@@ -17,12 +17,12 @@ mod imp {
     };
     use windows_sys::Win32::Graphics::Gdi::{
         AddFontResourceExW, BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush,
-        DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn, GetDC,
+        CreatePen, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn, GetDC,
         GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC, SelectObject,
-        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, DEFAULT_CHARSET,
-        DEFAULT_QUALITY, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE,
-        DT_VCENTER, FF_DONTCARE, FR_PRIVATE, HDC, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-        TEXTMETRICW, TRANSPARENT,
+        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, DEFAULT_CHARSET, DEFAULT_QUALITY,
+        DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
+        FR_PRIVATE, HDC, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, RoundRect, TEXTMETRICW,
+        TRANSPARENT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
@@ -2513,25 +2513,31 @@ mod imp {
 
             if !status_row && (selected_visible || hovered) {
                 let row_rect = RECT {
-                    left: dis.rcItem.left + 2,
-                    top: dis.rcItem.top + ROW_VERTICAL_INSET + offset_y,
-                    right: dis.rcItem.right - 2,
-                    bottom: dis.rcItem.bottom - ROW_VERTICAL_INSET + offset_y,
+                    left: dis.rcItem.left + 3,
+                    top: dis.rcItem.top + ROW_VERTICAL_INSET + 1 + offset_y,
+                    right: dis.rcItem.right - 3,
+                    bottom: dis.rcItem.bottom - ROW_VERTICAL_INSET - 1 + offset_y,
                 };
-                let region = CreateRoundRectRgn(
-                    row_rect.left,
-                    row_rect.top,
-                    row_rect.right,
-                    row_rect.bottom,
-                    ROW_ACTIVE_RADIUS,
-                    ROW_ACTIVE_RADIUS,
-                );
                 let hover_color =
                     blend_color(palette.results_bg, palette.row_hover, content_progress);
                 let fill_brush = CreateSolidBrush(hover_color);
-                FillRgn(dis.hDC, region, fill_brush);
+                let fill_pen = CreatePen(PS_SOLID, 1, hover_color);
+                let old_brush = SelectObject(dis.hDC, fill_brush as _);
+                let old_pen = SelectObject(dis.hDC, fill_pen as _);
+                // RoundRect generally renders cleaner highlight corners than region fills on GDI list rows.
+                RoundRect(
+                    dis.hDC,
+                    row_rect.left,
+                    row_rect.top,
+                    row_rect.right + 1,
+                    row_rect.bottom + 1,
+                    ROW_ACTIVE_RADIUS,
+                    ROW_ACTIVE_RADIUS,
+                );
+                SelectObject(dis.hDC, old_pen);
+                SelectObject(dis.hDC, old_brush);
+                DeleteObject(fill_pen as _);
                 DeleteObject(fill_brush as _);
-                DeleteObject(region as _);
             }
 
             let old_font = SelectObject(dis.hDC, state.title_font as _);

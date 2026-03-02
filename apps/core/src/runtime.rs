@@ -374,6 +374,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         let mut current_results: Vec<crate::model::SearchItem> = Vec::new();
         let mut suppressed_uninstall_titles: Vec<String> = Vec::new();
         let mut pending_uninstall_confirmation: Option<PendingUninstallConfirmation> = None;
+        let mut pending_delayed_query: Option<String> = None;
         let mut selected_index = 0_usize;
         let mut last_query = String::new();
         let mut search_session = OverlaySearchSession::default();
@@ -425,6 +426,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                                 }
                             }
                             HotkeyAction::Hide => {
+                                pending_delayed_query = None;
+                                overlay.cancel_query_delay();
                                 overlay.hide();
                                 reset_overlay_session(
                                     &overlay,
@@ -454,6 +457,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         }
                     }
                     OverlayEvent::ExternalQuit => {
+                        pending_delayed_query = None;
+                        overlay.cancel_query_delay();
                         overlay.hide_now();
                         last_query.clear();
                         search_session.clear();
@@ -463,6 +468,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                     }
                     OverlayEvent::Escape => {
                         if overlay_state.on_escape() {
+                            pending_delayed_query = None;
+                            overlay.cancel_query_delay();
                             overlay.hide_now();
                             reset_overlay_session(
                                 &overlay,
@@ -475,77 +482,46 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         }
                     }
                     OverlayEvent::QueryChanged(query) => {
-                        let mut query = query;
-                        pending_uninstall_confirmation = None;
-                        if let Some(expanded) =
-                            maybe_expand_uninstall_quick_shortcut(&query, last_query.as_str())
-                        {
-                            overlay.set_query_text(&expanded);
-                            query = expanded;
+                        if runtime_config.search_query_results_with_delay {
+                            pending_delayed_query = Some(query);
+                            overlay.schedule_query_delay(runtime_config.search_delay_time_ms as u32);
+                        } else {
+                            pending_delayed_query = None;
+                            overlay.cancel_query_delay();
+                            apply_query_change(
+                                query,
+                                &overlay,
+                                &service,
+                                &runtime_config,
+                                &plugin_registry,
+                                max_results,
+                                &background_index_refresh,
+                                &mut search_session,
+                                &mut pending_uninstall_confirmation,
+                                &suppressed_uninstall_titles,
+                                &mut current_results,
+                                &mut selected_index,
+                                &mut last_query,
+                            );
                         }
-
-                        let trimmed = query.trim();
-                        if trimmed.is_empty() {
-                            current_results.clear();
-                            selected_index = 0;
-                            last_query.clear();
-                            search_session.clear();
-                            pending_uninstall_confirmation = None;
-                            set_idle_overlay_state(&overlay);
-                            return;
-                        }
-                        if trimmed == last_query {
-                            return;
-                        }
-                        last_query = trimmed.to_string();
-                        let parsed_query =
-                            ParsedQuery::parse(trimmed, runtime_config.search_dsl_enabled);
-                        let query_result_limit = result_limit_for_query(max_results, &parsed_query);
-
-                        match search_overlay_results_with_session(
-                            &service,
-                            &runtime_config,
-                            &plugin_registry,
-                            &parsed_query,
-                            query_result_limit,
-                            &mut search_session,
-                        ) {
-                            Ok(mut results) => {
-                                dedupe_overlay_results(&mut results);
-                                if !suppressed_uninstall_titles.is_empty() {
-                                    filter_suppressed_uninstall_results(
-                                        &mut results,
-                                        &suppressed_uninstall_titles,
-                                    );
-                                }
-                                current_results = results;
-                                selected_index = 0;
-                                if current_results.is_empty() {
-                                    if should_show_indexing_status(&background_index_refresh) {
-                                        set_status_row_overlay_state(&overlay, STATUS_ROW_INDEXING);
-                                    } else {
-                                        set_status_row_overlay_state(
-                                            &overlay,
-                                            if parsed_query.command_mode {
-                                                STATUS_ROW_NO_COMMAND_RESULTS
-                                            } else {
-                                                STATUS_ROW_NO_RESULTS
-                                            },
-                                        );
-                                    }
-                                } else {
-                                    let rows =
-                                        overlay_rows(&current_results, parsed_query.command_mode);
-                                    overlay.set_results(&rows, selected_index);
-                                }
-                            }
-                            Err(error) => {
-                                current_results.clear();
-                                selected_index = 0;
-                                search_session.clear();
-                                overlay.set_results(&[], 0);
-                                overlay.set_status_text(&format!("Search error: {error}"));
-                            }
+                    }
+                    OverlayEvent::QueryDelayElapsed => {
+                        if let Some(query) = pending_delayed_query.take() {
+                            apply_query_change(
+                                query,
+                                &overlay,
+                                &service,
+                                &runtime_config,
+                                &plugin_registry,
+                                max_results,
+                                &background_index_refresh,
+                                &mut search_session,
+                                &mut pending_uninstall_confirmation,
+                                &suppressed_uninstall_titles,
+                                &mut current_results,
+                                &mut selected_index,
+                                &mut last_query,
+                            );
                         }
                     }
                     OverlayEvent::MoveSelection(direction) => {
@@ -558,6 +534,24 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         overlay.set_selected_index(selected_index);
                     }
                     OverlayEvent::Submit => {
+                        if let Some(query) = pending_delayed_query.take() {
+                            overlay.cancel_query_delay();
+                            apply_query_change(
+                                query,
+                                &overlay,
+                                &service,
+                                &runtime_config,
+                                &plugin_registry,
+                                max_results,
+                                &background_index_refresh,
+                                &mut search_session,
+                                &mut pending_uninstall_confirmation,
+                                &suppressed_uninstall_titles,
+                                &mut current_results,
+                                &mut selected_index,
+                                &mut last_query,
+                            );
+                        }
                         if current_results.is_empty() {
                             if overlay.query_text().trim().is_empty() {
                                 set_idle_overlay_state(&overlay);
@@ -1576,6 +1570,8 @@ fn write_diagnostics_bundle(cfg: &config::Config) -> Result<std::path::PathBuf, 
         "launch_at_startup": cfg.launch_at_startup,
         "search_mode_default": cfg.search_mode_default,
         "search_dsl_enabled": cfg.search_dsl_enabled,
+        "search_query_results_with_delay": cfg.search_query_results_with_delay,
+        "search_delay_time_ms": cfg.search_delay_time_ms,
         "uninstall_actions_enabled": cfg.uninstall_actions_enabled,
         "web_search_provider": cfg.web_search_provider,
         "clipboard_enabled": cfg.clipboard_enabled,
@@ -2685,6 +2681,88 @@ fn maybe_expand_uninstall_quick_shortcut(query: &str, last_query: &str) -> Optio
         }
     }
     None
+}
+
+#[cfg(target_os = "windows")]
+fn apply_query_change(
+    mut query: String,
+    overlay: &NativeOverlayShell,
+    service: &CoreService,
+    runtime_config: &Config,
+    plugin_registry: &PluginRegistry,
+    max_results: usize,
+    background_index_refresh: &BackgroundIndexRefresh,
+    search_session: &mut OverlaySearchSession,
+    pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
+    suppressed_uninstall_titles: &[String],
+    current_results: &mut Vec<crate::model::SearchItem>,
+    selected_index: &mut usize,
+    last_query: &mut String,
+) {
+    *pending_uninstall_confirmation = None;
+    if let Some(expanded) = maybe_expand_uninstall_quick_shortcut(&query, last_query.as_str()) {
+        overlay.set_query_text(&expanded);
+        query = expanded;
+    }
+
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        current_results.clear();
+        *selected_index = 0;
+        last_query.clear();
+        search_session.clear();
+        *pending_uninstall_confirmation = None;
+        set_idle_overlay_state(overlay);
+        return;
+    }
+    if trimmed == last_query {
+        return;
+    }
+    *last_query = trimmed.to_string();
+    let parsed_query = ParsedQuery::parse(trimmed, runtime_config.search_dsl_enabled);
+    let query_result_limit = result_limit_for_query(max_results, &parsed_query);
+
+    match search_overlay_results_with_session(
+        service,
+        runtime_config,
+        plugin_registry,
+        &parsed_query,
+        query_result_limit,
+        search_session,
+    ) {
+        Ok(mut results) => {
+            dedupe_overlay_results(&mut results);
+            if !suppressed_uninstall_titles.is_empty() {
+                filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
+            }
+            *current_results = results;
+            *selected_index = 0;
+            if current_results.is_empty() {
+                if should_show_indexing_status(background_index_refresh) {
+                    set_status_row_overlay_state(overlay, STATUS_ROW_INDEXING);
+                } else {
+                    set_status_row_overlay_state(
+                        overlay,
+                        if parsed_query.command_mode {
+                            STATUS_ROW_NO_COMMAND_RESULTS
+                        } else {
+                            STATUS_ROW_NO_RESULTS
+                        },
+                    );
+                }
+            } else {
+                let rows = overlay_rows(current_results, parsed_query.command_mode);
+                overlay.set_results(&rows, *selected_index);
+            }
+        }
+        Err(error) => {
+            current_results.clear();
+            *selected_index = 0;
+            search_session.clear();
+            overlay.set_results(&[], 0);
+            overlay.set_status_text(&format!("Search error: {error}"));
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

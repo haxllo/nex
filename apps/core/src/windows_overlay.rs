@@ -133,6 +133,7 @@ mod imp {
     const TIMER_ICON_CACHE_IDLE: usize = 0xBEF4;
     const TIMER_RESULTS_CONTENT_FADE: usize = 0xBEF5;
     const TIMER_COMMAND_BADGE_FADE: usize = 0xBEF6;
+    const TIMER_QUERY_DEBOUNCE: usize = 0xBEF7;
 
     const OVERLAY_ANIM_MS: u32 = 150;
     const OVERLAY_HIDE_ANIM_MS: u32 = 115;
@@ -333,6 +334,7 @@ mod imp {
     pub enum OverlayEvent {
         Hotkey(i32),
         QueryChanged(String),
+        QueryDelayElapsed,
         MoveSelection(i32),
         Submit,
         Escape,
@@ -748,6 +750,20 @@ mod imp {
             self.set_status_text("");
         }
 
+        pub fn schedule_query_delay(&self, delay_ms: u32) {
+            let delay = delay_ms.clamp(10, 2_000);
+            unsafe {
+                KillTimer(self.hwnd, TIMER_QUERY_DEBOUNCE);
+                SetTimer(self.hwnd, TIMER_QUERY_DEBOUNCE, delay, None);
+            }
+        }
+
+        pub fn cancel_query_delay(&self) {
+            unsafe {
+                KillTimer(self.hwnd, TIMER_QUERY_DEBOUNCE);
+            }
+        }
+
         pub fn set_performance_tuning(
             &self,
             idle_cache_trim_ms: u32,
@@ -1037,6 +1053,13 @@ mod imp {
                         }
                     }
                     on_event(OverlayEvent::QueryChanged(self.query_text()));
+                    continue;
+                }
+                if msg.message == WM_TIMER && msg.wParam == TIMER_QUERY_DEBOUNCE {
+                    unsafe {
+                        KillTimer(self.hwnd, TIMER_QUERY_DEBOUNCE);
+                    }
+                    on_event(OverlayEvent::QueryDelayElapsed);
                     continue;
                 }
 

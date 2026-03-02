@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 8;
+pub const CURRENT_CONFIG_VERSION: u32 = 9;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -19,6 +19,8 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "show_folders",
     "search_mode_default",
     "search_dsl_enabled",
+    "search_query_results_with_delay",
+    "search_delay_time_ms",
     "uninstall_actions_enabled",
     "web_search_provider",
     "web_search_custom_template",
@@ -109,6 +111,8 @@ pub struct Config {
     pub hotkey_recommended: Vec<String>,
     pub search_mode_default: SearchMode,
     pub search_dsl_enabled: bool,
+    pub search_query_results_with_delay: bool,
+    pub search_delay_time_ms: u16,
     pub uninstall_actions_enabled: bool,
     pub web_search_provider: WebSearchProvider,
     pub web_search_custom_template: String,
@@ -156,6 +160,8 @@ impl Default for Config {
             ],
             search_mode_default: SearchMode::All,
             search_dsl_enabled: true,
+            search_query_results_with_delay: true,
+            search_delay_time_ms: 90,
             uninstall_actions_enabled: true,
             web_search_provider: WebSearchProvider::Google,
             web_search_custom_template: String::new(),
@@ -450,6 +456,18 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
         "false"
     });
     text.push_str(",\n");
+    text.push_str("  // Delay query execution while typing for smoother UI updates\n");
+    text.push_str("  \"search_query_results_with_delay\": ");
+    text.push_str(if cfg.search_query_results_with_delay {
+        "true"
+    } else {
+        "false"
+    });
+    text.push_str(",\n");
+    text.push_str("  // Typing delay in milliseconds (valid range: 10..2000)\n");
+    text.push_str("  \"search_delay_time_ms\": ");
+    text.push_str(&cfg.search_delay_time_ms.to_string());
+    text.push_str(",\n");
     text.push_str("  // Enable command mode uninstall actions (e.g. > uninstall appname)\n");
     text.push_str("  \"uninstall_actions_enabled\": ");
     text.push_str(if cfg.uninstall_actions_enabled {
@@ -668,6 +686,18 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         "false"
     });
     text.push('\n');
+    text.push_str("# Delay query execution while typing for smoother UI updates\n");
+    text.push_str("search_query_results_with_delay = ");
+    text.push_str(if cfg.search_query_results_with_delay {
+        "true"
+    } else {
+        "false"
+    });
+    text.push('\n');
+    text.push_str("# Typing delay in milliseconds (valid range: 10..2000)\n");
+    text.push_str("search_delay_time_ms = ");
+    text.push_str(&cfg.search_delay_time_ms.to_string());
+    text.push('\n');
     text.push_str("# Enable command mode uninstall actions (e.g. > uninstall appname)\n");
     text.push_str("uninstall_actions_enabled = ");
     text.push_str(if cfg.uninstall_actions_enabled {
@@ -794,6 +824,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 
     if cfg.active_memory_target_mb < 20 || cfg.active_memory_target_mb > 512 {
         return Err("active_memory_target_mb out of range".into());
+    }
+    if cfg.search_delay_time_ms < 10 || cfg.search_delay_time_ms > 2_000 {
+        return Err("search_delay_time_ms out of range".into());
     }
 
     if cfg.index_max_items_total < 10_000 || cfg.index_max_items_total > 2_000_000 {
@@ -1079,6 +1112,17 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
     if source_version < 8 && !raw_has_key(raw, "ignore_hotkeys_on_fullscreen") {
         cfg.ignore_hotkeys_on_fullscreen = Config::default().ignore_hotkeys_on_fullscreen;
         changed = true;
+    }
+
+    if source_version < 9 {
+        if !raw_has_key(raw, "search_query_results_with_delay") {
+            cfg.search_query_results_with_delay = Config::default().search_query_results_with_delay;
+            changed = true;
+        }
+        if !raw_has_key(raw, "search_delay_time_ms") {
+            cfg.search_delay_time_ms = Config::default().search_delay_time_ms;
+            changed = true;
+        }
     }
 
     if TEMPLATE_REQUIRED_KEYS

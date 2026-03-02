@@ -1,6 +1,7 @@
 use crate::action_registry::{
     search_actions_with_mode, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
-    ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID, ACTION_WEB_SEARCH_PREFIX,
+    ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID, ACTION_TRIM_MEMORY_ID,
+    ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::{self, Config, ConfigError};
@@ -162,6 +163,7 @@ impl From<std::io::Error> for RuntimeError {
 pub enum RuntimeCommand {
     Run,
     Status,
+    StatusJson,
     Quit,
     Restart,
     EnsureConfig,
@@ -206,6 +208,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--background" => options.background = true,
             "--foreground" => options.background = false,
             "--status" => options.command = RuntimeCommand::Status,
+            "--status-json" => options.command = RuntimeCommand::StatusJson,
             "--quit" => options.command = RuntimeCommand::Quit,
             "--restart" => options.command = RuntimeCommand::Restart,
             "--ensure-config" => options.command = RuntimeCommand::EnsureConfig,
@@ -213,7 +216,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--diagnostics-bundle" => options.command = RuntimeCommand::DiagnosticsBundle,
             "--help" | "-h" => {
                 return Err(
-                    "usage: swiftfind-core [--background|--foreground] [--status|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle]".to_string(),
+                    "usage: swiftfind-core [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle]".to_string(),
                 )
             }
             unknown => return Err(format!("unknown argument: {unknown}")),
@@ -245,6 +248,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
 
     match options.command {
         RuntimeCommand::Status => return command_status(),
+        RuntimeCommand::StatusJson => return command_status_json(),
         RuntimeCommand::Quit => return command_quit(),
         RuntimeCommand::Restart => return command_restart(),
         RuntimeCommand::EnsureConfig => return command_ensure_config(),
@@ -377,12 +381,14 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
             .run_message_loop_with_events(|event| {
                 maybe_apply_runtime_config_reload(
                     &overlay,
+                    &service,
                     &mut runtime_config,
                     &mut plugin_registry,
                     &mut search_session,
                     &mut pending_uninstall_confirmation,
                     &mut max_results,
                     &mut config_watcher,
+                    &mut background_index_refresh,
                 );
                 maybe_apply_background_index_refresh(&service, &mut background_index_refresh);
                 match event {
@@ -691,6 +697,13 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                             return;
                         }
 
+                        if selected.id == ACTION_TRIM_MEMORY_ID {
+                            search_session.clear();
+                            overlay.trim_runtime_memory();
+                            overlay.set_status_text("Memory caches trimmed");
+                            return;
+                        }
+
                         match launch_overlay_selection(
                             &service,
                             &runtime_config,
@@ -825,6 +838,11 @@ fn command_status() -> Result<(), RuntimeError> {
                     "[swiftfind-core] status last_memory_snapshot {line}"
                 ));
             }
+            if let Some(line) = snapshot.last_config_reload_line {
+                log_info(&format!(
+                    "[swiftfind-core] status last_config_reload {line}"
+                ));
+            }
         }
         if let Some(report) = load_query_profile_status_report() {
             if let Some(recent) = report.recent {
@@ -872,6 +890,54 @@ fn command_status() -> Result<(), RuntimeError> {
     }
 }
 
+fn command_status_json() -> Result<(), RuntimeError> {
+    #[cfg(target_os = "windows")]
+    {
+        let state = inspect_runtime_process_state();
+        let lifecycle = if state.has_overlay_window {
+            "running"
+        } else if !state.other_runtime_pids.is_empty() {
+            "degraded"
+        } else {
+            "stopped"
+        };
+
+        let snapshot = load_status_diagnostics_snapshot();
+        let report = load_query_profile_status_report();
+        let diagnostics = snapshot
+            .as_ref()
+            .map(build_status_diagnostics_json)
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let payload = serde_json::json!({
+            "runtime_state": lifecycle,
+            "has_overlay_window": state.has_overlay_window,
+            "other_runtime_pids": state.other_runtime_pids,
+            "diagnostics": diagnostics,
+            "query_latency": report.map(query_profile_report_json),
+        });
+        let encoded = serde_json::to_string_pretty(&payload)
+            .map_err(|error| RuntimeError::Args(format!("status-json encode error: {error}")))?;
+        println!("{encoded}");
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let payload = serde_json::json!({
+            "runtime_state": "unsupported_platform",
+            "has_overlay_window": false,
+            "other_runtime_pids": Vec::<u32>::new(),
+            "diagnostics": serde_json::json!({}),
+            "query_latency": serde_json::Value::Null,
+        });
+        let encoded = serde_json::to_string_pretty(&payload)
+            .map_err(|error| RuntimeError::Args(format!("status-json encode error: {error}")))?;
+        println!("{encoded}");
+        Ok(())
+    }
+}
+
 fn command_diagnostics_bundle() -> Result<(), RuntimeError> {
     let cfg = config::load(None)?;
     let output_dir = write_diagnostics_bundle(&cfg)?;
@@ -890,6 +956,7 @@ struct StatusDiagnosticsSnapshot {
     last_icon_cache_line: Option<String>,
     last_overlay_tuning_line: Option<String>,
     last_memory_snapshot_line: Option<String>,
+    last_config_reload_line: Option<String>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -946,12 +1013,14 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     let last_icon_cache_line = latest_line_with_token(content, "overlay_icon_cache reason=");
     let last_overlay_tuning_line = latest_line_with_token(content, "overlay_tuning ");
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
+    let last_config_reload_line = latest_line_with_token(content, "config reloaded ");
 
     if startup_index_line.is_none()
         && last_provider_line.is_none()
         && last_icon_cache_line.is_none()
         && last_overlay_tuning_line.is_none()
         && last_memory_snapshot_line.is_none()
+        && last_config_reload_line.is_none()
     {
         return None;
     }
@@ -962,6 +1031,7 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
         last_icon_cache_line,
         last_overlay_tuning_line,
         last_memory_snapshot_line,
+        last_config_reload_line,
     })
 }
 
@@ -994,6 +1064,132 @@ fn summarize_query_profile_status_report(content: &str) -> Option<QueryProfileSt
         recent_skipped_symbol_queries,
         historical_skipped_symbol_queries,
     })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_json::Value {
+    let startup_indexing = snapshot
+        .startup_index_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let provider = snapshot
+        .last_provider_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let icon_cache = snapshot
+        .last_icon_cache_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let overlay_tuning = snapshot
+        .last_overlay_tuning_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let memory_snapshot = snapshot
+        .last_memory_snapshot_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let config_reload = snapshot
+        .last_config_reload_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let config_reload_epoch_secs = snapshot
+        .last_config_reload_line
+        .as_ref()
+        .and_then(|line| parse_log_line_epoch_secs(line));
+
+    serde_json::json!({
+        "startup_indexing": startup_indexing,
+        "provider": provider,
+        "icon_cache": icon_cache,
+        "overlay_tuning": overlay_tuning,
+        "memory_snapshot": memory_snapshot,
+        "config_reload": config_reload,
+        "config_reload_epoch_secs": config_reload_epoch_secs,
+        "raw": {
+            "startup_indexing_line": snapshot.startup_index_line,
+            "provider_line": snapshot.last_provider_line,
+            "icon_cache_line": snapshot.last_icon_cache_line,
+            "overlay_tuning_line": snapshot.last_overlay_tuning_line,
+            "memory_snapshot_line": snapshot.last_memory_snapshot_line,
+            "config_reload_line": snapshot.last_config_reload_line,
+        }
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn query_profile_report_json(report: QueryProfileStatusReport) -> serde_json::Value {
+    serde_json::json!({
+        "recent": report.recent.map(query_profile_summary_json),
+        "historical": report.historical.map(query_profile_summary_json),
+        "recent_skipped_symbol_queries": report.recent_skipped_symbol_queries,
+        "historical_skipped_symbol_queries": report.historical_skipped_symbol_queries,
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn query_profile_summary_json(summary: QueryProfileSummary) -> serde_json::Value {
+    serde_json::json!({
+        "samples": summary.samples,
+        "p50_total_ms": summary.p50_total_ms,
+        "p95_total_ms": summary.p95_total_ms,
+        "p99_total_ms": summary.p99_total_ms,
+        "max_total_ms": summary.max_total_ms,
+        "avg_total_ms": summary.avg_total_ms,
+        "p95_indexed_ms": summary.p95_indexed_ms,
+        "short_query_samples": summary.short_query_samples,
+        "short_query_p95_total_ms": summary.short_query_p95_total_ms,
+        "short_query_app_bias_rate_pct": summary.short_query_app_bias_rate_pct,
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_log_line_epoch_secs(line: &str) -> Option<u64> {
+    let trimmed = line.trim();
+    let start = trimmed.find('[')? + 1;
+    let end = trimmed[start..].find(']')? + start;
+    trimmed[start..end].parse::<u64>().ok()
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_key_value_tokens(line: &str) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_end_matches(':');
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim().trim_end_matches(',');
+        if value.is_empty() {
+            continue;
+        }
+        if let Ok(number) = value.parse::<u64>() {
+            map.insert(key.to_string(), serde_json::json!(number));
+            continue;
+        }
+        if let Ok(number) = value.parse::<f64>() {
+            map.insert(key.to_string(), serde_json::json!(number));
+            continue;
+        }
+        if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+            map.insert(
+                key.to_string(),
+                serde_json::json!(value.eq_ignore_ascii_case("true")),
+            );
+            continue;
+        }
+        map.insert(
+            key.to_string(),
+            serde_json::json!(value.trim_matches('"').to_string()),
+        );
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
 }
 
 #[cfg(test)]
@@ -1345,7 +1541,16 @@ fn write_diagnostics_bundle(cfg: &config::Config) -> Result<std::path::PathBuf, 
     std::fs::write(bundle_dir.join("summary.txt"), summary)?;
 
     if cfg.config_path.exists() {
-        let _ = std::fs::copy(&cfg.config_path, bundle_dir.join("config.raw.jsonc"));
+        let raw_ext = cfg
+            .config_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .filter(|ext| !ext.trim().is_empty())
+            .unwrap_or("txt");
+        let _ = std::fs::copy(
+            &cfg.config_path,
+            bundle_dir.join(format!("config.raw.{raw_ext}")),
+        );
     }
 
     let sanitized_cfg = serde_json::json!({
@@ -1365,6 +1570,9 @@ fn write_diagnostics_bundle(cfg: &config::Config) -> Result<std::path::PathBuf, 
         "plugins_safe_mode": cfg.plugins_safe_mode,
         "idle_cache_trim_ms": cfg.idle_cache_trim_ms,
         "active_memory_target_mb": cfg.active_memory_target_mb,
+        "index_max_items_total": cfg.index_max_items_total,
+        "index_max_items_per_root": cfg.index_max_items_per_root,
+        "index_max_items_per_query_seed": cfg.index_max_items_per_query_seed,
         "discovery_roots_count": cfg.discovery_roots.len(),
         "discovery_exclude_roots_count": cfg.discovery_exclude_roots.len(),
         "windows_search_enabled": cfg.windows_search_enabled,
@@ -2168,12 +2376,14 @@ fn search_overlay_results_with_session(
         parsed_query.command_mode,
     );
     let base_indexed_seed_limit = indexed_seed_limit(candidate_limit, normalized_query.len());
+    let seed_cap = (cfg.index_max_items_per_query_seed as usize).max(candidate_limit);
     let indexed_seed_limit = adaptive_indexed_seed_limit(
         session,
         candidate_limit,
         normalized_query.len(),
         base_indexed_seed_limit,
-    );
+    )
+    .min(seed_cap);
     let short_query_app_bias =
         should_use_short_query_app_mode(parsed_query, &filter, &normalized_query);
     let mut indexed_filter = filter.clone();
@@ -2403,12 +2613,14 @@ fn config_file_modified_time(path: &std::path::Path) -> Option<SystemTime> {
 #[cfg(target_os = "windows")]
 fn maybe_apply_runtime_config_reload(
     overlay: &NativeOverlayShell,
+    service: &CoreService,
     runtime_config: &mut Config,
     plugin_registry: &mut PluginRegistry,
     search_session: &mut OverlaySearchSession,
     pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
     max_results: &mut usize,
     watcher: &mut RuntimeConfigWatcher,
+    background_index_refresh: &mut BackgroundIndexRefresh,
 ) {
     if watcher.last_checked.elapsed() < CONFIG_RELOAD_POLL_INTERVAL {
         return;
@@ -2424,6 +2636,19 @@ fn maybe_apply_runtime_config_reload(
     match config::load(Some(watcher.path.as_path())) {
         Ok(next_config) => {
             let previous = runtime_config.clone();
+            let hotkey_changed = next_config.hotkey != previous.hotkey;
+            let index_db_path_changed = next_config.index_db_path != previous.index_db_path;
+            let discovery_config_changed = next_config.discovery_roots != previous.discovery_roots
+                || next_config.discovery_exclude_roots != previous.discovery_exclude_roots
+                || next_config.windows_search_enabled != previous.windows_search_enabled
+                || next_config.windows_search_fallback_filesystem
+                    != previous.windows_search_fallback_filesystem
+                || next_config.show_files != previous.show_files
+                || next_config.show_folders != previous.show_folders
+                || next_config.index_max_items_total != previous.index_max_items_total
+                || next_config.index_max_items_per_root != previous.index_max_items_per_root
+                || next_config.index_max_items_per_query_seed
+                    != previous.index_max_items_per_query_seed;
             *runtime_config = next_config;
             *max_results = runtime_config.max_results as usize;
 
@@ -2438,26 +2663,37 @@ fn maybe_apply_runtime_config_reload(
             search_session.clear();
             *pending_uninstall_confirmation = None;
 
-            if runtime_config.hotkey != previous.hotkey {
+            if hotkey_changed {
                 log_warn(&format!(
                     "[swiftfind-core] config hotkey changed ({} -> {}), restart required to apply",
                     previous.hotkey, runtime_config.hotkey
                 ));
             }
-            if runtime_config.index_db_path != previous.index_db_path
-                || runtime_config.discovery_roots != previous.discovery_roots
-                || runtime_config.discovery_exclude_roots != previous.discovery_exclude_roots
-                || runtime_config.windows_search_enabled != previous.windows_search_enabled
-                || runtime_config.windows_search_fallback_filesystem
-                    != previous.windows_search_fallback_filesystem
-            {
+            if index_db_path_changed {
                 log_warn(
-                    "[swiftfind-core] discovery/index config changed; restart (or manual rebuild) recommended",
+                    "[swiftfind-core] config index_db_path changed; restart required to apply",
                 );
+            }
+            if discovery_config_changed {
+                if let Err(error) = service.reconfigure_runtime_providers(runtime_config) {
+                    log_warn(&format!(
+                        "[swiftfind-core] provider reconfigure failed after config reload: {error}"
+                    ));
+                } else {
+                    let can_start_reindex = background_index_refresh.cache_applied
+                        || background_index_refresh.completed.load(Ordering::Acquire);
+                    if can_start_reindex {
+                        *background_index_refresh =
+                            start_background_index_refresh(runtime_config, false);
+                        log_info("[swiftfind-core] discovery settings changed; background reindex started");
+                    } else {
+                        log_warn("[swiftfind-core] discovery settings changed while indexing already in progress");
+                    }
+                }
             }
 
             log_info(&format!(
-                "[swiftfind-core] config reloaded max_results={} mode={:?} show_files={} show_folders={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={}",
+                "[swiftfind-core] config reloaded max_results={} mode={:?} show_files={} show_folders={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
                 runtime_config.max_results,
                 runtime_config.search_mode_default,
                 runtime_config.show_files,
@@ -2467,7 +2703,20 @@ fn maybe_apply_runtime_config_reload(
                 runtime_config.uninstall_actions_enabled,
                 runtime_config.plugins_enabled,
                 plugin_registry.action_items.len(),
+                runtime_config.index_max_items_total,
+                runtime_config.index_max_items_per_root,
+                runtime_config.index_max_items_per_query_seed,
             ));
+
+            if discovery_config_changed {
+                overlay.set_status_text("Discovery settings updated; reindexing...");
+            } else if index_db_path_changed {
+                overlay.set_status_text("Restart required to apply index path changes");
+            } else if hotkey_changed {
+                overlay.set_status_text("Restart required to apply hotkey changes");
+            } else {
+                overlay.set_status_text("Settings applied");
+            }
         }
         Err(error) => {
             log_warn(&format!(
@@ -2842,6 +3091,10 @@ fn execute_action_selection(
                 "[swiftfind-core] diagnostics bundle written to {}",
                 output_dir.display()
             ));
+            Ok(())
+        }
+        ACTION_TRIM_MEMORY_ID => {
+            log_info("[swiftfind-core] trim memory action invoked");
             Ok(())
         }
         _ => execute_plugin_action(cfg, plugins, &selected.id),
@@ -3368,6 +3621,11 @@ mod tests {
         let args = vec!["--status".to_string()];
         let options = parse_cli_args(&args).expect("status should parse");
         assert_eq!(options.command, RuntimeCommand::Status);
+        assert!(!options.background);
+
+        let args = vec!["--status-json".to_string()];
+        let options = parse_cli_args(&args).expect("status-json should parse");
+        assert_eq!(options.command, RuntimeCommand::StatusJson);
         assert!(!options.background);
     }
 

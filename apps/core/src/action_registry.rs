@@ -7,6 +7,7 @@ pub const ACTION_REBUILD_INDEX_ID: &str = "__swiftfind_action_rebuild_index__";
 pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__swiftfind_action_clear_clipboard__";
 pub const ACTION_OPEN_CONFIG_ID: &str = "__swiftfind_action_open_config__";
 pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__swiftfind_action_diagnostics_bundle__";
+pub const ACTION_TRIM_MEMORY_ID: &str = "__swiftfind_action_trim_memory__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__swiftfind_action_web_search__:";
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +49,12 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
             title: "Create Diagnostics Bundle",
             subtitle: "Export logs and sanitized config for support",
             keywords: &["diagnostics", "support", "bundle", "debug"],
+        },
+        BuiltInAction {
+            id: ACTION_TRIM_MEMORY_ID,
+            title: "Trim Memory Now",
+            subtitle: "Clear overlay icon/query caches and log memory snapshot",
+            keywords: &["memory", "trim", "cache", "compact"],
         },
     ]
 }

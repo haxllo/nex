@@ -50,6 +50,7 @@ From repo root or installed binary:
 
 ```powershell
 swiftfind-core.exe --status
+swiftfind-core.exe --status-json
 swiftfind-core.exe --quit
 swiftfind-core.exe --restart
 swiftfind-core.exe --ensure-config
@@ -60,6 +61,7 @@ swiftfind-core.exe --diagnostics-bundle
 Notes:
 
 - `--status` reports running/stopped and degraded process-without-window state.
+- `--status-json` reports structured diagnostics for automation (`memory_snapshot`, icon cache metrics, config reload line, and query latency summary).
 - `--quit` attempts graceful stop and falls back to force stop if runtime is stuck.
 - `--restart` performs the same stop flow then starts runtime again.
 - `--ensure-config` creates `%APPDATA%\SwiftFind\config.toml` if missing.
@@ -102,7 +104,8 @@ Current behavior:
 2. Click `?` in the right side of the input area.
 3. SwiftFind opens `%APPDATA%\SwiftFind\config.toml`.
 4. Edit and save config.
-5. Restart `swiftfind-core` to apply hotkey changes.
+5. Most settings apply automatically within about 1 second.
+6. Restart `swiftfind-core` only after `hotkey` or `index_db_path` changes.
 
 ## Change Hotkey via Config File
 
@@ -115,6 +118,36 @@ Notes:
 - You can keep inline comments in this file (`// ...`).
 - Most users only need to edit `hotkey`.
 - `launch_at_startup`, `max_results`, `discovery_roots`, and `discovery_exclude_roots` are optional tuning.
+- `index_max_items_total`, `index_max_items_per_root`, and `index_max_items_per_query_seed` tune memory/coverage tradeoffs for large discovery roots.
+
+## Live Config Apply Matrix
+
+- Applies immediately:
+- `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`
+- `clipboard_*`, `plugins_*`, `web_search_*`
+- `idle_cache_trim_ms`, `active_memory_target_mb`
+- `index_max_items_total`, `index_max_items_per_root`, `index_max_items_per_query_seed`
+
+- Applies with provider refresh + background reindex:
+- `discovery_roots`, `discovery_exclude_roots`
+- `windows_search_enabled`, `windows_search_fallback_filesystem`
+
+- Requires restart:
+- `hotkey`, `index_db_path`
+
+## Memory Profiling Workflow
+
+Use this for broad-root validation (`C:\`) and regression tracking:
+
+```powershell
+scripts/windows/profile-memory-and-icons.ps1
+```
+
+Expected output includes:
+
+- `--status-json` snapshot
+- `--status` summary
+- recent `query_profile`, `memory_snapshot`, `overlay_icon_cache`, and `config reloaded` lines
 
 ## Settings Direction
 

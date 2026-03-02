@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::action_executor::{launch_path, LaunchError};
 use crate::config::{validate, Config, SearchMode};
@@ -67,9 +67,9 @@ pub enum LaunchTarget<'a> {
 }
 
 pub struct CoreService {
-    config: Config,
+    config: RwLock<Config>,
     db: Connection,
-    providers: Vec<Box<dyn DiscoveryProvider>>,
+    providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
     last_stale_prune: Mutex<Option<Instant>>,
@@ -111,9 +111,9 @@ impl CoreService {
         let cached = index_store::list_items(&db)?;
         let cached_apps = collect_app_items(&cached);
         Ok(Self {
-            config,
+            config: RwLock::new(config),
             db,
-            providers: Vec::new(),
+            providers: RwLock::new(Vec::new()),
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
             last_stale_prune: Mutex::new(None),
@@ -121,29 +121,95 @@ impl CoreService {
         })
     }
 
-    pub fn with_providers(mut self, providers: Vec<Box<dyn DiscoveryProvider>>) -> Self {
-        self.providers = providers;
+    pub fn with_providers(self, providers: Vec<Box<dyn DiscoveryProvider>>) -> Self {
+        self.replace_providers(providers);
         self
     }
 
-    pub fn with_runtime_providers(mut self) -> Self {
-        let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
-        providers.push(Box::new(StartMenuAppDiscoveryProvider::default()));
-        // Always register filesystem provider so toggling file/folder discovery off
-        // can actively prune stale file/folder records from the index.
-        providers.push(Box::new(FileSystemDiscoveryProvider::with_options(
-            self.config.discovery_roots.clone(),
+    pub fn with_runtime_providers(self) -> Self {
+        let providers = runtime_providers_from_config(&self.config_snapshot());
+        self.replace_providers(providers);
+        self
+    }
+
+    pub fn reconfigure_runtime_providers(&self, cfg: &Config) -> Result<(), ServiceError> {
+        validate(cfg).map_err(ServiceError::Config)?;
+        let providers = runtime_providers_from_config(cfg);
+        self.replace_runtime_config(cfg.clone());
+        self.replace_providers(providers);
+        Ok(())
+    }
+
+    fn replace_providers(&self, providers: Vec<Box<dyn DiscoveryProvider>>) {
+        match self.providers.write() {
+            Ok(mut guard) => *guard = providers,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = providers;
+            }
+        }
+    }
+
+    fn runtime_providers(&self) -> Vec<String> {
+        match self.providers.read() {
+            Ok(guard) => guard
+                .iter()
+                .map(|p| p.provider_name().to_string())
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .map(|p| p.provider_name().to_string())
+                .collect(),
+        }
+    }
+
+    pub fn configured_provider_names(&self) -> Vec<String> {
+        self.runtime_providers()
+    }
+
+    fn config_snapshot(&self) -> Config {
+        match self.config.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn replace_runtime_config(&self, next: Config) {
+        match self.config.write() {
+            Ok(mut guard) => *guard = next,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = next;
+            }
+        }
+    }
+}
+
+fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvider>> {
+    let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
+    providers.push(Box::new(StartMenuAppDiscoveryProvider::default()));
+    // Always register filesystem provider so toggling file/folder discovery off
+    // can actively prune stale file/folder records from the index.
+    providers.push(Box::new(
+        FileSystemDiscoveryProvider::with_options(
+            config.discovery_roots.clone(),
             5,
-            self.config.discovery_exclude_roots.clone(),
-            self.config.windows_search_enabled,
-            self.config.windows_search_fallback_filesystem,
-            self.config.show_files,
-            self.config.show_folders,
-        )));
-        self.providers = providers;
-        self
-    }
+            config.discovery_exclude_roots.clone(),
+            config.windows_search_enabled,
+            config.windows_search_fallback_filesystem,
+            config.show_files,
+            config.show_folders,
+        )
+        .with_index_limits(
+            config.index_max_items_total as usize,
+            config.index_max_items_per_root as usize,
+        ),
+    ));
+    providers
+}
 
+impl CoreService {
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchItem>, ServiceError> {
         self.search_with_filter(query, limit, &SearchFilter::default())
     }
@@ -174,15 +240,16 @@ impl CoreService {
         clamp_to_config_max: bool,
     ) -> Result<Vec<SearchItem>, ServiceError> {
         self.prune_stale_items_if_due()?;
+        let config_snapshot = self.config_snapshot();
 
         let effective_limit = if clamp_to_config_max {
             if limit == 0 {
-                self.config.max_results as usize
+                config_snapshot.max_results as usize
             } else {
-                limit.min(self.config.max_results as usize)
+                limit.min(config_snapshot.max_results as usize)
             }
         } else if limit == 0 {
-            self.config.max_results as usize
+            config_snapshot.max_results as usize
         } else {
             limit
         };
@@ -192,24 +259,34 @@ impl CoreService {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            Ok(crate::search::search_with_filter(
+            return Ok(crate::search::search_with_filter(
                 &guard,
                 query,
                 effective_limit,
                 filter,
-            ))
-        } else {
+            ));
+        }
+
+        let mut seed_items = {
             let guard = match self.cached_items.read() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            Ok(crate::search::search_with_filter(
-                &guard,
-                query,
-                effective_limit,
-                filter,
-            ))
+            guard.clone()
+        };
+
+        if should_use_db_query_seed(filter, query) {
+            let db_seed_limit = (config_snapshot.index_max_items_per_query_seed as usize).max(250);
+            let db_candidates = self.db_query_candidates(query, filter.mode, db_seed_limit)?;
+            merge_seed_candidates(&mut seed_items, db_candidates);
         }
+
+        Ok(crate::search::search_with_filter(
+            &seed_items,
+            query,
+            effective_limit,
+            filter,
+        ))
     }
 
     pub fn cached_items_snapshot(&self) -> Vec<SearchItem> {
@@ -270,7 +347,11 @@ impl CoreService {
         &self,
         incremental_mode: bool,
     ) -> Result<IndexRefreshReport, ServiceError> {
-        if self.providers.is_empty() {
+        let providers_guard = match self.providers.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if providers_guard.is_empty() {
             self.refresh_cache_from_store()?;
             return Ok(IndexRefreshReport {
                 indexed_total: self.cached_len(),
@@ -290,10 +371,10 @@ impl CoreService {
         let mut discovered_total = 0_usize;
         let mut upserted_total = 0_usize;
         let mut removed_total = 0_usize;
-        let mut provider_reports = Vec::with_capacity(self.providers.len());
+        let mut provider_reports = Vec::with_capacity(providers_guard.len());
         let now_epoch_secs = now_epoch_secs();
 
-        for provider in &self.providers {
+        for provider in providers_guard.iter() {
             let started = Instant::now();
             let provider_name = provider.provider_name().to_string();
             let provider_stamp = if incremental_mode {
@@ -447,9 +528,106 @@ impl CoreService {
         }
     }
 
+    fn db_query_candidates(
+        &self,
+        query: &str,
+        mode: SearchMode,
+        limit: usize,
+    ) -> Result<Vec<SearchItem>, ServiceError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
+            return Ok(Vec::new());
+        }
+
+        let sql = match mode {
+            SearchMode::Files => {
+                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                 FROM item
+                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
+                   AND kind IN ('file', 'folder')
+                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
+                 LIMIT ?2"
+            }
+            SearchMode::Apps => {
+                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                 FROM item
+                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
+                   AND kind = 'app'
+                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
+                 LIMIT ?2"
+            }
+            SearchMode::All => {
+                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                 FROM item
+                 WHERE title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE
+                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
+                 LIMIT ?2"
+            }
+            SearchMode::Actions | SearchMode::Clipboard => unreachable!(),
+        };
+
+        let pattern = format!("%{trimmed}%");
+        let mut stmt = self
+            .db
+            .prepare(sql)
+            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+        let mut rows = stmt
+            .query(params![pattern, limit as i64])
+            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?
+        {
+            let id: String = row
+                .get(0)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            let kind: String = row
+                .get(1)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            let title: String = row
+                .get(2)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            let path: String = row
+                .get(3)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            let use_count: u32 = row
+                .get(4)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            let last_accessed_epoch_secs: i64 = row
+                .get(5)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            out.push(SearchItem::from_owned(
+                id,
+                kind,
+                title,
+                path,
+                use_count,
+                last_accessed_epoch_secs,
+            ));
+        }
+        Ok(out)
+    }
+
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
-        let latest = index_store::list_items(&self.db)?;
-        let latest_apps = collect_app_items(&latest);
+        let config_snapshot = self.config_snapshot();
+        let latest_full = index_store::list_items(&self.db)?;
+        let latest_apps = collect_app_items(&latest_full);
+        let latest = compact_cached_items(&latest_full, &config_snapshot);
+        if latest.len() < latest_full.len() {
+            crate::logging::info(&format!(
+                "[swiftfind-core] cache_compaction retained={} dropped={} file_seed_cap={}",
+                latest.len(),
+                latest_full.len().saturating_sub(latest.len()),
+                config_snapshot.index_max_items_per_query_seed
+            ));
+        }
         match self.cached_items.write() {
             Ok(mut guard) => {
                 *guard = latest;
@@ -638,8 +816,46 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
         .collect()
 }
 
+fn compact_cached_items(items: &[SearchItem], cfg: &Config) -> Vec<SearchItem> {
+    let file_seed_cap = (cfg.index_max_items_per_query_seed as usize).max(250);
+    let mut out = Vec::with_capacity(items.len().min(file_seed_cap + 2048));
+    let mut file_or_folder_count = 0_usize;
+
+    for item in items {
+        if is_file_or_folder_kind(item.kind.as_str()) {
+            if file_or_folder_count >= file_seed_cap {
+                continue;
+            }
+            file_or_folder_count += 1;
+        }
+        out.push(item.clone());
+    }
+
+    out
+}
+
+fn is_file_or_folder_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("file") || kind.eq_ignore_ascii_case("folder")
+}
+
 fn should_use_app_cache(filter: &SearchFilter) -> bool {
     filter.mode == SearchMode::Apps
+}
+
+fn should_use_db_query_seed(filter: &SearchFilter, query: &str) -> bool {
+    !query.trim().is_empty() && matches!(filter.mode, SearchMode::All | SearchMode::Files)
+}
+
+fn merge_seed_candidates(seed_items: &mut Vec<SearchItem>, extra: Vec<SearchItem>) {
+    if extra.is_empty() {
+        return;
+    }
+    let mut seen: HashSet<String> = seed_items.iter().map(|item| item.id.clone()).collect();
+    for item in extra {
+        if seen.insert(item.id.clone()) {
+            seed_items.push(item);
+        }
+    }
 }
 
 fn is_stale_index_entry(item: &SearchItem) -> bool {

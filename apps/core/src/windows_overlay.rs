@@ -756,6 +756,16 @@ mod imp {
             configure_runtime_performance_tuning(idle_cache_trim_ms, active_memory_target_mb);
         }
 
+        pub fn trim_runtime_memory(&self) {
+            if let Some(state) = state_for(self.hwnd) {
+                clear_icon_cache(state);
+                log_memory_snapshot("manual_trim");
+                unsafe {
+                    InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
+                }
+            }
+        }
+
         pub fn set_mode_strip_text(&self, text: &str) {
             if let Some(state) = state_for(self.hwnd) {
                 let resolved = if text.trim().is_empty() {

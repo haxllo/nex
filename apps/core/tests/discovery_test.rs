@@ -246,3 +246,72 @@ fn file_system_provider_excludes_configured_roots() {
     std::fs::remove_file(&skip_file).unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn file_system_provider_honors_item_caps() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let root = std::env::temp_dir().join(format!("swiftfind-cap-roots-{unique}"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    for idx in 0..10 {
+        let file = root.join(format!("Cap-{idx}.txt"));
+        std::fs::write(file, b"cap").unwrap();
+    }
+
+    let provider =
+        FileSystemDiscoveryProvider::new(vec![root.clone()], 6, vec![]).with_index_limits(6, 4);
+    let items = provider.discover().unwrap();
+    assert!(items.len() <= 6);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn runtime_provider_reconfigure_applies_new_roots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let root_a = std::env::temp_dir().join(format!("swiftfind-recfg-a-{unique}"));
+    let root_b = std::env::temp_dir().join(format!("swiftfind-recfg-b-{unique}"));
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let file_a = root_a.join("AlphaRoot.txt");
+    let file_b = root_b.join("BetaRoot.txt");
+    std::fs::write(&file_a, b"a").unwrap();
+    std::fs::write(&file_b, b"b").unwrap();
+
+    let mut cfg_a = swiftfind_core::config::Config::default();
+    cfg_a.discovery_roots = vec![root_a.clone()];
+    cfg_a.discovery_exclude_roots = vec![];
+    cfg_a.windows_search_enabled = false;
+
+    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let service = CoreService::with_connection(cfg_a.clone(), db)
+        .unwrap()
+        .with_runtime_providers();
+
+    let _ = service.rebuild_index().unwrap();
+    let before = service.search("alpharoot", 20).unwrap();
+    assert!(!before.is_empty());
+
+    let mut cfg_b = cfg_a.clone();
+    cfg_b.discovery_roots = vec![root_b.clone()];
+    service.reconfigure_runtime_providers(&cfg_b).unwrap();
+    let _ = service.rebuild_index().unwrap();
+
+    let after_a = service.search("alpharoot", 20).unwrap();
+    let after_b = service.search("betaroot", 20).unwrap();
+    assert!(after_a.is_empty());
+    assert!(!after_b.is_empty());
+
+    std::fs::remove_file(&file_a).unwrap();
+    std::fs::remove_file(&file_b).unwrap();
+    std::fs::remove_dir_all(&root_a).unwrap();
+    std::fs::remove_dir_all(&root_b).unwrap();
+}

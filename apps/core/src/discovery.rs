@@ -6,6 +6,9 @@ use std::time::UNIX_EPOCH;
 
 use crate::model::SearchItem;
 
+const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
+const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
     message: String,
@@ -175,6 +178,8 @@ pub struct FileSystemDiscoveryProvider {
     windows_search_fallback_filesystem: bool,
     show_files: bool,
     show_folders: bool,
+    max_items_total: usize,
+    max_items_per_root: usize,
 }
 
 impl FileSystemDiscoveryProvider {
@@ -217,7 +222,17 @@ impl FileSystemDiscoveryProvider {
             windows_search_fallback_filesystem,
             show_files,
             show_folders,
+            max_items_total: DEFAULT_INDEX_MAX_ITEMS_TOTAL,
+            max_items_per_root: DEFAULT_INDEX_MAX_ITEMS_PER_ROOT,
         }
+    }
+
+    pub fn with_index_limits(mut self, max_items_total: usize, max_items_per_root: usize) -> Self {
+        let total = max_items_total.max(1);
+        let per_root = max_items_per_root.max(1).min(total);
+        self.max_items_total = total;
+        self.max_items_per_root = per_root;
+        self
     }
 }
 
@@ -238,6 +253,8 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                 &self.excluded_roots,
                 self.show_files,
                 self.show_folders,
+                self.max_items_total,
+                self.max_items_per_root,
             ) {
                 Ok(items) if !items.is_empty() => return Ok(items),
                 Ok(_) if !self.windows_search_fallback_filesystem => return Ok(Vec::new()),
@@ -253,6 +270,8 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             self.max_depth,
             self.show_files,
             self.show_folders,
+            self.max_items_total,
+            self.max_items_per_root,
         )
     }
 
@@ -280,6 +299,10 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         stamp.push_str(if self.show_files { "true" } else { "false" });
         stamp.push_str(";show_folders=");
         stamp.push_str(if self.show_folders { "true" } else { "false" });
+        stamp.push_str(";cap_total=");
+        stamp.push_str(&self.max_items_total.to_string());
+        stamp.push_str(";cap_per_root=");
+        stamp.push_str(&self.max_items_per_root.to_string());
         Some(stamp)
     }
 }
@@ -290,21 +313,33 @@ fn discover_filesystem_walk(
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
+    max_items_total: usize,
+    max_items_per_root: usize,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     let mut out = Vec::new();
     let excluded = normalized_exclusion_roots(excluded_roots);
+    let total_budget = max_items_total.max(1);
+    let per_root_budget = max_items_per_root.max(1).min(total_budget);
+    let mut total_added = 0_usize;
 
     for root in roots {
+        if total_added >= total_budget {
+            break;
+        }
         if !root.exists() {
             continue;
         }
 
+        let mut root_added = 0_usize;
         for entry in walkdir::WalkDir::new(root)
             .max_depth(max_depth)
             .into_iter()
             .filter_entry(|entry| !is_path_under_any_excluded_root(entry.path(), &excluded))
             .filter_map(Result::ok)
         {
+            if total_added >= total_budget || root_added >= per_root_budget {
+                break;
+            }
             let path = entry.path();
             if path.is_dir() {
                 if !show_folders {
@@ -326,6 +361,8 @@ fn discover_filesystem_walk(
                     &folder_name,
                     &path.to_string_lossy(),
                 ));
+                total_added += 1;
+                root_added += 1;
                 continue;
             }
 
@@ -348,7 +385,16 @@ fn discover_filesystem_walk(
                 &file_name,
                 &path.to_string_lossy(),
             ));
+            total_added += 1;
+            root_added += 1;
         }
+    }
+
+    if total_added >= total_budget {
+        crate::logging::info(&format!(
+            "[swiftfind-core] discovery_cap provider=filesystem total_cap={} reached=true",
+            total_budget
+        ));
     }
 
     Ok(out)
@@ -725,6 +771,8 @@ fn discover_windows_search_items(
     excluded_roots: &[PathBuf],
     show_files: bool,
     show_folders: bool,
+    max_items_total: usize,
+    max_items_per_root: usize,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     use std::collections::HashSet;
     use std::os::windows::process::CommandExt;
@@ -828,6 +876,14 @@ $conn.Close()
     }
 
     let mut seen_ids = HashSet::new();
+    let normalized_roots = roots
+        .iter()
+        .map(|root| normalize_root_for_stamp(root))
+        .collect::<Vec<_>>();
+    let mut root_counts = vec![0_usize; normalized_roots.len()];
+    let total_budget = max_items_total.max(1);
+    let per_root_budget = max_items_per_root.max(1).min(total_budget);
+    let mut skipped_due_cap = 0_usize;
     let mut items = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let mut parts = line.splitn(3, '\t');
@@ -854,12 +910,33 @@ $conn.Close()
         if path.is_empty() {
             continue;
         }
+        let normalized_path = normalize_id_path(path);
+        let root_index = normalized_roots.iter().position(|root| {
+            normalized_path == *root
+                || (normalized_path.starts_with(root)
+                    && normalized_path[root.len()..].starts_with('\\'))
+        });
+        let Some(root_index) = root_index else {
+            continue;
+        };
+        if items.len() >= total_budget || root_counts[root_index] >= per_root_budget {
+            skipped_due_cap = skipped_due_cap.saturating_add(1);
+            continue;
+        }
         let title = title_raw.trim();
         let display_title = if title.is_empty() { path } else { title };
-        let id = format!("{kind}:{}", normalize_id_path(path));
+        let id = format!("{kind}:{normalized_path}");
         if seen_ids.insert(id.clone()) {
             items.push(SearchItem::new(&id, &kind, display_title, path));
+            root_counts[root_index] += 1;
         }
+    }
+
+    if skipped_due_cap > 0 {
+        crate::logging::info(&format!(
+            "[swiftfind-core] discovery_cap provider=windows_search skipped_due_cap={} total_cap={} per_root_cap={}",
+            skipped_due_cap, total_budget, per_root_budget
+        ));
     }
 
     Ok(items)

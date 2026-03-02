@@ -21,6 +21,35 @@ Expected:
 - Windows runtime smoke harness test passes.
 - Launcher UI flow tests pass.
 
+## v2.1 Reliability Scenarios
+
+1. Structured status output
+- Run: `cargo run -p swiftfind-core -- --status-json`
+- Expected: valid JSON with `runtime_state`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
+
+2. Baseline profile harness
+- Run: `scripts/windows/profile-memory-and-icons.ps1`
+- Expected: script updates config for `C:\` profiling, starts runtime, prints `--status-json`, and dumps recent `query_profile`/`memory_snapshot` lines.
+
+3. Memory envelope with broad discovery root
+- Set `discovery_roots = ["C:\\"]` and keep:
+- `windows_search_enabled = true`
+- `windows_search_fallback_filesystem = true`
+- `index_max_items_total`, `index_max_items_per_root`, `index_max_items_per_query_seed` at defaults unless testing overrides.
+- Exercise launcher with short and medium queries for at least 2 minutes.
+- Expected: active working set tracks close to `active_memory_target_mb`; idle trims occur after hide.
+
+4. Live config apply (no restart for discovery/search tuning)
+- Keep runtime running.
+- Edit and save `%APPDATA%\SwiftFind\config.toml` fields:
+- hot-apply fields: `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`, `clipboard_*`, `plugins_*`, `web_search_*`, `idle_cache_trim_ms`, `active_memory_target_mb`, `index_max_items_*`.
+- provider-refresh fields: `discovery_roots`, `discovery_exclude_roots`, `windows_search_enabled`, `windows_search_fallback_filesystem`.
+- Expected: launcher status updates to `Settings applied` or `Discovery settings updated; reindexing...`; no process restart required.
+
+5. Restart-required behavior
+- Change `hotkey` or `index_db_path` and save config.
+- Expected: launcher status indicates restart requirement; setting is not fully active until restart.
+
 ## Manual E2E Flow (Required)
 
 1. Start runtime/application process for this milestone build.
@@ -115,4 +144,10 @@ Expected output file:
 
 ## Release Blockers
 
-Do not mark the milestone release-ready if any manual check above fails.
+Do not mark the milestone release-ready if any gate below fails:
+
+- Memory gate: active working set exceeds configured target by more than 25% for 3 consecutive profile runs.
+- Discovery gate: editing discovery config does not trigger automatic background reindex.
+- Config gate: hot-apply fields require process restart to take effect.
+
+Note: icon-specific release gating is intentionally deferred from this validation set.

@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 6;
+pub const CURRENT_CONFIG_VERSION: u32 = 7;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -30,6 +30,9 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
+    "index_max_items_total",
+    "index_max_items_per_root",
+    "index_max_items_per_query_seed",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -116,6 +119,9 @@ pub struct Config {
     pub plugins_safe_mode: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
+    pub index_max_items_total: u32,
+    pub index_max_items_per_root: u32,
+    pub index_max_items_per_query_seed: u32,
 }
 
 impl Default for Config {
@@ -167,6 +173,9 @@ impl Default for Config {
             plugins_safe_mode: true,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
+            index_max_items_total: 120_000,
+            index_max_items_per_root: 40_000,
+            index_max_items_per_query_seed: 5_000,
         }
     }
 }
@@ -338,7 +347,9 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // SwiftFind config (comments are allowed).\n");
     text.push_str("  //\n");
     text.push_str("  // How to use this file:\n");
-    text.push_str("  // - Edit values, save, then restart SwiftFind.\n");
+    text.push_str("  // - Edit values and save.\n");
+    text.push_str("  // - Most settings apply automatically within about 1 second.\n");
+    text.push_str("  // - Restart required after changing hotkey or index_db_path.\n");
     text.push_str("  // - Keep strings in double quotes.\n");
     text.push_str(
         "  // - Use double backslashes for Windows paths (C:\\\\Users\\\\Admin\\\\...).\n",
@@ -349,7 +360,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // Quick setup:\n");
     text.push_str("  // 1) Keep exactly ONE `hotkey` line uncommented.\n");
     text.push_str("  // 2) Save file.\n");
-    text.push_str("  // 3) Restart SwiftFind.\n");
+    text.push_str("  // 3) Restart only if you changed hotkey/index_db_path.\n");
     text.push_str("  //\n");
     text.push_str("  // Safer Windows-friendly hotkeys (uncomment one if you prefer):\n");
 
@@ -524,6 +535,18 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // active memory target in MB (valid range: 20..512)\n");
     text.push_str("  \"active_memory_target_mb\": ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
+    text.push_str(",\n");
+    text.push_str("  // Maximum indexed file/folder items retained in database discovery pass\n");
+    text.push_str("  \"index_max_items_total\": ");
+    text.push_str(&cfg.index_max_items_total.to_string());
+    text.push_str(",\n");
+    text.push_str("  // Maximum indexed file/folder items retained per discovery root\n");
+    text.push_str("  \"index_max_items_per_root\": ");
+    text.push_str(&cfg.index_max_items_per_root.to_string());
+    text.push_str(",\n");
+    text.push_str("  // Runtime candidate budget for per-query file/folder retrieval\n");
+    text.push_str("  \"index_max_items_per_query_seed\": ");
+    text.push_str(&cfg.index_max_items_per_query_seed.to_string());
     text.push('\n');
     text.push_str("}\n");
 
@@ -542,7 +565,9 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# SwiftFind config (TOML format).\n");
     text.push_str("#\n");
     text.push_str("# How to use this file:\n");
-    text.push_str("# - Edit values, save, then restart SwiftFind.\n");
+    text.push_str("# - Edit values and save.\n");
+    text.push_str("# - Most settings apply automatically within about 1 second.\n");
+    text.push_str("# - Restart required after changing hotkey or index_db_path.\n");
     text.push_str("# - Strings must be in quotes (example: hotkey = \"Ctrl+Space\").\n");
     text.push_str("# - Use double backslashes for Windows paths (C:\\\\Users\\\\Admin\\\\...).\n");
     text.push_str("# - true/false and numbers are not quoted.\n");
@@ -551,7 +576,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# Quick setup:\n");
     text.push_str("# 1) Keep exactly ONE hotkey value.\n");
     text.push_str("# 2) Save file.\n");
-    text.push_str("# 3) Restart SwiftFind.\n");
+    text.push_str("# 3) Restart only if you changed hotkey/index_db_path.\n");
     text.push_str("#\n");
     text.push_str("# Safer Windows-friendly hotkeys you can use:\n");
     for option in &cfg.hotkey_recommended {
@@ -706,6 +731,18 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("active_memory_target_mb = ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
     text.push('\n');
+    text.push_str("# Maximum indexed file/folder items retained in discovery pass\n");
+    text.push_str("index_max_items_total = ");
+    text.push_str(&cfg.index_max_items_total.to_string());
+    text.push('\n');
+    text.push_str("# Maximum indexed file/folder items retained per discovery root\n");
+    text.push_str("index_max_items_per_root = ");
+    text.push_str(&cfg.index_max_items_per_root.to_string());
+    text.push('\n');
+    text.push_str("# Runtime candidate budget for per-query file/folder retrieval\n");
+    text.push_str("index_max_items_per_query_seed = ");
+    text.push_str(&cfg.index_max_items_per_query_seed.to_string());
+    text.push('\n');
 
     std::fs::write(path, text)?;
     Ok(())
@@ -738,6 +775,22 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 
     if cfg.active_memory_target_mb < 20 || cfg.active_memory_target_mb > 512 {
         return Err("active_memory_target_mb out of range".into());
+    }
+
+    if cfg.index_max_items_total < 10_000 || cfg.index_max_items_total > 2_000_000 {
+        return Err("index_max_items_total out of range".into());
+    }
+
+    if cfg.index_max_items_per_root < 1_000 || cfg.index_max_items_per_root > 1_000_000 {
+        return Err("index_max_items_per_root out of range".into());
+    }
+
+    if cfg.index_max_items_per_query_seed < 250 || cfg.index_max_items_per_query_seed > 200_000 {
+        return Err("index_max_items_per_query_seed out of range".into());
+    }
+
+    if cfg.index_max_items_per_root > cfg.index_max_items_total {
+        return Err("index_max_items_per_root must be <= index_max_items_total".into());
     }
 
     if cfg.web_search_provider == WebSearchProvider::Custom {
@@ -987,6 +1040,21 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
     if source_version < 6 && !raw_has_key(raw, "uninstall_actions_enabled") {
         cfg.uninstall_actions_enabled = Config::default().uninstall_actions_enabled;
         changed = true;
+    }
+
+    if source_version < 7 {
+        if !raw_has_key(raw, "index_max_items_total") {
+            cfg.index_max_items_total = Config::default().index_max_items_total;
+            changed = true;
+        }
+        if !raw_has_key(raw, "index_max_items_per_root") {
+            cfg.index_max_items_per_root = Config::default().index_max_items_per_root;
+            changed = true;
+        }
+        if !raw_has_key(raw, "index_max_items_per_query_seed") {
+            cfg.index_max_items_per_query_seed = Config::default().index_max_items_per_query_seed;
+            changed = true;
+        }
     }
 
     if TEMPLATE_REQUIRED_KEYS

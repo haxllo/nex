@@ -4418,7 +4418,7 @@ mod imp {
         };
 
         let path = std::path::Path::new(&target);
-        open_config_file_in_notepad(path)?;
+        open_config_file_with_default_app(path)?;
         state.status_is_error = false;
         state.help_tip_visible = false;
         let wide = to_wide("Opened config file. Restart SwiftFind after changes.");
@@ -4429,7 +4429,7 @@ mod imp {
         Ok(())
     }
 
-    fn open_config_file_in_notepad(path: &std::path::Path) -> Result<(), String> {
+    fn open_config_file_with_default_app(path: &std::path::Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create config directory: {e}"))?;
@@ -4441,9 +4441,8 @@ mod imp {
                 .map_err(|e| format!("failed to create config file: {e}"))?;
         }
 
-        std::process::Command::new("notepad")
-            .arg(path)
-            .spawn()
+        let launch_target = path.to_string_lossy().into_owned();
+        crate::action_executor::launch_path(&launch_target)
             .map_err(|e| format!("failed to open config file: {e}"))?;
         Ok(())
     }

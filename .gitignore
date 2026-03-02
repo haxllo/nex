@@ -1,4 +1,9 @@
 node_modules/
+.pnpm-store/
+.pnpm/
+.devcontainer/
+devsync.lock
+devsync.policy.toml
 .DS_Store
 target/
 artifacts

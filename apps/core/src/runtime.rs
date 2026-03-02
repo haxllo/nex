@@ -2251,7 +2251,7 @@ fn is_foreground_window_fullscreen() -> bool {
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
+        GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
     };
 
     let foreground = unsafe { GetForegroundWindow() };
@@ -2260,6 +2260,17 @@ fn is_foreground_window_fullscreen() -> bool {
     }
     if unsafe { IsWindowVisible(foreground) } == 0 || unsafe { IsIconic(foreground) } != 0 {
         return false;
+    }
+    // Desktop/taskbar shell surfaces can occupy the full monitor; do not treat them
+    // as fullscreen apps, otherwise the launcher hotkey is ignored on desktop focus.
+    let mut class_buf = [0u16; 128];
+    let class_len =
+        unsafe { GetClassNameW(foreground, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+    if class_len > 0 {
+        let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
+        if is_shell_surface_class_name(&class_name) {
+            return false;
+        }
     }
 
     let monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
@@ -2303,6 +2314,14 @@ fn is_foreground_window_fullscreen() -> bool {
     let covers_right = rect.right >= monitor_info.rcMonitor.right - fuzz;
     let covers_bottom = rect.bottom >= monitor_info.rcMonitor.bottom - fuzz;
     covers_left && covers_top && covers_right && covers_bottom
+}
+
+#[cfg(target_os = "windows")]
+fn is_shell_surface_class_name(class_name: &str) -> bool {
+    matches!(
+        class_name.trim().to_ascii_lowercase().as_str(),
+        "progman" | "workerw" | "shell_traywnd"
+    )
 }
 
 #[cfg(target_os = "windows")]

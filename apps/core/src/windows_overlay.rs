@@ -106,6 +106,7 @@ mod imp {
     const HEADER_ROW_LINE_HEIGHT: i32 = 1;
     const FOOTER_HINT_HEIGHT: i32 = 24;
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
+    const FOOTER_CONTENT_PAD_Y: i32 = 2;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Settings";
     const FOOTER_SEARCH_APPS_TEXT: &str = "Search apps";
@@ -4394,23 +4395,49 @@ mod imp {
             };
             SetBkMode(hdc, TRANSPARENT as i32);
 
-            let left_limit = draw_footer_settings_left(hdc, state, width, height);
+            let content_top = (FOOTER_SEPARATOR_HEIGHT + FOOTER_CONTENT_PAD_Y).min(height);
+            let content_bottom = (height - FOOTER_CONTENT_PAD_Y).max(content_top + 1);
+
+            let left_limit = draw_footer_settings_left(hdc, state, width, content_top, content_bottom);
             let mut right_cursor = width - 2;
-            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
+            right_cursor = draw_footer_keycap_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_KEY_ENTER,
+            );
             right_cursor = draw_footer_label_right(
                 hdc,
                 right_cursor,
-                height,
+                content_top,
+                content_bottom,
                 FOOTER_SEARCH_APPS_TEXT,
                 state.palette.text_hint_footer,
             );
             right_cursor -= FOOTER_GROUP_GAP;
-            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
-            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_CTRL);
+            right_cursor = draw_footer_keycap_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_KEY_ENTER,
+            );
+            right_cursor = draw_footer_keycap_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_KEY_CTRL,
+            );
             right_cursor = draw_footer_label_right(
                 hdc,
                 right_cursor,
-                height,
+                content_top,
+                content_bottom,
                 FOOTER_SETTINGS_HINT_TEXT,
                 state.palette.text_hint_footer,
             );
@@ -4419,18 +4446,25 @@ mod imp {
             if right_cursor < left_limit {
                 let clear_rect = RECT {
                     left: left_limit,
-                    top: FOOTER_SEPARATOR_HEIGHT,
+                    top: content_top,
                     right: width,
-                    bottom: height,
+                    bottom: content_bottom,
                 };
                 FillRect(hdc, &clear_rect, state.panel_brush as _);
                 right_cursor = width - 2;
-                right_cursor =
-                    draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
-                right_cursor = draw_footer_label_right(
+                right_cursor = draw_footer_keycap_right(
+                    hdc,
+                    state,
+                    right_cursor,
+                    content_top,
+                    content_bottom,
+                    FOOTER_KEY_ENTER,
+                );
+                let _ = draw_footer_label_right(
                     hdc,
                     right_cursor,
-                    height,
+                    content_top,
+                    content_bottom,
                     FOOTER_SEARCH_APPS_TEXT,
                     state.palette.text_hint_footer,
                 );
@@ -4443,7 +4477,13 @@ mod imp {
         }
     }
 
-    fn draw_footer_settings_left(hdc: HDC, state: &OverlayShellState, width: i32, height: i32) -> i32 {
+    fn draw_footer_settings_left(
+        hdc: HDC,
+        state: &OverlayShellState,
+        width: i32,
+        content_top: i32,
+        content_bottom: i32,
+    ) -> i32 {
         let icon_color = blend_color(state.palette.panel_bg, state.palette.text_hint_footer, 0.92);
         let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.90);
         let mut x = 0.max(PANEL_MARGIN_X / 2 - 1);
@@ -4454,9 +4494,9 @@ mod imp {
                 SetTextColor(hdc, icon_color);
                 let mut icon_rect = RECT {
                     left: x,
-                    top: 0,
+                    top: content_top,
                     right: (x + 14).min(width),
-                    bottom: height,
+                    bottom: content_bottom,
                 };
                 DrawTextW(
                     hdc,
@@ -4474,9 +4514,9 @@ mod imp {
             SetTextColor(hdc, label_color);
             let mut text_rect = RECT {
                 left: x,
-                top: 0,
+                top: content_top,
                 right: width,
-                bottom: height,
+                bottom: content_bottom,
             };
             DrawTextW(
                 hdc,
@@ -4494,14 +4534,16 @@ mod imp {
         hdc: HDC,
         state: &OverlayShellState,
         right: i32,
-        height: i32,
+        content_top: i32,
+        content_bottom: i32,
         text: &str,
     ) -> i32 {
         let text_width = measure_text_width(hdc, text).max(1);
         let cap_width = text_width + FOOTER_KEYCAP_PAD_X * 2;
         let left = (right - cap_width).max(0);
-        let top = ((height - FOOTER_KEYCAP_HEIGHT).max(0) / 2).max(FOOTER_SEPARATOR_HEIGHT);
-        let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(height);
+        let content_height = (content_bottom - content_top).max(1);
+        let top = content_top + ((content_height - FOOTER_KEYCAP_HEIGHT).max(0) / 2);
+        let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(content_bottom);
 
         unsafe {
             let fill_color = blend_color(state.palette.results_bg, state.palette.selection_accent, 0.86);
@@ -4547,7 +4589,8 @@ mod imp {
     fn draw_footer_label_right(
         hdc: HDC,
         right: i32,
-        height: i32,
+        content_top: i32,
+        content_bottom: i32,
         text: &str,
         color: u32,
     ) -> i32 {
@@ -4557,9 +4600,9 @@ mod imp {
             SetTextColor(hdc, color);
             let mut text_rect = RECT {
                 left,
-                top: 0,
+                top: content_top,
                 right,
-                bottom: height,
+                bottom: content_bottom,
             };
             DrawTextW(
                 hdc,

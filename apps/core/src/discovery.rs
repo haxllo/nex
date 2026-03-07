@@ -1,5 +1,5 @@
 #[cfg(target_os = "windows")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -162,7 +162,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "3";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "4";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -512,12 +512,19 @@ fn default_start_menu_roots() -> Vec<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderError> {
-    let mut items = Vec::new();
-
     if !root.exists() {
-        return Ok(items);
+        return Ok(Vec::new());
     }
 
+    #[derive(Debug, Clone)]
+    struct StartMenuCandidate {
+        path: PathBuf,
+        title: String,
+        ext: String,
+        shortcut_target: Option<String>,
+    }
+
+    let mut candidates: Vec<StartMenuCandidate> = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
@@ -539,7 +546,7 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
         if ext != "lnk" && ext != "exe" {
             continue;
         }
-        let mut resolved_shortcut_target: Option<String> = None;
+        let mut resolved_shortcut_target = None;
         if ext == "lnk" {
             resolved_shortcut_target = resolve_shortcut_target_for_discovery(path);
             if let Some(shortcut_target) = resolved_shortcut_target.as_deref() {
@@ -555,12 +562,79 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
         if is_documentation_like_start_entry_title(&title) {
             continue;
         }
-        let id = format!("app:{}", path.to_string_lossy());
-        let mut item = SearchItem::new(&id, "app", &title, &path.to_string_lossy());
-        if let Some(subtitle) =
-            start_menu_entry_subtitle(root, path, resolved_shortcut_target.as_deref())
-        {
-            item = item.with_subtitle(subtitle.as_str());
+
+        candidates.push(StartMenuCandidate {
+            path: path.to_path_buf(),
+            title,
+            ext,
+            shortcut_target: resolved_shortcut_target,
+        });
+    }
+
+    let shortcut_descriptions = load_shortcut_descriptions(root).unwrap_or_default();
+    let mut exe_paths = HashSet::new();
+    for candidate in &candidates {
+        if candidate.ext == "exe" {
+            let exe = normalize_shortcut_target_path(candidate.path.to_string_lossy().as_ref());
+            if !exe.is_empty() {
+                exe_paths.insert(exe);
+            }
+            continue;
+        }
+        if let Some(target) = candidate.shortcut_target.as_deref() {
+            let normalized_target = normalize_shortcut_target_path(target);
+            if looks_like_filesystem_path(normalized_target.as_str())
+                && normalized_target.to_ascii_lowercase().ends_with(".exe")
+            {
+                exe_paths.insert(normalized_target);
+            }
+        }
+    }
+    let mut exe_paths_vec: Vec<String> = exe_paths.into_iter().collect();
+    exe_paths_vec.sort();
+    let exe_descriptions = load_exe_file_descriptions(&exe_paths_vec).unwrap_or_default();
+
+    let mut items = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let path_text = candidate.path.to_string_lossy().to_string();
+        let id = format!("app:{path_text}");
+        let shortcut_key = normalize_id_path(&path_text);
+        let mut subtitle = shortcut_descriptions
+            .get(&shortcut_key)
+            .cloned()
+            .unwrap_or_default();
+
+        if subtitle.trim().is_empty() {
+            let exe_target = if candidate.ext == "exe" {
+                normalize_shortcut_target_path(path_text.as_str())
+            } else {
+                candidate
+                    .shortcut_target
+                    .as_deref()
+                    .map(normalize_shortcut_target_path)
+                    .unwrap_or_default()
+            };
+            if !exe_target.trim().is_empty() {
+                let exe_key = normalize_id_path(exe_target.as_str());
+                if let Some(exe_subtitle) = exe_descriptions.get(&exe_key) {
+                    subtitle = exe_subtitle.clone();
+                }
+            }
+        }
+
+        if subtitle.trim().is_empty() {
+            if let Some(fallback) = start_menu_entry_subtitle(
+                root,
+                candidate.path.as_path(),
+                candidate.shortcut_target.as_deref(),
+            ) {
+                subtitle = fallback;
+            }
+        }
+
+        let mut item = SearchItem::new(&id, "app", &candidate.title, &path_text);
+        if !subtitle.trim().is_empty() {
+            item = item.with_subtitle(subtitle.trim());
         }
         items.push(item);
     }
@@ -644,6 +718,154 @@ Get-StartApps | ForEach-Object {
     }
 
     Ok(items)
+}
+
+#[cfg(target_os = "windows")]
+fn load_shortcut_descriptions(root: &Path) -> Result<HashMap<String, String>, ProviderError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let root_path = root.to_string_lossy().replace('/', "\\");
+    if root_path.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$root = [string]$env:SWIFTFIND_START_ROOT
+if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { return }
+$shell = New-Object -ComObject WScript.Shell
+Get-ChildItem -LiteralPath $root -Recurse -File -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {
+  try {
+    $desc = [string]$shell.CreateShortcut($_.FullName).Description
+    if (-not [string]::IsNullOrWhiteSpace($desc)) {
+      "{0}`t{1}" -f $_.FullName, $desc.Trim()
+    }
+  } catch {}
+}
+"#;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .env("SWIFTFIND_START_ROOT", root_path)
+        .creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().map_err(|error| {
+        ProviderError::new(format!(
+            "shortcut description discovery invocation failed: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(path_raw) = parts.next() else {
+            continue;
+        };
+        let Some(desc_raw) = parts.next() else {
+            continue;
+        };
+        let path = path_raw.trim();
+        let desc = desc_raw.trim();
+        if path.is_empty() || desc.is_empty() {
+            continue;
+        }
+        out.insert(normalize_id_path(path), desc.to_string());
+    }
+
+    Ok(out)
+}
+
+#[cfg(target_os = "windows")]
+fn load_exe_file_descriptions(
+    exe_paths: &[String],
+) -> Result<HashMap<String, String>, ProviderError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    if exe_paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let joined_paths = exe_paths.join("\u{1f}");
+    if joined_paths.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$separator = [char]0x1f
+$paths = @()
+if ($env:SWIFTFIND_EXE_PATHS) { $paths = $env:SWIFTFIND_EXE_PATHS -split $separator }
+foreach ($path in $paths) {
+  $candidate = [string]$path
+  if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+  if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+  try {
+    $desc = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($candidate).FileDescription
+    if (-not [string]::IsNullOrWhiteSpace($desc)) {
+      "{0}`t{1}" -f $candidate, $desc.Trim()
+    }
+  } catch {}
+}
+"#;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .env("SWIFTFIND_EXE_PATHS", joined_paths)
+        .creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().map_err(|error| {
+        ProviderError::new(format!(
+            "exe description discovery invocation failed: {error}"
+        ))
+    })?;
+    if !output.status.success() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(path_raw) = parts.next() else {
+            continue;
+        };
+        let Some(desc_raw) = parts.next() else {
+            continue;
+        };
+        let path = path_raw.trim();
+        let desc = desc_raw.trim();
+        if path.is_empty() || desc.is_empty() {
+            continue;
+        }
+        out.insert(normalize_id_path(path), desc.to_string());
+    }
+
+    Ok(out)
 }
 
 #[cfg(target_os = "windows")]

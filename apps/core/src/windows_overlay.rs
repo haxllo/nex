@@ -109,7 +109,6 @@ mod imp {
     const FOOTER_CONTENT_PAD_Y: i32 = 4;
     const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 4;
     const FOOTER_CONTENT_PAD_X: i32 = 14;
-    const FOOTER_SETTINGS_ICON_SLOT_WIDTH: i32 = 16;
     const FOOTER_SETTINGS_ICON_ADVANCE: i32 = 20;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Config";

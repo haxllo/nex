@@ -104,7 +104,7 @@ mod imp {
     const HEADER_ROW_LABEL_HEIGHT: i32 = 14;
     const HEADER_ROW_LINE_GAP: i32 = 10;
     const HEADER_ROW_LINE_HEIGHT: i32 = 1;
-    const FOOTER_HINT_HEIGHT: i32 = 20;
+    const FOOTER_HINT_HEIGHT: i32 = 24;
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Settings";
@@ -112,11 +112,11 @@ mod imp {
     const FOOTER_SETTINGS_HINT_TEXT: &str = "Settings";
     const FOOTER_KEY_CTRL: &str = "Ctrl";
     const FOOTER_KEY_ENTER: &str = "\u{21B5}";
-    const FOOTER_KEYCAP_RADIUS: i32 = 8;
-    const FOOTER_KEYCAP_HEIGHT: i32 = 16;
-    const FOOTER_KEYCAP_PAD_X: i32 = 6;
-    const FOOTER_KEYCAP_GAP: i32 = 6;
-    const FOOTER_GROUP_GAP: i32 = 12;
+    const FOOTER_KEYCAP_RADIUS: i32 = 9;
+    const FOOTER_KEYCAP_HEIGHT: i32 = 18;
+    const FOOTER_KEYCAP_PAD_X: i32 = 7;
+    const FOOTER_KEYCAP_GAP: i32 = 7;
+    const FOOTER_GROUP_GAP: i32 = 14;
 
     const CONTROL_ID_INPUT: usize = 1001;
     const CONTROL_ID_LIST: usize = 1002;
@@ -171,7 +171,7 @@ mod imp {
     const FONT_STATUS_HEIGHT: i32 = -11;
     const FONT_HEADER_HEIGHT: i32 = -12;
     const FONT_TOP_HIT_HEIGHT: i32 = -16;
-    const FONT_HINT_HEIGHT: i32 = -10;
+    const FONT_HINT_HEIGHT: i32 = -11;
     const FONT_HELP_TIP_HEIGHT: i32 = -11;
     const FONT_HELP_ICON_HEIGHT: i32 = -14;
     const FONT_COMMAND_ICON_HEIGHT: i32 = -16;
@@ -4386,8 +4386,13 @@ mod imp {
             FillRect(hdc, &separator_rect, separator_brush as _);
             DeleteObject(separator_brush as _);
 
-            let old_hint_font = if state.hint_font != 0 {
-                SelectObject(hdc, state.hint_font as _)
+            let footer_font = if state.meta_font != 0 {
+                state.meta_font
+            } else {
+                state.hint_font
+            };
+            let old_hint_font = if footer_font != 0 {
+                SelectObject(hdc, footer_font as _)
             } else {
                 std::ptr::null_mut()
             };

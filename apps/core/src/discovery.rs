@@ -162,7 +162,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "4";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "5";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -571,7 +571,6 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
         });
     }
 
-    let shortcut_descriptions = load_shortcut_descriptions(root).unwrap_or_default();
     let mut exe_paths = HashSet::new();
     for candidate in &candidates {
         if candidate.ext == "exe" {
@@ -592,17 +591,13 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
     }
     let mut exe_paths_vec: Vec<String> = exe_paths.into_iter().collect();
     exe_paths_vec.sort();
-    let exe_descriptions = load_exe_file_descriptions(&exe_paths_vec).unwrap_or_default();
+    let exe_publishers = load_exe_company_names(&exe_paths_vec).unwrap_or_default();
 
     let mut items = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let path_text = candidate.path.to_string_lossy().to_string();
         let id = format!("app:{path_text}");
-        let shortcut_key = normalize_id_path(&path_text);
-        let mut subtitle = shortcut_descriptions
-            .get(&shortcut_key)
-            .cloned()
-            .unwrap_or_default();
+        let mut subtitle = String::new();
 
         if subtitle.trim().is_empty() {
             let exe_target = if candidate.ext == "exe" {
@@ -616,7 +611,7 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
             };
             if !exe_target.trim().is_empty() {
                 let exe_key = normalize_id_path(exe_target.as_str());
-                if let Some(exe_subtitle) = exe_descriptions.get(&exe_key) {
+                if let Some(exe_subtitle) = exe_publishers.get(&exe_key) {
                     subtitle = exe_subtitle.clone();
                 }
             }
@@ -721,79 +716,7 @@ Get-StartApps | ForEach-Object {
 }
 
 #[cfg(target_os = "windows")]
-fn load_shortcut_descriptions(root: &Path) -> Result<HashMap<String, String>, ProviderError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let root_path = root.to_string_lossy().replace('/', "\\");
-    if root_path.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$root = [string]$env:SWIFTFIND_START_ROOT
-if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { return }
-$shell = New-Object -ComObject WScript.Shell
-Get-ChildItem -LiteralPath $root -Recurse -File -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {
-  try {
-    $desc = [string]$shell.CreateShortcut($_.FullName).Description
-    if (-not [string]::IsNullOrWhiteSpace($desc)) {
-      "{0}`t{1}" -f $_.FullName, $desc.Trim()
-    }
-  } catch {}
-}
-"#;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .env("SWIFTFIND_START_ROOT", root_path)
-        .creation_flags(CREATE_NO_WINDOW);
-
-    let output = command.output().map_err(|error| {
-        ProviderError::new(format!(
-            "shortcut description discovery invocation failed: {error}"
-        ))
-    })?;
-    if !output.status.success() {
-        return Ok(HashMap::new());
-    }
-
-    let mut out = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let Some(path_raw) = parts.next() else {
-            continue;
-        };
-        let Some(desc_raw) = parts.next() else {
-            continue;
-        };
-        let path = path_raw.trim();
-        let desc = desc_raw.trim();
-        if path.is_empty() || desc.is_empty() {
-            continue;
-        }
-        out.insert(normalize_id_path(path), desc.to_string());
-    }
-
-    Ok(out)
-}
-
-#[cfg(target_os = "windows")]
-fn load_exe_file_descriptions(
-    exe_paths: &[String],
-) -> Result<HashMap<String, String>, ProviderError> {
+fn load_exe_company_names(exe_paths: &[String]) -> Result<HashMap<String, String>, ProviderError> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -816,9 +739,9 @@ foreach ($path in $paths) {
   if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
   if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
   try {
-    $desc = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($candidate).FileDescription
-    if (-not [string]::IsNullOrWhiteSpace($desc)) {
-      "{0}`t{1}" -f $candidate, $desc.Trim()
+    $publisher = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($candidate).CompanyName
+    if (-not [string]::IsNullOrWhiteSpace($publisher)) {
+      "{0}`t{1}" -f $candidate, $publisher.Trim()
     }
   } catch {}
 }
@@ -841,7 +764,7 @@ foreach ($path in $paths) {
 
     let output = command.output().map_err(|error| {
         ProviderError::new(format!(
-            "exe description discovery invocation failed: {error}"
+            "exe publisher discovery invocation failed: {error}"
         ))
     })?;
     if !output.status.success() {
@@ -854,15 +777,15 @@ foreach ($path in $paths) {
         let Some(path_raw) = parts.next() else {
             continue;
         };
-        let Some(desc_raw) = parts.next() else {
+        let Some(publisher_raw) = parts.next() else {
             continue;
         };
         let path = path_raw.trim();
-        let desc = desc_raw.trim();
-        if path.is_empty() || desc.is_empty() {
+        let publisher = publisher_raw.trim();
+        if path.is_empty() || publisher.is_empty() {
             continue;
         }
-        out.insert(normalize_id_path(path), desc.to_string());
+        out.insert(normalize_id_path(path), publisher.to_string());
     }
 
     Ok(out)
@@ -898,11 +821,7 @@ fn dedupe_apps_by_title(items: Vec<SearchItem>) -> Vec<SearchItem> {
 
 #[cfg(target_os = "windows")]
 fn app_quality_rank(item: &SearchItem) -> u8 {
-    let subtitle_bonus = if item.subtitle.trim().is_empty() {
-        0
-    } else {
-        1
-    };
+    let subtitle_bonus = subtitle_quality_score(item.subtitle.as_str());
     let lowered = item.path.trim().to_ascii_lowercase();
     if lowered.starts_with("shell:appsfolder\\") {
         return 3 + subtitle_bonus;
@@ -914,43 +833,33 @@ fn app_quality_rank(item: &SearchItem) -> u8 {
 }
 
 #[cfg(target_os = "windows")]
+fn subtitle_quality_score(subtitle: &str) -> u8 {
+    let trimmed = subtitle.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let word_count = trimmed.split_whitespace().count();
+    if word_count >= 3 {
+        3
+    } else if word_count == 2 {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn start_menu_entry_subtitle(
-    root: &Path,
-    entry_path: &Path,
+    _root: &Path,
+    _entry_path: &Path,
     shortcut_target: Option<&str>,
 ) -> Option<String> {
-    if let Some(folder_label) = start_menu_relative_folder_label(root, entry_path) {
-        return Some(folder_label);
-    }
-
     let shortcut_target = shortcut_target?;
     let normalized_target = normalize_shortcut_target_path(shortcut_target);
     if normalized_target.is_empty() || !looks_like_filesystem_path(normalized_target.as_str()) {
         return None;
     }
     program_files_vendor_label(normalized_target.as_str())
-}
-
-#[cfg(target_os = "windows")]
-fn start_menu_relative_folder_label(root: &Path, entry_path: &Path) -> Option<String> {
-    let parent = entry_path.parent()?;
-    let relative_parent = parent.strip_prefix(root).ok()?;
-    let normalized = relative_parent.to_string_lossy().replace('/', "\\");
-    let parts: Vec<&str> = normalized
-        .split('\\')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let tail_count = parts.len().min(2);
-    let label = parts[parts.len() - tail_count..].join(" • ");
-    if label.trim().is_empty() {
-        None
-    } else {
-        Some(label)
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -991,10 +900,6 @@ fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
         return None;
     }
 
-    if lower.starts_with('{') && lower.contains("}\\") {
-        return Some("Desktop app".to_string());
-    }
-
     if let Some((package_name, _app_entry)) = trimmed.split_once('!') {
         if let Some((publisher_hint, _package_tail)) = package_name.split_once('_') {
             let publisher = publisher_hint
@@ -1003,10 +908,9 @@ fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
                 .unwrap_or("")
                 .trim();
             if !publisher.is_empty() {
-                return Some(format!("{publisher} Store app"));
+                return Some(publisher.to_string());
             }
         }
-        return Some("Store app".to_string());
     }
 
     None

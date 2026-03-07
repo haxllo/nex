@@ -104,7 +104,19 @@ mod imp {
     const HEADER_ROW_LABEL_HEIGHT: i32 = 14;
     const HEADER_ROW_LINE_GAP: i32 = 10;
     const HEADER_ROW_LINE_HEIGHT: i32 = 1;
-    const FOOTER_HINT_HEIGHT: i32 = 14;
+    const FOOTER_HINT_HEIGHT: i32 = 20;
+    const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
+    const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
+    const FOOTER_SETTINGS_TEXT: &str = "Settings";
+    const FOOTER_SEARCH_APPS_TEXT: &str = "Search apps";
+    const FOOTER_SETTINGS_HINT_TEXT: &str = "Settings";
+    const FOOTER_KEY_CTRL: &str = "Ctrl";
+    const FOOTER_KEY_ENTER: &str = "\u{21B5}";
+    const FOOTER_KEYCAP_RADIUS: i32 = 8;
+    const FOOTER_KEYCAP_HEIGHT: i32 = 16;
+    const FOOTER_KEYCAP_PAD_X: i32 = 6;
+    const FOOTER_KEYCAP_GAP: i32 = 6;
+    const FOOTER_GROUP_GAP: i32 = 12;
 
     const CONTROL_ID_INPUT: usize = 1001;
     const CONTROL_ID_LIST: usize = 1002;
@@ -377,6 +389,7 @@ mod imp {
         list_prev_proc: isize,
         help_prev_proc: isize,
         help_tip_prev_proc: isize,
+        footer_hint_prev_proc: isize,
 
         input_font: isize,
         title_font: isize,
@@ -459,6 +472,7 @@ mod imp {
                 list_prev_proc: 0,
                 help_prev_proc: 0,
                 help_tip_prev_proc: 0,
+                footer_hint_prev_proc: 0,
                 input_font: 0,
                 title_font: 0,
                 meta_font: 0,
@@ -1546,6 +1560,11 @@ mod imp {
                             GWLP_WNDPROC,
                             control_subclass_proc as *const () as isize,
                         );
+                        state.footer_hint_prev_proc = SetWindowLongPtrW(
+                            state.footer_hint_hwnd,
+                            GWLP_WNDPROC,
+                            control_subclass_proc as *const () as isize,
+                        );
                         SetWindowLongPtrW(state.help_tip_hwnd, GWLP_USERDATA, hwnd as isize);
 
                         ShowWindow(state.list_hwnd, SW_HIDE);
@@ -1887,6 +1906,10 @@ mod imp {
                 paint_help_tip(hwnd, state);
                 return 0;
             }
+            if hwnd == state.footer_hint_hwnd && message == WM_PAINT {
+                paint_footer_hint(hwnd, state);
+                return 0;
+            }
             if hwnd == state.edit_hwnd
                 && (message == WM_SETFOCUS
                     || message == WM_KEYDOWN
@@ -2126,6 +2149,8 @@ mod imp {
             state.help_prev_proc
         } else if hwnd == state.help_tip_hwnd {
             state.help_tip_prev_proc
+        } else if hwnd == state.footer_hint_hwnd {
+            state.footer_hint_prev_proc
         } else {
             0
         };
@@ -4321,6 +4346,229 @@ mod imp {
             }
             EndPaint(hwnd, &paint);
         }
+    }
+
+    fn paint_footer_hint(hwnd: HWND, state: &OverlayShellState) {
+        if state.panel_brush == 0 {
+            return;
+        }
+
+        unsafe {
+            let mut paint: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut paint);
+            if hdc.is_null() {
+                return;
+            }
+
+            let mut client: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut client);
+            let width = client.right - client.left;
+            let height = client.bottom - client.top;
+            if width <= 0 || height <= 0 {
+                EndPaint(hwnd, &paint);
+                return;
+            }
+
+            FillRect(hdc, &client, state.panel_brush as _);
+
+            let separator_color = blend_color(
+                state.palette.panel_bg,
+                state.palette.row_separator,
+                0.92,
+            );
+            let separator_brush = CreateSolidBrush(separator_color);
+            let separator_rect = RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: FOOTER_SEPARATOR_HEIGHT,
+            };
+            FillRect(hdc, &separator_rect, separator_brush as _);
+            DeleteObject(separator_brush as _);
+
+            let old_hint_font = if state.hint_font != 0 {
+                SelectObject(hdc, state.hint_font as _)
+            } else {
+                std::ptr::null_mut()
+            };
+            SetBkMode(hdc, TRANSPARENT as i32);
+
+            let left_limit = draw_footer_settings_left(hdc, state, width, height);
+            let mut right_cursor = width - 2;
+            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
+            right_cursor = draw_footer_label_right(
+                hdc,
+                right_cursor,
+                height,
+                FOOTER_SEARCH_APPS_TEXT,
+                state.palette.text_hint_footer,
+            );
+            right_cursor -= FOOTER_GROUP_GAP;
+            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
+            right_cursor = draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_CTRL);
+            right_cursor = draw_footer_label_right(
+                hdc,
+                right_cursor,
+                height,
+                FOOTER_SETTINGS_HINT_TEXT,
+                state.palette.text_hint_footer,
+            );
+
+            // Keep right-side hints from visually colliding with the left utility label.
+            if right_cursor < left_limit {
+                let clear_rect = RECT {
+                    left: left_limit,
+                    top: FOOTER_SEPARATOR_HEIGHT,
+                    right: width,
+                    bottom: height,
+                };
+                FillRect(hdc, &clear_rect, state.panel_brush as _);
+                right_cursor = width - 2;
+                right_cursor =
+                    draw_footer_keycap_right(hdc, state, right_cursor, height, FOOTER_KEY_ENTER);
+                right_cursor = draw_footer_label_right(
+                    hdc,
+                    right_cursor,
+                    height,
+                    FOOTER_SEARCH_APPS_TEXT,
+                    state.palette.text_hint_footer,
+                );
+            }
+
+            if !old_hint_font.is_null() {
+                SelectObject(hdc, old_hint_font);
+            }
+            EndPaint(hwnd, &paint);
+        }
+    }
+
+    fn draw_footer_settings_left(hdc: HDC, state: &OverlayShellState, width: i32, height: i32) -> i32 {
+        let icon_color = blend_color(state.palette.panel_bg, state.palette.text_hint_footer, 0.92);
+        let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.90);
+        let mut x = 0.max(PANEL_MARGIN_X / 2 - 1);
+
+        if state.command_icon_font != 0 {
+            unsafe {
+                let old_font = SelectObject(hdc, state.command_icon_font as _);
+                SetTextColor(hdc, icon_color);
+                let mut icon_rect = RECT {
+                    left: x,
+                    top: 0,
+                    right: (x + 14).min(width),
+                    bottom: height,
+                };
+                DrawTextW(
+                    hdc,
+                    to_wide(FOOTER_SETTINGS_ICON).as_ptr(),
+                    -1,
+                    &mut icon_rect,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                );
+                SelectObject(hdc, old_font);
+            }
+            x += 18;
+        }
+
+        unsafe {
+            SetTextColor(hdc, label_color);
+            let mut text_rect = RECT {
+                left: x,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            DrawTextW(
+                hdc,
+                to_wide(FOOTER_SETTINGS_TEXT).as_ptr(),
+                -1,
+                &mut text_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+
+        x + measure_text_width(hdc, FOOTER_SETTINGS_TEXT) + FOOTER_GROUP_GAP
+    }
+
+    fn draw_footer_keycap_right(
+        hdc: HDC,
+        state: &OverlayShellState,
+        right: i32,
+        height: i32,
+        text: &str,
+    ) -> i32 {
+        let text_width = measure_text_width(hdc, text).max(1);
+        let cap_width = text_width + FOOTER_KEYCAP_PAD_X * 2;
+        let left = (right - cap_width).max(0);
+        let top = ((height - FOOTER_KEYCAP_HEIGHT).max(0) / 2).max(FOOTER_SEPARATOR_HEIGHT);
+        let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(height);
+
+        unsafe {
+            let fill_color = blend_color(state.palette.results_bg, state.palette.selection_accent, 0.86);
+            let border_color = blend_color(state.palette.results_bg, state.palette.panel_border, 0.90);
+            let text_color = blend_color(state.palette.results_bg, state.palette.text_primary, 0.92);
+            let fill_brush = CreateSolidBrush(fill_color);
+            let border_pen = CreatePen(PS_SOLID, 1, border_color);
+            let old_brush = SelectObject(hdc, fill_brush as _);
+            let old_pen = SelectObject(hdc, border_pen as _);
+            RoundRect(
+                hdc,
+                left,
+                top,
+                right + 1,
+                bottom + 1,
+                FOOTER_KEYCAP_RADIUS,
+                FOOTER_KEYCAP_RADIUS,
+            );
+            SelectObject(hdc, old_pen);
+            SelectObject(hdc, old_brush);
+            DeleteObject(border_pen as _);
+            DeleteObject(fill_brush as _);
+
+            SetTextColor(hdc, text_color);
+            let mut text_rect = RECT {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            DrawTextW(
+                hdc,
+                to_wide(text).as_ptr(),
+                -1,
+                &mut text_rect,
+                DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+            );
+        }
+
+        left - FOOTER_KEYCAP_GAP
+    }
+
+    fn draw_footer_label_right(
+        hdc: HDC,
+        right: i32,
+        height: i32,
+        text: &str,
+        color: u32,
+    ) -> i32 {
+        let text_width = measure_text_width(hdc, text).max(1);
+        let left = (right - text_width).max(0);
+        unsafe {
+            SetTextColor(hdc, color);
+            let mut text_rect = RECT {
+                left,
+                top: 0,
+                right,
+                bottom: height,
+            };
+            DrawTextW(
+                hdc,
+                to_wide(text).as_ptr(),
+                -1,
+                &mut text_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+        }
+        left - FOOTER_KEYCAP_GAP
     }
 
     fn invalidate_list_row(list_hwnd: HWND, row: i32) {

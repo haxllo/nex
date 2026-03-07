@@ -89,7 +89,7 @@ mod imp {
     const MODE_STRIP_HEIGHT: i32 = 16;
     const STATUS_HEIGHT: i32 = 18;
     const NO_RESULTS_INLINE_WIDTH: i32 = 96;
-    const ROW_HEIGHT: i32 = 60;
+    const ROW_HEIGHT: i32 = 56;
     const LIST_RADIUS: i32 = 16;
     const MAX_VISIBLE_ROWS: usize = 5;
     const ROW_INSET_X: i32 = 10;
@@ -4371,11 +4371,7 @@ mod imp {
 
             FillRect(hdc, &client, state.panel_brush as _);
 
-            let separator_color = blend_color(
-                state.palette.panel_bg,
-                state.palette.row_separator,
-                0.92,
-            );
+            let separator_color = state.palette.panel_border;
             let separator_brush = CreateSolidBrush(separator_color);
             let separator_rect = RECT {
                 left: 0,

@@ -19,8 +19,9 @@ mod imp {
         AddFontResourceExW, BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush,
         CreatePen, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn, GetDC,
         GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC, SelectObject,
-        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, DEFAULT_CHARSET, DEFAULT_QUALITY,
-        DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
+        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, DEFAULT_CHARSET,
+        ANTIALIASED_QUALITY, CLEARTYPE_QUALITY, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
+        DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
         FR_PRIVATE, HDC, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, RoundRect, TEXTMETRICW,
         TRANSPARENT,
     };
@@ -104,11 +105,13 @@ mod imp {
     const HEADER_ROW_LABEL_HEIGHT: i32 = 14;
     const HEADER_ROW_LINE_GAP: i32 = 10;
     const HEADER_ROW_LINE_HEIGHT: i32 = 1;
-    const FOOTER_HINT_HEIGHT: i32 = 24;
+    const FOOTER_HINT_HEIGHT: i32 = 26;
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
     const FOOTER_CONTENT_PAD_Y: i32 = 4;
-    const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 6;
+    const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 4;
     const FOOTER_CONTENT_PAD_X: i32 = 14;
+    const FOOTER_SETTINGS_ICON_SLOT_WIDTH: i32 = 16;
+    const FOOTER_SETTINGS_ICON_ADVANCE: i32 = 20;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Config";
     const FOOTER_OPEN_HINT_TEXT: &str = "Open";
@@ -180,6 +183,8 @@ mod imp {
     const FONT_HINT_HEIGHT: i32 = -11;
     const FONT_HELP_TIP_HEIGHT: i32 = -11;
     const FONT_HELP_ICON_HEIGHT: i32 = -14;
+    const FONT_FOOTER_HEIGHT: i32 = -13;
+    const FONT_FOOTER_ICON_HEIGHT: i32 = -14;
     const FONT_COMMAND_ICON_HEIGHT: i32 = -16;
     const FONT_COMMAND_PREFIX_HEIGHT: i32 = -22;
     const FONT_COMMAND_BADGE_HEIGHT: i32 = -24;
@@ -192,6 +197,8 @@ mod imp {
     const FONT_WEIGHT_HINT: i32 = 400;
     const FONT_WEIGHT_HELP_TIP: i32 = 400;
     const FONT_WEIGHT_HELP_ICON: i32 = 400;
+    const FONT_WEIGHT_FOOTER: i32 = 500;
+    const FONT_WEIGHT_FOOTER_ICON: i32 = 500;
     const FONT_WEIGHT_COMMAND_ICON: i32 = 400;
     const FONT_WEIGHT_COMMAND_PREFIX: i32 = 800;
     const FONT_WEIGHT_COMMAND_BADGE: i32 = 800;
@@ -406,6 +413,8 @@ mod imp {
         hint_font: isize,
         help_tip_font: isize,
         help_icon_font: isize,
+        footer_font: isize,
+        footer_icon_font: isize,
         command_prefix_font: isize,
         command_badge_font: isize,
         command_icon_font: isize,
@@ -488,6 +497,8 @@ mod imp {
                 hint_font: 0,
                 help_tip_font: 0,
                 help_icon_font: 0,
+                footer_font: 0,
+                footer_icon_font: 0,
                 command_prefix_font: 0,
                 command_badge_font: 0,
                 command_icon_font: 0,
@@ -1370,6 +1381,12 @@ mod imp {
                     state.help_icon_font = create_font_with_family(
                         FONT_HELP_ICON_HEIGHT,
                         FONT_WEIGHT_HELP_ICON,
+                        icon_font_family_primary_wide(),
+                    );
+                    state.footer_font = create_font(FONT_FOOTER_HEIGHT, FONT_WEIGHT_FOOTER);
+                    state.footer_icon_font = create_font_with_family(
+                        FONT_FOOTER_ICON_HEIGHT,
+                        FONT_WEIGHT_FOOTER_ICON,
                         icon_font_family_primary_wide(),
                     );
                     state.command_prefix_font = create_font_with_family(
@@ -4388,7 +4405,9 @@ mod imp {
             FillRect(hdc, &separator_rect, separator_brush as _);
             DeleteObject(separator_brush as _);
 
-            let footer_font = if state.meta_font != 0 {
+            let footer_font = if state.footer_font != 0 {
+                state.footer_font
+            } else if state.meta_font != 0 {
                 state.meta_font
             } else {
                 state.hint_font
@@ -4507,18 +4526,23 @@ mod imp {
         content_top: i32,
         content_bottom: i32,
     ) -> i32 {
-        let icon_color = blend_color(state.palette.panel_bg, state.palette.text_hint_footer, 0.92);
-        let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.90);
+        let icon_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
+        let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
         let mut x = FOOTER_CONTENT_PAD_X;
 
-        if state.command_icon_font != 0 {
+        let icon_font = if state.footer_icon_font != 0 {
+            state.footer_icon_font
+        } else {
+            state.command_icon_font
+        };
+        if icon_font != 0 {
             unsafe {
-                let old_font = SelectObject(hdc, state.command_icon_font as _);
+                let old_font = SelectObject(hdc, icon_font as _);
                 SetTextColor(hdc, icon_color);
                 let mut icon_rect = RECT {
                     left: x,
                     top: content_top,
-                    right: (x + 14).min(width),
+                    right: (x + FOOTER_SETTINGS_ICON_SLOT_WIDTH).min(width),
                     bottom: content_bottom,
                 };
                 DrawTextW(
@@ -4530,7 +4554,7 @@ mod imp {
                 );
                 SelectObject(hdc, old_font);
             }
-            x += 18;
+            x += FOOTER_SETTINGS_ICON_ADVANCE;
         }
 
         unsafe {
@@ -4914,6 +4938,12 @@ mod imp {
             if state.help_icon_font != 0 {
                 DeleteObject(state.help_icon_font as _);
             }
+            if state.footer_font != 0 {
+                DeleteObject(state.footer_font as _);
+            }
+            if state.footer_icon_font != 0 {
+                DeleteObject(state.footer_icon_font as _);
+            }
             if state.command_prefix_font != 0 {
                 DeleteObject(state.command_prefix_font as _);
             }
@@ -5090,10 +5120,29 @@ mod imp {
     }
 
     fn create_font(height: i32, weight: i32) -> isize {
-        create_font_with_family(height, weight, font_family_wide())
+        create_font_with_family_quality(
+            height,
+            weight,
+            font_family_wide(),
+            CLEARTYPE_QUALITY as u32,
+        )
     }
 
     fn create_font_with_family(height: i32, weight: i32, family_wide: &[u16]) -> isize {
+        create_font_with_family_quality(
+            height,
+            weight,
+            family_wide,
+            ANTIALIASED_QUALITY as u32,
+        )
+    }
+
+    fn create_font_with_family_quality(
+        height: i32,
+        weight: i32,
+        family_wide: &[u16],
+        quality: u32,
+    ) -> isize {
         (unsafe {
             CreateFontW(
                 height,
@@ -5107,7 +5156,7 @@ mod imp {
                 DEFAULT_CHARSET as u32,
                 OUT_DEFAULT_PRECIS as u32,
                 0,
-                DEFAULT_QUALITY as u32,
+                quality,
                 FF_DONTCARE as u32,
                 family_wide.as_ptr(),
             )

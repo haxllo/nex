@@ -30,6 +30,8 @@ PrivilegesRequired=lowest
 ; - Current user (default, no elevation)
 ; - All users (elevates and uses common locations)
 PrivilegesRequiredOverridesAllowed=dialog
+; Always show install scope choice instead of silently reusing previous mode.
+UsePreviousPrivileges=no
 DefaultDirName={autopf}\SwiftFind
 DisableDirPage=yes
 DisableProgramGroupPage=yes

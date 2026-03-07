@@ -1696,16 +1696,14 @@ fn overlay_rows(results: &[crate::model::SearchItem], command_mode: bool) -> Vec
     }
 
     if command_mode {
-        let mut rows = Vec::new();
-        rows.push(section_header_row("Commands"));
-        for (index, item) in results.iter().enumerate() {
-            rows.push(result_row(item, index, OverlayRowRole::Item, command_mode));
-        }
-        return rows;
+        return results
+            .iter()
+            .enumerate()
+            .map(|(index, item)| result_row(item, index, OverlayRowRole::Item, command_mode))
+            .collect();
     }
 
     let mut rows = Vec::new();
-    rows.push(section_header_row("Top Hit"));
     rows.push(result_row(
         &results[0],
         0,
@@ -1734,30 +1732,17 @@ fn overlay_rows(results: &[crate::model::SearchItem], command_mode: bool) -> Vec
         }
     }
 
-    append_group_rows(
-        &mut rows,
-        "Applications",
-        &app_indices,
-        results,
-        command_mode,
-    );
-    append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
-    append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
-    append_group_rows(
-        &mut rows,
-        "Clipboard",
-        &clipboard_indices,
-        results,
-        command_mode,
-    );
-    append_group_rows(&mut rows, "Other", &other_indices, results, command_mode);
+    append_group_rows(&mut rows, &app_indices, results, command_mode);
+    append_group_rows(&mut rows, &file_indices, results, command_mode);
+    append_group_rows(&mut rows, &action_indices, results, command_mode);
+    append_group_rows(&mut rows, &clipboard_indices, results, command_mode);
+    append_group_rows(&mut rows, &other_indices, results, command_mode);
     rows
 }
 
 #[cfg(target_os = "windows")]
 fn append_group_rows(
     rows: &mut Vec<OverlayRow>,
-    header: &str,
     indices: &[usize],
     results: &[crate::model::SearchItem],
     command_mode: bool,
@@ -1765,7 +1750,6 @@ fn append_group_rows(
     if indices.is_empty() {
         return;
     }
-    rows.push(section_header_row(header));
     for index in indices {
         rows.push(result_row(
             &results[*index],
@@ -1773,18 +1757,6 @@ fn append_group_rows(
             OverlayRowRole::Item,
             command_mode,
         ));
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn section_header_row(title: &str) -> OverlayRow {
-    OverlayRow {
-        role: OverlayRowRole::Header,
-        result_index: -1,
-        kind: "section".to_string(),
-        title: title.to_string(),
-        path: String::new(),
-        icon_path: String::new(),
     }
 }
 

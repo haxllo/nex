@@ -16,7 +16,6 @@
 AppId={{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
-DefaultDirName={localappdata}\Programs\SwiftFind
 DefaultGroupName=SwiftFind
 OutputDir=artifacts\windows
 OutputBaseFilename=swiftfind-{#AppVersion}-windows-x64-setup
@@ -25,6 +24,11 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 PrivilegesRequired=lowest
+; Allow installer scope selection:
+; - Current user (default, no elevation)
+; - All users (elevates and uses common locations)
+PrivilegesRequiredOverridesAllowed=dialog
+DefaultDirName={autopf}\SwiftFind
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 ; Avoid installer hangs in "automatically close applications" stage.
@@ -59,6 +63,8 @@ Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--background"; Descriptio
 Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "swiftfind-quit-runtime"
 ; Remove per-user startup registration even if config still had launch_at_startup=true.
 Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup"
+; Remove machine-wide startup registration when present (all-users installs).
+Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup-machine"
 ; Hard-stop any leftover process to avoid ghost hotkey/runtime after uninstall.
 Filename: "{cmd}"; Parameters: "/C taskkill /IM swiftfind-core.exe /F /T >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-kill-runtime"
 

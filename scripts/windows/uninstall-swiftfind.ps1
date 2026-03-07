@@ -1,11 +1,33 @@
 param(
   [switch]$PurgeUserData,
-  [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\SwiftFind"
+  [ValidateSet("CurrentUser", "AllUsers")]
+  [string]$InstallScope = "CurrentUser",
+  [string]$InstallRoot = ""
 )
 
 $ErrorActionPreference = "Continue"
 
+function Test-IsAdministrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not $InstallRoot -or $InstallRoot.Trim().Length -eq 0) {
+  if ($InstallScope -eq "AllUsers") {
+    $InstallRoot = Join-Path $env:ProgramFiles "SwiftFind"
+  }
+  else {
+    $InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\SwiftFind"
+  }
+}
+
+if ($InstallScope -eq "AllUsers" -and -not (Test-IsAdministrator)) {
+  throw "AllUsers uninstall requires an elevated PowerShell session (Run as administrator)."
+}
+
 Write-Host "== SwiftFind Uninstall ==" -ForegroundColor Cyan
+Write-Host "Install scope: $InstallScope"
 Write-Host "Install root: $InstallRoot"
 
 $installedExe = Join-Path $InstallRoot "bin\swiftfind-core.exe"
@@ -25,6 +47,7 @@ Start-Sleep -Milliseconds 200
 
 Write-Host "[3/5] Removing startup registration..."
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v SwiftFind /f | Out-Null
+reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v SwiftFind /f | Out-Null
 
 Write-Host "[4/5] Removing installed files..."
 if (Test-Path $InstallRoot) {

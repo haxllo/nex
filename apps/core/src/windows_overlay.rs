@@ -16,14 +16,13 @@ mod imp {
         DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        AddFontResourceExW, BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush,
-        CreatePen, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn, GetDC,
-        GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC, SelectObject,
-        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, DEFAULT_CHARSET,
-        ANTIALIASED_QUALITY, CLEARTYPE_QUALITY, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
-        DT_SINGLELINE, DT_VCENTER, FF_DONTCARE,
-        FR_PRIVATE, HDC, OPAQUE, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, RoundRect, TEXTMETRICW,
-        TRANSPARENT,
+        AddFontResourceExW, BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn,
+        CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn, GetDC,
+        GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC, RoundRect, SelectObject,
+        SetBkColor, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, ANTIALIASED_QUALITY,
+        CLEARTYPE_QUALITY, DEFAULT_CHARSET, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
+        DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FR_PRIVATE, HDC, OPAQUE, OUT_DEFAULT_PRECIS,
+        PAINTSTRUCT, PS_SOLID, TEXTMETRICW, TRANSPARENT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
@@ -2114,8 +2113,7 @@ mod imp {
                 }
                 return 0;
             }
-            if message == WM_LBUTTONUP && (hwnd == state.help_hwnd || hwnd == state.help_tip_hwnd)
-            {
+            if message == WM_LBUTTONUP && (hwnd == state.help_hwnd || hwnd == state.help_tip_hwnd) {
                 if let Err(error) = open_help_config_file(state) {
                     state.status_is_error = true;
                     state.help_tip_visible = false;
@@ -2957,6 +2955,23 @@ mod imp {
             0
         } else {
             size.cx
+        }
+    }
+
+    fn measure_text_size(hdc: HDC, text: &str) -> SIZE {
+        if text.is_empty() {
+            return SIZE { cx: 0, cy: 0 };
+        }
+        let wide = to_wide_no_nul(text);
+        let mut size: SIZE = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetTextExtentPoint32W(hdc, wide.as_ptr(), wide.len() as i32, &mut size) };
+        if ok == 0 {
+            SIZE {
+                cx: 0,
+                cy: current_text_height(hdc),
+            }
+        } else {
+            size
         }
     }
 
@@ -4423,7 +4438,8 @@ mod imp {
                 (FOOTER_SEPARATOR_HEIGHT + FOOTER_SEPARATOR_TO_CONTENT_GAP).min(height);
             let content_bottom = (height - FOOTER_CONTENT_PAD_Y).max(content_top + 1);
 
-            let left_limit = draw_footer_settings_left(hdc, state, width, content_top, content_bottom);
+            let left_limit =
+                draw_footer_settings_left(hdc, state, width, content_top, content_bottom);
             let mut right_cursor = width - FOOTER_CONTENT_PAD_X;
             right_cursor = draw_footer_keycap_right(
                 hdc,
@@ -4529,6 +4545,7 @@ mod imp {
         let icon_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
         let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
         let mut x = FOOTER_CONTENT_PAD_X;
+        let content_height = (content_bottom - content_top).max(1);
 
         let icon_font = if state.footer_icon_font != 0 {
             state.footer_icon_font
@@ -4539,19 +4556,10 @@ mod imp {
             unsafe {
                 let old_font = SelectObject(hdc, icon_font as _);
                 SetTextColor(hdc, icon_color);
-                let mut icon_rect = RECT {
-                    left: x,
-                    top: content_top,
-                    right: (x + FOOTER_SETTINGS_ICON_SLOT_WIDTH).min(width),
-                    bottom: content_bottom,
-                };
-                DrawTextW(
-                    hdc,
-                    to_wide(FOOTER_SETTINGS_ICON).as_ptr(),
-                    -1,
-                    &mut icon_rect,
-                    DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-                );
+                let icon_wide = to_wide_no_nul(FOOTER_SETTINGS_ICON);
+                let icon_size = measure_text_size(hdc, FOOTER_SETTINGS_ICON);
+                let icon_y = content_top + ((content_height - icon_size.cy).max(0) / 2);
+                TextOutW(hdc, x, icon_y, icon_wide.as_ptr(), icon_wide.len() as i32);
                 SelectObject(hdc, old_font);
             }
             x += FOOTER_SETTINGS_ICON_ADVANCE;
@@ -4559,18 +4567,16 @@ mod imp {
 
         unsafe {
             SetTextColor(hdc, label_color);
-            let mut text_rect = RECT {
-                left: x,
-                top: content_top,
-                right: width,
-                bottom: content_bottom,
-            };
-            DrawTextW(
+            let text_wide = to_wide_no_nul(FOOTER_SETTINGS_TEXT);
+            let text_size = measure_text_size(hdc, FOOTER_SETTINGS_TEXT);
+            let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
+            let text_x = x.min(width.max(0));
+            TextOutW(
                 hdc,
-                to_wide(FOOTER_SETTINGS_TEXT).as_ptr(),
-                -1,
-                &mut text_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                text_x,
+                text_y,
+                text_wide.as_ptr(),
+                text_wide.len() as i32,
             );
         }
 
@@ -4593,9 +4599,15 @@ mod imp {
         let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(content_bottom);
 
         unsafe {
-            let fill_color = blend_color(state.palette.results_bg, state.palette.selection_accent, 0.86);
-            let border_color = blend_color(state.palette.results_bg, state.palette.panel_border, 0.90);
-            let text_color = blend_color(state.palette.results_bg, state.palette.text_primary, 0.92);
+            let fill_color = blend_color(
+                state.palette.results_bg,
+                state.palette.selection_accent,
+                0.86,
+            );
+            let border_color =
+                blend_color(state.palette.results_bg, state.palette.panel_border, 0.90);
+            let text_color =
+                blend_color(state.palette.results_bg, state.palette.text_primary, 0.92);
             let fill_brush = CreateSolidBrush(fill_color);
             let border_pen = CreatePen(PS_SOLID, 1, border_color);
             let old_brush = SelectObject(hdc, fill_brush as _);
@@ -4615,18 +4627,18 @@ mod imp {
             DeleteObject(fill_brush as _);
 
             SetTextColor(hdc, text_color);
-            let mut text_rect = RECT {
-                left,
-                top,
-                right,
-                bottom,
-            };
-            DrawTextW(
+            let text_wide = to_wide_no_nul(text);
+            let text_size = measure_text_size(hdc, text);
+            let cap_width = (right - left).max(1);
+            let cap_height = (bottom - top).max(1);
+            let text_x = left + ((cap_width - text_size.cx).max(0) / 2);
+            let text_y = top + ((cap_height - text_size.cy).max(0) / 2);
+            TextOutW(
                 hdc,
-                to_wide(text).as_ptr(),
-                -1,
-                &mut text_rect,
-                DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                text_x,
+                text_y,
+                text_wide.as_ptr(),
+                text_wide.len() as i32,
             );
         }
 
@@ -4645,18 +4657,16 @@ mod imp {
         let left = (right - text_width).max(0);
         unsafe {
             SetTextColor(hdc, color);
-            let mut text_rect = RECT {
-                left,
-                top: content_top,
-                right,
-                bottom: content_bottom,
-            };
-            DrawTextW(
+            let text_wide = to_wide_no_nul(text);
+            let text_size = measure_text_size(hdc, text);
+            let content_height = (content_bottom - content_top).max(1);
+            let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
+            TextOutW(
                 hdc,
-                to_wide(text).as_ptr(),
-                -1,
-                &mut text_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+                left,
+                text_y,
+                text_wide.as_ptr(),
+                text_wide.len() as i32,
             );
         }
         left - FOOTER_KEYCAP_GAP
@@ -5129,12 +5139,7 @@ mod imp {
     }
 
     fn create_font_with_family(height: i32, weight: i32, family_wide: &[u16]) -> isize {
-        create_font_with_family_quality(
-            height,
-            weight,
-            family_wide,
-            ANTIALIASED_QUALITY as u32,
-        )
+        create_font_with_family_quality(height, weight, family_wide, ANTIALIASED_QUALITY as u32)
     }
 
     fn create_font_with_family_quality(

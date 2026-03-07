@@ -586,7 +586,7 @@ impl CoreService {
 
         let sql = match mode {
             SearchMode::Files => {
-                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
                  FROM item
                  WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
                    AND kind IN ('file', 'folder')
@@ -594,7 +594,7 @@ impl CoreService {
                  LIMIT ?2"
             }
             SearchMode::Apps => {
-                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
                  FROM item
                  WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
                    AND kind = 'app'
@@ -602,7 +602,7 @@ impl CoreService {
                  LIMIT ?2"
             }
             SearchMode::All => {
-                "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs
+                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
                  FROM item
                  WHERE title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE
                  ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
@@ -636,17 +636,21 @@ impl CoreService {
             let path: String = row
                 .get(3)
                 .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let use_count: u32 = row
+            let subtitle: String = row
                 .get(4)
                 .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let last_accessed_epoch_secs: i64 = row
+            let use_count: u32 = row
                 .get(5)
                 .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            out.push(SearchItem::from_owned(
+            let last_accessed_epoch_secs: i64 = row
+                .get(6)
+                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
+            out.push(SearchItem::from_owned_with_subtitle(
                 id,
                 kind,
                 title,
                 path,
+                subtitle,
                 use_count,
                 last_accessed_epoch_secs,
             ));

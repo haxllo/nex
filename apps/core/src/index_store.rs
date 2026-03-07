@@ -57,14 +57,15 @@ pub fn open_from_config(cfg: &Config) -> Result<Connection, StoreError> {
 
 pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError> {
     db.execute(
-        "INSERT INTO item (id, kind, title, path, use_count, last_accessed_epoch_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, path=excluded.path,
+        "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, path=excluded.path, subtitle=excluded.subtitle,
          use_count=excluded.use_count, last_accessed_epoch_secs=excluded.last_accessed_epoch_secs",
         params![
             item.id,
             item.kind,
             item.title,
             item.path,
+            item.subtitle,
             item.use_count,
             item.last_accessed_epoch_secs,
         ],
@@ -74,7 +75,7 @@ pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError>
 
 pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreError> {
     let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs FROM item WHERE id = ?1",
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs FROM item WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
     if let Some(row) = rows.next()? {
@@ -82,13 +83,15 @@ pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreEr
         let kind: String = row.get(1)?;
         let title: String = row.get(2)?;
         let path: String = row.get(3)?;
-        let use_count: u32 = row.get(4)?;
-        let last_accessed_epoch_secs: i64 = row.get(5)?;
-        Ok(Some(SearchItem::from_owned(
+        let subtitle: String = row.get(4)?;
+        let use_count: u32 = row.get(5)?;
+        let last_accessed_epoch_secs: i64 = row.get(6)?;
+        Ok(Some(SearchItem::from_owned_with_subtitle(
             id,
             kind,
             title,
             path,
+            subtitle,
             use_count,
             last_accessed_epoch_secs,
         )))
@@ -99,7 +102,7 @@ pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreEr
 
 pub fn list_items(db: &Connection) -> Result<Vec<SearchItem>, StoreError> {
     let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, use_count, last_accessed_epoch_secs FROM item ORDER BY id",
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs FROM item ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
 
@@ -109,13 +112,15 @@ pub fn list_items(db: &Connection) -> Result<Vec<SearchItem>, StoreError> {
         let kind: String = row.get(1)?;
         let title: String = row.get(2)?;
         let path: String = row.get(3)?;
-        let use_count: u32 = row.get(4)?;
-        let last_accessed_epoch_secs: i64 = row.get(5)?;
-        out.push(SearchItem::from_owned(
+        let subtitle: String = row.get(4)?;
+        let use_count: u32 = row.get(5)?;
+        let last_accessed_epoch_secs: i64 = row.get(6)?;
+        out.push(SearchItem::from_owned_with_subtitle(
             id,
             kind,
             title,
             path,
+            subtitle,
             use_count,
             last_accessed_epoch_secs,
         ));
@@ -210,9 +215,12 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
     if current_version < 3 {
         migration_v3(conn)?;
     }
+    if current_version < 4 {
+        migration_v4(conn)?;
+    }
 
-    if current_version < 3 {
-        conn.pragma_update(None, "user_version", 3_i64)?;
+    if current_version < 4 {
+        conn.pragma_update(None, "user_version", 4_i64)?;
     }
 
     Ok(())
@@ -225,6 +233,7 @@ fn migration_v1(conn: &Connection) -> Result<(), StoreError> {
             kind TEXT NOT NULL,
             title TEXT NOT NULL,
             path TEXT NOT NULL,
+            subtitle TEXT NOT NULL DEFAULT '',
             use_count INTEGER NOT NULL DEFAULT 0,
             last_accessed_epoch_secs INTEGER NOT NULL DEFAULT 0
         )",
@@ -262,5 +271,26 @@ fn migration_v3(conn: &Connection) -> Result<(), StoreError> {
          ON item_query_memory(query_norm, mode, selected_count DESC, last_selected_epoch_secs DESC)",
         [],
     )?;
+    Ok(())
+}
+
+fn migration_v4(conn: &Connection) -> Result<(), StoreError> {
+    let mut has_subtitle = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(item)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let column_name: String = row.get(1)?;
+        if column_name.eq_ignore_ascii_case("subtitle") {
+            has_subtitle = true;
+            break;
+        }
+    }
+
+    if !has_subtitle {
+        conn.execute(
+            "ALTER TABLE item ADD COLUMN subtitle TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     Ok(())
 }

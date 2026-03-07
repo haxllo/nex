@@ -162,7 +162,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "2";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "3";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -539,10 +539,11 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
         if ext != "lnk" && ext != "exe" {
             continue;
         }
+        let mut resolved_shortcut_target: Option<String> = None;
         if ext == "lnk" {
-            if let Some(shortcut_target) = resolve_shortcut_target_for_discovery(path) {
-                if should_exclude_non_app_start_reference(title.as_str(), shortcut_target.as_str())
-                {
+            resolved_shortcut_target = resolve_shortcut_target_for_discovery(path);
+            if let Some(shortcut_target) = resolved_shortcut_target.as_deref() {
+                if should_exclude_non_app_start_reference(title.as_str(), shortcut_target) {
                     continue;
                 }
             }
@@ -555,8 +556,13 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
             continue;
         }
         let id = format!("app:{}", path.to_string_lossy());
-
-        items.push(SearchItem::new(&id, "app", &title, &path.to_string_lossy()));
+        let mut item = SearchItem::new(&id, "app", &title, &path.to_string_lossy());
+        if let Some(subtitle) =
+            start_menu_entry_subtitle(root, path, resolved_shortcut_target.as_deref())
+        {
+            item = item.with_subtitle(subtitle.as_str());
+        }
+        items.push(item);
     }
 
     Ok(items)
@@ -630,7 +636,11 @@ Get-StartApps | ForEach-Object {
 
         let path = format!("shell:AppsFolder\\{app_id}");
         let id = format!("app:{}", normalize_id_path(&path));
-        items.push(SearchItem::new(&id, "app", title, &path));
+        let mut item = SearchItem::new(&id, "app", title, &path);
+        if let Some(subtitle) = start_app_subtitle_from_app_id(app_id) {
+            item = item.with_subtitle(subtitle.as_str());
+        }
+        items.push(item);
     }
 
     Ok(items)
@@ -666,14 +676,118 @@ fn dedupe_apps_by_title(items: Vec<SearchItem>) -> Vec<SearchItem> {
 
 #[cfg(target_os = "windows")]
 fn app_quality_rank(item: &SearchItem) -> u8 {
+    let subtitle_bonus = if item.subtitle.trim().is_empty() {
+        0
+    } else {
+        1
+    };
     let lowered = item.path.trim().to_ascii_lowercase();
     if lowered.starts_with("shell:appsfolder\\") {
-        return 3;
+        return 3 + subtitle_bonus;
     }
     if lowered.ends_with(".lnk") || lowered.ends_with(".exe") {
-        return 2;
+        return 2 + subtitle_bonus;
     }
-    1
+    1 + subtitle_bonus
+}
+
+#[cfg(target_os = "windows")]
+fn start_menu_entry_subtitle(
+    root: &Path,
+    entry_path: &Path,
+    shortcut_target: Option<&str>,
+) -> Option<String> {
+    if let Some(folder_label) = start_menu_relative_folder_label(root, entry_path) {
+        return Some(folder_label);
+    }
+
+    let shortcut_target = shortcut_target?;
+    let normalized_target = normalize_shortcut_target_path(shortcut_target);
+    if normalized_target.is_empty() || !looks_like_filesystem_path(normalized_target.as_str()) {
+        return None;
+    }
+    program_files_vendor_label(normalized_target.as_str())
+}
+
+#[cfg(target_os = "windows")]
+fn start_menu_relative_folder_label(root: &Path, entry_path: &Path) -> Option<String> {
+    let parent = entry_path.parent()?;
+    let relative_parent = parent.strip_prefix(root).ok()?;
+    let normalized = relative_parent.to_string_lossy().replace('/', "\\");
+    let parts: Vec<&str> = normalized
+        .split('\\')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let tail_count = parts.len().min(2);
+    let label = parts[parts.len() - tail_count..].join(" • ");
+    if label.trim().is_empty() {
+        None
+    } else {
+        Some(label)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn program_files_vendor_label(target_path: &str) -> Option<String> {
+    let normalized = target_path.replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    let markers = ["\\program files\\", "\\program files (x86)\\"];
+    for marker in markers {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let tail = &normalized[start + marker.len()..];
+        let vendor = tail.split('\\').next().unwrap_or("").trim();
+        if vendor.is_empty() {
+            continue;
+        }
+        let vendor_lower = vendor.to_ascii_lowercase();
+        if matches!(
+            vendor_lower.as_str(),
+            "windowsapps" | "common files" | "windows nt"
+        ) {
+            continue;
+        }
+        return Some(vendor.to_string());
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
+    let trimmed = app_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("microsoft.autogenerated.") {
+        return None;
+    }
+
+    if lower.starts_with('{') && lower.contains("}\\") {
+        return Some("Desktop app".to_string());
+    }
+
+    if let Some((package_name, _app_entry)) = trimmed.split_once('!') {
+        if let Some((publisher_hint, _package_tail)) = package_name.split_once('_') {
+            let publisher = publisher_hint
+                .split('.')
+                .find(|part| !part.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            if !publisher.is_empty() {
+                return Some(format!("{publisher} Store app"));
+            }
+        }
+        return Some("Store app".to_string());
+    }
+
+    None
 }
 
 #[cfg(target_os = "windows")]

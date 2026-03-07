@@ -484,7 +484,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                     OverlayEvent::QueryChanged(query) => {
                         if runtime_config.search_query_results_with_delay {
                             pending_delayed_query = Some(query);
-                            overlay.schedule_query_delay(runtime_config.search_delay_time_ms as u32);
+                            overlay
+                                .schedule_query_delay(runtime_config.search_delay_time_ms as u32);
                         } else {
                             pending_delayed_query = None;
                             overlay.cancel_query_delay();
@@ -2056,7 +2057,7 @@ fn overlay_subtitle(item: &crate::model::SearchItem, command_mode: bool) -> Stri
         return String::new();
     }
     if item.kind.eq_ignore_ascii_case("app") {
-        return String::new();
+        return item.subtitle.trim().to_string();
     }
     if item.kind.eq_ignore_ascii_case("action") {
         if item.path.trim().is_empty() {

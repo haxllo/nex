@@ -91,7 +91,14 @@ Updater behavior:
 - Default hotkey: `Ctrl+Shift+Space`
 - Config file: `%APPDATA%\SwiftFind\config.toml`
 - Index DB: `%APPDATA%\SwiftFind\index.sqlite3`
-- Install root (scripted install): `%LOCALAPPDATA%\Programs\SwiftFind\`
+- Install root (scripted install):
+- `CurrentUser` scope: `%LOCALAPPDATA%\Programs\SwiftFind\`
+- `AllUsers` scope: `%ProgramFiles%\SwiftFind\` (requires elevated install)
+
+Installer scope behavior (`setup.exe`):
+
+- Default: `Current user`
+- Optional: `All users` (prompts elevation and installs to machine location)
 
 If config file does not exist, runtime writes defaults to the stable app-data location on startup.
 The generated file is a user-focused template with inline comments (JSON5-compatible).

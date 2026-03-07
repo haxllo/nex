@@ -5,12 +5,34 @@ param(
   [switch]$StartAfterInstall = $true,
   [ValidateSet("Ask", "True", "False")]
   [string]$LaunchAtStartup = "Ask",
-  [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\SwiftFind"
+  [ValidateSet("CurrentUser", "AllUsers")]
+  [string]$InstallScope = "CurrentUser",
+  [string]$InstallRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 
+function Test-IsAdministrator {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not $InstallRoot -or $InstallRoot.Trim().Length -eq 0) {
+  if ($InstallScope -eq "AllUsers") {
+    $InstallRoot = Join-Path $env:ProgramFiles "SwiftFind"
+  }
+  else {
+    $InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\SwiftFind"
+  }
+}
+
+if ($InstallScope -eq "AllUsers" -and -not (Test-IsAdministrator)) {
+  throw "AllUsers install requires an elevated PowerShell session (Run as administrator)."
+}
+
 Write-Host "== SwiftFind Install ==" -ForegroundColor Cyan
+Write-Host "Install scope: $InstallScope"
 Write-Host "Install root: $InstallRoot"
 
 if ($SkipBuild) {

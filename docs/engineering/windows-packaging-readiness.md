@@ -129,6 +129,8 @@ Optional flags:
 - `-BuildFromSource` (developer mode; builds with Cargo if prebuilt exe is not present)
 - `-SourceExe "<path>"` (explicit exe path override)
 - `-StartAfterInstall:$false` (install only)
+- `-InstallScope CurrentUser|AllUsers` (default `CurrentUser`; `AllUsers` requires elevated PowerShell)
+- `-InstallRoot "<path>"` (explicit install path override)
 
 Uninstall:
 
@@ -139,3 +141,5 @@ scripts/windows/uninstall-swiftfind.ps1
 Optional:
 
 - `-PurgeUserData` (also removes `%APPDATA%\SwiftFind`)
+- `-InstallScope CurrentUser|AllUsers` (default `CurrentUser`; `AllUsers` requires elevated PowerShell)
+- `-InstallRoot "<path>"` (explicit install path override)

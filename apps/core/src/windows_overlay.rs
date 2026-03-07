@@ -91,7 +91,7 @@ mod imp {
     const NO_RESULTS_INLINE_WIDTH: i32 = 96;
     const ROW_HEIGHT: i32 = 56;
     const LIST_RADIUS: i32 = 16;
-    const MAX_VISIBLE_ROWS: usize = 5;
+    const MAX_VISIBLE_ROWS: usize = 8;
     const ROW_INSET_X: i32 = 10;
     const ROW_ICON_SIZE: i32 = 34;
     const ROW_ICON_DRAW_SIZE: i32 = 32;
@@ -108,11 +108,14 @@ mod imp {
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
     const FOOTER_CONTENT_PAD_Y: i32 = 2;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
-    const FOOTER_SETTINGS_TEXT: &str = "Settings";
-    const FOOTER_SEARCH_APPS_TEXT: &str = "Search apps";
-    const FOOTER_SETTINGS_HINT_TEXT: &str = "Settings";
-    const FOOTER_KEY_CTRL: &str = "Ctrl";
+    const FOOTER_SETTINGS_TEXT: &str = "Config";
+    const FOOTER_OPEN_HINT_TEXT: &str = "Open";
+    const FOOTER_MOVE_HINT_TEXT: &str = "Move";
+    const FOOTER_CLOSE_HINT_TEXT: &str = "Close";
     const FOOTER_KEY_ENTER: &str = "\u{21B5}";
+    const FOOTER_KEY_UP: &str = "\u{2191}";
+    const FOOTER_KEY_DOWN: &str = "\u{2193}";
+    const FOOTER_KEY_ESC: &str = "Esc";
     const FOOTER_KEYCAP_RADIUS: i32 = 9;
     const FOOTER_KEYCAP_HEIGHT: i32 = 18;
     const FOOTER_KEYCAP_PAD_X: i32 = 7;
@@ -4406,14 +4409,39 @@ mod imp {
                 right_cursor,
                 content_top,
                 content_bottom,
-                FOOTER_KEY_ENTER,
+                FOOTER_KEY_ESC,
             );
             right_cursor = draw_footer_label_right(
                 hdc,
                 right_cursor,
                 content_top,
                 content_bottom,
-                FOOTER_SEARCH_APPS_TEXT,
+                FOOTER_CLOSE_HINT_TEXT,
+                state.palette.text_hint_footer,
+            );
+            right_cursor -= FOOTER_GROUP_GAP;
+            right_cursor = draw_footer_keycap_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_KEY_DOWN,
+            );
+            right_cursor = draw_footer_keycap_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_KEY_UP,
+            );
+            right_cursor = draw_footer_label_right(
+                hdc,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_MOVE_HINT_TEXT,
                 state.palette.text_hint_footer,
             );
             right_cursor -= FOOTER_GROUP_GAP;
@@ -4425,20 +4453,12 @@ mod imp {
                 content_bottom,
                 FOOTER_KEY_ENTER,
             );
-            right_cursor = draw_footer_keycap_right(
-                hdc,
-                state,
-                right_cursor,
-                content_top,
-                content_bottom,
-                FOOTER_KEY_CTRL,
-            );
             right_cursor = draw_footer_label_right(
                 hdc,
                 right_cursor,
                 content_top,
                 content_bottom,
-                FOOTER_SETTINGS_HINT_TEXT,
+                FOOTER_OPEN_HINT_TEXT,
                 state.palette.text_hint_footer,
             );
 
@@ -4465,7 +4485,7 @@ mod imp {
                     right_cursor,
                     content_top,
                     content_bottom,
-                    FOOTER_SEARCH_APPS_TEXT,
+                    FOOTER_OPEN_HINT_TEXT,
                     state.palette.text_hint_footer,
                 );
             }

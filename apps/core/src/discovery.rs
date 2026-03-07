@@ -162,7 +162,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "5";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "6";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -685,6 +685,8 @@ Get-StartApps | ForEach-Object {
         )));
     }
 
+    let appx_publishers = load_appx_family_publishers().unwrap_or_default();
+
     let mut items = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Some((name, app_id)) = line.split_once('\t') else {
@@ -706,13 +708,78 @@ Get-StartApps | ForEach-Object {
         let path = format!("shell:AppsFolder\\{app_id}");
         let id = format!("app:{}", normalize_id_path(&path));
         let mut item = SearchItem::new(&id, "app", title, &path);
-        if let Some(subtitle) = start_app_subtitle_from_app_id(app_id) {
+        if let Some(subtitle) = start_app_subtitle_from_app_id(app_id, &appx_publishers) {
             item = item.with_subtitle(subtitle.as_str());
         }
         items.push(item);
     }
 
     Ok(items)
+}
+
+#[cfg(target_os = "windows")]
+fn load_appx_family_publishers() -> Result<HashMap<String, String>, ProviderError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+Get-AppxPackage | ForEach-Object {
+  $family = [string]$_.PackageFamilyName
+  if ([string]::IsNullOrWhiteSpace($family)) { return }
+  $publisher = [string]$_.PublisherDisplayName
+  if ([string]::IsNullOrWhiteSpace($publisher)) {
+    $raw = [string]$_.Publisher
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+      if ($raw -match 'CN=([^,]+)') { $publisher = $matches[1] } else { $publisher = $raw }
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($publisher)) {
+    "{0}`t{1}" -f $family.Trim(), $publisher.Trim()
+  }
+}
+"#;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().map_err(|error| {
+        ProviderError::new(format!("Get-AppxPackage invocation failed: {error}"))
+    })?;
+    if !output.status.success() {
+        return Ok(HashMap::new());
+    }
+
+    let mut out = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(family_raw) = parts.next() else {
+            continue;
+        };
+        let Some(publisher_raw) = parts.next() else {
+            continue;
+        };
+        let family = family_raw.trim();
+        let publisher = publisher_raw.trim();
+        if family.is_empty() || publisher.is_empty() {
+            continue;
+        }
+        out.insert(family.to_ascii_lowercase(), publisher.to_string());
+    }
+
+    Ok(out)
 }
 
 #[cfg(target_os = "windows")]
@@ -889,7 +956,10 @@ fn program_files_vendor_label(target_path: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
+fn start_app_subtitle_from_app_id(
+    app_id: &str,
+    appx_publishers: &HashMap<String, String>,
+) -> Option<String> {
     let trimmed = app_id.trim();
     if trimmed.is_empty() {
         return None;
@@ -901,19 +971,41 @@ fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
     }
 
     if let Some((package_name, _app_entry)) = trimmed.split_once('!') {
+        let family_key = package_name.trim().to_ascii_lowercase();
+        if let Some(label) = appx_publishers.get(&family_key) {
+            let cleaned = label.trim();
+            if !cleaned.is_empty() {
+                return Some(cleaned.to_string());
+            }
+        }
         if let Some((publisher_hint, _package_tail)) = package_name.split_once('_') {
-            let publisher = publisher_hint
-                .split('.')
-                .find(|part| !part.trim().is_empty())
-                .unwrap_or("")
-                .trim();
-            if !publisher.is_empty() {
-                return Some(publisher.to_string());
+            if let Some(publisher) = normalize_publisher_hint(publisher_hint) {
+                return Some(publisher);
             }
         }
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_publisher_hint(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let head = trimmed.split('.').find(|part| !part.trim().is_empty())?;
+    let head = head.trim();
+    if head.is_empty() {
+        return None;
+    }
+
+    let lower = head.to_ascii_lowercase();
+    if lower.starts_with("microsoft") {
+        return Some("Microsoft".to_string());
+    }
+
+    Some(head.to_string())
 }
 
 #[cfg(target_os = "windows")]

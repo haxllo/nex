@@ -89,7 +89,7 @@ mod imp {
     const MODE_STRIP_HEIGHT: i32 = 16;
     const STATUS_HEIGHT: i32 = 18;
     const NO_RESULTS_INLINE_WIDTH: i32 = 96;
-    const ROW_HEIGHT: i32 = 56;
+    const ROW_HEIGHT: i32 = 58;
     const LIST_RADIUS: i32 = 16;
     const MAX_VISIBLE_ROWS: usize = 8;
     const ROW_INSET_X: i32 = 10;
@@ -106,7 +106,9 @@ mod imp {
     const HEADER_ROW_LINE_HEIGHT: i32 = 1;
     const FOOTER_HINT_HEIGHT: i32 = 24;
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
-    const FOOTER_CONTENT_PAD_Y: i32 = 2;
+    const FOOTER_CONTENT_PAD_Y: i32 = 4;
+    const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 6;
+    const FOOTER_CONTENT_PAD_X: i32 = 14;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Config";
     const FOOTER_OPEN_HINT_TEXT: &str = "Open";
@@ -4002,9 +4004,9 @@ mod imp {
             if footer_hint_mode {
                 MoveWindow(
                     state.footer_hint_hwnd,
-                    PANEL_MARGIN_X,
+                    0,
                     footer_hint_top,
-                    input_width,
+                    width,
                     FOOTER_HINT_HEIGHT,
                     1,
                 );
@@ -4398,11 +4400,12 @@ mod imp {
             };
             SetBkMode(hdc, TRANSPARENT as i32);
 
-            let content_top = (FOOTER_SEPARATOR_HEIGHT + FOOTER_CONTENT_PAD_Y).min(height);
+            let content_top =
+                (FOOTER_SEPARATOR_HEIGHT + FOOTER_SEPARATOR_TO_CONTENT_GAP).min(height);
             let content_bottom = (height - FOOTER_CONTENT_PAD_Y).max(content_top + 1);
 
             let left_limit = draw_footer_settings_left(hdc, state, width, content_top, content_bottom);
-            let mut right_cursor = width - 2;
+            let mut right_cursor = width - FOOTER_CONTENT_PAD_X;
             right_cursor = draw_footer_keycap_right(
                 hdc,
                 state,
@@ -4471,7 +4474,7 @@ mod imp {
                     bottom: content_bottom,
                 };
                 FillRect(hdc, &clear_rect, state.panel_brush as _);
-                right_cursor = width - 2;
+                right_cursor = width - FOOTER_CONTENT_PAD_X;
                 right_cursor = draw_footer_keycap_right(
                     hdc,
                     state,
@@ -4506,7 +4509,7 @@ mod imp {
     ) -> i32 {
         let icon_color = blend_color(state.palette.panel_bg, state.palette.text_hint_footer, 0.92);
         let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.90);
-        let mut x = 0.max(PANEL_MARGIN_X / 2 - 1);
+        let mut x = FOOTER_CONTENT_PAD_X;
 
         if state.command_icon_font != 0 {
             unsafe {

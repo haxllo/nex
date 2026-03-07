@@ -2068,9 +2068,7 @@ mod imp {
                 }
                 return 0;
             }
-            if (message == WM_LBUTTONUP
-                || message == windows_sys::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN)
-                && (hwnd == state.help_hwnd || hwnd == state.help_tip_hwnd)
+            if message == WM_LBUTTONUP && (hwnd == state.help_hwnd || hwnd == state.help_tip_hwnd)
             {
                 if let Err(error) = open_help_config_file(state) {
                     state.status_is_error = true;

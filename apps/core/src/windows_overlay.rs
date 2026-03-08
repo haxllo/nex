@@ -109,9 +109,6 @@ mod imp {
     const FOOTER_CONTENT_PAD_Y: i32 = 4;
     const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 10;
     const FOOTER_CONTENT_PAD_X: i32 = 14;
-    const FOOTER_SETTINGS_ICON_ADVANCE: i32 = 20;
-    const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
-    const FOOTER_SETTINGS_TEXT: &str = "Settings";
     const FOOTER_HINT_LABEL_OPEN: &str = "Open";
     const FOOTER_HINT_LABEL_MOVE: &str = "Move";
     const FOOTER_HINT_LABEL_CLOSE: &str = "Close";
@@ -125,9 +122,8 @@ mod imp {
     const FOOTER_KEYCAP_RADIUS: i32 = 8;
     const FOOTER_KEYCAP_GAP: i32 = 6;
     const FOOTER_KEYCAP_TEXT_NUDGE_Y: i32 = -1;
-    const FOOTER_HINT_GROUP_GAP: i32 = 12;
-    const FOOTER_HINT_LABEL_GAP: i32 = 7;
-    const FOOTER_SECTION_GAP: i32 = 16;
+    const FOOTER_HINT_GROUP_GAP: i32 = 10;
+    const FOOTER_HINT_LABEL_GAP: i32 = 6;
 
     const CONTROL_ID_INPUT: usize = 1001;
     const CONTROL_ID_LIST: usize = 1002;
@@ -186,7 +182,6 @@ mod imp {
     const FONT_HELP_TIP_HEIGHT: i32 = -11;
     const FONT_HELP_ICON_HEIGHT: i32 = -14;
     const FONT_FOOTER_HEIGHT: i32 = -13;
-    const FONT_FOOTER_ICON_HEIGHT: i32 = -14;
     const FONT_COMMAND_ICON_HEIGHT: i32 = -16;
     const FONT_COMMAND_PREFIX_HEIGHT: i32 = -22;
     const FONT_COMMAND_BADGE_HEIGHT: i32 = -24;
@@ -200,7 +195,6 @@ mod imp {
     const FONT_WEIGHT_HELP_TIP: i32 = 400;
     const FONT_WEIGHT_HELP_ICON: i32 = 400;
     const FONT_WEIGHT_FOOTER: i32 = 500;
-    const FONT_WEIGHT_FOOTER_ICON: i32 = 500;
     const FONT_WEIGHT_COMMAND_ICON: i32 = 400;
     const FONT_WEIGHT_COMMAND_PREFIX: i32 = 800;
     const FONT_WEIGHT_COMMAND_BADGE: i32 = 800;
@@ -416,7 +410,6 @@ mod imp {
         help_tip_font: isize,
         help_icon_font: isize,
         footer_font: isize,
-        footer_icon_font: isize,
         command_prefix_font: isize,
         command_badge_font: isize,
         command_icon_font: isize,
@@ -500,7 +493,6 @@ mod imp {
                 help_tip_font: 0,
                 help_icon_font: 0,
                 footer_font: 0,
-                footer_icon_font: 0,
                 command_prefix_font: 0,
                 command_badge_font: 0,
                 command_icon_font: 0,
@@ -1386,11 +1378,6 @@ mod imp {
                         icon_font_family_primary_wide(),
                     );
                     state.footer_font = create_font(FONT_FOOTER_HEIGHT, FONT_WEIGHT_FOOTER);
-                    state.footer_icon_font = create_font_with_family(
-                        FONT_FOOTER_ICON_HEIGHT,
-                        FONT_WEIGHT_FOOTER_ICON,
-                        icon_font_family_primary_wide(),
-                    );
                     state.command_prefix_font = create_font_with_family(
                         FONT_COMMAND_PREFIX_HEIGHT,
                         FONT_WEIGHT_COMMAND_PREFIX,
@@ -4455,9 +4442,7 @@ mod imp {
                 (FOOTER_SEPARATOR_HEIGHT + FOOTER_SEPARATOR_TO_CONTENT_GAP).min(height);
             let content_bottom = (height - FOOTER_CONTENT_PAD_Y).max(content_top + 1);
 
-            let left_limit =
-                draw_footer_settings_left(hdc, state, width, content_top, content_bottom);
-            draw_footer_hints_right(hdc, state, width, content_top, content_bottom, left_limit);
+            draw_footer_hints_centered(hdc, state, width, content_top, content_bottom);
 
             if !old_hint_font.is_null() {
                 SelectObject(hdc, old_hint_font);
@@ -4466,65 +4451,13 @@ mod imp {
         }
     }
 
-    fn draw_footer_settings_left(
+    fn draw_footer_hints_centered(
         hdc: HDC,
         state: &OverlayShellState,
         width: i32,
         content_top: i32,
         content_bottom: i32,
-    ) -> i32 {
-        let icon_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
-        let label_color = blend_color(state.palette.panel_bg, state.palette.text_primary, 0.94);
-        let mut x = FOOTER_CONTENT_PAD_X;
-        let content_height = (content_bottom - content_top).max(1);
-
-        let icon_font = if state.footer_icon_font != 0 {
-            state.footer_icon_font
-        } else {
-            state.command_icon_font
-        };
-        if icon_font != 0 {
-            unsafe {
-                let old_font = SelectObject(hdc, icon_font as _);
-                SetTextColor(hdc, icon_color);
-                let icon_wide = to_wide_no_nul(FOOTER_SETTINGS_ICON);
-                let icon_size = measure_text_size(hdc, FOOTER_SETTINGS_ICON);
-                let icon_y = content_top + ((content_height - icon_size.cy).max(0) / 2);
-                TextOutW(hdc, x, icon_y, icon_wide.as_ptr(), icon_wide.len() as i32);
-                SelectObject(hdc, old_font);
-            }
-            x += FOOTER_SETTINGS_ICON_ADVANCE;
-        }
-
-        unsafe {
-            SetTextColor(hdc, label_color);
-            let text_wide = to_wide_no_nul(FOOTER_SETTINGS_TEXT);
-            let text_size = measure_text_size(hdc, FOOTER_SETTINGS_TEXT);
-            let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
-            let text_x = x.min(width.max(0));
-            TextOutW(
-                hdc,
-                text_x,
-                text_y,
-                text_wide.as_ptr(),
-                text_wide.len() as i32,
-            );
-        }
-
-        x + measure_text_width(hdc, FOOTER_SETTINGS_TEXT) + FOOTER_SECTION_GAP
-    }
-
-    fn draw_footer_hints_right(
-        hdc: HDC,
-        state: &OverlayShellState,
-        width: i32,
-        content_top: i32,
-        content_bottom: i32,
-        left_limit: i32,
     ) {
-        let available_left = left_limit + FOOTER_SECTION_GAP;
-        let right_edge = (width - FOOTER_CONTENT_PAD_X).max(available_left);
-
         let full_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER])
             + FOOTER_HINT_GROUP_GAP
             + footer_group_width(
@@ -4538,10 +4471,13 @@ mod imp {
             + FOOTER_HINT_GROUP_GAP
             + footer_group_width(hdc, FOOTER_HINT_LABEL_CLOSE, &[FOOTER_KEY_ESC]);
         let min_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER]);
-        let available_width = (right_edge - available_left).max(0);
+        let available_left = FOOTER_CONTENT_PAD_X.min(width.max(0));
+        let available_right = (width - FOOTER_CONTENT_PAD_X).max(available_left);
+        let available_width = (available_right - available_left).max(0);
 
-        let mut right_cursor = right_edge;
         if available_width >= full_width {
+            let block_left = available_left + ((available_width - full_width) / 2);
+            let mut right_cursor = block_left + full_width;
             right_cursor = draw_footer_hint_group_right(
                 hdc,
                 state,
@@ -4572,6 +4508,8 @@ mod imp {
                 &[FOOTER_KEY_ENTER],
             );
         } else if available_width >= medium_width {
+            let block_left = available_left + ((available_width - medium_width) / 2);
+            let mut right_cursor = block_left + medium_width;
             right_cursor = draw_footer_hint_group_right(
                 hdc,
                 state,
@@ -4592,6 +4530,8 @@ mod imp {
                 &[FOOTER_KEY_ENTER],
             );
         } else if available_width >= min_width {
+            let block_left = available_left + ((available_width - min_width) / 2);
+            let right_cursor = block_left + min_width;
             let _ = draw_footer_hint_group_right(
                 hdc,
                 state,
@@ -5018,9 +4958,6 @@ mod imp {
             }
             if state.footer_font != 0 {
                 DeleteObject(state.footer_font as _);
-            }
-            if state.footer_icon_font != 0 {
-                DeleteObject(state.footer_icon_font as _);
             }
             if state.command_prefix_font != 0 {
                 DeleteObject(state.command_prefix_font as _);

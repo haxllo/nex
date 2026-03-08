@@ -112,10 +112,20 @@ mod imp {
     const FOOTER_SETTINGS_ICON_ADVANCE: i32 = 20;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";
     const FOOTER_SETTINGS_TEXT: &str = "Settings";
-    const FOOTER_HINTS_FULL_TEXT: &str = "Enter Open  •  ↑↓ Move  •  Esc Close";
-    const FOOTER_HINTS_MEDIUM_TEXT: &str = "Enter Open  •  Esc Close";
-    const FOOTER_HINTS_MIN_TEXT: &str = "Enter Open";
-    const FOOTER_SECTION_GAP: i32 = 14;
+    const FOOTER_HINT_LABEL_OPEN: &str = "Open";
+    const FOOTER_HINT_LABEL_MOVE: &str = "Move";
+    const FOOTER_HINT_LABEL_CLOSE: &str = "Close";
+    const FOOTER_KEY_ENTER: &str = "\u{21B5}";
+    const FOOTER_KEY_UP: &str = "\u{2191}";
+    const FOOTER_KEY_DOWN: &str = "\u{2193}";
+    const FOOTER_KEY_ESC: &str = "Esc";
+    const FOOTER_KEYCAP_HEIGHT: i32 = 18;
+    const FOOTER_KEYCAP_PAD_X: i32 = 7;
+    const FOOTER_KEYCAP_RADIUS: i32 = 8;
+    const FOOTER_KEYCAP_GAP: i32 = 5;
+    const FOOTER_HINT_GROUP_GAP: i32 = 12;
+    const FOOTER_HINT_LABEL_GAP: i32 = 7;
+    const FOOTER_SECTION_GAP: i32 = 16;
 
     const CONTROL_ID_INPUT: usize = 1001;
     const CONTROL_ID_LIST: usize = 1002;
@@ -4510,27 +4520,208 @@ mod imp {
         content_bottom: i32,
         left_limit: i32,
     ) {
-        let right = (width - FOOTER_CONTENT_PAD_X).max(0);
-        let choices = [
-            FOOTER_HINTS_FULL_TEXT,
-            FOOTER_HINTS_MEDIUM_TEXT,
-            FOOTER_HINTS_MIN_TEXT,
-        ];
-        let mut selected = FOOTER_HINTS_MIN_TEXT;
-        for candidate in choices {
-            let width = measure_text_width(hdc, candidate).max(1);
-            let left = right - width;
-            if left >= left_limit + FOOTER_SECTION_GAP {
-                selected = candidate;
-                break;
+        let available_left = left_limit + FOOTER_SECTION_GAP;
+        let right_edge = (width - FOOTER_CONTENT_PAD_X).max(available_left);
+
+        let full_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER])
+            + FOOTER_HINT_GROUP_GAP
+            + footer_group_width(
+                hdc,
+                FOOTER_HINT_LABEL_MOVE,
+                &[FOOTER_KEY_UP, FOOTER_KEY_DOWN],
+            )
+            + FOOTER_HINT_GROUP_GAP
+            + footer_group_width(hdc, FOOTER_HINT_LABEL_CLOSE, &[FOOTER_KEY_ESC]);
+        let medium_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER])
+            + FOOTER_HINT_GROUP_GAP
+            + footer_group_width(hdc, FOOTER_HINT_LABEL_CLOSE, &[FOOTER_KEY_ESC]);
+        let min_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER]);
+        let available_width = (right_edge - available_left).max(0);
+
+        let mut right_cursor = right_edge;
+        if available_width >= full_width {
+            right_cursor = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_CLOSE,
+                &[FOOTER_KEY_ESC],
+            );
+            right_cursor -= FOOTER_HINT_GROUP_GAP;
+            right_cursor = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_MOVE,
+                &[FOOTER_KEY_UP, FOOTER_KEY_DOWN],
+            );
+            right_cursor -= FOOTER_HINT_GROUP_GAP;
+            let _ = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_OPEN,
+                &[FOOTER_KEY_ENTER],
+            );
+        } else if available_width >= medium_width {
+            right_cursor = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_CLOSE,
+                &[FOOTER_KEY_ESC],
+            );
+            right_cursor -= FOOTER_HINT_GROUP_GAP;
+            let _ = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_OPEN,
+                &[FOOTER_KEY_ENTER],
+            );
+        } else if available_width >= min_width {
+            let _ = draw_footer_hint_group_right(
+                hdc,
+                state,
+                right_cursor,
+                content_top,
+                content_bottom,
+                FOOTER_HINT_LABEL_OPEN,
+                &[FOOTER_KEY_ENTER],
+            );
+        }
+    }
+
+    fn footer_group_width(hdc: HDC, label: &str, keys: &[&str]) -> i32 {
+        if keys.is_empty() {
+            return measure_text_width(hdc, label).max(1);
+        }
+
+        let mut total = measure_text_width(hdc, label).max(1) + FOOTER_HINT_LABEL_GAP;
+        for (index, key) in keys.iter().enumerate() {
+            total += footer_keycap_width(hdc, key);
+            if index + 1 < keys.len() {
+                total += FOOTER_KEYCAP_GAP;
             }
         }
-        let text_width = measure_text_width(hdc, selected).max(1);
-        let left = (right - text_width).max(left_limit + FOOTER_SECTION_GAP);
+        total
+    }
+
+    fn draw_footer_hint_group_right(
+        hdc: HDC,
+        state: &OverlayShellState,
+        right: i32,
+        content_top: i32,
+        content_bottom: i32,
+        label: &str,
+        keys: &[&str],
+    ) -> i32 {
+        let mut cursor = right;
+        for (index, key) in keys.iter().rev().enumerate() {
+            cursor = draw_footer_keycap_right(hdc, state, cursor, content_top, content_bottom, key);
+            if index + 1 < keys.len() {
+                cursor -= FOOTER_KEYCAP_GAP;
+            }
+        }
+        cursor -= FOOTER_HINT_LABEL_GAP;
+        draw_footer_label_right(
+            hdc,
+            cursor,
+            content_top,
+            content_bottom,
+            label,
+            state.palette.text_hint_footer,
+        )
+    }
+
+    fn footer_keycap_width(hdc: HDC, text: &str) -> i32 {
+        measure_text_width(hdc, text).max(1) + FOOTER_KEYCAP_PAD_X * 2
+    }
+
+    fn draw_footer_keycap_right(
+        hdc: HDC,
+        state: &OverlayShellState,
+        right: i32,
+        content_top: i32,
+        content_bottom: i32,
+        text: &str,
+    ) -> i32 {
+        let cap_width = footer_keycap_width(hdc, text);
+        let left = (right - cap_width).max(0);
+        let content_height = (content_bottom - content_top).max(1);
+        let top = content_top + ((content_height - FOOTER_KEYCAP_HEIGHT).max(0) / 2);
+        let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(content_bottom);
+
         unsafe {
-            SetTextColor(hdc, state.palette.text_hint_footer);
-            let text_wide = to_wide_no_nul(selected);
-            let text_size = measure_text_size(hdc, selected);
+            let fill_color = blend_color(
+                state.palette.results_bg,
+                state.palette.selection_accent,
+                0.78,
+            );
+            let border_color =
+                blend_color(state.palette.results_bg, state.palette.panel_border, 0.88);
+            let text_color =
+                blend_color(state.palette.results_bg, state.palette.text_primary, 0.94);
+            let fill_brush = CreateSolidBrush(fill_color);
+            let border_pen = CreatePen(PS_SOLID, 1, border_color);
+            let old_brush = SelectObject(hdc, fill_brush as _);
+            let old_pen = SelectObject(hdc, border_pen as _);
+            RoundRect(
+                hdc,
+                left,
+                top,
+                right + 1,
+                bottom + 1,
+                FOOTER_KEYCAP_RADIUS,
+                FOOTER_KEYCAP_RADIUS,
+            );
+            SelectObject(hdc, old_pen);
+            SelectObject(hdc, old_brush);
+            DeleteObject(border_pen as _);
+            DeleteObject(fill_brush as _);
+
+            SetTextColor(hdc, text_color);
+            let text_wide = to_wide_no_nul(text);
+            let text_size = measure_text_size(hdc, text);
+            let cap_height = (bottom - top).max(1);
+            let text_x = left + ((cap_width - text_size.cx).max(0) / 2);
+            let text_y = top + ((cap_height - text_size.cy).max(0) / 2);
+            TextOutW(
+                hdc,
+                text_x,
+                text_y,
+                text_wide.as_ptr(),
+                text_wide.len() as i32,
+            );
+        }
+
+        left
+    }
+
+    fn draw_footer_label_right(
+        hdc: HDC,
+        right: i32,
+        content_top: i32,
+        content_bottom: i32,
+        text: &str,
+        color: u32,
+    ) -> i32 {
+        let text_width = measure_text_width(hdc, text).max(1);
+        let left = (right - text_width).max(0);
+        unsafe {
+            SetTextColor(hdc, color);
+            let text_wide = to_wide_no_nul(text);
+            let text_size = measure_text_size(hdc, text);
             let content_height = (content_bottom - content_top).max(1);
             let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
             TextOutW(
@@ -4541,6 +4732,7 @@ mod imp {
                 text_wide.len() as i32,
             );
         }
+        left
     }
 
     fn invalidate_list_row(list_hwnd: HWND, row: i32) {

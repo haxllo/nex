@@ -2065,16 +2065,8 @@ mod imp {
                 return 0;
             }
             if message == WM_LBUTTONUP && (hwnd == state.help_hwnd || hwnd == state.help_tip_hwnd) {
-                if let Err(error) = open_help_config_file(state) {
-                    state.status_is_error = true;
-                    state.help_tip_visible = false;
-                    let wide = to_wide(&format!("Help open error: {error}"));
-                    unsafe {
-                        SetWindowTextW(state.status_hwnd, wide.as_ptr());
-                        InvalidateRect(state.status_hwnd, std::ptr::null(), 1);
-                    }
-                    layout_children(parent, state);
-                }
+                // Click activation is handled once via the parent WM_COMMAND path.
+                // Opening from both handlers causes the config file to launch twice.
                 return 0;
             }
         }

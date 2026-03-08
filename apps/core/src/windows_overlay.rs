@@ -107,7 +107,7 @@ mod imp {
     const FOOTER_HINT_HEIGHT: i32 = 26;
     const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
     const FOOTER_CONTENT_PAD_Y: i32 = 4;
-    const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 4;
+    const FOOTER_SEPARATOR_TO_CONTENT_GAP: i32 = 8;
     const FOOTER_CONTENT_PAD_X: i32 = 14;
     const FOOTER_SETTINGS_ICON_ADVANCE: i32 = 20;
     const FOOTER_SETTINGS_ICON: &str = "\u{E713}";

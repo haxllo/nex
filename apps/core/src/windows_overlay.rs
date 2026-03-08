@@ -4606,6 +4606,16 @@ mod imp {
         let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(content_bottom);
 
         unsafe {
+            let key_font = if state.hint_font != 0 {
+                state.hint_font
+            } else {
+                state.footer_font
+            };
+            let old_font = if key_font != 0 {
+                SelectObject(hdc, key_font as _)
+            } else {
+                std::ptr::null_mut()
+            };
             let fill_color = blend_color(
                 state.palette.results_bg,
                 state.palette.selection_accent,
@@ -4648,6 +4658,10 @@ mod imp {
                 &mut text_rect,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
+
+            if !old_font.is_null() {
+                SelectObject(hdc, old_font);
+            }
         }
 
         left

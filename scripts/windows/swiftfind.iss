@@ -1,6 +1,5 @@
 #define MyAppName "SwiftFind"
-#define MyAppId "{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
-#define MyAppIdGuid "E3A739E3-FAF7-4E18-BD8B-01744C9E7C27"
+#define MyAppId "{{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
 #define MyAppUninstallKey "{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1"
 
 #ifndef AppVersion

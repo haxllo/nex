@@ -117,7 +117,6 @@ mod imp {
     const FOOTER_KEY_DOWN: &str = "\u{2193}";
     const FOOTER_KEY_ESC: &str = "Esc";
     const FOOTER_KEYCAP_GAP: i32 = 6;
-    const FOOTER_KEYCAP_TEXT_NUDGE_Y: i32 = -1;
     const FOOTER_HINT_GROUP_GAP: i32 = 10;
     const FOOTER_HINT_LABEL_GAP: i32 = 6;
 
@@ -4596,6 +4595,7 @@ mod imp {
     ) -> i32 {
         let text_width = footer_keycap_width(hdc, text);
         let left = (right - text_width).max(0);
+        let content_height = (content_bottom - content_top).max(1);
 
         unsafe {
             let key_font = if state.hint_font != 0 {
@@ -4612,18 +4612,14 @@ mod imp {
                 blend_color(state.palette.results_bg, state.palette.text_primary, 0.94);
             SetTextColor(hdc, text_color);
             let text_wide = to_wide_no_nul(text);
-            let mut text_rect = RECT {
-                left,
-                top: content_top + FOOTER_KEYCAP_TEXT_NUDGE_Y,
-                right: right + 1,
-                bottom: content_bottom + FOOTER_KEYCAP_TEXT_NUDGE_Y,
-            };
-            DrawTextW(
+            let text_size = measure_text_size(hdc, text);
+            let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
+            TextOutW(
                 hdc,
+                left,
+                text_y,
                 text_wide.as_ptr(),
                 text_wide.len() as i32,
-                &mut text_rect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
 
             if !old_font.is_null() {

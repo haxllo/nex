@@ -116,10 +116,6 @@ mod imp {
     const FOOTER_KEY_UP: &str = "\u{2191}";
     const FOOTER_KEY_DOWN: &str = "\u{2193}";
     const FOOTER_KEY_ESC: &str = "Esc";
-    const FOOTER_KEYCAP_HEIGHT: i32 = 18;
-    const FOOTER_KEYCAP_PAD_X: i32 = 8;
-    const FOOTER_KEYCAP_MIN_WIDTH: i32 = 22;
-    const FOOTER_KEYCAP_RADIUS: i32 = 8;
     const FOOTER_KEYCAP_GAP: i32 = 6;
     const FOOTER_KEYCAP_TEXT_NUDGE_Y: i32 = -1;
     const FOOTER_HINT_GROUP_GAP: i32 = 10;
@@ -4587,8 +4583,7 @@ mod imp {
     }
 
     fn footer_keycap_width(hdc: HDC, text: &str) -> i32 {
-        (measure_text_width(hdc, text).max(1) + FOOTER_KEYCAP_PAD_X * 2)
-            .max(FOOTER_KEYCAP_MIN_WIDTH)
+        measure_text_width(hdc, text).max(1)
     }
 
     fn draw_footer_keycap_right(
@@ -4599,11 +4594,8 @@ mod imp {
         content_bottom: i32,
         text: &str,
     ) -> i32 {
-        let cap_width = footer_keycap_width(hdc, text);
-        let left = (right - cap_width).max(0);
-        let content_height = (content_bottom - content_top).max(1);
-        let top = content_top + ((content_height - FOOTER_KEYCAP_HEIGHT).max(0) / 2);
-        let bottom = (top + FOOTER_KEYCAP_HEIGHT).min(content_bottom);
+        let text_width = footer_keycap_width(hdc, text);
+        let left = (right - text_width).max(0);
 
         unsafe {
             let key_font = if state.hint_font != 0 {
@@ -4616,40 +4608,15 @@ mod imp {
             } else {
                 std::ptr::null_mut()
             };
-            let fill_color = blend_color(
-                state.palette.results_bg,
-                state.palette.selection_accent,
-                0.78,
-            );
-            let border_color =
-                blend_color(state.palette.results_bg, state.palette.panel_border, 0.88);
             let text_color =
                 blend_color(state.palette.results_bg, state.palette.text_primary, 0.94);
-            let fill_brush = CreateSolidBrush(fill_color);
-            let border_pen = CreatePen(PS_SOLID, 1, border_color);
-            let old_brush = SelectObject(hdc, fill_brush as _);
-            let old_pen = SelectObject(hdc, border_pen as _);
-            RoundRect(
-                hdc,
-                left,
-                top,
-                right + 1,
-                bottom + 1,
-                FOOTER_KEYCAP_RADIUS,
-                FOOTER_KEYCAP_RADIUS,
-            );
-            SelectObject(hdc, old_pen);
-            SelectObject(hdc, old_brush);
-            DeleteObject(border_pen as _);
-            DeleteObject(fill_brush as _);
-
             SetTextColor(hdc, text_color);
             let text_wide = to_wide_no_nul(text);
             let mut text_rect = RECT {
                 left,
-                top: top + FOOTER_KEYCAP_TEXT_NUDGE_Y,
+                top: content_top + FOOTER_KEYCAP_TEXT_NUDGE_Y,
                 right: right + 1,
-                bottom: bottom + 1 + FOOTER_KEYCAP_TEXT_NUDGE_Y,
+                bottom: content_bottom + FOOTER_KEYCAP_TEXT_NUDGE_Y,
             };
             DrawTextW(
                 hdc,

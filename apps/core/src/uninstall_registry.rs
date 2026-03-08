@@ -1,8 +1,6 @@
 use crate::model::{normalize_for_search, SearchItem};
 use std::cmp::Ordering;
-use std::collections::HashMap;
-#[cfg(target_os = "windows")]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -84,14 +82,105 @@ pub fn publishers_by_display_name() -> Result<HashMap<String, String>, String> {
     let entries = load_cached_entries(false)?;
     let mut out = HashMap::new();
     for entry in entries {
-        let key = normalize_for_search(entry.display_name.as_str());
         let publisher = entry.publisher.trim();
-        if key.is_empty() || publisher.is_empty() {
+        if publisher.is_empty() {
             continue;
         }
-        out.entry(key).or_insert_with(|| publisher.to_string());
+        for key in publisher_lookup_keys(entry.display_name.as_str()) {
+            if key.is_empty() {
+                continue;
+            }
+            out.entry(key).or_insert_with(|| publisher.to_string());
+        }
     }
     Ok(out)
+}
+
+fn publisher_lookup_keys(display_name: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+
+    let raw = display_name.trim();
+    if raw.is_empty() {
+        return keys;
+    }
+
+    let normalized_raw = normalize_for_search(raw);
+    if !normalized_raw.is_empty() && seen.insert(normalized_raw.clone()) {
+        keys.push(normalized_raw);
+    }
+
+    let no_paren = strip_parenthetical_segments(raw);
+    let normalized_no_paren = normalize_for_search(no_paren.as_str());
+    if !normalized_no_paren.is_empty() && seen.insert(normalized_no_paren.clone()) {
+        keys.push(normalized_no_paren);
+    }
+
+    let no_version = strip_common_version_suffix(no_paren.as_str());
+    let normalized_no_version = normalize_for_search(no_version.as_str());
+    if !normalized_no_version.is_empty() && seen.insert(normalized_no_version.clone()) {
+        keys.push(normalized_no_version);
+    }
+
+    let alpha_only = no_version
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    if !alpha_only.is_empty() && seen.insert(alpha_only.clone()) {
+        keys.push(alpha_only);
+    }
+
+    keys
+}
+
+fn strip_parenthetical_segments(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                depth = depth.saturating_add(1);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+            }
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn strip_common_version_suffix(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if let Some(idx) = lowered.find(" version ") {
+        return trimmed[..idx].trim().to_string();
+    }
+
+    let mut kept = Vec::new();
+    for token in trimmed.split_whitespace() {
+        let starts_numeric = token
+            .chars()
+            .next()
+            .map(|ch| ch.is_ascii_digit())
+            .unwrap_or(false);
+        if starts_numeric {
+            break;
+        }
+        kept.push(token);
+    }
+
+    if kept.is_empty() {
+        trimmed.to_string()
+    } else {
+        kept.join(" ")
+    }
 }
 
 fn search_uninstall_actions_with_entries(

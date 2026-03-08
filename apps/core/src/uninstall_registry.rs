@@ -1,5 +1,6 @@
 use crate::model::{normalize_for_search, SearchItem};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -77,6 +78,20 @@ pub fn is_display_name_registered(display_name: &str) -> Result<bool, String> {
         .iter()
         .map(|entry| normalize_for_search(entry.display_name.as_str()))
         .any(|normalized_name| normalized_name == normalized_query))
+}
+
+pub fn publishers_by_display_name() -> Result<HashMap<String, String>, String> {
+    let entries = load_cached_entries(false)?;
+    let mut out = HashMap::new();
+    for entry in entries {
+        let key = normalize_for_search(entry.display_name.as_str());
+        let publisher = entry.publisher.trim();
+        if key.is_empty() || publisher.is_empty() {
+            continue;
+        }
+        out.entry(key).or_insert_with(|| publisher.to_string());
+    }
+    Ok(out)
 }
 
 fn search_uninstall_actions_with_entries(

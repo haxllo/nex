@@ -148,11 +148,19 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
 
         #[cfg(target_os = "windows")]
         {
+            let uninstall_publishers = crate::uninstall_registry::publishers_by_display_name()
+                .unwrap_or_else(|error| {
+                    crate::logging::warn(&format!(
+                        "[swiftfind-core] uninstall publisher map unavailable: {}",
+                        error
+                    ));
+                    HashMap::new()
+                });
             let mut items = Vec::new();
             for root in &self.roots {
-                items.extend(discover_start_menu_root(root)?);
+                items.extend(discover_start_menu_root(root, &uninstall_publishers)?);
             }
-            if let Ok(system_apps) = discover_start_apps() {
+            if let Ok(system_apps) = discover_start_apps(&uninstall_publishers) {
                 items.extend(system_apps);
             }
             Ok(dedupe_apps_by_title(items))
@@ -511,7 +519,10 @@ fn default_start_menu_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderError> {
+fn discover_start_menu_root(
+    root: &Path,
+    uninstall_publishers: &HashMap<String, String>,
+) -> Result<Vec<SearchItem>, ProviderError> {
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -599,6 +610,12 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
         let id = format!("app:{path_text}");
         let mut subtitle = String::new();
 
+        if let Some(publisher) =
+            publisher_from_uninstall_map(candidate.title.as_str(), uninstall_publishers)
+        {
+            subtitle = publisher;
+        }
+
         if subtitle.trim().is_empty() {
             let exe_target = if candidate.ext == "exe" {
                 normalize_shortcut_target_path(path_text.as_str())
@@ -638,7 +655,9 @@ fn discover_start_menu_root(root: &Path) -> Result<Vec<SearchItem>, ProviderErro
 }
 
 #[cfg(target_os = "windows")]
-fn discover_start_apps() -> Result<Vec<SearchItem>, ProviderError> {
+fn discover_start_apps(
+    uninstall_publishers: &HashMap<String, String>,
+) -> Result<Vec<SearchItem>, ProviderError> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -708,7 +727,9 @@ Get-StartApps | ForEach-Object {
         let path = format!("shell:AppsFolder\\{app_id}");
         let id = format!("app:{}", normalize_id_path(&path));
         let mut item = SearchItem::new(&id, "app", title, &path);
-        if let Some(subtitle) = start_app_subtitle_from_app_id(app_id, &appx_publishers) {
+        if let Some(subtitle) = publisher_from_uninstall_map(title, uninstall_publishers)
+            .or_else(|| start_app_subtitle_from_app_id(app_id, &appx_publishers))
+        {
             item = item.with_subtitle(subtitle.as_str());
         }
         items.push(item);
@@ -986,6 +1007,21 @@ fn start_app_subtitle_from_app_id(
     }
 
     None
+}
+
+#[cfg(target_os = "windows")]
+fn publisher_from_uninstall_map(
+    title: &str,
+    uninstall_publishers: &HashMap<String, String>,
+) -> Option<String> {
+    let key = crate::model::normalize_for_search(title);
+    if key.is_empty() {
+        return None;
+    }
+    uninstall_publishers
+        .get(&key)
+        .map(|publisher| publisher.trim().to_string())
+        .filter(|publisher| !publisher.is_empty())
 }
 
 #[cfg(target_os = "windows")]

@@ -70,12 +70,28 @@ Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden
 Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup"
 ; Remove machine-wide startup registration when present (all-users installs).
 Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup-machine"
-; Hard-stop any leftover process to avoid ghost hotkey/runtime after uninstall.
-Filename: "{cmd}"; Parameters: "/C taskkill /IM swiftfind-core.exe /F /T >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-kill-runtime"
 
 [Code]
 const
   SwiftFindUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+  SwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
+
+function StripWrappingQuotes(Value: string): string;
+begin
+  Result := Trim(Value);
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result) - 2);
+end;
+
+function StripDisplayIconSuffix(Value: string): string;
+var
+  SuffixPos: Integer;
+begin
+  Result := StripWrappingQuotes(Value);
+  SuffixPos := Pos(',', Result);
+  if SuffixPos > 0 then
+    Result := Trim(Copy(Result, 1, SuffixPos - 1));
+end;
 
 function TryGetInstallLocation(RootKey: Integer; var InstallLocation: string): Boolean;
 begin
@@ -84,13 +100,34 @@ begin
     (Trim(InstallLocation) <> '');
 end;
 
-function HasScopedInstall(RootKey: Integer): Boolean;
+function TryGetRegisteredRuntimeExe(RootKey: Integer; var RuntimeExe: string): Boolean;
 var
   InstallLocation: string;
+  DisplayIcon: string;
 begin
-  Result := RegKeyExists(RootKey, SwiftFindUninstallSubkey);
-  if not Result then
-    Result := TryGetInstallLocation(RootKey, InstallLocation);
+  Result := false;
+
+  if TryGetInstallLocation(RootKey, InstallLocation) then
+  begin
+    RuntimeExe := AddBackslash(StripWrappingQuotes(InstallLocation)) + SwiftFindRuntimeRelativePath;
+    if FileExists(RuntimeExe) then
+    begin
+      Result := true;
+      exit;
+    end;
+  end;
+
+  if RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'DisplayIcon', DisplayIcon) then
+  begin
+    RuntimeExe := StripDisplayIconSuffix(DisplayIcon);
+    if FileExists(RuntimeExe) then
+    begin
+      Result := true;
+      exit;
+    end;
+  end;
+
+  RuntimeExe := '';
 end;
 
 function OppositeScopeInstallError(): string;
@@ -113,20 +150,41 @@ begin
     OtherScopeRoot := HKLM;
   end;
 
-  if not HasScopedInstall(OtherScopeRoot) then
+  if not TryGetRegisteredRuntimeExe(OtherScopeRoot, InstallLocation) then
   begin
     Result := '';
     exit;
   end;
-
-  if not TryGetInstallLocation(OtherScopeRoot, InstallLocation) then
-    InstallLocation := '(install location unavailable)';
 
   Result :=
     ExpandConstant('{#MyAppName}') + ' is already installed for ' + OtherScopeLabel + '.' + #13#10 + #13#10 +
     'Existing install: ' + InstallLocation + #13#10 + #13#10 +
     'This installer is currently set to install for ' + CurrentScopeLabel + '.' + #13#10 +
     'Uninstall the existing ' + OtherScopeLabel + ' copy first, or rerun setup and choose the same scope.';
+end;
+
+procedure ForceStopRuntimeByPath(RuntimeExe: string);
+var
+  ResultCode: Integer;
+  PowerShellExe: string;
+  EscapedRuntimeExe: string;
+  Command: string;
+begin
+  if not FileExists(RuntimeExe) then
+    exit;
+
+  PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(PowerShellExe) then
+    exit;
+
+  EscapedRuntimeExe := StringChangeEx(RuntimeExe, '''', '''''', True);
+  Command :=
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ' +
+    '"Get-CimInstance Win32_Process -Filter ""Name = ''swiftfind-core.exe''"" ' +
+    '| Where-Object { $_.ExecutablePath -eq ''' + EscapedRuntimeExe + ''' } ' +
+    '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
+
+  Exec(PowerShellExe, Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure StopSwiftFindRuntime();
@@ -141,15 +199,14 @@ begin
       Sleep(250);
   end;
 
-  Exec(
-    ExpandConstant('{cmd}'),
-    '/C taskkill /IM swiftfind-core.exe /F /T >NUL 2>&1',
-    '',
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  );
+  ForceStopRuntimeByPath(RuntimeExe);
   Sleep(250);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    StopSwiftFindRuntime();
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

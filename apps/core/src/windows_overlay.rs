@@ -151,7 +151,6 @@ mod imp {
     const TIMER_QUERY_DEBOUNCE: usize = 0xBEF7;
 
     const OVERLAY_ANIM_MS: u32 = 150;
-    const OVERLAY_HIDE_ANIM_MS: u32 = 115;
     const OVERLAY_ALPHA_OPAQUE: u8 = 255;
     // Results panel expand/collapse animation (scroll behavior remains immediate).
     const RESULTS_ANIM_MS: u32 = 110;
@@ -646,7 +645,7 @@ mod imp {
         }
 
         pub fn hide(&self) {
-            self.animate_hide();
+            hide_overlay_immediate(self.hwnd);
             schedule_icon_cache_idle_cleanup(self.hwnd);
         }
 
@@ -1270,40 +1269,6 @@ mod imp {
             );
         }
 
-        fn animate_hide(&self) {
-            if !self.is_visible() {
-                return;
-            }
-
-            let mut rect: RECT = unsafe { std::mem::zeroed() };
-            unsafe {
-                GetWindowRect(self.hwnd, &mut rect);
-            }
-            let final_left = rect.left;
-            let final_top = rect.top;
-            let final_width = rect.right - rect.left;
-            let final_height = rect.bottom - rect.top;
-
-            let end_width = ((final_width as f32) * 0.96_f32) as i32;
-            let end_height = ((final_height as f32) * 0.96_f32) as i32;
-            let end_left = final_left + (final_width - end_width) / 2;
-            let end_top = final_top + (final_height - end_height) / 2;
-            start_window_animation(
-                self.hwnd,
-                final_left,
-                final_top,
-                final_width,
-                final_height,
-                end_left,
-                end_top,
-                end_width,
-                end_height,
-                OVERLAY_ALPHA_OPAQUE,
-                0,
-                OVERLAY_HIDE_ANIM_MS,
-                true,
-            );
-        }
     }
 
     extern "system" fn overlay_wnd_proc(

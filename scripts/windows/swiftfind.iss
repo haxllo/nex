@@ -1,4 +1,5 @@
 #define MyAppName "SwiftFind"
+#define MyAppId "{{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-local"
@@ -13,7 +14,7 @@
 #endif
 
 [Setup]
-AppId={{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
 AppVerName={#MyAppName}
@@ -73,6 +74,61 @@ Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\Cu
 Filename: "{cmd}"; Parameters: "/C taskkill /IM swiftfind-core.exe /F /T >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-kill-runtime"
 
 [Code]
+const
+  SwiftFindUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+
+function TryGetInstallLocation(RootKey: Integer; var InstallLocation: string): Boolean;
+begin
+  Result :=
+    RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'InstallLocation', InstallLocation) and
+    (Trim(InstallLocation) <> '');
+end;
+
+function HasScopedInstall(RootKey: Integer): Boolean;
+var
+  InstallLocation: string;
+begin
+  Result := RegKeyExists(RootKey, SwiftFindUninstallSubkey);
+  if not Result then
+    Result := TryGetInstallLocation(RootKey, InstallLocation);
+end;
+
+function OppositeScopeInstallError(): string;
+var
+  CurrentScopeLabel: string;
+  OtherScopeLabel: string;
+  OtherScopeRoot: Integer;
+  InstallLocation: string;
+begin
+  if IsAdminInstallMode then
+  begin
+    CurrentScopeLabel := 'all users';
+    OtherScopeLabel := 'current user';
+    OtherScopeRoot := HKCU;
+  end
+  else
+  begin
+    CurrentScopeLabel := 'current user';
+    OtherScopeLabel := 'all users';
+    OtherScopeRoot := HKLM;
+  end;
+
+  if not HasScopedInstall(OtherScopeRoot) then
+  begin
+    Result := '';
+    exit;
+  end;
+
+  if not TryGetInstallLocation(OtherScopeRoot, InstallLocation) then
+    InstallLocation := '(install location unavailable)';
+
+  Result :=
+    ExpandConstant('{#MyAppName}') + ' is already installed for ' + OtherScopeLabel + '.' + #13#10 + #13#10 +
+    'Existing install: ' + InstallLocation + #13#10 + #13#10 +
+    'This installer is currently set to install for ' + CurrentScopeLabel + '.' + #13#10 +
+    'Uninstall the existing ' + OtherScopeLabel + ' copy first, or rerun setup and choose the same scope.';
+end;
+
 procedure StopSwiftFindRuntime();
 var
   ResultCode: Integer;
@@ -98,6 +154,9 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  Result := OppositeScopeInstallError();
+  if Result <> '' then
+    exit;
+
   StopSwiftFindRuntime();
-  Result := '';
 end;

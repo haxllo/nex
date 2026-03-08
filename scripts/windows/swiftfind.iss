@@ -177,7 +177,8 @@ begin
   if not FileExists(PowerShellExe) then
     exit;
 
-  EscapedRuntimeExe := StringChangeEx(RuntimeExe, '''', '''''', True);
+  EscapedRuntimeExe := RuntimeExe;
+  StringChangeEx(EscapedRuntimeExe, '''', '''''', True);
   Command :=
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ' +
     '"Get-CimInstance Win32_Process -Filter ""Name = ''swiftfind-core.exe''"" ' +

@@ -1,5 +1,7 @@
 #define MyAppName "SwiftFind"
-#define MyAppId "{{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
+#define MyAppId "{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
+#define MyAppIdGuid "E3A739E3-FAF7-4E18-BD8B-01744C9E7C27"
+#define MyAppUninstallKey "{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1"
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-local"
@@ -73,8 +75,10 @@ Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\Cu
 
 [Code]
 const
-  SwiftFindUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1';
+  SwiftFindUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
   SwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
+
+procedure ForceStopRuntimeByPath(RuntimeExe: string); forward;
 
 function StripWrappingQuotes(Value: string): string;
 begin
@@ -83,14 +87,27 @@ begin
     Result := Copy(Result, 2, Length(Result) - 2);
 end;
 
-function StripDisplayIconSuffix(Value: string): string;
+function ExtractCommandPath(Value: string): string;
 var
-  SuffixPos: Integer;
+  ClosingQuotePos: Integer;
+  SpacePos: Integer;
 begin
-  Result := StripWrappingQuotes(Value);
-  SuffixPos := Pos(',', Result);
-  if SuffixPos > 0 then
-    Result := Trim(Copy(Result, 1, SuffixPos - 1));
+  Result := Trim(Value);
+  if Result = '' then
+    exit;
+
+  if Result[1] = '"' then
+  begin
+    Delete(Result, 1, 1);
+    ClosingQuotePos := Pos('"', Result);
+    if ClosingQuotePos > 0 then
+      Result := Copy(Result, 1, ClosingQuotePos - 1);
+    exit;
+  end;
+
+  SpacePos := Pos(' ', Result);
+  if SpacePos > 0 then
+    Result := Copy(Result, 1, SpacePos - 1);
 end;
 
 function TryGetInstallLocation(RootKey: Integer; var InstallLocation: string): Boolean;
@@ -119,7 +136,7 @@ begin
 
   if RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'DisplayIcon', DisplayIcon) then
   begin
-    RuntimeExe := StripDisplayIconSuffix(DisplayIcon);
+    RuntimeExe := ExtractCommandPath(DisplayIcon);
     if FileExists(RuntimeExe) then
     begin
       Result := true;
@@ -130,37 +147,132 @@ begin
   RuntimeExe := '';
 end;
 
-function OppositeScopeInstallError(): string;
+function TryGetUninstallExe(RootKey: Integer; var UninstallExe: string): Boolean;
 var
-  CurrentScopeLabel: string;
-  OtherScopeLabel: string;
-  OtherScopeRoot: Integer;
-  InstallLocation: string;
+  UninstallString: string;
 begin
-  if IsAdminInstallMode then
+  Result :=
+    RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'UninstallString', UninstallString) and
+    (Trim(UninstallString) <> '');
+  if not Result then
   begin
-    CurrentScopeLabel := 'all users';
-    OtherScopeLabel := 'current user';
-    OtherScopeRoot := HKCU;
-  end
-  else
-  begin
-    CurrentScopeLabel := 'current user';
-    OtherScopeLabel := 'all users';
-    OtherScopeRoot := HKLM;
+    UninstallExe := '';
+    exit;
   end;
 
-  if not TryGetRegisteredRuntimeExe(OtherScopeRoot, InstallLocation) then
+  UninstallExe := ExtractCommandPath(UninstallString);
+  Result := FileExists(UninstallExe);
+  if not Result then
+    UninstallExe := '';
+end;
+
+function ScopeLabelForRootKey(RootKey: Integer): string;
+begin
+  if RootKey = HKLM then
+    Result := 'all users'
+  else
+    Result := 'current user';
+end;
+
+procedure StopRuntimeByExecutable(RuntimeExe: string);
+var
+  ResultCode: Integer;
+begin
+  if FileExists(RuntimeExe) then
+  begin
+    if Exec(RuntimeExe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Sleep(250);
+  end;
+
+  ForceStopRuntimeByPath(RuntimeExe);
+  Sleep(250);
+end;
+
+function RemoveScopedInstall(RootKey: Integer; var ErrorMessage: string): Boolean;
+var
+  RuntimeExe: string;
+  UninstallExe: string;
+  ResultCode: Integer;
+begin
+  Result := false;
+  ErrorMessage := '';
+
+  if not TryGetRegisteredRuntimeExe(RootKey, RuntimeExe) then
+  begin
+    Result := true;
+    exit;
+  end;
+
+  if not TryGetUninstallExe(RootKey, UninstallExe) then
+  begin
+    ErrorMessage :=
+      ExpandConstant('{#MyAppName}') + ' is installed for ' + ScopeLabelForRootKey(RootKey) +
+      ' at ' + RuntimeExe + ', but its uninstaller could not be located.';
+    exit;
+  end;
+
+  StopRuntimeByExecutable(RuntimeExe);
+
+  if not Exec(
+    UninstallExe,
+    '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+  begin
+    ErrorMessage :=
+      'Failed to start the existing ' + ScopeLabelForRootKey(RootKey) +
+      ' uninstaller: ' + UninstallExe;
+    exit;
+  end;
+
+  if ResultCode <> 0 then
+  begin
+    ErrorMessage :=
+      'The existing ' + ScopeLabelForRootKey(RootKey) +
+      ' install could not be removed automatically (exit code ' + IntToStr(ResultCode) + ').';
+    exit;
+  end;
+
+  Result := true;
+end;
+
+function PrepareOppositeScopeInstall(): string;
+var
+  OtherScopeRoot: Integer;
+  RuntimeExe: string;
+  ErrorMessage: string;
+begin
+  if IsAdminInstallMode then
+    OtherScopeRoot := HKCU
+  else
+    OtherScopeRoot := HKLM;
+
+  if not TryGetRegisteredRuntimeExe(OtherScopeRoot, RuntimeExe) then
   begin
     Result := '';
     exit;
   end;
 
+  if (OtherScopeRoot = HKLM) and not IsAdminInstallMode then
+  begin
+    Result :=
+      ExpandConstant('{#MyAppName}') + ' is already installed for all users.' + #13#10 + #13#10 +
+      'Existing install: ' + RuntimeExe + #13#10 + #13#10 +
+      'To replace it, rerun setup and choose All users, or uninstall the all-users copy first.';
+    exit;
+  end;
+
+  if not RemoveScopedInstall(OtherScopeRoot, ErrorMessage) then
+  begin
+    Result := ErrorMessage;
+    exit;
+  end;
+
   Result :=
-    ExpandConstant('{#MyAppName}') + ' is already installed for ' + OtherScopeLabel + '.' + #13#10 + #13#10 +
-    'Existing install: ' + InstallLocation + #13#10 + #13#10 +
-    'This installer is currently set to install for ' + CurrentScopeLabel + '.' + #13#10 +
-    'Uninstall the existing ' + OtherScopeLabel + ' copy first, or rerun setup and choose the same scope.';
+    '';
 end;
 
 procedure ForceStopRuntimeByPath(RuntimeExe: string);
@@ -189,19 +301,8 @@ begin
 end;
 
 procedure StopSwiftFindRuntime();
-var
-  ResultCode: Integer;
-  RuntimeExe: string;
 begin
-  RuntimeExe := ExpandConstant('{app}\bin\swiftfind-core.exe');
-  if FileExists(RuntimeExe) then
-  begin
-    if Exec(RuntimeExe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-      Sleep(250);
-  end;
-
-  ForceStopRuntimeByPath(RuntimeExe);
-  Sleep(250);
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -212,7 +313,7 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  Result := OppositeScopeInstallError();
+  Result := PrepareOppositeScopeInstall();
   if Result <> '' then
     exit;
 

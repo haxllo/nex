@@ -120,9 +120,11 @@ mod imp {
     const FOOTER_KEY_DOWN: &str = "\u{2193}";
     const FOOTER_KEY_ESC: &str = "Esc";
     const FOOTER_KEYCAP_HEIGHT: i32 = 18;
-    const FOOTER_KEYCAP_PAD_X: i32 = 7;
+    const FOOTER_KEYCAP_PAD_X: i32 = 8;
+    const FOOTER_KEYCAP_MIN_WIDTH: i32 = 22;
     const FOOTER_KEYCAP_RADIUS: i32 = 8;
-    const FOOTER_KEYCAP_GAP: i32 = 5;
+    const FOOTER_KEYCAP_GAP: i32 = 6;
+    const FOOTER_KEYCAP_TEXT_NUDGE_Y: i32 = -1;
     const FOOTER_HINT_GROUP_GAP: i32 = 12;
     const FOOTER_HINT_LABEL_GAP: i32 = 7;
     const FOOTER_SECTION_GAP: i32 = 16;
@@ -4645,7 +4647,8 @@ mod imp {
     }
 
     fn footer_keycap_width(hdc: HDC, text: &str) -> i32 {
-        measure_text_width(hdc, text).max(1) + FOOTER_KEYCAP_PAD_X * 2
+        (measure_text_width(hdc, text).max(1) + FOOTER_KEYCAP_PAD_X * 2)
+            .max(FOOTER_KEYCAP_MIN_WIDTH)
     }
 
     fn draw_footer_keycap_right(
@@ -4692,16 +4695,18 @@ mod imp {
 
             SetTextColor(hdc, text_color);
             let text_wide = to_wide_no_nul(text);
-            let text_size = measure_text_size(hdc, text);
-            let cap_height = (bottom - top).max(1);
-            let text_x = left + ((cap_width - text_size.cx).max(0) / 2);
-            let text_y = top + ((cap_height - text_size.cy).max(0) / 2);
-            TextOutW(
+            let mut text_rect = RECT {
+                left,
+                top: top + FOOTER_KEYCAP_TEXT_NUDGE_Y,
+                right: right + 1,
+                bottom: bottom + 1 + FOOTER_KEYCAP_TEXT_NUDGE_Y,
+            };
+            DrawTextW(
                 hdc,
-                text_x,
-                text_y,
                 text_wide.as_ptr(),
                 text_wide.len() as i32,
+                &mut text_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
         }
 

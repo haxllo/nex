@@ -116,6 +116,7 @@ mod imp {
     const FOOTER_KEY_UP: &str = "\u{2191}";
     const FOOTER_KEY_DOWN: &str = "\u{2193}";
     const FOOTER_KEY_ESC: &str = "Esc";
+    const FOOTER_KEY_TEXT_SHIFT_Y: i32 = 1;
     const FOOTER_KEYCAP_GAP: i32 = 6;
     const FOOTER_HINT_GROUP_GAP: i32 = 10;
     const FOOTER_HINT_LABEL_GAP: i32 = 6;
@@ -4613,7 +4614,8 @@ mod imp {
             SetTextColor(hdc, text_color);
             let text_wide = to_wide_no_nul(text);
             let text_size = measure_text_size(hdc, text);
-            let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
+            let text_y =
+                content_top + ((content_height - text_size.cy).max(0) / 2) + FOOTER_KEY_TEXT_SHIFT_Y;
             TextOutW(
                 hdc,
                 left,

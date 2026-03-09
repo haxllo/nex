@@ -402,14 +402,6 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         log_info("[swiftfind-core] hotkey_event received");
                         let overlay_visible = overlay.is_visible();
                         overlay_state.set_visible(overlay_visible);
-                        if !overlay_visible
-                            && should_ignore_hotkey_due_to_fullscreen(&runtime_config)
-                        {
-                            log_info(
-                                "[swiftfind-core] hotkey ignored because fullscreen app is active",
-                            );
-                            return;
-                        }
                         let action = overlay_state.on_hotkey(overlay.has_focus());
                         match action {
                             HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
@@ -2207,94 +2199,6 @@ fn acquire_single_instance_guard() -> Result<Option<SingleInstanceGuard>, String
 #[cfg(target_os = "windows")]
 fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(target_os = "windows")]
-fn should_ignore_hotkey_due_to_fullscreen(cfg: &Config) -> bool {
-    if !cfg.ignore_hotkeys_on_fullscreen {
-        return false;
-    }
-    is_foreground_window_fullscreen()
-}
-
-#[cfg(target_os = "windows")]
-fn is_foreground_window_fullscreen() -> bool {
-    use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
-    };
-
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_null() {
-        return false;
-    }
-    if unsafe { IsWindowVisible(foreground) } == 0 || unsafe { IsIconic(foreground) } != 0 {
-        return false;
-    }
-    // Desktop/taskbar shell surfaces can occupy the full monitor; do not treat them
-    // as fullscreen apps, otherwise the launcher hotkey is ignored on desktop focus.
-    let mut class_buf = [0u16; 128];
-    let class_len =
-        unsafe { GetClassNameW(foreground, class_buf.as_mut_ptr(), class_buf.len() as i32) };
-    if class_len > 0 {
-        let class_name = String::from_utf16_lossy(&class_buf[..class_len as usize]);
-        if is_shell_surface_class_name(&class_name) {
-            return false;
-        }
-    }
-
-    let monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
-    if monitor.is_null() {
-        return false;
-    }
-
-    let mut monitor_info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        rcMonitor: RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        rcWork: RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        },
-        dwFlags: 0,
-    };
-    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info as *mut MONITORINFO) } == 0 {
-        return false;
-    }
-
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
-    };
-    if unsafe { GetWindowRect(foreground, &mut rect as *mut RECT) } == 0 {
-        return false;
-    }
-
-    let fuzz = 2;
-    let covers_left = rect.left <= monitor_info.rcMonitor.left + fuzz;
-    let covers_top = rect.top <= monitor_info.rcMonitor.top + fuzz;
-    let covers_right = rect.right >= monitor_info.rcMonitor.right - fuzz;
-    let covers_bottom = rect.bottom >= monitor_info.rcMonitor.bottom - fuzz;
-    covers_left && covers_top && covers_right && covers_bottom
-}
-
-#[cfg(target_os = "windows")]
-fn is_shell_surface_class_name(class_name: &str) -> bool {
-    matches!(
-        class_name.trim().to_ascii_lowercase().as_str(),
-        "progman" | "workerw" | "shell_traywnd"
-    )
 }
 
 #[cfg(target_os = "windows")]

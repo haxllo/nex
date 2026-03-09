@@ -28,7 +28,7 @@ fn accepts_default_config() {
     assert_eq!(cfg.index_max_items_total, 120_000);
     assert_eq!(cfg.index_max_items_per_root, 40_000);
     assert_eq!(cfg.index_max_items_per_query_seed, 5_000);
-    assert!(cfg.ignore_hotkeys_on_fullscreen);
+    assert!(!cfg.game_mode_enabled);
     assert!(cfg.search_query_results_with_delay);
     assert_eq!(cfg.search_delay_time_ms, 90);
     assert!(
@@ -183,7 +183,7 @@ fn writes_user_template_with_comments_and_loads_it() {
     assert!(raw.contains("\"index_max_items_total\":"));
     assert!(raw.contains("\"index_max_items_per_root\":"));
     assert!(raw.contains("\"index_max_items_per_query_seed\":"));
-    assert!(raw.contains("\"ignore_hotkeys_on_fullscreen\": true"));
+    assert!(raw.contains("\"game_mode_enabled\": false"));
     assert!(raw.contains("\"search_query_results_with_delay\": true"));
     assert!(raw.contains("\"search_delay_time_ms\": 90"));
     if cfg.discovery_exclude_roots.is_empty() {
@@ -260,7 +260,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert_eq!(loaded.index_max_items_total, 120_000);
     assert_eq!(loaded.index_max_items_per_root, 40_000);
     assert_eq!(loaded.index_max_items_per_query_seed, 5_000);
-    assert!(loaded.ignore_hotkeys_on_fullscreen);
+    assert!(!loaded.game_mode_enabled);
     assert!(loaded.search_query_results_with_delay);
     assert_eq!(loaded.search_delay_time_ms, 90);
 
@@ -277,7 +277,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"index_max_items_total\": 120000"));
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));
     assert!(updated_raw.contains("\"index_max_items_per_query_seed\": 5000"));
-    assert!(updated_raw.contains("\"ignore_hotkeys_on_fullscreen\": true"));
+    assert!(updated_raw.contains("\"game_mode_enabled\": false"));
     assert!(updated_raw.contains("\"search_query_results_with_delay\": true"));
     assert!(updated_raw.contains("\"search_delay_time_ms\": 90"));
 

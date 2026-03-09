@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 9;
+pub const CURRENT_CONFIG_VERSION: u32 = 10;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -29,7 +29,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "clipboard_exclude_sensitive_patterns",
     "plugins_enabled",
     "plugins_safe_mode",
-    "ignore_hotkeys_on_fullscreen",
+    "game_mode_enabled",
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
@@ -122,7 +122,8 @@ pub struct Config {
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
-    pub ignore_hotkeys_on_fullscreen: bool,
+    #[serde(alias = "ignore_hotkeys_on_fullscreen")]
+    pub game_mode_enabled: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     pub index_max_items_total: u32,
@@ -179,7 +180,7 @@ impl Default for Config {
             plugins_enabled: true,
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
-            ignore_hotkeys_on_fullscreen: true,
+            game_mode_enabled: false,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             index_max_items_total: 120_000,
@@ -537,9 +538,9 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
         "false"
     });
     text.push_str(",\n");
-    text.push_str("  // Ignore launcher hotkey while a fullscreen app is active.\n");
-    text.push_str("  \"ignore_hotkeys_on_fullscreen\": ");
-    text.push_str(if cfg.ignore_hotkeys_on_fullscreen {
+    text.push_str("  // Game Mode: suppress the launcher hotkey while a likely game/fullscreen app is active.\n");
+    text.push_str("  \"game_mode_enabled\": ");
+    text.push_str(if cfg.game_mode_enabled {
         "true"
     } else {
         "false"
@@ -759,9 +760,9 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         "false"
     });
     text.push('\n');
-    text.push_str("# Ignore launcher hotkey while a fullscreen app is active.\n");
-    text.push_str("ignore_hotkeys_on_fullscreen = ");
-    text.push_str(if cfg.ignore_hotkeys_on_fullscreen {
+    text.push_str("# Game Mode: suppress the launcher hotkey while a likely game/fullscreen app is active.\n");
+    text.push_str("game_mode_enabled = ");
+    text.push_str(if cfg.game_mode_enabled {
         "true"
     } else {
         "false"
@@ -1109,8 +1110,11 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         }
     }
 
-    if source_version < 8 && !raw_has_key(raw, "ignore_hotkeys_on_fullscreen") {
-        cfg.ignore_hotkeys_on_fullscreen = Config::default().ignore_hotkeys_on_fullscreen;
+    if source_version < 10
+        && !raw_has_key(raw, "game_mode_enabled")
+        && !raw_has_key(raw, "ignore_hotkeys_on_fullscreen")
+    {
+        cfg.game_mode_enabled = Config::default().game_mode_enabled;
         changed = true;
     }
 

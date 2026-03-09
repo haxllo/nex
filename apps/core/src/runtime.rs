@@ -358,6 +358,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
             runtime_config.idle_cache_trim_ms,
             runtime_config.active_memory_target_mb,
         );
+        overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
         log_info("[swiftfind-core] native overlay shell initialized (hidden)");
 
         let mut registrar = default_hotkey_registrar();
@@ -402,6 +403,14 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         log_info("[swiftfind-core] hotkey_event received");
                         let overlay_visible = overlay.is_visible();
                         overlay_state.set_visible(overlay_visible);
+                        if !overlay_visible
+                            && should_suppress_hotkey_for_game_mode(&runtime_config)
+                        {
+                            log_info(
+                                "[swiftfind-core] hotkey ignored because game mode is active for the foreground app",
+                            );
+                            return;
+                        }
                         let action = overlay_state.on_hotkey(overlay.has_focus());
                         match action {
                             HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
@@ -457,6 +466,9 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         unsafe {
                             windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
                         }
+                    }
+                    OverlayEvent::TrayToggleGameMode => {
+                        toggle_game_mode_from_tray(&overlay, &mut runtime_config);
                     }
                     OverlayEvent::Escape => {
                         if overlay_state.on_escape() {
@@ -1573,7 +1585,7 @@ fn write_diagnostics_bundle(cfg: &config::Config) -> Result<std::path::PathBuf, 
         "plugins_enabled": cfg.plugins_enabled,
         "plugin_paths_count": cfg.plugin_paths.len(),
         "plugins_safe_mode": cfg.plugins_safe_mode,
-        "ignore_hotkeys_on_fullscreen": cfg.ignore_hotkeys_on_fullscreen,
+        "game_mode_enabled": cfg.game_mode_enabled,
         "idle_cache_trim_ms": cfg.idle_cache_trim_ms,
         "active_memory_target_mb": cfg.active_memory_target_mb,
         "index_max_items_total": cfg.index_max_items_total,
@@ -2201,6 +2213,282 @@ fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ForegroundWindowSnapshot {
+    class_name: String,
+    process_name: String,
+    process_path: String,
+    covers_monitor: bool,
+    has_standard_frame: bool,
+    maximized: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn toggle_game_mode_from_tray(overlay: &NativeOverlayShell, runtime_config: &mut Config) {
+    let previous = runtime_config.game_mode_enabled;
+    let next = !previous;
+    runtime_config.game_mode_enabled = next;
+    overlay.set_game_mode_enabled(next);
+
+    if let Err(error) = config::write_user_template(runtime_config, &runtime_config.config_path) {
+        runtime_config.game_mode_enabled = previous;
+        overlay.set_game_mode_enabled(previous);
+        log_warn(&format!(
+            "[swiftfind-core] failed to persist game mode toggle: {error}"
+        ));
+        overlay.set_status_text("Could not update Game Mode setting");
+        return;
+    }
+
+    log_info(&format!(
+        "[swiftfind-core] game mode updated from tray: enabled={next}"
+    ));
+    overlay.set_status_text(if next {
+        "Game Mode enabled"
+    } else {
+        "Game Mode disabled"
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn should_suppress_hotkey_for_game_mode(cfg: &Config) -> bool {
+    if !cfg.game_mode_enabled {
+        return false;
+    }
+
+    collect_foreground_window_snapshot()
+        .is_some_and(|snapshot| should_block_hotkey_for_foreground_window(&snapshot))
+}
+
+#[cfg(target_os = "windows")]
+fn collect_foreground_window_snapshot() -> Option<ForegroundWindowSnapshot> {
+    use windows_sys::Win32::Foundation::{CloseHandle, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, SW_SHOWMAXIMIZED,
+        WINDOWPLACEMENT, WS_CAPTION, WS_MAXIMIZE, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return None;
+    }
+    if unsafe { IsWindowVisible(foreground) } == 0 || unsafe { IsIconic(foreground) } != 0 {
+        return None;
+    }
+
+    let mut class_buf = [0u16; 128];
+    let class_len =
+        unsafe { GetClassNameW(foreground, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+    let class_name = if class_len > 0 {
+        String::from_utf16_lossy(&class_buf[..class_len as usize])
+    } else {
+        String::new()
+    };
+    if is_shell_surface_class_name(&class_name) {
+        return None;
+    }
+
+    let monitor = unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return None;
+    }
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        rcWork: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        dwFlags: 0,
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info as *mut MONITORINFO) } == 0 {
+        return None;
+    }
+
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetWindowRect(foreground, &mut rect as *mut RECT) } == 0 {
+        return None;
+    }
+
+    let fuzz = 2;
+    let covers_monitor = rect.left <= monitor_info.rcMonitor.left + fuzz
+        && rect.top <= monitor_info.rcMonitor.top + fuzz
+        && rect.right >= monitor_info.rcMonitor.right - fuzz
+        && rect.bottom >= monitor_info.rcMonitor.bottom - fuzz;
+
+    let style = unsafe { GetWindowLongPtrW(foreground, GWL_STYLE) as u32 };
+    let has_standard_frame =
+        style & ((WS_CAPTION | WS_THICKFRAME | WS_SYSMENU) as u32) != 0;
+
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        flags: 0,
+        showCmd: 0,
+        ptMinPosition: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+        ptMaxPosition: windows_sys::Win32::Foundation::POINT { x: 0, y: 0 },
+        rcNormalPosition: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+    };
+    let placement_reports_maximized =
+        unsafe { GetWindowPlacement(foreground, &mut placement as *mut WINDOWPLACEMENT) } != 0
+            && placement.showCmd == SW_SHOWMAXIMIZED as u32;
+    let maximized = placement_reports_maximized || (style & (WS_MAXIMIZE as u32) != 0);
+
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(foreground, &mut pid as *mut u32);
+    }
+
+    let mut process_path = String::new();
+    let mut process_name = String::new();
+    if pid != 0 {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if !process.is_null() {
+            let mut buffer = vec![0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let ok = unsafe {
+                QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length as *mut u32)
+            };
+            if ok != 0 && length > 0 {
+                process_path = String::from_utf16_lossy(&buffer[..length as usize]);
+                process_name = std::path::Path::new(&process_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            unsafe {
+                CloseHandle(process);
+            }
+        }
+    }
+
+    Some(ForegroundWindowSnapshot {
+        class_name,
+        process_name,
+        process_path,
+        covers_monitor,
+        has_standard_frame,
+        maximized,
+    })
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn should_block_hotkey_for_foreground_window(snapshot: &ForegroundWindowSnapshot) -> bool {
+    if !snapshot.covers_monitor {
+        return false;
+    }
+    if snapshot.maximized && snapshot.has_standard_frame {
+        return false;
+    }
+
+    let process_name = snapshot.process_name.trim().to_ascii_lowercase();
+    let process_path = snapshot.process_path.trim().to_ascii_lowercase();
+    if is_known_non_game_process(&process_name) || is_known_non_game_path(&process_path) {
+        return false;
+    }
+    if is_known_game_process(&process_name) || is_likely_game_path(&process_path) {
+        return true;
+    }
+
+    !snapshot.has_standard_frame
+}
+
+#[allow(dead_code)]
+fn is_shell_surface_class_name(class_name: &str) -> bool {
+    matches!(
+        class_name.trim().to_ascii_lowercase().as_str(),
+        "progman" | "workerw" | "shell_traywnd"
+    )
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn is_known_non_game_process(process_name: &str) -> bool {
+    matches!(
+        process_name,
+        ""
+            | "explorer.exe"
+            | "taskmgr.exe"
+            | "chrome.exe"
+            | "msedge.exe"
+            | "firefox.exe"
+            | "waterfox.exe"
+            | "code.exe"
+            | "devenv.exe"
+            | "wezterm-gui.exe"
+            | "windowsterminal.exe"
+            | "powershell.exe"
+            | "pwsh.exe"
+            | "cmd.exe"
+            | "notepad.exe"
+            | "notepad++.exe"
+            | "vlc.exe"
+            | "mpv.exe"
+            | "obs64.exe"
+            | "applicationframehost.exe"
+            | "searchhost.exe"
+            | "startmenuexperiencehost.exe"
+            | "lockapp.exe"
+    )
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn is_known_non_game_path(process_path: &str) -> bool {
+    process_path.contains("\\microsoft\\edge\\application\\")
+        || process_path.contains("\\google\\chrome\\application\\")
+        || process_path.contains("\\mozilla firefox\\")
+        || process_path.contains("\\microsoft\\windowsapps\\")
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn is_known_game_process(process_name: &str) -> bool {
+    process_name.contains("valorant")
+        || process_name == "cs2.exe"
+        || process_name == "csgo.exe"
+        || process_name == "cod.exe"
+        || process_name == "modernwarfare.exe"
+        || process_name.ends_with("-shipping.exe")
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn is_likely_game_path(process_path: &str) -> bool {
+    process_path.contains("\\steamapps\\common\\")
+        || process_path.contains("\\riot games\\")
+        || process_path.contains("\\epic games\\")
+        || process_path.contains("\\battle.net\\")
+        || process_path.contains("\\blizzard entertainment\\")
+        || process_path.contains("\\ubisoft\\")
+        || process_path.contains("\\rockstar games\\")
+        || process_path.contains("\\gog galaxy\\games\\")
+        || process_path.contains("\\ea games\\")
+        || process_path.contains("\\electronic arts\\")
+}
+
 #[cfg(target_os = "windows")]
 fn start_background_index_refresh(
     config: &Config,
@@ -2729,6 +3017,7 @@ fn maybe_apply_runtime_config_reload(
                 runtime_config.idle_cache_trim_ms,
                 runtime_config.active_memory_target_mb,
             );
+            overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);
             for warning in &plugin_registry.load_warnings {
                 log_warn(&format!("[swiftfind-core] plugin_warning {warning}"));
@@ -2766,11 +3055,12 @@ fn maybe_apply_runtime_config_reload(
             }
 
             log_info(&format!(
-                "[swiftfind-core] config reloaded max_results={} mode={:?} show_files={} show_folders={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
+                "[swiftfind-core] config reloaded max_results={} mode={:?} show_files={} show_folders={} game_mode={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
                 runtime_config.max_results,
                 runtime_config.search_mode_default,
                 runtime_config.show_files,
                 runtime_config.show_folders,
+                runtime_config.game_mode_enabled,
                 runtime_config.search_dsl_enabled,
                 runtime_config.clipboard_enabled,
                 runtime_config.uninstall_actions_enabled,
@@ -3250,11 +3540,12 @@ mod tests {
         maybe_expand_uninstall_quick_shortcut, next_selection_index, parse_cli_args,
         parse_status_diagnostics_snapshot, parse_tasklist_pid_lines, result_limit_for_query,
         search_overlay_results, search_overlay_results_with_session,
-        should_hide_known_start_menu_doc_sample_entry, should_skip_non_searchable_query,
-        summarize_query_profiles, track_uninstall_title_suppression,
+        should_block_hotkey_for_foreground_window, should_hide_known_start_menu_doc_sample_entry,
+        should_skip_non_searchable_query, summarize_query_profiles,
+        track_uninstall_title_suppression,
         uninstall_confirmation_results, uninstall_target_title_from_action_title,
-        IndexedPrefixCache, OverlaySearchSession, RuntimeCommand, RuntimeOptions,
-        ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
+        ForegroundWindowSnapshot, IndexedPrefixCache, OverlaySearchSession, RuntimeCommand,
+        RuntimeOptions, ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
         INDEXED_PREFIX_CACHE_MAX_SEED_LIMIT, INDEXED_PREFIX_CACHE_MIN_SEED_LIMIT,
         UNINSTALL_QUERY_RESULT_LIMIT,
     };
@@ -3614,6 +3905,34 @@ mod tests {
             "viv",
             &SearchFilter::default()
         ));
+    }
+
+    #[test]
+    fn game_mode_does_not_block_standard_maximized_apps() {
+        let snapshot = ForegroundWindowSnapshot {
+            class_name: "Chrome_WidgetWin_1".to_string(),
+            process_name: "chrome.exe".to_string(),
+            process_path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe".to_string(),
+            covers_monitor: true,
+            has_standard_frame: true,
+            maximized: true,
+        };
+
+        assert!(!should_block_hotkey_for_foreground_window(&snapshot));
+    }
+
+    #[test]
+    fn game_mode_blocks_known_game_like_borderless_windows() {
+        let snapshot = ForegroundWindowSnapshot {
+            class_name: "UnrealWindow".to_string(),
+            process_name: "VALORANT-Win64-Shipping.exe".to_string(),
+            process_path: "C:\\Riot Games\\VALORANT\\live\\ShooterGame\\Binaries\\Win64\\VALORANT-Win64-Shipping.exe".to_string(),
+            covers_monitor: true,
+            has_standard_frame: false,
+            maximized: false,
+        };
+
+        assert!(should_block_hotkey_for_foreground_window(&snapshot));
     }
 
     #[test]

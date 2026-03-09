@@ -43,28 +43,33 @@ mod imp {
     };
     use windows_sys::Win32::UI::Shell::{
         ExtractIconExW, FindExecutableW, HlinkResolveShortcutToString, SHGetFileInfoW,
-        SHParseDisplayName, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON,
-        SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+        SHParseDisplayName, Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
+        NIM_ADD, NIM_DELETE, NIM_MODIFY, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION,
+        SHGFI_LARGEICON, SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AnimateWindow, CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyIcon,
-        DispatchMessageW, DrawIconEx, FindWindowW, GetClientRect, GetCursorPos,
+        AnimateWindow, AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW,
+        DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, DrawIconEx, FindWindowW,
+        GetClientRect, GetCursorPos,
         GetForegroundWindow, GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW,
         GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, IsChild, KillTimer,
         LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
         SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, AW_ACTIVATE,
-        AW_BLEND, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, DI_NORMAL, EN_CHANGE,
-        ES_AUTOHSCROLL, ES_MULTILINE, GWLP_USERDATA, GWLP_WNDPROC, GWL_STYLE, HMENU, HWND_TOPMOST,
-        IDC_ARROW, IDC_HAND, LBN_DBLCLK, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
-        LBS_OWNERDRAWFIXED, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT,
-        LB_GETTOPINDEX, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LB_SETTOPINDEX, LWA_ALPHA,
-        MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WM_ACTIVATE,
-        WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
-        WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONUP,
+        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TrackPopupMenu,
+        TranslateMessage, AW_ACTIVATE, AW_BLEND, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+        CW_USEDEFAULT, DI_NORMAL, EN_CHANGE, ES_AUTOHSCROLL, ES_MULTILINE, GWLP_USERDATA,
+        GWLP_WNDPROC, GWL_STYLE, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LBN_DBLCLK,
+        LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, LB_ADDSTRING,
+        LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTOPINDEX, LB_ITEMFROMPOINT,
+        LB_RESETCONTENT, LB_SETCURSEL, LB_SETTOPINDEX, LWA_ALPHA, MF_CHECKED, MF_SEPARATOR,
+        MF_STRING, MF_UNCHECKED, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+        SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP,
+        WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
+        WM_DESTROY, WM_DRAWITEM, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
         WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-        WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD,
-        WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+        WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSW,
+        WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_TABSTOP,
+        WS_VISIBLE,
     };
 
     const CLASS_NAME: &str = "SwiftFindOverlayWindowClass";
@@ -140,8 +145,14 @@ mod imp {
     const SWIFTFIND_WM_SUBMIT: u32 = WM_APP + 5;
     const SWIFTFIND_WM_EXTERNAL_SHOW: u32 = WM_APP + 16;
     const SWIFTFIND_WM_EXTERNAL_QUIT: u32 = WM_APP + 17;
+    const SWIFTFIND_WM_TRAY_ICON: u32 = WM_APP + 18;
+    const SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
     const EM_GETRECT: u32 = 0x00B2;
     const EM_SETRECTNP: u32 = 0x00B4;
+    const TRAY_ICON_ID: u32 = 1;
+    const TRAY_MENU_SHOW: usize = 41001;
+    const TRAY_MENU_GAME_MODE: usize = 41002;
+    const TRAY_MENU_QUIT: usize = 41003;
 
     const TIMER_WINDOW_ANIM: usize = 0xBEF1;
     const TIMER_HELP_HOVER: usize = 0xBEF3;
@@ -353,6 +364,7 @@ mod imp {
         QueryDelayElapsed,
         MoveSelection(i32),
         Submit,
+        TrayToggleGameMode,
         Escape,
         ExternalShow,
         ExternalQuit,
@@ -453,6 +465,9 @@ mod imp {
         icon_cache: HashMap<String, isize>,
         icon_cache_lru: VecDeque<String>,
         icon_cache_metrics: IconCacheMetrics,
+        game_mode_enabled: bool,
+        tray_icon_added: bool,
+        tray_icon_handle: isize,
     }
 
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +547,9 @@ mod imp {
                 icon_cache: HashMap::new(),
                 icon_cache_lru: VecDeque::new(),
                 icon_cache_metrics: IconCacheMetrics::default(),
+                game_mode_enabled: false,
+                tray_icon_added: false,
+                tray_icon_handle: 0,
             }
         }
     }
@@ -607,6 +625,11 @@ mod imp {
             shell.center_window();
             shell.apply_rounded_corners();
             shell.hide_immediate();
+            if let Err(error) = shell.initialize_tray_icon() {
+                crate::logging::warn(&format!(
+                    "[swiftfind-core] tray icon init warning: {error}"
+                ));
+            }
             Ok(shell)
         }
 
@@ -790,6 +813,13 @@ mod imp {
             active_memory_target_mb: u16,
         ) {
             configure_runtime_performance_tuning(idle_cache_trim_ms, active_memory_target_mb);
+        }
+
+        pub fn set_game_mode_enabled(&self, enabled: bool) {
+            if let Some(state) = state_for(self.hwnd) {
+                state.game_mode_enabled = enabled;
+                let _ = update_tray_icon(self.hwnd, state);
+            }
         }
 
         pub fn trim_runtime_memory(&self) {
@@ -1088,6 +1118,7 @@ mod imp {
                     SWIFTFIND_WM_MOVE_UP => on_event(OverlayEvent::MoveSelection(-1)),
                     SWIFTFIND_WM_MOVE_DOWN => on_event(OverlayEvent::MoveSelection(1)),
                     SWIFTFIND_WM_SUBMIT => on_event(OverlayEvent::Submit),
+                    SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE => on_event(OverlayEvent::TrayToggleGameMode),
                     SWIFTFIND_WM_ESCAPE => on_event(OverlayEvent::Escape),
                     SWIFTFIND_WM_EXTERNAL_SHOW => on_event(OverlayEvent::ExternalShow),
                     SWIFTFIND_WM_EXTERNAL_QUIT => on_event(OverlayEvent::ExternalQuit),
@@ -1099,6 +1130,18 @@ mod imp {
                     DispatchMessageW(&msg);
                 }
             }
+        }
+
+        fn initialize_tray_icon(&self) -> Result<(), String> {
+            let Some(state) = state_for(self.hwnd) else {
+                return Err("overlay state unavailable for tray init".to_string());
+            };
+            if state.tray_icon_added {
+                return Ok(());
+            }
+            state.tray_icon_handle = load_tray_icon_handle()?;
+            add_tray_icon(self.hwnd, state)?;
+            Ok(())
         }
 
         fn center_window(&self) {
@@ -1581,6 +1624,29 @@ mod imp {
             WM_COMMAND => {
                 let control_id = wparam & 0xffff;
                 let notification = (wparam >> 16) & 0xffff;
+                if notification == 0 {
+                    match control_id {
+                        TRAY_MENU_SHOW => {
+                            unsafe {
+                                PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_SHOW, 0, 0);
+                            }
+                            return 0;
+                        }
+                        TRAY_MENU_GAME_MODE => {
+                            unsafe {
+                                PostMessageW(hwnd, SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE, 0, 0);
+                            }
+                            return 0;
+                        }
+                        TRAY_MENU_QUIT => {
+                            unsafe {
+                                PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_QUIT, 0, 0);
+                            }
+                            return 0;
+                        }
+                        _ => {}
+                    }
+                }
                 if control_id == CONTROL_ID_INPUT && notification as u32 == EN_CHANGE as u32 {
                     if let Some(state) = state_for(hwnd) {
                         if !state.placeholder_hint.is_empty() {
@@ -1821,6 +1887,20 @@ mod imp {
                 }
                 0
             }
+            SWIFTFIND_WM_TRAY_ICON => {
+                if let Some(state) = state_for(hwnd) {
+                    match lparam as u32 {
+                        WM_LBUTTONUP | WM_LBUTTONDBLCLK => unsafe {
+                            PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_SHOW, 0, 0);
+                        },
+                        WM_RBUTTONUP => {
+                            show_tray_context_menu(hwnd, state);
+                        }
+                        _ => {}
+                    }
+                }
+                0
+            }
             WM_CLOSE => {
                 unsafe {
                     ShowWindow(hwnd, SW_HIDE);
@@ -1828,6 +1908,9 @@ mod imp {
                 0
             }
             WM_DESTROY => {
+                if let Some(state) = state_for(hwnd) {
+                    remove_tray_icon(hwnd, state);
+                }
                 unsafe {
                     PostQuitMessage(0);
                 }
@@ -4863,6 +4946,147 @@ mod imp {
         }
     }
 
+    fn tray_tooltip_text(game_mode_enabled: bool) -> String {
+        if game_mode_enabled {
+            "SwiftFind - Game Mode On".to_string()
+        } else {
+            "SwiftFind".to_string()
+        }
+    }
+
+    fn copy_wide_text_into_buffer(buffer: &mut [u16], text: &str) {
+        if buffer.is_empty() {
+            return;
+        }
+        let wide = to_wide(text);
+        let copy_len = wide.len().saturating_sub(1).min(buffer.len().saturating_sub(1));
+        buffer[..copy_len].copy_from_slice(&wide[..copy_len]);
+        buffer[copy_len] = 0;
+    }
+
+    fn build_tray_icon_data(hwnd: HWND, state: &OverlayShellState) -> NOTIFYICONDATAW {
+        let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        data.hWnd = hwnd;
+        data.uID = TRAY_ICON_ID;
+        data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        data.uCallbackMessage = SWIFTFIND_WM_TRAY_ICON;
+        data.hIcon = state.tray_icon_handle as _;
+        copy_wide_text_into_buffer(&mut data.szTip, &tray_tooltip_text(state.game_mode_enabled));
+        data
+    }
+
+    fn load_tray_icon_handle() -> Result<isize, String> {
+        let exe = std::env::current_exe().map_err(|error| format!("current_exe failed: {error}"))?;
+        let wide = path_to_wide(&exe);
+        let mut small_icon = std::ptr::null_mut();
+        let extracted = unsafe {
+            ExtractIconExW(
+                wide.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &mut small_icon,
+                1,
+            )
+        };
+        if extracted == 0 || small_icon.is_null() {
+            return Err("ExtractIconExW did not return a small icon".to_string());
+        }
+        Ok(small_icon as isize)
+    }
+
+    fn add_tray_icon(hwnd: HWND, state: &mut OverlayShellState) -> Result<(), String> {
+        let data = build_tray_icon_data(hwnd, state);
+        let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data as *const NOTIFYICONDATAW) };
+        if ok == 0 {
+            return Err(format!(
+                "Shell_NotifyIconW(NIM_ADD) failed with error {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        state.tray_icon_added = true;
+        Ok(())
+    }
+
+    fn update_tray_icon(hwnd: HWND, state: &OverlayShellState) -> Result<(), String> {
+        if !state.tray_icon_added {
+            return Ok(());
+        }
+        let data = build_tray_icon_data(hwnd, state);
+        let ok = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data as *const NOTIFYICONDATAW) };
+        if ok == 0 {
+            return Err(format!(
+                "Shell_NotifyIconW(NIM_MODIFY) failed with error {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove_tray_icon(hwnd: HWND, state: &mut OverlayShellState) {
+        if state.tray_icon_added {
+            let data = build_tray_icon_data(hwnd, state);
+            unsafe {
+                Shell_NotifyIconW(NIM_DELETE, &data as *const NOTIFYICONDATAW);
+            }
+            state.tray_icon_added = false;
+        }
+        if state.tray_icon_handle != 0 {
+            unsafe {
+                DestroyIcon(state.tray_icon_handle as _);
+            }
+            state.tray_icon_handle = 0;
+        }
+    }
+
+    fn show_tray_context_menu(hwnd: HWND, state: &OverlayShellState) {
+        let menu = unsafe { CreatePopupMenu() };
+        if menu.is_null() {
+            return;
+        }
+
+        let open_text = to_wide("Open SwiftFind");
+        let game_mode_text = to_wide("Game Mode");
+        let quit_text = to_wide("Quit");
+        unsafe {
+            AppendMenuW(menu, MF_STRING, TRAY_MENU_SHOW, open_text.as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(
+                menu,
+                MF_STRING | if state.game_mode_enabled { MF_CHECKED } else { MF_UNCHECKED },
+                TRAY_MENU_GAME_MODE,
+                game_mode_text.as_ptr(),
+            );
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(menu, MF_STRING, TRAY_MENU_QUIT, quit_text.as_ptr());
+        }
+
+        let mut cursor = POINT { x: 0, y: 0 };
+        unsafe {
+            GetCursorPos(&mut cursor as *mut POINT);
+            SetForegroundWindow(hwnd);
+        }
+        let selected = unsafe {
+            TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                cursor.x,
+                cursor.y,
+                0,
+                hwnd,
+                std::ptr::null(),
+            )
+        };
+        if selected != 0 {
+            unsafe {
+                PostMessageW(hwnd, WM_COMMAND, selected as usize, 0);
+            }
+        }
+        unsafe {
+            DestroyMenu(menu);
+        }
+    }
+
     fn cleanup_state_resources(state: &mut OverlayShellState) {
         unsafe {
             if state.input_font != 0 {
@@ -4943,6 +5167,12 @@ mod imp {
             if state.help_tip_border_brush != 0 {
                 DeleteObject(state.help_tip_border_brush as _);
             }
+        }
+        if state.tray_icon_handle != 0 {
+            unsafe {
+                DestroyIcon(state.tray_icon_handle as _);
+            }
+            state.tray_icon_handle = 0;
         }
         clear_icon_cache(state);
     }

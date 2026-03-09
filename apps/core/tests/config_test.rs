@@ -300,3 +300,40 @@ fn migrates_legacy_config_and_preserves_user_values() {
     std::fs::remove_file(&config_path).unwrap();
     std::fs::remove_dir_all(&config_dir).unwrap();
 }
+
+#[test]
+fn legacy_fullscreen_flag_does_not_enable_game_mode_on_migration() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_dir = std::env::temp_dir()
+        .join("swiftfind")
+        .join(format!("migrate-game-mode-{unique}"));
+    let config_path = config_dir.join("config.toml");
+
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"
+version = 9
+hotkey = "Ctrl+Space"
+ignore_hotkeys_on_fullscreen = true
+"#,
+    )
+    .unwrap();
+
+    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    assert_eq!(
+        loaded.version,
+        swiftfind_core::config::CURRENT_CONFIG_VERSION
+    );
+    assert!(!loaded.game_mode_enabled);
+
+    let updated_raw = std::fs::read_to_string(&config_path).unwrap();
+    assert!(updated_raw.contains("game_mode_enabled = false"));
+    assert!(!updated_raw.contains("ignore_hotkeys_on_fullscreen"));
+
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::remove_dir_all(&config_dir).unwrap();
+}

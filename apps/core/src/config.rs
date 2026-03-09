@@ -122,7 +122,6 @@ pub struct Config {
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
-    #[serde(alias = "ignore_hotkeys_on_fullscreen")]
     pub game_mode_enabled: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
@@ -1110,10 +1109,7 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         }
     }
 
-    if source_version < 10
-        && !raw_has_key(raw, "game_mode_enabled")
-        && !raw_has_key(raw, "ignore_hotkeys_on_fullscreen")
-    {
+    if source_version < 10 && !raw_has_key(raw, "game_mode_enabled") {
         cfg.game_mode_enabled = Config::default().game_mode_enabled;
         changed = true;
     }

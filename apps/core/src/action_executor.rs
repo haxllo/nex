@@ -62,6 +62,10 @@ fn launch_existing_path(candidate: &Path) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_open(target: &str) -> Result<(), LaunchError> {
+    if target.trim().to_ascii_lowercase().starts_with("shell:") {
+        return launch_shell_target(target);
+    }
+
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -84,6 +88,18 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
         });
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
+    std::process::Command::new("explorer.exe")
+        .arg(target)
+        .spawn()
+        .map_err(|error| LaunchError::LaunchFailed {
+            message: format!("failed to launch shell target '{target}': {error}"),
+            code: None,
+        })?;
     Ok(())
 }
 

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const LOG_FILE_NAME: &str = "swiftfind.log";
+pub const LOG_FILE_NAME: &str = "nex.log";
+const LEGACY_LOG_FILE_NAME: &str = "swiftfind.log";
 const MAX_LOG_BYTES: u64 = 1_000_000;
 const MAX_ARCHIVES: usize = 5;
 
@@ -19,10 +20,22 @@ pub fn logs_dir() -> PathBuf {
     crate::config::stable_app_data_dir().join("logs")
 }
 
+pub fn primary_log_path() -> PathBuf {
+    logs_dir().join(LOG_FILE_NAME)
+}
+
+pub fn candidate_log_paths() -> Vec<PathBuf> {
+    let mut paths = vec![primary_log_path(), logs_dir().join(LEGACY_LOG_FILE_NAME)];
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub fn init() -> Result<(), std::io::Error> {
     let log_dir = logs_dir();
     fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join(LOG_FILE_NAME);
+    migrate_legacy_log_file(&log_dir)?;
+    let log_path = primary_log_path();
     rotate_if_needed(&log_path, &log_dir)?;
 
     let file = OpenOptions::new()
@@ -112,9 +125,18 @@ fn rotate_if_needed(log_path: &Path, log_dir: &Path) -> Result<(), std::io::Erro
     }
 
     let stamp = now_secs();
-    let archived = log_dir.join(format!("swiftfind-{stamp}.log"));
+    let archived = log_dir.join(format!("nex-{stamp}.log"));
     fs::rename(log_path, archived)?;
     prune_old_archives(log_dir)?;
+    Ok(())
+}
+
+fn migrate_legacy_log_file(log_dir: &Path) -> Result<(), std::io::Error> {
+    let legacy_path = log_dir.join(LEGACY_LOG_FILE_NAME);
+    let current_path = log_dir.join(LOG_FILE_NAME);
+    if !current_path.exists() && legacy_path.exists() {
+        fs::rename(legacy_path, current_path)?;
+    }
     Ok(())
 }
 
@@ -125,7 +147,7 @@ fn prune_old_archives(log_dir: &Path) -> Result<(), std::io::Error> {
         .filter(|path| {
             path.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("swiftfind-") && n.ends_with(".log"))
+                .map(|n| n.starts_with("nex-") && n.ends_with(".log"))
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>();
@@ -167,9 +189,7 @@ mod tests {
     #[test]
     fn logs_dir_uses_stable_app_data_layout() {
         let dir = logs_dir();
-        assert!(dir
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .contains("swiftfind"));
+        let lowered = dir.to_string_lossy().to_ascii_lowercase();
+        assert!(lowered.contains("nex") || lowered.contains("swiftfind"));
     }
 }

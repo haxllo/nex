@@ -1,13 +1,13 @@
-use swiftfind_core::contract::{CoreRequest, LaunchRequest, SearchRequest};
-use swiftfind_core::core_service::CoreService;
-use swiftfind_core::transport::{handle_json, handle_request, ErrorCode, TransportResponse};
+use nex_core::contract::{CoreRequest, LaunchRequest, SearchRequest};
+use nex_core::core_service::CoreService;
+use nex_core::transport::{handle_json, handle_request, ErrorCode, TransportResponse};
 
 fn service_with_seed_item() -> CoreService {
-    let config = swiftfind_core::config::Config::default();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "seed",
             "app",
             "Code",

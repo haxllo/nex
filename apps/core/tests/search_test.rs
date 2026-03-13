@@ -1,5 +1,5 @@
-use swiftfind_core::model::SearchItem;
-use swiftfind_core::search::SearchFilter;
+use nex_core::model::SearchItem;
+use nex_core::search::SearchFilter;
 
 #[test]
 fn typo_query_returns_expected_match() {
@@ -10,7 +10,7 @@ fn typo_query_returns_expected_match() {
         "C:\\Q4_Report.xlsx",
     )];
 
-    let results = swiftfind_core::search::search(&items, "q4 reort", 10);
+    let results = nex_core::search::search(&items, "q4 reort", 10);
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, "1");
@@ -24,7 +24,7 @@ fn ranks_better_matches_first() {
         SearchItem::new("3", "doc", "Decode Notes", "C:\\DecodeNotes.txt"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "code", 10);
+    let results = nex_core::search::search(&items, "code", 10);
 
     let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
     assert_eq!(ids, vec!["1", "2", "3"]);
@@ -34,7 +34,7 @@ fn ranks_better_matches_first() {
 fn empty_query_returns_no_results() {
     let items = vec![SearchItem::new("1", "app", "Code", "C:\\Code.exe")];
 
-    let results = swiftfind_core::search::search(&items, "   ", 10);
+    let results = nex_core::search::search(&items, "   ", 10);
 
     assert!(results.is_empty());
 }
@@ -47,7 +47,7 @@ fn honors_result_limit() {
         SearchItem::new("3", "doc", "Document Three", "C:\\Docs\\three.txt"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "document", 2);
+    let results = nex_core::search::search(&items, "document", 2);
 
     assert_eq!(results.len(), 2);
 }
@@ -60,7 +60,7 @@ fn recent_item_outranks_older_equivalent() {
             .with_usage(5, 2_000_000_000),
     ];
 
-    let results = swiftfind_core::search::search(&items, "report", 10);
+    let results = nex_core::search::search(&items, "report", 10);
 
     assert_eq!(results[0].id, "recent");
     assert_eq!(results[1].id, "old");
@@ -75,7 +75,7 @@ fn frequency_influences_ties_predictably() {
             .with_usage(12, 1_800_000_000),
     ];
 
-    let results = swiftfind_core::search::search(&items, "terminal", 10);
+    let results = nex_core::search::search(&items, "terminal", 10);
 
     assert_eq!(results[0].id, "high");
     assert_eq!(results[1].id, "low");
@@ -99,7 +99,7 @@ fn apps_then_local_files_then_other_results() {
         SearchItem::new("app", "app", "Code", "C:\\Program Files\\Code\\Code.exe"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "code", 10);
+    let results = nex_core::search::search(&items, "code", 10);
     let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
 
     assert_eq!(ids, vec!["app", "local", "remote"]);
@@ -112,7 +112,7 @@ fn local_file_outranks_network_file_in_same_kind() {
         SearchItem::new("local", "file", "Report", "C:\\Reports\\report.txt"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "report", 10);
+    let results = nex_core::search::search(&items, "report", 10);
     let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
 
     assert_eq!(ids, vec!["local", "network"]);
@@ -126,7 +126,7 @@ fn exact_match_outranks_prefix_and_substring() {
         SearchItem::new("substring", "app", "Decode Tool", "C:\\Decode.exe"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "code", 10);
+    let results = nex_core::search::search(&items, "code", 10);
     let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
 
     assert_eq!(ids[0], "exact");
@@ -142,11 +142,11 @@ fn deterministic_order_does_not_depend_on_input_order() {
     let mut reversed = forward.clone();
     reversed.reverse();
 
-    let forward_ids: Vec<String> = swiftfind_core::search::search(&forward, "term", 10)
+    let forward_ids: Vec<String> = nex_core::search::search(&forward, "term", 10)
         .into_iter()
         .map(|item| item.id)
         .collect();
-    let reversed_ids: Vec<String> = swiftfind_core::search::search(&reversed, "term", 10)
+    let reversed_ids: Vec<String> = nex_core::search::search(&reversed, "term", 10)
         .into_iter()
         .map(|item| item.id)
         .collect();
@@ -162,7 +162,7 @@ fn word_boundary_boost_promotes_whole_word_match() {
         SearchItem::new("spaced", "app", "Visual Studio Code", "C:\\VSCode.exe"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "studio", 10);
+    let results = nex_core::search::search(&items, "studio", 10);
     assert_eq!(results[0].id, "spaced");
 }
 
@@ -173,7 +173,7 @@ fn acronym_boost_promotes_expected_match() {
         SearchItem::new("fuzzy", "app", "Gecko", "C:\\Gecko.exe"),
     ];
 
-    let results = swiftfind_core::search::search(&items, "gk", 10);
+    let results = nex_core::search::search(&items, "gk", 10);
     assert_eq!(results[0].id, "acronym");
 }
 
@@ -189,7 +189,7 @@ fn short_plain_query_prefers_app_top_hit() {
         ),
     ];
 
-    let results = swiftfind_core::search::search(&items, "v", 10);
+    let results = nex_core::search::search(&items, "v", 10);
     assert_eq!(results[0].id, "app-prefix");
 }
 
@@ -205,7 +205,7 @@ fn extension_filter_matches_only_requested_extension() {
         extension_filter: Some("md".to_string()),
         ..SearchFilter::default()
     };
-    let results = swiftfind_core::search::search_with_filter(&items, "read", 10, &filter);
+    let results = nex_core::search::search_with_filter(&items, "read", 10, &filter);
     let ids: Vec<&str> = results.iter().map(|item| item.id.as_str()).collect();
     assert_eq!(ids, vec!["md"]);
 }
@@ -223,7 +223,7 @@ fn visibility_filter_can_hide_files() {
         include_folders: true,
         ..SearchFilter::default()
     };
-    let results = swiftfind_core::search::search_with_filter(&items, "doc", 10, &filter);
+    let results = nex_core::search::search_with_filter(&items, "doc", 10, &filter);
     let ids: Vec<&str> = results.iter().map(|item| item.id.as_str()).collect();
     assert!(!ids.contains(&"file"));
     assert!(ids.contains(&"folder"));
@@ -243,7 +243,7 @@ fn visibility_filter_can_hide_folders() {
         include_folders: false,
         ..SearchFilter::default()
     };
-    let results = swiftfind_core::search::search_with_filter(&items, "doc", 10, &filter);
+    let results = nex_core::search::search_with_filter(&items, "doc", 10, &filter);
     let ids: Vec<&str> = results.iter().map(|item| item.id.as_str()).collect();
     assert!(ids.contains(&"file"));
     assert!(!ids.contains(&"folder"));

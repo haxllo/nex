@@ -151,7 +151,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
             let uninstall_publishers = crate::uninstall_registry::publishers_by_display_name()
                 .unwrap_or_else(|error| {
                     crate::logging::warn(&format!(
-                        "[swiftfind-core] uninstall publisher map unavailable: {}",
+                        "[nex] uninstall publisher map unavailable: {}",
                         error
                     ));
                     HashMap::new()
@@ -400,7 +400,7 @@ fn discover_filesystem_walk(
 
     if total_added >= total_budget {
         crate::logging::info(&format!(
-            "[swiftfind-core] discovery_cap provider=filesystem total_cap={} reached=true",
+            "[nex] discovery_cap provider=filesystem total_cap={} reached=true",
             total_budget
         ));
     }
@@ -824,7 +824,8 @@ fn load_exe_company_names(exe_paths: &[String]) -> Result<HashMap<String, String
 $ErrorActionPreference = 'Stop'
 $separator = [char]0x1f
 $paths = @()
-if ($env:SWIFTFIND_EXE_PATHS) { $paths = $env:SWIFTFIND_EXE_PATHS -split $separator }
+if ($env:NEX_EXE_PATHS) { $paths = $env:NEX_EXE_PATHS -split $separator }
+elseif ($env:SWIFTFIND_EXE_PATHS) { $paths = $env:SWIFTFIND_EXE_PATHS -split $separator }
 foreach ($path in $paths) {
   $candidate = [string]$path
   if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
@@ -850,6 +851,7 @@ foreach ($path in $paths) {
             "-Command",
             script,
         ])
+        .env("NEX_EXE_PATHS", &joined_paths)
         .env("SWIFTFIND_EXE_PATHS", joined_paths)
         .creation_flags(CREATE_NO_WINDOW);
 
@@ -1281,8 +1283,10 @@ $ErrorActionPreference = 'Stop'
 $separator = [char]0x1f
 $roots = @()
 $excludes = @()
-if ($env:SWIFTFIND_WS_ROOTS) { $roots = $env:SWIFTFIND_WS_ROOTS -split $separator }
-if ($env:SWIFTFIND_WS_EXCLUDES) { $excludes = $env:SWIFTFIND_WS_EXCLUDES -split $separator }
+if ($env:NEX_WS_ROOTS) { $roots = $env:NEX_WS_ROOTS -split $separator }
+elseif ($env:SWIFTFIND_WS_ROOTS) { $roots = $env:SWIFTFIND_WS_ROOTS -split $separator }
+if ($env:NEX_WS_EXCLUDES) { $excludes = $env:NEX_WS_EXCLUDES -split $separator }
+elseif ($env:SWIFTFIND_WS_EXCLUDES) { $excludes = $env:SWIFTFIND_WS_EXCLUDES -split $separator }
 
 $conn = New-Object -ComObject ADODB.Connection
 $conn.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows'")
@@ -1342,7 +1346,9 @@ $conn.Close()
             "-Command",
             script,
         ])
+        .env("NEX_WS_ROOTS", &roots_joined)
         .env("SWIFTFIND_WS_ROOTS", roots_joined)
+        .env("NEX_WS_EXCLUDES", &excluded_joined)
         .env("SWIFTFIND_WS_EXCLUDES", excluded_joined)
         .creation_flags(CREATE_NO_WINDOW);
 
@@ -1424,7 +1430,7 @@ $conn.Close()
 
     if skipped_due_cap > 0 {
         crate::logging::info(&format!(
-            "[swiftfind-core] discovery_cap provider=windows_search skipped_due_cap={} total_cap={} per_root_cap={}",
+            "[nex] discovery_cap provider=windows_search skipped_due_cap={} total_cap={} per_root_cap={}",
             skipped_due_cap, total_budget, per_root_budget
         ));
     }

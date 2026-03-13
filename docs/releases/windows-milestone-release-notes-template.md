@@ -1,11 +1,11 @@
-# SwiftFind Windows Milestone Release Notes
+# Nex Windows Milestone Release Notes
 
 ## Release Metadata
 
 - Version: `<version>`
 - Build date (UTC): `<timestamp>`
-- Artifact: `artifacts/windows/swiftfind-<version>-windows-x64.zip`
-- Manifest: `artifacts/windows/swiftfind-<version>-windows-x64-manifest.json`
+- Artifact: `artifacts/windows/nex-<version>-windows-x64.zip`
+- Manifest: `artifacts/windows/nex-<version>-windows-x64-manifest.json`
 
 ## Highlights
 
@@ -19,8 +19,8 @@
 
 - Automated gates passed:
   - `./node_modules/.bin/vitest --run`
-  - `cargo test -p swiftfind-core`
-  - `cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
+  - `cargo test -p nex`
+  - `cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
 - Windows runtime smoke harness status: `<pass/fail>`
 - Manual E2E checklist status: `<pass/fail>`
 - Manual evidence file: `artifacts/windows/manual-e2e-result.json`

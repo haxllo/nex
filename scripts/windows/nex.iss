@@ -1,4 +1,4 @@
-#define MyAppName "SwiftFind"
+#define MyAppName "Nex"
 #define MyAppId "{{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}"
 #define MyAppUninstallKey "{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1"
 
@@ -20,9 +20,9 @@ AppName={#MyAppName}
 AppVersion={#AppVersion}
 AppVerName={#MyAppName}
 UninstallDisplayName={#MyAppName}
-DefaultGroupName=SwiftFind
+DefaultGroupName=Nex
 OutputDir=artifacts\windows
-OutputBaseFilename=swiftfind-{#AppVersion}-windows-x64-setup
+OutputBaseFilename=nex-{#AppVersion}-windows-x64-setup
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -34,48 +34,58 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ; Always show install scope choice instead of silently reusing previous mode.
 UsePreviousPrivileges=no
-DefaultDirName={autopf}\SwiftFind
+DefaultDirName={autopf}\Nex
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 ; Avoid installer hangs in "automatically close applications" stage.
 ; Runtime shutdown is handled explicitly in [UninstallRun] during upgrade/uninstall.
 CloseApplications=no
 RestartApplications=no
-UninstallDisplayIcon={app}\bin\swiftfind-core.exe
+UninstallDisplayIcon={app}\bin\nex.exe
 SetupIconFile={#SetupIconPath}
 
 [Files]
-Source: "{#StageDir}\bin\swiftfind-core.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#StageDir}\bin\nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+Type: files; Name: "{app}\bin\nex-core.exe"
+Type: files; Name: "{app}\bin\swiftfind-core.exe"
+
 [Icons]
-Name: "{autoprograms}\SwiftFind"; Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--background"
-Name: "{autodesktop}\SwiftFind"; Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--background"; Tasks: desktopicon
+Name: "{autoprograms}\Nex"; Filename: "{app}\bin\nex.exe"; Parameters: "--background"
+Name: "{autodesktop}\Nex"; Filename: "{app}\bin\nex.exe"; Parameters: "--background"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 Name: "startuplaunch"; Description: "Launch at startup (can be changed later in config.toml)"; GroupDescription: "Startup:"
 
 [Run]
-Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--ensure-config"; Flags: runhidden
-Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--set-launch-at-startup=true"; Flags: runhidden; Tasks: startuplaunch
-Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--set-launch-at-startup=false"; Flags: runhidden; Tasks: not startuplaunch
-Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--background"; Description: "Launch SwiftFind now"; Flags: runhidden nowait postinstall skipifsilent
+Filename: "{app}\bin\nex.exe"; Parameters: "--ensure-config"; Flags: runhidden
+Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=true"; Flags: runhidden; Tasks: startuplaunch
+Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=false"; Flags: runhidden; Tasks: not startuplaunch
+Filename: "{app}\bin\nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Ask running instance to terminate cleanly first.
-Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "swiftfind-quit-runtime"
+Filename: "{app}\bin\nex.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime"
+Filename: "{app}\bin\nex-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime-legacy"
+Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime-swiftfind-legacy"
 ; Remove per-user startup registration even if config still had launch_at_startup=true.
-Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup"
+Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Nex /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-startup"
+Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-legacy-startup"
 ; Remove machine-wide startup registration when present (all-users installs).
-Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "swiftfind-clear-startup-machine"
+Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v Nex /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-startup-machine"
+Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-legacy-startup-machine"
 
 [Code]
 const
-  SwiftFindUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
-  SwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
+  NexUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
+  NexRuntimeRelativePath = 'bin\nex.exe';
+  LegacyNexRuntimeRelativePath = 'bin\nex-core.exe';
+  LegacySwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
 
 procedure ForceStopRuntimeByPath(RuntimeExe: string); forward;
 
@@ -112,8 +122,30 @@ end;
 function TryGetInstallLocation(RootKey: Integer; var InstallLocation: string): Boolean;
 begin
   Result :=
-    RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'InstallLocation', InstallLocation) and
+    RegQueryStringValue(RootKey, NexUninstallSubkey, 'InstallLocation', InstallLocation) and
     (Trim(InstallLocation) <> '');
+end;
+
+function TryResolveExistingRuntimeRelativePath(InstallLocation: string; var RuntimeExe: string): Boolean;
+begin
+  RuntimeExe := AddBackslash(StripWrappingQuotes(InstallLocation)) + NexRuntimeRelativePath;
+  if FileExists(RuntimeExe) then
+  begin
+    Result := true;
+    exit;
+  end;
+
+  RuntimeExe := AddBackslash(StripWrappingQuotes(InstallLocation)) + LegacyNexRuntimeRelativePath;
+  if FileExists(RuntimeExe) then
+  begin
+    Result := true;
+    exit;
+  end;
+
+  RuntimeExe := AddBackslash(StripWrappingQuotes(InstallLocation)) + LegacySwiftFindRuntimeRelativePath;
+  Result := FileExists(RuntimeExe);
+  if not Result then
+    RuntimeExe := '';
 end;
 
 function TryGetRegisteredRuntimeExe(RootKey: Integer; var RuntimeExe: string): Boolean;
@@ -125,15 +157,14 @@ begin
 
   if TryGetInstallLocation(RootKey, InstallLocation) then
   begin
-    RuntimeExe := AddBackslash(StripWrappingQuotes(InstallLocation)) + SwiftFindRuntimeRelativePath;
-    if FileExists(RuntimeExe) then
+    if TryResolveExistingRuntimeRelativePath(InstallLocation, RuntimeExe) then
     begin
       Result := true;
       exit;
     end;
   end;
 
-  if RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'DisplayIcon', DisplayIcon) then
+  if RegQueryStringValue(RootKey, NexUninstallSubkey, 'DisplayIcon', DisplayIcon) then
   begin
     RuntimeExe := ExtractCommandPath(DisplayIcon);
     if FileExists(RuntimeExe) then
@@ -151,7 +182,7 @@ var
   UninstallString: string;
 begin
   Result :=
-    RegQueryStringValue(RootKey, SwiftFindUninstallSubkey, 'UninstallString', UninstallString) and
+    RegQueryStringValue(RootKey, NexUninstallSubkey, 'UninstallString', UninstallString) and
     (Trim(UninstallString) <> '');
   if not Result then
   begin
@@ -292,22 +323,24 @@ begin
   StringChangeEx(EscapedRuntimeExe, '''', '''''', True);
   Command :=
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ' +
-    '"Get-CimInstance Win32_Process -Filter ""Name = ''swiftfind-core.exe''"" ' +
+    '"Get-CimInstance Win32_Process ' +
     '| Where-Object { $_.ExecutablePath -eq ''' + EscapedRuntimeExe + ''' } ' +
     '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
 
   Exec(PowerShellExe, Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-procedure StopSwiftFindRuntime();
+procedure StopNexRuntime();
 begin
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex.exe'));
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex-core.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
-    StopSwiftFindRuntime();
+    StopNexRuntime();
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -316,5 +349,5 @@ begin
   if Result <> '' then
     exit;
 
-  StopSwiftFindRuntime();
+  StopNexRuntime();
 end;

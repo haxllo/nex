@@ -2,13 +2,13 @@ use crate::config::{Config, WebSearchProvider};
 use crate::model::{normalize_for_search, SearchItem};
 use crate::uninstall_registry::{has_uninstall_intent, search_uninstall_actions};
 
-pub const ACTION_OPEN_LOGS_ID: &str = "__swiftfind_action_open_logs__";
-pub const ACTION_REBUILD_INDEX_ID: &str = "__swiftfind_action_rebuild_index__";
-pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__swiftfind_action_clear_clipboard__";
-pub const ACTION_OPEN_CONFIG_ID: &str = "__swiftfind_action_open_config__";
-pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__swiftfind_action_diagnostics_bundle__";
-pub const ACTION_TRIM_MEMORY_ID: &str = "__swiftfind_action_trim_memory__";
-pub const ACTION_WEB_SEARCH_PREFIX: &str = "__swiftfind_action_web_search__:";
+pub const ACTION_OPEN_LOGS_ID: &str = "__nex_action_open_logs__";
+pub const ACTION_REBUILD_INDEX_ID: &str = "__nex_action_rebuild_index__";
+pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__nex_action_clear_clipboard__";
+pub const ACTION_OPEN_CONFIG_ID: &str = "__nex_action_open_config__";
+pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle__";
+pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
+pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltInAction {
@@ -22,7 +22,7 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
     &[
         BuiltInAction {
             id: ACTION_OPEN_LOGS_ID,
-            title: "Open SwiftFind Logs Folder",
+            title: "Open Nex Logs Folder",
             subtitle: "Open logs directory in File Explorer",
             keywords: &["logs", "log", "debug"],
         },
@@ -40,7 +40,7 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
         },
         BuiltInAction {
             id: ACTION_OPEN_CONFIG_ID,
-            title: "Open SwiftFind Config",
+            title: "Open Nex Config",
             subtitle: "Open config.toml",
             keywords: &["config", "settings", "preferences"],
         },
@@ -185,7 +185,7 @@ mod tests {
         let actions = search_actions("diag", 10);
         assert!(actions
             .iter()
-            .any(|action| action.id == "__swiftfind_action_diagnostics_bundle__"));
+            .any(|action| action.id == "__nex_action_diagnostics_bundle__"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 ## Product Name
 
-Working name: `SwiftFind` (rename later if desired).
+Working name: `Nex`.
 
 ## Problem Statement
 

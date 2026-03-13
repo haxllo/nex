@@ -1,8 +1,8 @@
-# Spotlight-Parity Architecture (Windows SwiftFind)
+# Spotlight-Parity Architecture (Windows Nex)
 
 ## Goal
 
-Deliver a Spotlight-like launcher quality bar while preserving SwiftFind's runtime performance targets.
+Deliver a Spotlight-like launcher quality bar while preserving Nex's runtime performance targets.
 
 Core principle:
 
@@ -67,7 +67,7 @@ Output constraints:
 Default privacy posture:
 
 - all indexing and ranking are local
-- logs stay under `%APPDATA%\\SwiftFind\\logs`
+- logs stay under `%APPDATA%\\Nex\\logs`
 - config and index paths are explicit in startup logs
 
 If online suggestions are added later:

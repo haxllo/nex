@@ -50,6 +50,39 @@ const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const ACTION_UNINSTALL_CONFIRM_ID: &str = "action:uninstall:confirm";
 const ACTION_UNINSTALL_CANCEL_ID: &str = "action:uninstall:cancel";
 static STDIO_LOGGING_ENABLED: AtomicBool = AtomicBool::new(true);
+#[cfg(target_os = "windows")]
+const CURRENT_RUNTIME_EXE_NAME: &str = "nex.exe";
+#[cfg(target_os = "windows")]
+const LEGACY_RUNTIME_EXE_NAMES: &[&str] = &["nex-core.exe", "swiftfind-core.exe"];
+const CURRENT_LOG_PREFIX: &str = "[nex]";
+const LEGACY_LOG_PREFIXES: &[&str] = &["[nex-core]", "[swiftfind-core]"];
+
+fn env_var_with_legacy(current: &str, legacy: &str) -> Result<String, std::env::VarError> {
+    std::env::var(current).or_else(|_| std::env::var(legacy))
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_executable_names() -> impl Iterator<Item = &'static str> {
+    std::iter::once(CURRENT_RUNTIME_EXE_NAME).chain(LEGACY_RUNTIME_EXE_NAMES.iter().copied())
+}
+
+fn runtime_log_prefixes() -> impl Iterator<Item = &'static str> {
+    std::iter::once(CURRENT_LOG_PREFIX).chain(LEGACY_LOG_PREFIXES.iter().copied())
+}
+
+fn runtime_log_marker(prefix: &str, marker: &str) -> String {
+    format!("{prefix} {marker}")
+}
+
+fn rfind_runtime_log_marker(content: &str, marker: &str) -> Option<usize> {
+    runtime_log_prefixes()
+        .filter_map(|prefix| content.rfind(&runtime_log_marker(prefix, marker)))
+        .max()
+}
+
+fn line_contains_runtime_log_marker(line: &str, marker: &str) -> bool {
+    runtime_log_prefixes().any(|prefix| line.contains(&runtime_log_marker(prefix, marker)))
+}
 
 #[derive(Debug, Clone, Default)]
 struct OverlaySearchSession {
@@ -217,7 +250,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--diagnostics-bundle" => options.command = RuntimeCommand::DiagnosticsBundle,
             "--help" | "-h" => {
                 return Err(
-                    "usage: swiftfind-core [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle]".to_string(),
+                    "usage: nex [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle]".to_string(),
                 )
             }
             unknown => return Err(format!("unknown argument: {unknown}")),
@@ -239,7 +272,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     configure_stdio_logging(options);
 
     if let Err(error) = crate::logging::init() {
-        log_warn(&format!("[swiftfind-core] logging init warning: {error}"));
+        log_warn(&format!("[nex] logging init warning: {error}"));
     }
 
     #[cfg(target_os = "windows")]
@@ -266,12 +299,12 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     if !runtime_config.config_path.exists() {
         config::write_user_template(&runtime_config, &runtime_config.config_path)?;
         log_info(&format!(
-            "[swiftfind-core] wrote user config template to {}",
+            "[nex] wrote user config template to {}",
             runtime_config.config_path.display()
         ));
     }
     log_info(&format!(
-        "[swiftfind-core] startup mode={} hotkey={} config_path={} index_db_path={}",
+        "[nex] startup mode={} hotkey={} config_path={} index_db_path={}",
         runtime_mode(),
         runtime_config.hotkey,
         runtime_config.config_path.display(),
@@ -283,7 +316,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     let mut background_index_refresh = {
         let initial_cached_items = service.cached_items_len();
         log_info(&format!(
-            "[swiftfind-core] startup cached_items={} (async indexing scheduled)",
+            "[nex] startup cached_items={} (async indexing scheduled)",
             initial_cached_items
         ));
         start_background_index_refresh(&runtime_config, initial_cached_items == 0)
@@ -292,7 +325,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     {
         let index_report = service.rebuild_index_incremental_with_report()?;
         log_info(&format!(
-            "[swiftfind-core] startup indexed_items={} discovered={} upserted={} removed={}",
+            "[nex] startup indexed_items={} discovered={} upserted={} removed={}",
             index_report.indexed_total,
             index_report.discovered_total,
             index_report.upserted_total,
@@ -300,7 +333,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
         for provider in &index_report.providers {
             log_info(&format!(
-                "[swiftfind-core] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
                 provider.provider,
                 provider.discovered,
                 provider.upserted,
@@ -315,10 +348,10 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     #[cfg(target_os = "windows")]
     {
         for warning in &plugin_registry.load_warnings {
-            log_warn(&format!("[swiftfind-core] plugin_warning {warning}"));
+            log_warn(&format!("[nex] plugin_warning {warning}"));
         }
         log_info(&format!(
-            "[swiftfind-core] plugins loaded provider_items={} action_items={}",
+            "[nex] plugins loaded provider_items={} action_items={}",
             plugin_registry.provider_items.len(),
             plugin_registry.action_items.len()
         ));
@@ -336,7 +369,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         if let Ok(exe) = std::env::current_exe() {
             if let Err(error) = crate::startup::set_enabled(runtime_config.launch_at_startup, &exe)
             {
-                log_warn(&format!("[swiftfind-core] startup sync warning: {error}"));
+                log_warn(&format!("[nex] startup sync warning: {error}"));
             }
         }
 
@@ -346,7 +379,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         };
         if _single_instance.is_none() {
             let _ = signal_existing_instance_show();
-            log_info("[swiftfind-core] runtime already active; signaled existing instance");
+            log_info("[nex] runtime already active; signaled existing instance");
             return Ok(());
         }
 
@@ -359,12 +392,12 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
             runtime_config.active_memory_target_mb,
         );
         overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
-        log_info("[swiftfind-core] native overlay shell initialized (hidden)");
+        log_info("[nex] native overlay shell initialized (hidden)");
 
         let mut registrar = default_hotkey_registrar();
         let registration = registrar.register_hotkey(&runtime_config.hotkey)?;
         log_registration(&registration);
-        log_info("[swiftfind-core] event loop running (native overlay)");
+        log_info("[nex] event loop running (native overlay)");
 
         let mut max_results = runtime_config.max_results as usize;
         let mut config_watcher = RuntimeConfigWatcher {
@@ -400,14 +433,14 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                 );
                 match event {
                     OverlayEvent::Hotkey(_) => {
-                        log_info("[swiftfind-core] hotkey_event received");
+                        log_info("[nex] hotkey_event received");
                         let overlay_visible = overlay.is_visible();
                         overlay_state.set_visible(overlay_visible);
                         if !overlay_visible
                             && should_suppress_hotkey_for_game_mode(&runtime_config)
                         {
                             log_info(
-                                "[swiftfind-core] hotkey ignored because game mode is active for the foreground app",
+                                "[nex] hotkey ignored because game mode is active for the foreground app",
                             );
                             return;
                         }
@@ -753,7 +786,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        log_info("[swiftfind-core] non-windows runtime mode: no global hotkey loop");
+        log_info("[nex] non-windows runtime mode: no global hotkey loop");
         Ok(())
     }
 }
@@ -763,12 +796,12 @@ fn command_ensure_config() -> Result<(), RuntimeError> {
     if !cfg.config_path.exists() {
         config::write_user_template(&cfg, &cfg.config_path)?;
         log_info(&format!(
-            "[swiftfind-core] wrote user config template to {}",
+            "[nex] wrote user config template to {}",
             cfg.config_path.display()
         ));
     }
     log_info(&format!(
-        "[swiftfind-core] config ready at {}",
+        "[nex] config ready at {}",
         cfg.config_path.display()
     ));
     Ok(())
@@ -781,7 +814,7 @@ fn command_sync_startup() -> Result<(), RuntimeError> {
         let exe = std::env::current_exe()?;
         crate::startup::set_enabled(cfg.launch_at_startup, &exe)?;
         log_info(&format!(
-            "[swiftfind-core] startup registration synced: enabled={}",
+            "[nex] startup registration synced: enabled={}",
             cfg.launch_at_startup
         ));
         return Ok(());
@@ -789,7 +822,7 @@ fn command_sync_startup() -> Result<(), RuntimeError> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        log_info("[swiftfind-core] startup sync is unsupported on this platform");
+        log_info("[nex] startup sync is unsupported on this platform");
         Ok(())
     }
 }
@@ -806,7 +839,7 @@ fn command_set_launch_at_startup(enabled: bool) -> Result<(), RuntimeError> {
     }
 
     log_info(&format!(
-        "[swiftfind-core] launch_at_startup updated: enabled={} (can be changed in config)",
+        "[nex] launch_at_startup updated: enabled={} (can be changed in config)",
         enabled
     ));
     Ok(())
@@ -818,7 +851,7 @@ fn command_status() -> Result<(), RuntimeError> {
         let state = inspect_runtime_process_state();
         let running = state.has_overlay_window;
         log_info(&format!(
-            "[swiftfind-core] status: {}",
+            "[nex] status: {}",
             if running {
                 "running"
             } else if !state.other_runtime_pids.is_empty() {
@@ -829,40 +862,40 @@ fn command_status() -> Result<(), RuntimeError> {
         ));
         if !state.other_runtime_pids.is_empty() {
             log_warn(&format!(
-                "[swiftfind-core] status detected runtime_pids_without_window={:?} recommendation=run --restart",
+                "[nex] status detected runtime_pids_without_window={:?} recommendation=run --restart",
                 state.other_runtime_pids
             ));
         }
         if let Some(snapshot) = load_status_diagnostics_snapshot() {
             if let Some(line) = snapshot.startup_index_line {
-                log_info(&format!("[swiftfind-core] status last_indexing {line}"));
+                log_info(&format!("[nex] status last_indexing {line}"));
             }
             if let Some(line) = snapshot.last_provider_line {
-                log_info(&format!("[swiftfind-core] status last_provider {line}"));
+                log_info(&format!("[nex] status last_provider {line}"));
             }
             if let Some(line) = snapshot.last_icon_cache_line {
-                log_info(&format!("[swiftfind-core] status last_icon_cache {line}"));
+                log_info(&format!("[nex] status last_icon_cache {line}"));
             }
             if let Some(line) = snapshot.last_overlay_tuning_line {
                 log_info(&format!(
-                    "[swiftfind-core] status last_overlay_tuning {line}"
+                    "[nex] status last_overlay_tuning {line}"
                 ));
             }
             if let Some(line) = snapshot.last_memory_snapshot_line {
                 log_info(&format!(
-                    "[swiftfind-core] status last_memory_snapshot {line}"
+                    "[nex] status last_memory_snapshot {line}"
                 ));
             }
             if let Some(line) = snapshot.last_config_reload_line {
                 log_info(&format!(
-                    "[swiftfind-core] status last_config_reload {line}"
+                    "[nex] status last_config_reload {line}"
                 ));
             }
         }
         if let Some(report) = load_query_profile_status_report() {
             if let Some(recent) = report.recent {
                 log_info(&format!(
-                    "[swiftfind-core] status query_latency_recent samples={} p50_ms={} p95_ms={} p99_ms={} max_ms={} avg_ms={} indexed_p95_ms={} short_q_samples={} short_q_p95_ms={} short_q_app_bias_rate={}%",
+                    "[nex] status query_latency_recent samples={} p50_ms={} p95_ms={} p99_ms={} max_ms={} avg_ms={} indexed_p95_ms={} short_q_samples={} short_q_p95_ms={} short_q_app_bias_rate={}%",
                     recent.samples,
                     recent.p50_total_ms,
                     recent.p95_total_ms,
@@ -877,7 +910,7 @@ fn command_status() -> Result<(), RuntimeError> {
             }
             if let Some(historical) = report.historical {
                 log_info(&format!(
-                    "[swiftfind-core] status query_latency_historical samples={} p50_ms={} p95_ms={} p99_ms={} max_ms={} avg_ms={} indexed_p95_ms={} short_q_samples={} short_q_p95_ms={} short_q_app_bias_rate={}%",
+                    "[nex] status query_latency_historical samples={} p50_ms={} p95_ms={} p99_ms={} max_ms={} avg_ms={} indexed_p95_ms={} short_q_samples={} short_q_p95_ms={} short_q_app_bias_rate={}%",
                     historical.samples,
                     historical.p50_total_ms,
                     historical.p95_total_ms,
@@ -891,7 +924,7 @@ fn command_status() -> Result<(), RuntimeError> {
                 ));
             }
             log_info(&format!(
-                "[swiftfind-core] status query_guard recent_skipped_symbol_queries={} historical_skipped_symbol_queries={}",
+                "[nex] status query_guard recent_skipped_symbol_queries={} historical_skipped_symbol_queries={}",
                 report.recent_skipped_symbol_queries, report.historical_skipped_symbol_queries
             ));
         }
@@ -900,7 +933,7 @@ fn command_status() -> Result<(), RuntimeError> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        log_info("[swiftfind-core] status: unsupported on this platform");
+        log_info("[nex] status: unsupported on this platform");
         Ok(())
     }
 }
@@ -957,7 +990,7 @@ fn command_diagnostics_bundle() -> Result<(), RuntimeError> {
     let cfg = config::load(None)?;
     let output_dir = write_diagnostics_bundle(&cfg)?;
     log_info(&format!(
-        "[swiftfind-core] diagnostics bundle written to {}",
+        "[nex] diagnostics bundle written to {}",
         output_dir.display()
     ));
     Ok(())
@@ -1009,15 +1042,17 @@ struct QueryProfileStatusReport {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn load_status_diagnostics_snapshot() -> Option<StatusDiagnosticsSnapshot> {
-    let log_path = crate::logging::logs_dir().join("swiftfind.log");
-    let content = std::fs::read_to_string(&log_path).ok()?;
+    let content = crate::logging::candidate_log_paths()
+        .into_iter()
+        .find_map(|log_path| std::fs::read_to_string(log_path).ok())?;
     parse_status_diagnostics_snapshot(&content)
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn load_query_profile_status_report() -> Option<QueryProfileStatusReport> {
-    let log_path = crate::logging::logs_dir().join("swiftfind.log");
-    let content = std::fs::read_to_string(&log_path).ok()?;
+    let content = crate::logging::candidate_log_paths()
+        .into_iter()
+        .find_map(|log_path| std::fs::read_to_string(log_path).ok())?;
     summarize_query_profile_status_report(&content)
 }
 
@@ -1273,7 +1308,7 @@ fn summarize_query_profile_samples(samples: &[QueryProfileSample]) -> Option<Que
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn recent_runtime_log_slice(content: &str) -> &str {
-    let Some(pos) = content.rfind("[swiftfind-core] startup mode=") else {
+    let Some(pos) = rfind_runtime_log_marker(content, "startup mode=") else {
         return content;
     };
     let line_start = content[..pos].rfind('\n').map(|idx| idx + 1).unwrap_or(pos);
@@ -1296,7 +1331,7 @@ fn parse_recent_query_profile_samples(content: &str) -> Vec<QueryProfileSample> 
     }
     let start_index = lines
         .iter()
-        .rposition(|line| line.contains("[swiftfind-core] startup mode="))
+        .rposition(|line| line_contains_runtime_log_marker(line, "startup mode="))
         .unwrap_or(0);
     parse_query_profile_samples(&lines[start_index..].join("\n"))
 }
@@ -1305,7 +1340,7 @@ fn parse_recent_query_profile_samples(content: &str) -> Vec<QueryProfileSample> 
 fn parse_query_profile_samples(content: &str) -> Vec<QueryProfileSample> {
     content
         .lines()
-        .filter(|line| line.contains("[swiftfind-core] query_profile "))
+        .filter(|line| line_contains_runtime_log_marker(line, "query_profile "))
         .filter_map(|line| {
             let total_ms = parse_u128_field(line, "total_ms=")?;
             let indexed_ms = parse_u128_field(line, "indexed_ms=").unwrap_or(0);
@@ -1377,15 +1412,15 @@ fn command_quit() -> Result<(), RuntimeError> {
     {
         match stop_runtime_instance(std::time::Duration::from_secs(3))? {
             StopRuntimeOutcome::AlreadyStopped => {
-                log_info("[swiftfind-core] quit skipped (not running)");
+                log_info("[nex] quit skipped (not running)");
                 Ok(())
             }
             StopRuntimeOutcome::Graceful => {
-                log_info("[swiftfind-core] quit completed (graceful)");
+                log_info("[nex] quit completed (graceful)");
                 Ok(())
             }
             StopRuntimeOutcome::Forced => {
-                log_warn("[swiftfind-core] quit required forced process termination");
+                log_warn("[nex] quit required forced process termination");
                 Ok(())
             }
             StopRuntimeOutcome::Failed => Err(RuntimeError::Overlay(
@@ -1397,7 +1432,7 @@ fn command_quit() -> Result<(), RuntimeError> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        log_info("[swiftfind-core] quit is unsupported on this platform");
+        log_info("[nex] quit is unsupported on this platform");
         Ok(())
     }
 }
@@ -1412,7 +1447,7 @@ fn command_restart() -> Result<(), RuntimeError> {
                 ));
             }
             StopRuntimeOutcome::Forced => {
-                log_warn("[swiftfind-core] restart required forced process termination");
+                log_warn("[nex] restart required forced process termination");
             }
             StopRuntimeOutcome::Graceful | StopRuntimeOutcome::AlreadyStopped => {}
         }
@@ -1495,29 +1530,38 @@ fn wait_until_overlay_window_closed(timeout: std::time::Duration) -> bool {
 #[cfg(target_os = "windows")]
 fn force_terminate_other_runtime_processes() -> Result<bool, RuntimeError> {
     let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
-    let command = format!(
-        "taskkill /F /T /FI \"IMAGENAME eq swiftfind-core.exe\" /FI \"PID ne {}\" >NUL 2>&1",
-        current_pid
-    );
-    let status = std::process::Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .status()
-        .map_err(RuntimeError::Io)?;
-    Ok(status.success())
+    let mut terminated_any = false;
+    for exe_name in runtime_executable_names() {
+        let command = format!(
+            "taskkill /F /T /FI \"IMAGENAME eq {exe_name}\" /FI \"PID ne {}\" >NUL 2>&1",
+            current_pid
+        );
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(command)
+            .status()
+            .map_err(RuntimeError::Io)?;
+        terminated_any |= status.success();
+    }
+    Ok(terminated_any)
 }
 
 #[cfg(target_os = "windows")]
 fn runtime_process_pids_excluding_current() -> Result<Vec<u32>, RuntimeError> {
     let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
-    let output = std::process::Command::new("cmd")
-        .arg("/C")
-        .arg("tasklist /FI \"IMAGENAME eq swiftfind-core.exe\" /FO LIST /NH")
-        .output()
-        .map_err(RuntimeError::Io)?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut pids = parse_tasklist_pid_lines(&stdout);
+    let mut pids = Vec::new();
+    for exe_name in runtime_executable_names() {
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(format!("tasklist /FI \"IMAGENAME eq {exe_name}\" /FO LIST /NH"))
+            .output()
+            .map_err(RuntimeError::Io)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        pids.extend(parse_tasklist_pid_lines(&stdout));
+    }
     pids.retain(|pid| *pid != current_pid);
+    pids.sort_unstable();
+    pids.dedup();
     Ok(pids)
 }
 
@@ -1548,7 +1592,7 @@ fn write_diagnostics_bundle(cfg: &config::Config) -> Result<std::path::PathBuf, 
 
     let running_state = runtime_state_summary();
     let summary = format!(
-        "swiftfind diagnostics bundle\ngenerated_epoch_secs={stamp}\nruntime_state={running_state}\nconfig_path={}\nindex_db_path={}\nlogs_dir={}\n",
+        "nex diagnostics bundle\ngenerated_epoch_secs={stamp}\nruntime_state={running_state}\nconfig_path={}\nindex_db_path={}\nlogs_dir={}\n",
         cfg.config_path.display(),
         cfg.index_db_path.display(),
         crate::logging::logs_dir().display()
@@ -1672,13 +1716,13 @@ fn spawn_background_process() -> Result<(), RuntimeError> {
     let exe = std::env::current_exe()?;
     let mut command = std::process::Command::new(exe);
     command.arg("--foreground");
-    command.env("SWIFTFIND_SUPPRESS_STDIO", "1");
+    command.env("NEX_SUPPRESS_STDIO", "1");
     command.creation_flags(0x00000008 | 0x00000200 | 0x08000000);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());
     command.spawn()?;
-    log_info("[swiftfind-core] background process started");
+    log_info("[nex] background process started");
     Ok(())
 }
 
@@ -1959,7 +2003,7 @@ fn reconcile_suppressed_uninstall_titles(suppressed_uninstall_titles: &mut Vec<S
             Ok(still_registered) => still_registered,
             Err(error) => {
                 log_warn(&format!(
-                    "[swiftfind-core] uninstall suppression registry check failed for '{}': {}",
+                    "[nex] uninstall suppression registry check failed for '{}': {}",
                     title, error
                 ));
                 true
@@ -2065,7 +2109,7 @@ fn overlay_subtitle(item: &crate::model::SearchItem, command_mode: bool) -> Stri
     }
     if item.kind.eq_ignore_ascii_case("action") {
         if item.path.trim().is_empty() {
-            return "SwiftFind action".to_string();
+            return "Nex action".to_string();
         }
         return item.path.trim().to_string();
     }
@@ -2161,11 +2205,11 @@ fn log_registration(registration: &HotkeyRegistration) {
     match registration {
         HotkeyRegistration::Native(id) => {
             log_info(&format!(
-                "[swiftfind-core] hotkey registered native_id={id}"
+                "[nex] hotkey registered native_id={id}"
             ));
         }
         HotkeyRegistration::Noop(label) => {
-            log_info(&format!("[swiftfind-core] hotkey registered noop={label}"));
+            log_info(&format!("[nex] hotkey registered noop={label}"));
         }
     }
 }
@@ -2189,7 +2233,7 @@ fn acquire_single_instance_guard() -> Result<Option<SingleInstanceGuard>, String
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
-    let mutex_name = to_wide("Local\\SwiftFindRuntimeSingleton");
+    let mutex_name = to_wide("Local\\NexRuntimeSingleton");
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
     if handle.is_null() {
         let error = unsafe { GetLastError() };
@@ -2235,14 +2279,14 @@ fn toggle_game_mode_from_tray(overlay: &NativeOverlayShell, runtime_config: &mut
         runtime_config.game_mode_enabled = previous;
         overlay.set_game_mode_enabled(previous);
         log_warn(&format!(
-            "[swiftfind-core] failed to persist game mode toggle: {error}"
+            "[nex] failed to persist game mode toggle: {error}"
         ));
         overlay.set_status_text("Could not update Game Mode setting");
         return;
     }
 
     log_info(&format!(
-        "[swiftfind-core] game mode updated from tray: enabled={next}"
+        "[nex] game mode updated from tray: enabled={next}"
     ));
     overlay.set_status_text(if next {
         "Game Mode enabled"
@@ -2549,7 +2593,7 @@ fn maybe_apply_background_index_refresh(
             match service.reload_cache_from_store() {
                 Ok(cached_items) => {
                     log_info(&format!(
-                        "[swiftfind-core] startup indexed_items={} discovered={} upserted={} removed={} elapsed_ms={} cached_items={}",
+                        "[nex] startup indexed_items={} discovered={} upserted={} removed={} elapsed_ms={} cached_items={}",
                         report.indexed_total,
                         report.discovered_total,
                         report.upserted_total,
@@ -2559,7 +2603,7 @@ fn maybe_apply_background_index_refresh(
                     ));
                     for provider in &report.providers {
                         log_info(&format!(
-                            "[swiftfind-core] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
                             provider.provider,
                             provider.discovered,
                             provider.upserted,
@@ -2571,16 +2615,16 @@ fn maybe_apply_background_index_refresh(
                 }
                 Err(error) => {
                     log_warn(&format!(
-                        "[swiftfind-core] background indexing cache refresh failed: {error}"
+                        "[nex] background indexing cache refresh failed: {error}"
                     ));
                 }
             }
         }
         Some(Err(error)) => {
-            log_warn(&format!("[swiftfind-core] {error}"));
+            log_warn(&format!("[nex] {error}"));
         }
         None => {
-            log_warn("[swiftfind-core] background indexing completed without result");
+            log_warn("[nex] background indexing completed without result");
         }
     }
 
@@ -2588,7 +2632,7 @@ fn maybe_apply_background_index_refresh(
 
     if state.pending_discovery_reindex {
         log_info(
-            "[swiftfind-core] discovery settings queued during indexing; starting pending reindex",
+            "[nex] discovery settings queued during indexing; starting pending reindex",
         );
         *state = start_background_index_refresh(runtime_config, false);
     }
@@ -2637,7 +2681,7 @@ fn search_overlay_results_with_session(
     let normalized_query = crate::model::normalize_for_search(text_query);
     if should_skip_non_searchable_query(parsed_query, &normalized_query) {
         log_info(&format!(
-            "[swiftfind-core] query_guard skip=non_searchable_symbol_only q=\"{}\"",
+            "[nex] query_guard skip=non_searchable_symbol_only q=\"{}\"",
             sanitize_query_for_profile_log(parsed_query.raw.as_str())
         ));
         session.clear();
@@ -2767,7 +2811,7 @@ fn search_overlay_results_with_session(
     let total_ms = search_started.elapsed().as_millis();
     if total_ms >= QUERY_PROFILE_LOG_THRESHOLD_MS {
         log_info(&format!(
-            "[swiftfind-core] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} clipboard_count={} clipboard_ms={} rank_ms={} total_ms={}",
+            "[nex] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} clipboard_count={} clipboard_ms={} rank_ms={} total_ms={}",
             sanitize_query_for_profile_log(text_query),
             format!("{:?}", filter.mode).to_ascii_lowercase(),
             candidate_limit,
@@ -3020,42 +3064,42 @@ fn maybe_apply_runtime_config_reload(
             overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);
             for warning in &plugin_registry.load_warnings {
-                log_warn(&format!("[swiftfind-core] plugin_warning {warning}"));
+                log_warn(&format!("[nex] plugin_warning {warning}"));
             }
             search_session.clear();
             *pending_uninstall_confirmation = None;
 
             if hotkey_changed {
                 log_warn(&format!(
-                    "[swiftfind-core] config hotkey changed ({} -> {}), restart required to apply",
+                    "[nex] config hotkey changed ({} -> {}), restart required to apply",
                     previous.hotkey, runtime_config.hotkey
                 ));
             }
             if index_db_path_changed {
                 log_warn(
-                    "[swiftfind-core] config index_db_path changed; restart required to apply",
+                    "[nex] config index_db_path changed; restart required to apply",
                 );
             }
             if discovery_config_changed {
                 if let Err(error) = service.reconfigure_runtime_providers(runtime_config) {
                     log_warn(&format!(
-                        "[swiftfind-core] provider reconfigure failed after config reload: {error}"
+                        "[nex] provider reconfigure failed after config reload: {error}"
                     ));
                 } else {
                     if background_index_refresh.cache_applied {
                         *background_index_refresh =
                             start_background_index_refresh(runtime_config, false);
-                        log_info("[swiftfind-core] discovery settings changed; background reindex started");
+                        log_info("[nex] discovery settings changed; background reindex started");
                     } else {
                         background_index_refresh.pending_discovery_reindex = true;
                         discovery_reindex_queued = true;
-                        log_info("[swiftfind-core] discovery settings changed while indexing is active; reindex queued");
+                        log_info("[nex] discovery settings changed while indexing is active; reindex queued");
                     }
                 }
             }
 
             log_info(&format!(
-                "[swiftfind-core] config reloaded max_results={} mode={:?} show_files={} show_folders={} game_mode={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
+                "[nex] config reloaded max_results={} mode={:?} show_files={} show_folders={} game_mode={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
                 runtime_config.max_results,
                 runtime_config.search_mode_default,
                 runtime_config.show_files,
@@ -3087,7 +3131,7 @@ fn maybe_apply_runtime_config_reload(
         }
         Err(error) => {
             log_warn(&format!(
-                "[swiftfind-core] config reload skipped due to invalid config: {error}"
+                "[nex] config reload skipped due to invalid config: {error}"
             ));
         }
     }
@@ -3444,7 +3488,7 @@ fn execute_action_selection(
                 .rebuild_index_with_report()
                 .map_err(|error| format!("rebuild index failed: {error}"))?;
             log_info(&format!(
-                "[swiftfind-core] action_rebuild_index indexed={} discovered={} upserted={} removed={}",
+                "[nex] action_rebuild_index indexed={} discovered={} upserted={} removed={}",
                 report.indexed_total, report.discovered_total, report.upserted_total, report.removed_total
             ));
             Ok(())
@@ -3458,13 +3502,13 @@ fn execute_action_selection(
             let output_dir = write_diagnostics_bundle(cfg)
                 .map_err(|error| format!("diagnostics bundle failed: {error}"))?;
             log_info(&format!(
-                "[swiftfind-core] diagnostics bundle written to {}",
+                "[nex] diagnostics bundle written to {}",
                 output_dir.display()
             ));
             Ok(())
         }
         ACTION_TRIM_MEMORY_ID => {
-            log_info("[swiftfind-core] trim memory action invoked");
+            log_info("[nex] trim memory action invoked");
             Ok(())
         }
         _ => execute_plugin_action(cfg, plugins, &selected.id),
@@ -3504,7 +3548,7 @@ fn execute_plugin_action(
 }
 
 fn configure_stdio_logging(options: RuntimeOptions) {
-    let suppress_from_env = std::env::var("SWIFTFIND_SUPPRESS_STDIO")
+    let suppress_from_env = env_var_with_legacy("NEX_SUPPRESS_STDIO", "SWIFTFIND_SUPPRESS_STDIO")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let suppress_for_background = options.command == RuntimeCommand::Run && options.background;
@@ -3565,7 +3609,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("swiftfind-overlay-search-{unique}.tmp"));
+        let path = std::env::temp_dir().join(format!("nex-overlay-search-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
@@ -3597,7 +3641,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let launch_path = std::env::temp_dir().join(format!("swiftfind-launch-flow-{unique}.tmp"));
+        let launch_path = std::env::temp_dir().join(format!("nex-launch-flow-{unique}.tmp"));
         std::fs::write(&launch_path, b"ok").expect("temp launch file should be created");
 
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
@@ -3624,7 +3668,7 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_reports_error_for_missing_path() {
-        let missing_path = std::env::temp_dir().join("swiftfind-does-not-exist-launch-flow.exe");
+        let missing_path = std::env::temp_dir().join("nex-does-not-exist-launch-flow.exe");
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
             .expect("service should initialize");
         let item = SearchItem::new(
@@ -3778,7 +3822,7 @@ mod tests {
         let mut results = vec![
             SearchItem::new("app-discord", "app", "Discord", "C:\\Discord\\Discord.exe"),
             SearchItem::new(
-                "__swiftfind_action_uninstall__:discord",
+                "__nex_action_uninstall__:discord",
                 "action",
                 "Uninstall Discord",
                 "Vendor application",
@@ -3798,7 +3842,7 @@ mod tests {
         assert!(results.iter().all(|item| item.id != "app-discord"));
         assert!(results
             .iter()
-            .all(|item| item.id != "__swiftfind_action_uninstall__:discord"));
+            .all(|item| item.id != "__nex_action_uninstall__:discord"));
         assert!(results.iter().any(|item| item.id == "app-vscode"));
         assert!(results.iter().any(|item| item.id == "file-readme"));
     }
@@ -3941,7 +3985,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("swiftfind-overlay-cache-{unique}.tmp"));
+        let path = std::env::temp_dir().join(format!("nex-overlay-cache-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
@@ -4083,7 +4127,7 @@ mod tests {
             .expect("service should initialize");
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
-        let parsed = ParsedQuery::parse(">swiftfind roadmap", true);
+        let parsed = ParsedQuery::parse(">nex roadmap", true);
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 10)
             .expect("search should succeed");
         assert!(results
@@ -4097,9 +4141,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let app_path = std::env::temp_dir().join(format!("swiftfind-short-query-app-{unique}.tmp"));
+        let app_path = std::env::temp_dir().join(format!("nex-short-query-app-{unique}.tmp"));
         let file_path =
-            std::env::temp_dir().join(format!("swiftfind-short-query-file-{unique}.tmp"));
+            std::env::temp_dir().join(format!("nex-short-query-file-{unique}.tmp"));
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
@@ -4140,8 +4184,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let app_path = std::env::temp_dir().join(format!("swiftfind-short-two-app-{unique}.tmp"));
-        let file_path = std::env::temp_dir().join(format!("swiftfind-short-two-file-{unique}.tmp"));
+        let app_path = std::env::temp_dir().join(format!("nex-short-two-app-{unique}.tmp"));
+        let file_path = std::env::temp_dir().join(format!("nex-short-two-file-{unique}.tmp"));
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
@@ -4229,9 +4273,9 @@ mod tests {
     #[test]
     fn parses_status_diagnostics_snapshot_from_log_content() {
         let content = "\
-[1] [INFO] [swiftfind-core] startup indexed_items=310 discovered=320 upserted=16 removed=4
-[2] [INFO] [swiftfind-core] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
-[3] [INFO] [swiftfind-core] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9
+[1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
+[2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
+[3] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9
 ";
 
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
@@ -4254,16 +4298,16 @@ mod tests {
 
     #[test]
     fn returns_none_for_status_snapshot_without_diagnostics_tokens() {
-        let content = "[1] [INFO] [swiftfind-core] status: running\n";
+        let content = "[1] [INFO] [nex] status: running\n";
         assert!(parse_status_diagnostics_snapshot(content).is_none());
     }
 
     #[test]
     fn summarizes_query_profiles_from_log_content() {
         let content = "\
-[1] [INFO] [swiftfind-core] query_profile q=\"v\" mode=all candidate_limit=60 indexed_seed_limit=240 short_app_bias=true indexed_cache_hit=false indexed_count=20 indexed_ms=20 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=21
-[2] [INFO] [swiftfind-core] query_profile q=\"va\" mode=all candidate_limit=80 indexed_seed_limit=160 short_app_bias=true indexed_cache_hit=false indexed_count=20 indexed_ms=26 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=27
-[3] [INFO] [swiftfind-core] query_profile q=\"vala\" mode=all candidate_limit=120 indexed_seed_limit=240 short_app_bias=false indexed_cache_hit=false indexed_count=20 indexed_ms=54 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=55
+[1] [INFO] [nex] query_profile q=\"v\" mode=all candidate_limit=60 indexed_seed_limit=240 short_app_bias=true indexed_cache_hit=false indexed_count=20 indexed_ms=20 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=21
+[2] [INFO] [nex] query_profile q=\"va\" mode=all candidate_limit=80 indexed_seed_limit=160 short_app_bias=true indexed_cache_hit=false indexed_count=20 indexed_ms=26 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=27
+[3] [INFO] [nex] query_profile q=\"vala\" mode=all candidate_limit=120 indexed_seed_limit=240 short_app_bias=false indexed_cache_hit=false indexed_count=20 indexed_ms=54 provider_count=0 provider_ms=0 action_count=0 action_ms=0 built_in_actions=0 plugin_actions=0 clipboard_count=0 clipboard_ms=0 rank_ms=0 total_ms=55
 ";
         let summary = summarize_query_profiles(content).expect("summary should parse");
         assert_eq!(summary.samples, 3);
@@ -4291,11 +4335,11 @@ mod tests {
     #[test]
     fn parses_tasklist_pid_lines_from_list_output() {
         let content = "\
-Image Name:   swiftfind-core.exe
+Image Name:   nex.exe
 PID:          1124
 Session Name: Console
 
-Image Name:   swiftfind-core.exe
+Image Name:   nex.exe
 PID:          2208
 Session Name: Console
 ";

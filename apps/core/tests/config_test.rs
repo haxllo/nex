@@ -3,25 +3,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn rejects_max_results_out_of_range() {
-    let cfg = swiftfind_core::config::Config {
+    let cfg = nex_core::config::Config {
         max_results: 200,
         ..Default::default()
     };
-    assert!(swiftfind_core::config::validate(&cfg).is_err());
+    assert!(nex_core::config::validate(&cfg).is_err());
 }
 
 #[test]
 fn accepts_default_config() {
-    let cfg = swiftfind_core::config::Config::default();
+    let cfg = nex_core::config::Config::default();
     assert_eq!(cfg.max_results, 20);
-    assert_eq!(cfg.version, swiftfind_core::config::CURRENT_CONFIG_VERSION);
+    assert_eq!(cfg.version, nex_core::config::CURRENT_CONFIG_VERSION);
     assert_eq!(cfg.hotkey, "Ctrl+Space");
     assert!(!cfg.launch_at_startup);
     assert!(!cfg.hotkey_help.trim().is_empty());
     assert!(!cfg.hotkey_recommended.is_empty());
     assert_eq!(
         cfg.web_search_provider,
-        swiftfind_core::config::WebSearchProvider::Google
+        nex_core::config::WebSearchProvider::Google
     );
     assert!(cfg.windows_search_enabled);
     assert!(cfg.windows_search_fallback_filesystem);
@@ -32,32 +32,32 @@ fn accepts_default_config() {
     assert!(cfg.search_query_results_with_delay);
     assert_eq!(cfg.search_delay_time_ms, 90);
     assert!(
-        cfg.index_db_path.to_string_lossy().contains("swiftfind")
-            || cfg.index_db_path.to_string_lossy().contains("SwiftFind")
+        cfg.index_db_path.to_string_lossy().contains("nex")
+            || cfg.index_db_path.to_string_lossy().contains("Nex")
     );
     assert!(cfg.show_files);
     assert!(cfg.show_folders);
     assert!(cfg.uninstall_actions_enabled);
     assert!(
-        cfg.config_path.to_string_lossy().contains("swiftfind")
-            || cfg.config_path.to_string_lossy().contains("SwiftFind")
+        cfg.config_path.to_string_lossy().contains("nex")
+            || cfg.config_path.to_string_lossy().contains("Nex")
     );
-    assert!(swiftfind_core::config::validate(&cfg).is_ok());
+    assert!(nex_core::config::validate(&cfg).is_ok());
 }
 
 #[test]
 fn opens_index_store_from_config_path() {
-    let mut cfg = swiftfind_core::config::Config::default();
+    let mut cfg = nex_core::config::Config::default();
     cfg.index_db_path = std::env::temp_dir()
         .join("swiftfind")
         .join("cfg-open.sqlite3");
 
-    let db = swiftfind_core::index_store::open_from_config(&cfg).unwrap();
+    let db = nex_core::index_store::open_from_config(&cfg).unwrap();
     let item =
-        swiftfind_core::model::SearchItem::new("cfg-1", "app", "Terminal", "C:\\Terminal.exe");
-    swiftfind_core::index_store::upsert_item(&db, &item).unwrap();
+        nex_core::model::SearchItem::new("cfg-1", "app", "Terminal", "C:\\Terminal.exe");
+    nex_core::index_store::upsert_item(&db, &item).unwrap();
 
-    let got = swiftfind_core::index_store::get_item(&db, "cfg-1").unwrap();
+    let got = nex_core::index_store::get_item(&db, "cfg-1").unwrap();
     assert!(got.is_some());
 
     drop(db);
@@ -74,11 +74,11 @@ fn loads_default_when_config_file_missing() {
         .join("swiftfind")
         .join(format!("missing-config-{unique}.json"));
 
-    let cfg = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    let cfg = nex_core::config::load(Some(&config_path)).unwrap();
 
     assert_eq!(cfg.config_path, config_path);
     assert_eq!(cfg.max_results, 20);
-    assert_eq!(cfg.version, swiftfind_core::config::CURRENT_CONFIG_VERSION);
+    assert_eq!(cfg.version, nex_core::config::CURRENT_CONFIG_VERSION);
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn saves_and_reloads_config_file() {
         .join("swiftfind")
         .join(format!("save-reload-{unique}.json"));
 
-    let mut cfg = swiftfind_core::config::Config::default();
+    let mut cfg = nex_core::config::Config::default();
     cfg.config_path = config_path.clone();
     cfg.max_results = 33;
     cfg.hotkey = "Ctrl+Space".to_string();
@@ -99,8 +99,8 @@ fn saves_and_reloads_config_file() {
     cfg.discovery_roots = vec![std::env::temp_dir().join("root-a")];
     cfg.discovery_exclude_roots = vec![std::env::temp_dir().join("root-a").join("exclude")];
 
-    swiftfind_core::config::save(&cfg).unwrap();
-    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    nex_core::config::save(&cfg).unwrap();
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
 
     assert_eq!(loaded.max_results, 33);
     assert_eq!(loaded.hotkey, "Ctrl+Space");
@@ -109,7 +109,7 @@ fn saves_and_reloads_config_file() {
     assert_eq!(loaded.discovery_exclude_roots.len(), 1);
     assert_eq!(
         loaded.version,
-        swiftfind_core::config::CURRENT_CONFIG_VERSION
+        nex_core::config::CURRENT_CONFIG_VERSION
     );
 
     std::fs::remove_file(&config_path).unwrap();
@@ -135,12 +135,12 @@ fn loads_partial_config_with_migration_safe_defaults() {
     )
     .unwrap();
 
-    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
 
     assert_eq!(loaded.max_results, 25);
     assert_eq!(
         loaded.version,
-        swiftfind_core::config::CURRENT_CONFIG_VERSION
+        nex_core::config::CURRENT_CONFIG_VERSION
     );
     assert_eq!(loaded.hotkey, "Ctrl+Space");
     assert!(!loaded.launch_at_startup);
@@ -164,12 +164,12 @@ fn writes_user_template_with_comments_and_loads_it() {
         .join("swiftfind")
         .join(format!("template-{unique}.json"));
 
-    let mut cfg = swiftfind_core::config::Config::default();
+    let mut cfg = nex_core::config::Config::default();
     cfg.config_path = config_path.clone();
 
-    swiftfind_core::config::write_user_template(&cfg, &config_path).unwrap();
+    nex_core::config::write_user_template(&cfg, &config_path).unwrap();
     let raw = std::fs::read_to_string(&config_path).unwrap();
-    assert!(raw.contains("// SwiftFind config (comments are allowed)."));
+    assert!(raw.contains("// Nex config (comments are allowed)."));
     assert!(raw.contains("\"hotkey\": \"Ctrl+Space\""));
     assert!(raw.contains("// \"hotkey\": \"Ctrl+Alt+Space\""));
     assert!(!raw.contains("\"index_db_path\""));
@@ -199,7 +199,7 @@ fn writes_user_template_with_comments_and_loads_it() {
         }
     }
 
-    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
     assert_eq!(loaded.hotkey, cfg.hotkey);
     assert_eq!(loaded.max_results, cfg.max_results);
     assert_eq!(loaded.discovery_exclude_roots, cfg.discovery_exclude_roots);
@@ -209,10 +209,10 @@ fn writes_user_template_with_comments_and_loads_it() {
 
 #[test]
 fn rejects_custom_web_provider_without_query_placeholder() {
-    let mut cfg = swiftfind_core::config::Config::default();
-    cfg.web_search_provider = swiftfind_core::config::WebSearchProvider::Custom;
+    let mut cfg = nex_core::config::Config::default();
+    cfg.web_search_provider = nex_core::config::WebSearchProvider::Custom;
     cfg.web_search_custom_template = "https://example.com/search".to_string();
-    let err = swiftfind_core::config::validate(&cfg).expect_err("custom template should fail");
+    let err = nex_core::config::validate(&cfg).expect_err("custom template should fail");
     assert!(err.contains("{query}"));
 }
 
@@ -242,10 +242,10 @@ fn migrates_legacy_config_and_preserves_user_values() {
     )
     .unwrap();
 
-    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
     assert_eq!(
         loaded.version,
-        swiftfind_core::config::CURRENT_CONFIG_VERSION
+        nex_core::config::CURRENT_CONFIG_VERSION
     );
     assert_eq!(loaded.hotkey, "Ctrl+Alt+P");
     assert_eq!(loaded.max_results, 33);
@@ -323,10 +323,10 @@ ignore_hotkeys_on_fullscreen = true
     )
     .unwrap();
 
-    let loaded = swiftfind_core::config::load(Some(&config_path)).unwrap();
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
     assert_eq!(
         loaded.version,
-        swiftfind_core::config::CURRENT_CONFIG_VERSION
+        nex_core::config::CURRENT_CONFIG_VERSION
     );
     assert!(!loaded.game_mode_enabled);
 

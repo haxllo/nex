@@ -2,25 +2,25 @@
 
 ## Config File Location
 
-- Path: `%APPDATA%\\SwiftFind\\config.toml`
+- Path: `%APPDATA%\\Nex\\config.toml`
 - Write strategy: atomic temp-write + replace
-- Format: JSON5-compatible (inline `//` comments are allowed)
+- Format: TOML with inline comment guidance in the generated template
 
 ## Runtime Schema (Current)
 
-```json5
-{
-  "hotkey": "Ctrl+Space",
-  "launch_at_startup": false,
-  "max_results": 20,
-  "discovery_roots": [
-    "C:\\Users\\<user>"
-  ],
-  "discovery_exclude_roots": [
-    "C:\\Users\\<user>\\AppData\\Local\\Temp",
-    "C:\\Users\\<user>\\AppData\\Local\\Microsoft\\Windows\\INetCache"
-  ]
-}
+```toml
+hotkey = "Ctrl+Space"
+launch_at_startup = false
+max_results = 20
+
+discovery_roots = [
+  "C:\\Users\\<user>",
+]
+
+discovery_exclude_roots = [
+  "C:\\Users\\<user>\\AppData\\Local\\Temp",
+  "C:\\Users\\<user>\\AppData\\Local\\Microsoft\\Windows\\INetCache",
+]
 ```
 
 Additional generated fields may also exist in persisted config (for example `version`, `index_db_path`, `config_path`, and hotkey help metadata).
@@ -42,12 +42,14 @@ Additional generated fields may also exist in persisted config (for example `ver
 
 ## Reload/Apply Behavior
 
-- Runtime reads config at startup.
+- Runtime reads config at startup and watches for config file updates.
 - Hotkey changes require runtime restart to re-register globally.
-- Discovery root changes apply on next index rebuild/runtime restart.
+- `index_db_path` changes require runtime restart.
+- Most search/runtime settings hot-apply after save.
+- Discovery root and Windows Search settings trigger provider refresh plus background reindex.
 
 ## Settings Direction
 
 - Settings are file-driven in current product direction.
-- `?` in launcher opens `%APPDATA%\\SwiftFind\\config.toml`.
+- `?` in launcher opens `%APPDATA%\\Nex\\config.toml`.
 - No native settings window is required for this phase.

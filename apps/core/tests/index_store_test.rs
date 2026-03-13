@@ -2,12 +2,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn inserts_and_reads_search_item() {
-    let db = swiftfind_core::index_store::open_memory().unwrap();
-    let item = swiftfind_core::model::SearchItem::new("1", "app", "Code", "C:\\Code.exe")
+    let db = nex_core::index_store::open_memory().unwrap();
+    let item = nex_core::model::SearchItem::new("1", "app", "Code", "C:\\Code.exe")
         .with_usage(3, 1_700_000_000);
 
-    swiftfind_core::index_store::upsert_item(&db, &item).unwrap();
-    let got = swiftfind_core::index_store::get_item(&db, "1")
+    nex_core::index_store::upsert_item(&db, &item).unwrap();
+    let got = nex_core::index_store::get_item(&db, "1")
         .unwrap()
         .unwrap();
 
@@ -27,19 +27,19 @@ fn persists_items_across_reopen() {
         .join(format!("persist-test-{unique}.sqlite3"));
 
     {
-        let db = swiftfind_core::index_store::open_file(&db_path).unwrap();
-        let item = swiftfind_core::model::SearchItem::new(
+        let db = nex_core::index_store::open_file(&db_path).unwrap();
+        let item = nex_core::model::SearchItem::new(
             "persist-1",
             "file",
             "Report",
             "C:\\Report.xlsx",
         )
         .with_usage(7, 1_800_000_000);
-        swiftfind_core::index_store::upsert_item(&db, &item).unwrap();
+        nex_core::index_store::upsert_item(&db, &item).unwrap();
     }
 
-    let reopened = swiftfind_core::index_store::open_file(&db_path).unwrap();
-    let got = swiftfind_core::index_store::get_item(&reopened, "persist-1")
+    let reopened = nex_core::index_store::open_file(&db_path).unwrap();
+    let got = nex_core::index_store::get_item(&reopened, "persist-1")
         .unwrap()
         .unwrap();
 
@@ -62,12 +62,12 @@ fn persists_meta_values_across_reopen() {
         .join(format!("meta-test-{unique}.sqlite3"));
 
     {
-        let db = swiftfind_core::index_store::open_file(&db_path).unwrap();
-        swiftfind_core::index_store::set_meta(&db, "provider_stamp:filesystem", "abc123").unwrap();
+        let db = nex_core::index_store::open_file(&db_path).unwrap();
+        nex_core::index_store::set_meta(&db, "provider_stamp:filesystem", "abc123").unwrap();
     }
 
-    let reopened = swiftfind_core::index_store::open_file(&db_path).unwrap();
-    let value = swiftfind_core::index_store::get_meta(&reopened, "provider_stamp:filesystem")
+    let reopened = nex_core::index_store::open_file(&db_path).unwrap();
+    let value = nex_core::index_store::get_meta(&reopened, "provider_stamp:filesystem")
         .unwrap()
         .unwrap();
     assert_eq!(value, "abc123");
@@ -78,12 +78,12 @@ fn persists_meta_values_across_reopen() {
 
 #[test]
 fn stores_and_reads_query_selection_memory() {
-    let db = swiftfind_core::index_store::open_memory().unwrap();
-    swiftfind_core::index_store::record_query_selection(&db, "vim", "all", "app:a", 100).unwrap();
-    swiftfind_core::index_store::record_query_selection(&db, "vim", "all", "app:a", 200).unwrap();
-    swiftfind_core::index_store::record_query_selection(&db, "vim", "all", "app:b", 150).unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
+    nex_core::index_store::record_query_selection(&db, "vim", "all", "app:a", 100).unwrap();
+    nex_core::index_store::record_query_selection(&db, "vim", "all", "app:a", 200).unwrap();
+    nex_core::index_store::record_query_selection(&db, "vim", "all", "app:b", 150).unwrap();
 
-    let rows = swiftfind_core::index_store::list_query_selections(&db, "vim", "all", 10).unwrap();
+    let rows = nex_core::index_store::list_query_selections(&db, "vim", "all", 10).unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].0, "app:a");
     assert_eq!(rows[0].1, 2);

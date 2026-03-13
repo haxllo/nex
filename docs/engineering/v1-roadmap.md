@@ -1,4 +1,4 @@
-# SwiftFind V1 Robustness Roadmap
+# Nex V1 Robustness Roadmap
 
 Last updated: 2026-02-23
 
@@ -50,7 +50,7 @@ Nice-to-have:
 
 Acceptance criteria:
 - Upgrade over running instance succeeds without manual folder cleanup.
-- No ghost `swiftfind-core.exe` process remains after uninstall.
+- No ghost `nex.exe` process remains after uninstall.
 - `--status` reflects real process state after quit/restart flows.
 
 Task breakdown (implementation):
@@ -131,7 +131,7 @@ Nice-to-have:
 Acceptance criteria:
 - Update path works from prior stable to current stable.
 - Rollback path is validated in operator checklist.
-- No data-loss for `%APPDATA%\SwiftFind` config/index/logs.
+- No data-loss for `%APPDATA%\Nex` config/index/logs.
 
 Task breakdown (implementation):
 1. Channel-aware updater flow:
@@ -222,10 +222,10 @@ Next recommended tasks:
 ## Required Gates (Every Milestone)
 
 ```powershell
-cargo check -p swiftfind-core
-cargo test -p swiftfind-core
+cargo check -p nex
+cargo test -p nex
 pnpm vitest --run
-cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 ```
 
 Manual Windows checks:

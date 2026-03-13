@@ -22,7 +22,7 @@ if (-not $Version -or $Version.Trim().Length -eq 0) {
 }
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$artifactName = "swiftfind-$Version-windows-x64"
+$artifactName = "nex-$Version-windows-x64"
 $stageDir = Join-Path $OutputRoot "$artifactName-stage"
 $zipPath = Join-Path $OutputRoot "$artifactName.zip"
 $manifestPath = Join-Path $OutputRoot "$artifactName-manifest.json"
@@ -38,9 +38,9 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-N
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "docs") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-Null
 
-cargo build -p swiftfind-core --release --quiet
+cargo build -p nex --release --quiet
 
-$coreExe = "target/release/swiftfind-core.exe"
+$coreExe = "target/release/nex.exe"
 if (-not (Test-Path $coreExe)) {
   throw "Expected core executable not found at $coreExe"
 }
@@ -92,9 +92,9 @@ else {
   Write-Host "Signing skipped (unsigned artifact)." -ForegroundColor Yellow
 }
 
-Copy-Item $coreExe (Join-Path $stageDir "bin/swiftfind-core.exe") -Force
-if (Test-Path "apps/assets/swiftfinder.svg") {
-  Copy-Item "apps/assets/swiftfinder.svg" (Join-Path $stageDir "assets/swiftfinder.svg") -Force
+Copy-Item $coreExe (Join-Path $stageDir "bin/nex.exe") -Force
+if (Test-Path "apps/assets/nex.svg") {
+  Copy-Item "apps/assets/nex.svg" (Join-Path $stageDir "assets/nex.svg") -Force
 }
 if (Test-Path "apps/assets/fonts/Geist") {
   New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets/fonts") | Out-Null
@@ -102,15 +102,15 @@ if (Test-Path "apps/assets/fonts/Geist") {
 }
 Copy-Item "docs/engineering/windows-runtime-validation-checklist.md" (Join-Path $stageDir "docs/windows-runtime-validation-checklist.md") -Force
 Copy-Item "docs/releases/windows-milestone-release-notes-template.md" (Join-Path $stageDir "docs/release-notes-template.md") -Force
-Copy-Item "scripts/windows/install-swiftfind.ps1" (Join-Path $stageDir "scripts/install-swiftfind.ps1") -Force
-Copy-Item "scripts/windows/uninstall-swiftfind.ps1" (Join-Path $stageDir "scripts/uninstall-swiftfind.ps1") -Force
-Copy-Item "scripts/windows/update-swiftfind.ps1" (Join-Path $stageDir "scripts/update-swiftfind.ps1") -Force
+Copy-Item "scripts/windows/install-nex.ps1" (Join-Path $stageDir "scripts/install-nex.ps1") -Force
+Copy-Item "scripts/windows/uninstall-nex.ps1" (Join-Path $stageDir "scripts/uninstall-nex.ps1") -Force
+Copy-Item "scripts/windows/update-nex.ps1" (Join-Path $stageDir "scripts/update-nex.ps1") -Force
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
 
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
-$exePath = Join-Path $stageDir "bin/swiftfind-core.exe"
+$exePath = Join-Path $stageDir "bin/nex.exe"
 $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $exeSize = (Get-Item -LiteralPath $exePath).Length
 
@@ -149,7 +149,7 @@ $manifest = [ordered]@{
       sha256 = $null
     }
     core_exe = [ordered]@{
-      path = "bin/swiftfind-core.exe"
+      path = "bin/nex.exe"
       size_bytes = $exeSize
       sha256 = $exeHash
     }

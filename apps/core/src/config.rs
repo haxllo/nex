@@ -4,7 +4,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const CURRENT_CONFIG_VERSION: u32 = 10;
+pub const APP_DISPLAY_NAME: &str = "Nex";
+pub const LEGACY_APP_DISPLAY_NAME: &str = "SwiftFind";
+#[cfg(target_os = "windows")]
+const APP_DIR_NAME_WINDOWS: &str = "Nex";
+#[cfg(target_os = "windows")]
+const LEGACY_APP_DIR_NAME_WINDOWS: &str = "SwiftFind";
+const APP_DIR_NAME_UNIX: &str = "nex";
+const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
+const CONFIG_FILE_NAME: &str = "config.toml";
+const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
+
+pub const CURRENT_CONFIG_VERSION: u32 = 11;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -133,7 +144,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let app_dir = stable_app_data_dir();
-        let config_path = app_dir.join("config.toml");
+        let config_path = app_dir.join(CONFIG_FILE_NAME);
         Self {
             version: CURRENT_CONFIG_VERSION,
             max_results: 20,
@@ -147,9 +158,9 @@ impl Default for Config {
             show_folders: true,
             hotkey: "Ctrl+Space".to_string(),
             launch_at_startup: false,
-            hotkey_help:
-                "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart SwiftFind."
-                    .to_string(),
+            hotkey_help: format!(
+                "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."
+            ),
             hotkey_recommended: vec![
                 "Ctrl+Space".to_string(),
                 "Ctrl+Shift+Space".to_string(),
@@ -223,38 +234,56 @@ impl From<serde_json::Error> for ConfigError {
 pub fn stable_app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(app_data) = std::env::var("APPDATA") {
-            return PathBuf::from(app_data).join("SwiftFind");
-        }
-
-        if let Ok(user_profile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(user_profile)
-                .join("AppData")
-                .join("Roaming")
-                .join("SwiftFind");
+        if let Some(preferred) = windows_app_data_dir(APP_DIR_NAME_WINDOWS) {
+            return migrate_legacy_app_data_dir(
+                preferred,
+                windows_app_data_dir(LEGACY_APP_DIR_NAME_WINDOWS),
+            );
         }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg).join("swiftfind");
-        }
-
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(".config").join("swiftfind");
+        if let Some(preferred) = unix_app_data_dir(APP_DIR_NAME_UNIX) {
+            return migrate_legacy_app_data_dir(
+                preferred,
+                unix_app_data_dir(LEGACY_APP_DIR_NAME_UNIX),
+            );
         }
     }
 
-    std::env::temp_dir().join("swiftfind")
+    std::env::temp_dir().join(APP_DIR_NAME_UNIX)
 }
 
 pub fn stable_config_path() -> PathBuf {
-    stable_app_data_dir().join("config.toml")
+    stable_app_data_dir().join(CONFIG_FILE_NAME)
 }
 
-fn stable_legacy_config_path() -> PathBuf {
-    stable_app_data_dir().join("config.json")
+fn stable_legacy_config_paths() -> Vec<PathBuf> {
+    let current_dir = stable_app_data_dir();
+    let mut paths = vec![current_dir.join(LEGACY_CONFIG_FILE_NAME)];
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(legacy_dir) = windows_app_data_dir(LEGACY_APP_DIR_NAME_WINDOWS) {
+            if legacy_dir != current_dir {
+                paths.push(legacy_dir.join(LEGACY_CONFIG_FILE_NAME));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(legacy_dir) = unix_app_data_dir(LEGACY_APP_DIR_NAME_UNIX) {
+            if legacy_dir != current_dir {
+                paths.push(legacy_dir.join(LEGACY_CONFIG_FILE_NAME));
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn is_toml_path(path: &Path) -> bool {
@@ -271,8 +300,10 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
 
     if !resolved_path.exists() {
         if path.is_none() {
-            let legacy_path = stable_legacy_config_path();
-            if legacy_path.exists() {
+            if let Some(legacy_path) = stable_legacy_config_paths()
+                .into_iter()
+                .find(|candidate| candidate.exists())
+            {
                 let raw = std::fs::read_to_string(&legacy_path)?;
                 let mut cfg: Config = parse_text(&raw)?;
                 let source_version = cfg.version;
@@ -285,9 +316,18 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                         .join("index.sqlite3");
                 }
 
-                let _ = apply_migrations(&mut cfg, &raw);
+                let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
+                should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
                 validate(&cfg).map_err(ConfigError::Validation)?;
-                persist_migrated_config(&cfg, &resolved_path, &raw, source_version, &legacy_path)?;
+                if should_persist_migration {
+                    persist_migrated_config(
+                        &cfg,
+                        &resolved_path,
+                        &raw,
+                        source_version,
+                        &legacy_path,
+                    )?;
+                }
                 return Ok(cfg);
             }
         }
@@ -309,7 +349,8 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
             .join("index.sqlite3");
     }
 
-    let should_persist_migration = apply_migrations(&mut cfg, &raw);
+    let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
+    should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
     validate(&cfg).map_err(ConfigError::Validation)?;
     if should_persist_migration {
         persist_migrated_config(&cfg, &resolved_path, &raw, source_version, &resolved_path)?;
@@ -353,7 +394,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
 
     let mut text = String::new();
     text.push_str("{\n");
-    text.push_str("  // SwiftFind config (comments are allowed).\n");
+    text.push_str("  // Nex config (comments are allowed).\n");
     text.push_str("  //\n");
     text.push_str("  // How to use this file:\n");
     text.push_str("  // - Edit values and save.\n");
@@ -387,7 +428,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  \"hotkey\": ");
     text.push_str(&json_string(&cfg.hotkey));
     text.push_str(",\n");
-    text.push_str("  // Start SwiftFind automatically when you sign in (true/false)\n");
+    text.push_str("  // Start Nex automatically when you sign in (true/false)\n");
     text.push_str("  \"launch_at_startup\": ");
     text.push_str(if cfg.launch_at_startup {
         "true"
@@ -591,7 +632,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         toml_string_array_section(&cfg.clipboard_exclude_sensitive_patterns);
 
     let mut text = String::new();
-    text.push_str("# SwiftFind config (TOML format).\n");
+    text.push_str("# Nex config (TOML format).\n");
     text.push_str("#\n");
     text.push_str("# How to use this file:\n");
     text.push_str("# - Edit values and save.\n");
@@ -618,7 +659,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&json_string(&cfg.hotkey));
     text.push_str("\n\n");
 
-    text.push_str("# Start SwiftFind automatically when you sign in (true/false)\n");
+    text.push_str("# Start Nex automatically when you sign in (true/false)\n");
     text.push_str("launch_at_startup = ");
     text.push_str(if cfg.launch_at_startup {
         "true"
@@ -905,8 +946,8 @@ fn write_atomic(path: &Path, encoded: &str) -> Result<(), ConfigError> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let temp_path = parent.join(format!(".swiftfind-config-{ts}.tmp"));
-    let backup_path = parent.join(".swiftfind-config.backup");
+    let temp_path = parent.join(format!(".nex-config-{ts}.tmp"));
+    let backup_path = parent.join(".nex-config.backup");
 
     std::fs::write(&temp_path, encoded)?;
 
@@ -1132,6 +1173,10 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
+    if raw.contains(LEGACY_APP_DISPLAY_NAME) || raw.contains(LEGACY_APP_DIR_NAME_UNIX) {
+        changed = true;
+    }
+
     changed
 }
 
@@ -1194,4 +1239,127 @@ fn parse_text(raw: &str) -> Result<Config, ConfigError> {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_data_dir(app_dir_name: &str) -> Option<PathBuf> {
+    if let Ok(app_data) = std::env::var("APPDATA") {
+        return Some(PathBuf::from(app_data).join(app_dir_name));
+    }
+
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        return Some(
+            PathBuf::from(user_profile)
+                .join("AppData")
+                .join("Roaming")
+                .join(app_dir_name),
+        );
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn unix_app_data_dir(app_dir_name: &str) -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join(app_dir_name));
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(PathBuf::from(home).join(".config").join(app_dir_name));
+    }
+
+    None
+}
+
+fn migrate_legacy_app_data_dir(preferred: PathBuf, legacy: Option<PathBuf>) -> PathBuf {
+    let Some(legacy) = legacy else {
+        return preferred;
+    };
+
+    if legacy == preferred || !legacy.exists() {
+        return preferred;
+    }
+
+    if !preferred.exists() {
+        if let Some(parent) = preferred.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        return match std::fs::rename(&legacy, &preferred) {
+            Ok(()) => preferred,
+            Err(_) => legacy,
+        };
+    }
+
+    match move_missing_entries(&legacy, &preferred) {
+        Ok(()) => preferred,
+        Err(_) => {
+            if app_data_dir_has_state(&preferred) || !app_data_dir_has_state(&legacy) {
+                preferred
+            } else {
+                legacy
+            }
+        }
+    }
+}
+
+fn move_missing_entries(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if target.exists() {
+            continue;
+        }
+        std::fs::rename(entry.path(), target)?;
+    }
+
+    let is_empty = std::fs::read_dir(from)?.next().transpose()?.is_none();
+    if is_empty {
+        let _ = std::fs::remove_dir(from);
+    }
+    Ok(())
+}
+
+fn app_data_dir_has_state(path: &Path) -> bool {
+    [CONFIG_FILE_NAME, LEGACY_CONFIG_FILE_NAME, "index.sqlite3"]
+        .iter()
+        .any(|file_name| path.join(file_name).exists())
+}
+
+fn rewrite_managed_paths_to_current_app_dir(cfg: &mut Config) -> bool {
+    let current_dir = stable_app_data_dir();
+
+    #[cfg(target_os = "windows")]
+    let legacy_dir = windows_app_data_dir(LEGACY_APP_DIR_NAME_WINDOWS);
+    #[cfg(not(target_os = "windows"))]
+    let legacy_dir = unix_app_data_dir(LEGACY_APP_DIR_NAME_UNIX);
+
+    let Some(legacy_dir) = legacy_dir else {
+        return false;
+    };
+    if legacy_dir == current_dir {
+        return false;
+    }
+
+    let mut changed = false;
+
+    if let Some(rebased) = rebase_managed_path(&cfg.index_db_path, &legacy_dir, &current_dir) {
+        cfg.index_db_path = rebased;
+        changed = true;
+    }
+
+    for plugin_path in &mut cfg.plugin_paths {
+        if let Some(rebased) = rebase_managed_path(plugin_path, &legacy_dir, &current_dir) {
+            *plugin_path = rebased;
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn rebase_managed_path(path: &Path, from_root: &Path, to_root: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(from_root).ok()?;
+    Some(to_root.join(relative))
 }

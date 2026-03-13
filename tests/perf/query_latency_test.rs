@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use swiftfind_core::model::SearchItem;
-use swiftfind_core::search::search;
+use nex_core::model::SearchItem;
+use nex_core::search::search;
 
 fn p95_ms(samples: &mut [f64]) -> f64 {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

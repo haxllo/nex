@@ -1,9 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use swiftfind_core::core_service::CoreService;
+use nex_core::core_service::CoreService;
 #[cfg(not(target_os = "windows"))]
-use swiftfind_core::discovery::StartMenuAppDiscoveryProvider;
-use swiftfind_core::discovery::{
+use nex_core::discovery::StartMenuAppDiscoveryProvider;
+use nex_core::discovery::{
     AppProvider, DiscoveryProvider, FileProvider, FileSystemDiscoveryProvider,
 };
 
@@ -44,7 +44,7 @@ fn file_system_provider_discovers_files_in_roots() {
         .unwrap()
         .as_nanos();
 
-    let root = std::env::temp_dir().join(format!("swiftfind-discovery-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-discovery-{unique}"));
     let nested = root.join("nested");
     std::fs::create_dir_all(&nested).unwrap();
 
@@ -74,19 +74,19 @@ fn rebuild_index_uses_registered_providers() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let app_path = std::env::temp_dir().join(format!("swiftfind-app-provider-{unique}.tmp"));
-    let file_path = std::env::temp_dir().join(format!("swiftfind-file-provider-{unique}.tmp"));
+    let app_path = std::env::temp_dir().join(format!("nex-app-provider-{unique}.tmp"));
+    let file_path = std::env::temp_dir().join(format!("nex-file-provider-{unique}.tmp"));
     std::fs::write(&app_path, b"app").unwrap();
     std::fs::write(&file_path, b"file").unwrap();
 
-    let config = swiftfind_core::config::Config::default();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().unwrap();
 
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_providers(vec![
             Box::new(AppProvider::from_apps(vec![
-                swiftfind_core::model::SearchItem::new(
+                nex_core::model::SearchItem::new(
                     "app-code",
                     "app",
                     "Visual Studio Code",
@@ -94,7 +94,7 @@ fn rebuild_index_uses_registered_providers() {
                 ),
             ])),
             Box::new(FileProvider::from_files(vec![
-                swiftfind_core::model::SearchItem::new(
+                nex_core::model::SearchItem::new(
                     "file-report",
                     "file",
                     "Q4_Report.xlsx",
@@ -119,17 +119,17 @@ fn runtime_providers_use_configured_roots() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("swiftfind-runtime-roots-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-runtime-roots-{unique}"));
     std::fs::create_dir_all(&root).unwrap();
     let file_path = root.join("RuntimeDoc.txt");
     std::fs::write(&file_path, b"runtime").unwrap();
 
-    let mut config = swiftfind_core::config::Config::default();
+    let mut config = nex_core::config::Config::default();
     config.discovery_roots = vec![root.clone()];
     // Ensure this test root is not filtered by default exclude roots (which may include %TEMP%).
     config.discovery_exclude_roots = vec![];
 
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_runtime_providers();
@@ -150,18 +150,18 @@ fn runtime_providers_respect_show_files_and_folders_toggles() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("swiftfind-runtime-hidden-roots-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-runtime-hidden-roots-{unique}"));
     std::fs::create_dir_all(&root).unwrap();
     let file_path = root.join("HiddenDoc.txt");
     std::fs::write(&file_path, b"runtime").unwrap();
 
-    let mut config = swiftfind_core::config::Config::default();
+    let mut config = nex_core::config::Config::default();
     config.discovery_roots = vec![root.clone()];
     config.discovery_exclude_roots = vec![];
     config.show_files = false;
     config.show_folders = false;
 
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_runtime_providers();
@@ -180,16 +180,16 @@ fn runtime_providers_prune_existing_file_entries_when_disabled() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("swiftfind-runtime-prune-roots-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-runtime-prune-roots-{unique}"));
     std::fs::create_dir_all(&root).unwrap();
 
-    let mut config = swiftfind_core::config::Config::default();
+    let mut config = nex_core::config::Config::default();
     config.discovery_roots = vec![root.clone()];
     config.discovery_exclude_roots = vec![];
     config.show_files = false;
     config.show_folders = false;
 
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_runtime_providers();
@@ -198,7 +198,7 @@ fn runtime_providers_prune_existing_file_entries_when_disabled() {
     std::fs::write(&stale_path, b"stale").unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "file:stale-doc",
             "file",
             "StaleDoc.txt",
@@ -224,7 +224,7 @@ fn file_system_provider_excludes_configured_roots() {
         .unwrap()
         .as_nanos();
 
-    let root = std::env::temp_dir().join(format!("swiftfind-exclude-roots-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-exclude-roots-{unique}"));
     let included = root.join("include");
     let excluded = root.join("exclude");
     std::fs::create_dir_all(&included).unwrap();
@@ -254,7 +254,7 @@ fn file_system_provider_honors_item_caps() {
         .unwrap()
         .as_nanos();
 
-    let root = std::env::temp_dir().join(format!("swiftfind-cap-roots-{unique}"));
+    let root = std::env::temp_dir().join(format!("nex-cap-roots-{unique}"));
     std::fs::create_dir_all(&root).unwrap();
 
     for idx in 0..10 {
@@ -277,8 +277,8 @@ fn runtime_provider_reconfigure_applies_new_roots() {
         .unwrap()
         .as_nanos();
 
-    let root_a = std::env::temp_dir().join(format!("swiftfind-recfg-a-{unique}"));
-    let root_b = std::env::temp_dir().join(format!("swiftfind-recfg-b-{unique}"));
+    let root_a = std::env::temp_dir().join(format!("nex-recfg-a-{unique}"));
+    let root_b = std::env::temp_dir().join(format!("nex-recfg-b-{unique}"));
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
     let file_a = root_a.join("AlphaRoot.txt");
@@ -286,12 +286,12 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     std::fs::write(&file_a, b"a").unwrap();
     std::fs::write(&file_b, b"b").unwrap();
 
-    let mut cfg_a = swiftfind_core::config::Config::default();
+    let mut cfg_a = nex_core::config::Config::default();
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];
     cfg_a.windows_search_enabled = false;
 
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(cfg_a.clone(), db)
         .unwrap()
         .with_runtime_providers();

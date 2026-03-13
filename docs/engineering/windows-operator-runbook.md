@@ -1,30 +1,31 @@
 # Windows Operator Runbook (Current)
 
-This runbook covers how to run and validate the SwiftFind native Windows overlay runtime.
+This runbook covers how to run and validate the Nex native Windows overlay runtime.
+Nex is the product name; the current internal Windows runtime binary remains `nex.exe`.
 
 ## Start Runtime
 
 From repo root:
 
 ```powershell
-cargo run -p swiftfind-core
+cargo run -p nex
 ```
 
 Installed release mode (recommended for users):
 
 ```powershell
-.\scripts\install-swiftfind.ps1
+.\scripts\install-nex.ps1
 ```
 
 Notes:
 
-- When run from the packaged release zip, installer uses prebuilt `bin\swiftfind-core.exe`.
+- When run from the packaged release zip, installer uses prebuilt `bin\nex.exe`.
 - Rust/Cargo is not required for end users.
 
 Background mode (detached, no terminal dependency):
 
 ```powershell
-cargo run -p swiftfind-core -- --background
+cargo run -p nex -- --background
 ```
 
 Expected startup logs include:
@@ -41,21 +42,21 @@ Expected startup logs include:
 
 When running on Windows:
 
-- `cargo run` starts child process `swiftfind-core.exe`.
-- In Task Manager, look for `swiftfind-core.exe` (and `cargo.exe` while running from Cargo).
+- `cargo run` starts child process `nex.exe`.
+- In Task Manager, look for `nex.exe` (and `cargo.exe` while running from Cargo).
 
 ## Lifecycle Commands
 
 From repo root or installed binary:
 
 ```powershell
-swiftfind-core.exe --status
-swiftfind-core.exe --status-json
-swiftfind-core.exe --quit
-swiftfind-core.exe --restart
-swiftfind-core.exe --ensure-config
-swiftfind-core.exe --sync-startup
-swiftfind-core.exe --diagnostics-bundle
+nex.exe --status
+nex.exe --status-json
+nex.exe --quit
+nex.exe --restart
+nex.exe --ensure-config
+nex.exe --sync-startup
+nex.exe --diagnostics-bundle
 ```
 
 Notes:
@@ -64,7 +65,7 @@ Notes:
 - `--status-json` reports structured diagnostics for automation (`memory_snapshot`, icon cache metrics, config reload line, and query latency summary).
 - `--quit` attempts graceful stop and falls back to force stop if runtime is stuck.
 - `--restart` performs the same stop flow then starts runtime again.
-- `--ensure-config` creates `%APPDATA%\SwiftFind\config.toml` if missing.
+- `--ensure-config` creates `%APPDATA%\Nex\config.toml` if missing.
 - `--sync-startup` applies `launch_at_startup` from config to HKCU Run.
 - `--diagnostics-bundle` writes a support bundle with summary, sanitized config, and recent logs.
 
@@ -73,9 +74,9 @@ Notes:
 Channel-aware updater (user-triggered, no background updater service):
 
 ```powershell
-scripts/windows/update-swiftfind.ps1 -Channel stable
-scripts/windows/update-swiftfind.ps1 -Channel beta
-scripts/windows/update-swiftfind.ps1 -Channel stable -Version "1.2.0"
+scripts/windows/update-nex.ps1 -Channel stable
+scripts/windows/update-nex.ps1 -Channel beta
+scripts/windows/update-nex.ps1 -Channel stable -Version "1.2.0"
 ```
 
 Updater behavior:
@@ -88,12 +89,12 @@ Updater behavior:
 
 ## Default Hotkey and Config
 
-- Default hotkey: `Ctrl+Shift+Space`
-- Config file: `%APPDATA%\SwiftFind\config.toml`
-- Index DB: `%APPDATA%\SwiftFind\index.sqlite3`
+- Default hotkey: `Ctrl+Space`
+- Config file: `%APPDATA%\Nex\config.toml`
+- Index DB: `%APPDATA%\Nex\index.sqlite3`
 - Install root (scripted install):
-- `CurrentUser` scope: `%LOCALAPPDATA%\Programs\SwiftFind\`
-- `AllUsers` scope: `%ProgramFiles%\SwiftFind\` (requires elevated install)
+- `CurrentUser` scope: `%LOCALAPPDATA%\Programs\Nex\`
+- `AllUsers` scope: `%ProgramFiles%\Nex\` (requires elevated install)
 
 Installer scope behavior (`setup.exe`):
 
@@ -101,7 +102,7 @@ Installer scope behavior (`setup.exe`):
 - Optional: `All users` (prompts elevation and installs to machine location)
 
 If config file does not exist, runtime writes defaults to the stable app-data location on startup.
-The generated file is a user-focused template with inline comments (JSON5-compatible).
+The generated file is a user-focused TOML template with inline comments.
 
 ## Settings (Current)
 
@@ -109,16 +110,16 @@ Current behavior:
 
 1. Open launcher with your configured hotkey.
 2. Click `?` in the right side of the input area.
-3. SwiftFind opens `%APPDATA%\SwiftFind\config.toml`.
+3. Nex opens `%APPDATA%\Nex\config.toml`.
 4. Edit and save config.
 5. Most settings apply automatically within about 1 second.
-6. Restart `swiftfind-core` only after `hotkey` or `index_db_path` changes.
+6. Restart `nex` only after `hotkey` or `index_db_path` changes.
 
 ## Change Hotkey via Config File
 
-1. Open `%APPDATA%\SwiftFind\config.toml` directly.
+1. Open `%APPDATA%\Nex\config.toml` directly.
 2. Update the `hotkey` value.
-3. Restart `swiftfind-core`.
+3. Restart `nex`.
 
 Notes:
 
@@ -159,7 +160,7 @@ Expected output includes:
 ## Settings Direction
 
 Settings are intentionally file-driven in the current product direction.
-`?` opens `%APPDATA%\SwiftFind\config.toml`, and this remains the supported path for:
+`?` opens `%APPDATA%\Nex\config.toml`, and this remains the supported path for:
 
 - hotkey changes
 - startup toggle (`launch_at_startup`)
@@ -168,7 +169,8 @@ Settings are intentionally file-driven in the current product direction.
 
 Recommended low-conflict hotkeys on Windows:
 
-- `Ctrl+Shift+Space` (default)
+- `Ctrl+Space` (default)
+- `Ctrl+Shift+Space`
 - `Ctrl+Alt+Space`
 - `Alt+Shift+Space`
 - `Ctrl+Shift+P`
@@ -183,7 +185,7 @@ Avoid these common system/reserved shortcuts:
 
 ## Launcher Flow (Native Overlay)
 
-1. Press hotkey (`Ctrl+Shift+Space` by default).
+1. Press hotkey (`Ctrl+Space` by default).
 2. A centered floating launcher overlay appears and input is focused.
 3. Type query text to fetch ranked results.
 4. Use `Up` / `Down` to move selection.
@@ -198,12 +200,12 @@ Behavior details:
 - Closing launcher clears current query/results (next open is clean).
 - On first run (new config), launcher shows a brief onboarding hint with hotkey/config guidance.
 - Search and launch failures are shown in launcher status text.
-- Typing `log` in launcher adds an action to open `%APPDATA%\SwiftFind\logs`.
+- Typing `log` in launcher adds an action to open `%APPDATA%\Nex\logs`.
 
 ## Logs and Diagnostics
 
-- Log directory: `%APPDATA%\SwiftFind\logs`
-- Current file: `swiftfind.log`
+- Log directory: `%APPDATA%\Nex\logs`
+- Current file: `nex.log`
 - Rotation: old logs are archived when current file reaches size threshold.
 - Panic/crash details are written to logs via runtime panic hook.
 - Overlay icon cache writes diagnostics on cache-clear events:
@@ -247,9 +249,9 @@ After:
 Run these on a real Windows host:
 
 1. Start runtime:
-   - `cargo run -p swiftfind-core`
+   - `cargo run -p nex`
 2. Confirm process visibility:
-   - Task Manager shows `swiftfind-core.exe`.
+   - Task Manager shows `nex.exe`.
 3. Confirm hotkey:
    - configured hotkey opens the overlay.
 4. Confirm search + launch:
@@ -292,12 +294,12 @@ Recommended capture points:
 
 1. Hotkey does not trigger:
    - Check startup log for `hotkey registered native_id=...`.
-   - Try changing hotkey in `%APPDATA%\SwiftFind\config.toml` to avoid OS/app conflicts.
+   - Try changing hotkey in `%APPDATA%\Nex\config.toml` to avoid OS/app conflicts.
    - Restart runtime after config change.
    - Check if another launcher utility (PowerToys, Flow Launcher, etc.) is intercepting your chosen hotkey.
 2. Overlay does not focus or appears behind apps:
    - Trigger the configured hotkey twice to force refocus.
-   - Ensure runtime is still active (`swiftfind-core.exe`).
+   - Ensure runtime is still active (`nex.exe`).
    - Disable conflicting always-on-top/focus-stealing utilities while validating.
 3. No results returned:
    - Check startup `indexed_items` value.
@@ -314,27 +316,27 @@ Recommended capture points:
      - `shell:AppsFolder\\...` (UWP/AppX) targets now attempt PIDL/display-name icon resolution before generic fallback
    - If arrows still appear for specific apps:
      - capture the exact app names (for example: Chrome, Visual Studio)
-     - restart runtime once (`swiftfind-core.exe --restart`) to refresh in-memory icon cache
+     - restart runtime once (`nex.exe --restart`) to refresh in-memory icon cache
      - re-test with the same query
    - If still reproducible, treat as app-specific shortcut metadata edge case and record:
      - shortcut path
      - whether target executable icon differs from shortcut icon
    - Verify the path is launchable from Explorer/Run dialog.
 6. Process not visible:
-   - Ensure `cargo run -p swiftfind-core` is still running.
-   - Verify `swiftfind-core.exe` in Task Manager Details tab.
+   - Ensure `cargo run -p nex` is still running.
+   - Verify `nex.exe` in Task Manager Details tab.
 7. JS tests flaky on Windows:
    - Use `pnpm vitest --run` with repo `vitest.config.ts` (single-fork mode configured).
 8. Config open/edit issues:
-   - Ensure `%APPDATA%\SwiftFind\config.toml` is writable.
+   - Ensure `%APPDATA%\Nex\config.toml` is writable.
    - Check if the config file is locked by another process/editor.
 
 ## Validation Commands
 
 ```powershell
 pnpm vitest --run
-cargo test -p swiftfind-core
-cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex
+cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 ```
 
 ## Release Lifecycle Validation
@@ -342,17 +344,17 @@ cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_quer
 Run these on a Windows host before publishing a release.
 
 1. Clean install:
-   - install `swiftfind-<version>-windows-x64-setup.exe`.
+   - install `nex-<version>-windows-x64-setup.exe`.
    - verify launcher starts and hotkey works without Rust/Cargo installed.
 
 2. Upgrade-over-existing:
-   - run `scripts/windows/update-swiftfind.ps1 -Channel stable -Version "<newer-version>"`.
+   - run `scripts/windows/update-nex.ps1 -Channel stable -Version "<newer-version>"`.
    - verify checksum verification passes and install completes without manual cleanup.
-   - verify `%APPDATA%\SwiftFind\config.toml` remains intact.
+   - verify `%APPDATA%\Nex\config.toml` remains intact.
 
 3. Uninstall + reinstall:
    - uninstall from Windows Apps settings (or uninstaller).
-   - verify `swiftfind-core.exe` is not running and hotkey no longer triggers.
+   - verify `nex.exe` is not running and hotkey no longer triggers.
    - reinstall and verify normal runtime behavior returns.
 
 4. Rollback:

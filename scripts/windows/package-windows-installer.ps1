@@ -25,12 +25,12 @@ $outputRootAbs = if ([System.IO.Path]::IsPathRooted($OutputRoot)) {
   [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 }
 
-$artifactName = "swiftfind-$Version-windows-x64"
+$artifactName = "nex-$Version-windows-x64"
 $stageDir = Join-Path $outputRootAbs "$artifactName-stage"
-$issPath = Join-Path $repoRoot "scripts/windows/swiftfind.iss"
-$setupIconPath = Join-Path $repoRoot "apps/assets/swiftfinder.ico"
+$issPath = Join-Path $repoRoot "scripts/windows/nex.iss"
+$setupIconPath = Join-Path $repoRoot "apps/assets/nex.ico"
 
-Write-Host "== Building SwiftFind Setup.exe for $Version ==" -ForegroundColor Cyan
+Write-Host "== Building Nex Setup.exe for $Version ==" -ForegroundColor Cyan
 
 if (-not (Test-Path $InnoCompiler)) {
   $resolvedInno = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
@@ -57,7 +57,7 @@ if (-not (Test-Path $issPath)) {
 }
 
 if (-not (Test-Path $setupIconPath)) {
-  throw "Setup icon not found at '$setupIconPath'. Expected apps/assets/swiftfinder.ico."
+  throw "Setup icon not found at '$setupIconPath'. Expected apps/assets/nex.ico."
 }
 
 if (-not (Test-Path $stageDir)) {
@@ -68,8 +68,8 @@ if (-not (Test-Path $stageDir)) {
   }
 }
 
-if (-not (Test-Path (Join-Path $stageDir "bin/swiftfind-core.exe"))) {
-  throw "Missing staged executable at '$stageDir/bin/swiftfind-core.exe'."
+if (-not (Test-Path (Join-Path $stageDir "bin/nex.exe"))) {
+  throw "Missing staged executable at '$stageDir/bin/nex.exe'."
 }
 
 New-Item -ItemType Directory -Force -Path $outputRootAbs | Out-Null
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) {
   throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }
 
-$setupPath = Join-Path $outputRootAbs "swiftfind-$Version-windows-x64-setup.exe"
+$setupPath = Join-Path $outputRootAbs "nex-$Version-windows-x64-setup.exe"
 if (-not (Test-Path $setupPath)) {
   throw "Expected installer was not generated at '$setupPath'."
 }

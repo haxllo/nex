@@ -1,6 +1,6 @@
 # Master Phase and Task Tracker
 
-This file is the single planning/status source of truth for SwiftFind execution.
+This file is the single planning/status source of truth for Nex execution.
 
 Last updated: 2026-02-23
 

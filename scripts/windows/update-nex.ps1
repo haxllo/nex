@@ -5,8 +5,8 @@ param(
   [string]$Repo = "haxllo/sch",
   [switch]$StartAfterUpdate = $true,
   [switch]$KeepBackup,
-  [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\SwiftFind",
-  [string]$CacheRoot = "$env:LOCALAPPDATA\SwiftFind\updates"
+  [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Nex",
+  [string]$CacheRoot = "$env:LOCALAPPDATA\Nex\updates"
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,8 +92,30 @@ function Download-ReleaseAsset {
   )
   Invoke-WebRequest `
     -Uri $Asset.browser_download_url `
-    -Headers @{ "User-Agent" = "SwiftFind-Updater"; "Accept" = "application/octet-stream" } `
+    -Headers @{ "User-Agent" = "Nex-Updater"; "Accept" = "application/octet-stream" } `
     -OutFile $OutFile
+}
+
+function Get-RuntimeExecutableCandidates {
+  param([string]$Root)
+
+  return @(
+    (Join-Path $Root "bin\nex.exe"),
+    (Join-Path $Root "bin\nex-core.exe"),
+    (Join-Path $Root "bin\swiftfind-core.exe")
+  )
+}
+
+function Resolve-InstalledRuntimePath {
+  param([string]$Root)
+
+  foreach ($candidate in (Get-RuntimeExecutableCandidates -Root $Root)) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  return (Join-Path $Root "bin\nex.exe")
 }
 
 function Stop-Runtime {
@@ -109,7 +131,9 @@ function Stop-Runtime {
     Start-Sleep -Milliseconds 400
   }
 
-  cmd /c "taskkill /IM swiftfind-core.exe /F /T >NUL 2>&1" | Out-Null
+  foreach ($imageName in @("nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
+    cmd /c "taskkill /IM $imageName /F /T >NUL 2>&1" | Out-Null
+  }
   Start-Sleep -Milliseconds 200
 }
 
@@ -160,7 +184,7 @@ function Verify-ManifestAndInstaller {
   }
 }
 
-Write-Host "== SwiftFind Update ==" -ForegroundColor Cyan
+Write-Host "== Nex Update ==" -ForegroundColor Cyan
 Write-Host "Channel: $Channel"
 if ($Version) {
   Write-Host "Requested version: $Version"
@@ -169,14 +193,14 @@ Write-Host "Repo: $Repo"
 Write-Host "Install root: $InstallRoot"
 
 $apiUrl = "https://api.github.com/repos/$Repo/releases?per_page=40"
-$releases = @(Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "SwiftFind-Updater" })
+$releases = @(Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "Nex-Updater" })
 if ($releases.Count -eq 0) {
   throw "No releases were returned for '$Repo'."
 }
 
 $targetRelease = Resolve-TargetRelease -Releases $releases -ChannelName $Channel -RequestedVersion $Version
 $resolvedVersion = Normalize-Version ([string]$targetRelease.tag_name)
-$artifactBase = "swiftfind-$resolvedVersion-windows-x64"
+$artifactBase = "nex-$resolvedVersion-windows-x64"
 $setupName = "$artifactBase-setup.exe"
 $manifestName = "$artifactBase-manifest.json"
 
@@ -205,7 +229,7 @@ Verify-ManifestAndInstaller `
   -ExpectedChannel $Channel `
   -SetupPath $setupPath
 
-$installedExe = Join-Path $InstallRoot "bin\swiftfind-core.exe"
+$installedExe = Resolve-InstalledRuntimePath -Root $InstallRoot
 $backupDir = $null
 
 try {
@@ -215,7 +239,7 @@ try {
   if (Test-Path -LiteralPath $InstallRoot) {
     $backupRoot = Join-Path $CacheRoot "backups"
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-    $backupDir = Join-Path $backupRoot "swiftfind-backup-$stamp"
+    $backupDir = Join-Path $backupRoot "nex-backup-$stamp"
     Move-Item -LiteralPath $InstallRoot -Destination $backupDir
     Write-Host "Backup created: $backupDir"
   }
@@ -227,7 +251,7 @@ try {
     throw "Installer exited with code $($proc.ExitCode)."
   }
 
-  $newExe = Join-Path $InstallRoot "bin\swiftfind-core.exe"
+  $newExe = Resolve-InstalledRuntimePath -Root $InstallRoot
   if (-not (Test-Path -LiteralPath $newExe)) {
     throw "Updated runtime executable not found at '$newExe'."
   }
@@ -255,13 +279,13 @@ catch {
   Write-Host "Attempting rollback..." -ForegroundColor Yellow
 
   try {
-    Stop-Runtime -InstalledExePath (Join-Path $InstallRoot "bin\swiftfind-core.exe")
+    Stop-Runtime -InstalledExePath (Resolve-InstalledRuntimePath -Root $InstallRoot)
     if (Test-Path -LiteralPath $InstallRoot) {
       Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     }
     if ($backupDir -and (Test-Path -LiteralPath $backupDir)) {
       Move-Item -LiteralPath $backupDir -Destination $InstallRoot
-      $restoredExe = Join-Path $InstallRoot "bin\swiftfind-core.exe"
+      $restoredExe = Resolve-InstalledRuntimePath -Root $InstallRoot
       if ($StartAfterUpdate -and (Test-Path -LiteralPath $restoredExe)) {
         Start-Process -FilePath $restoredExe -ArgumentList "--background" -WindowStyle Hidden
       }

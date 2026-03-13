@@ -1,8 +1,8 @@
 #[cfg(not(target_os = "windows"))]
-use swiftfind_core::hotkey_runtime::{
+use nex_core::hotkey_runtime::{
     default_hotkey_registrar, run_message_loop, HotkeyRuntimeError,
 };
-use swiftfind_core::hotkey_runtime::{HotkeyRegistrar, HotkeyRegistration, MockHotkeyRegistrar};
+use nex_core::hotkey_runtime::{HotkeyRegistrar, HotkeyRegistration, MockHotkeyRegistrar};
 
 #[test]
 fn mock_registrar_tracks_registration_lifecycle() {

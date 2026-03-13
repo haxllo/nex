@@ -690,7 +690,7 @@ impl CoreService {
         let latest = compact_cached_items(&latest_full, &config_snapshot);
         if latest.len() < latest_full.len() {
             crate::logging::info(&format!(
-                "[swiftfind-core] cache_compaction retained={} dropped={} file_seed_cap={}",
+                "[nex] cache_compaction retained={} dropped={} file_seed_cap={}",
                 latest.len(),
                 latest_full.len().saturating_sub(latest.len()),
                 config_snapshot.index_max_items_per_query_seed
@@ -1088,8 +1088,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let app_path = std::env::temp_dir().join(format!("swiftfind-app-cache-app-{unique}.tmp"));
-        let file_path = std::env::temp_dir().join(format!("swiftfind-app-cache-file-{unique}.tmp"));
+        let app_path = std::env::temp_dir().join(format!("nex-app-cache-app-{unique}.tmp"));
+        let file_path = std::env::temp_dir().join(format!("nex-app-cache-file-{unique}.tmp"));
         std::fs::write(&app_path, b"ok").expect("app path should exist");
         std::fs::write(&file_path, b"ok").expect("file path should exist");
 
@@ -1132,7 +1132,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("swiftfind-app-cache-kind-{unique}.tmp"));
+        let path = std::env::temp_dir().join(format!("nex-app-cache-kind-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should exist");
 
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
@@ -1175,7 +1175,7 @@ mod tests {
 
         let mut temp_paths = Vec::new();
         for idx in 0..25 {
-            let path = std::env::temp_dir().join(format!("swiftfind-uncapped-{idx}.tmp"));
+            let path = std::env::temp_dir().join(format!("nex-uncapped-{idx}.tmp"));
             std::fs::write(&path, b"ok").expect("temp file should exist");
             temp_paths.push(path.clone());
             service

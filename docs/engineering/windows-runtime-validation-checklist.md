@@ -24,7 +24,7 @@ Expected:
 ## v2.1 Reliability Scenarios
 
 1. Structured status output
-- Run: `cargo run -p swiftfind-core -- --status-json`
+- Run: `cargo run -p nex -- --status-json`
 - Expected: valid JSON with `runtime_state`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
 
 2. Baseline profile harness
@@ -41,7 +41,7 @@ Expected:
 
 4. Live config apply (no restart for discovery/search tuning)
 - Keep runtime running.
-- Edit and save `%APPDATA%\SwiftFind\config.toml` fields:
+- Edit and save `%APPDATA%\Nex\config.toml` fields:
 - hot-apply fields: `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`, `clipboard_*`, `plugins_*`, `web_search_*`, `idle_cache_trim_ms`, `active_memory_target_mb`, `index_max_items_*`.
 - provider-refresh fields: `discovery_roots`, `discovery_exclude_roots`, `windows_search_enabled`, `windows_search_fallback_filesystem`.
 - Expected: launcher status updates to `Settings applied` or `Discovery settings updated; reindexing...`; no process restart required.
@@ -55,7 +55,7 @@ Expected:
 1. Start runtime/application process for this milestone build.
 - Expected: process is running without immediate crash.
 
-2. Press `Alt+Space` with another app focused.
+2. Press the configured hotkey with another app focused.
 - Expected: launcher overlay opens; query input is focused.
 - Expected: launcher opens in compact bar state (no visible results list).
 
@@ -86,17 +86,18 @@ Expected:
 
 9. Settings access checks.
 - Click `?` in launcher input area.
-- Expected: `%APPDATA%\SwiftFind\config.toml` opens for manual edits.
-- Edit `hotkey` or `max_results`, save, restart runtime, verify behavior updates.
+- Expected: `%APPDATA%\Nex\config.toml` opens for manual edits.
+- Edit `hotkey` or `max_results`, save, and verify behavior updates.
+- Restart is only required if you changed `hotkey` or `index_db_path`.
 
 10. Future settings UI note.
 - Native settings UI is intentionally disabled from `?` for now.
 - Expected: no crash; manual config path remains available.
 
 11. Lifecycle command checks.
-- Run `swiftfind-core.exe --status` while runtime is active.
+- Run `nex.exe --status` while runtime is active.
 - Expected: reports running.
-- Run `swiftfind-core.exe --quit`, then `--status`.
+- Run `nex.exe --quit`, then `--status`.
 - Expected: reports stopped after quit.
 
 12. Clean install checks.
@@ -108,14 +109,14 @@ Expected:
 - Install a newer build over an existing installed build.
 - Expected: install succeeds without manual uninstall.
 - Expected: runtime restarts cleanly and hotkey registration remains valid.
-- Expected: config file in `%APPDATA%\SwiftFind\config.toml` is preserved.
+- Expected: config file in `%APPDATA%\Nex\config.toml` is preserved.
 
 14. Channel updater checks.
-- Run `scripts/windows/update-swiftfind.ps1 -Channel stable`.
+- Run `scripts/windows/update-nex.ps1 -Channel stable`.
 - Expected: manifest and installer are downloaded.
 - Expected: installer checksum is verified before apply.
 - Expected: update applies cleanly and runtime can be started.
-- Run `scripts/windows/update-swiftfind.ps1 -Channel beta` (on beta tag availability).
+- Run `scripts/windows/update-nex.ps1 -Channel beta` (on beta tag availability).
 - Expected: beta channel resolves beta-tagged release only.
 
 15. Uninstall + reinstall checks.

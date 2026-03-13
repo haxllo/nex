@@ -1,32 +1,32 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::sync::{Arc, Mutex};
-use swiftfind_core::config::SearchMode;
-use swiftfind_core::core_service::{CoreService, LaunchTarget, ServiceError};
-use swiftfind_core::discovery::{DiscoveryProvider, ProviderError};
-use swiftfind_core::model::SearchItem;
+use nex_core::config::SearchMode;
+use nex_core::core_service::{CoreService, LaunchTarget, ServiceError};
+use nex_core::discovery::{DiscoveryProvider, ProviderError};
+use nex_core::model::SearchItem;
 
-fn test_config() -> swiftfind_core::config::Config {
-    swiftfind_core::config::Config::default()
+fn test_config() -> nex_core::config::Config {
+    nex_core::config::Config::default()
 }
 
 #[test]
 fn service_search_returns_ranked_results() {
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p1 = std::env::temp_dir().join(format!("swiftfind-search-ranked-{unique}-1.tmp"));
-    let p2 = std::env::temp_dir().join(format!("swiftfind-search-ranked-{unique}-2.tmp"));
+    let p1 = std::env::temp_dir().join(format!("nex-search-ranked-{unique}-1.tmp"));
+    let p2 = std::env::temp_dir().join(format!("nex-search-ranked-{unique}-2.tmp"));
     std::fs::write(&p1, b"1").unwrap();
     std::fs::write(&p2, b"2").unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "1",
             "app",
             "Code",
@@ -34,7 +34,7 @@ fn service_search_returns_ranked_results() {
         ))
         .unwrap();
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "2",
             "app",
             "Codeium",
@@ -57,15 +57,15 @@ fn service_launch_by_id_uses_indexed_path() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("swiftfind-service-launch-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-service-launch-{unique}.tmp"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "launch-id",
             "file",
             "Launch Target",
@@ -85,15 +85,15 @@ fn service_launch_by_id_records_usage_signals() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("swiftfind-launch-usage-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-launch-usage-{unique}.tmp"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "usage-id",
             "file",
             "Usage Target",
@@ -116,7 +116,7 @@ fn service_launch_by_id_records_usage_signals() {
 #[test]
 fn service_launch_by_missing_id_returns_typed_error() {
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     let result = service.launch(LaunchTarget::Id("missing"));
@@ -130,11 +130,11 @@ fn service_launch_by_missing_id_returns_typed_error() {
 #[test]
 fn service_rebuild_index_reports_item_count() {
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "1",
             "file",
             "A",
@@ -142,7 +142,7 @@ fn service_rebuild_index_reports_item_count() {
         ))
         .unwrap();
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "2",
             "file",
             "B",
@@ -160,16 +160,16 @@ fn service_search_prunes_stale_items() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let present_path = std::env::temp_dir().join(format!("swiftfind-present-{unique}.tmp"));
-    let missing_path = std::env::temp_dir().join(format!("swiftfind-missing-{unique}.tmp"));
+    let present_path = std::env::temp_dir().join(format!("nex-present-{unique}.tmp"));
+    let missing_path = std::env::temp_dir().join(format!("nex-missing-{unique}.tmp"));
     std::fs::write(&present_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "present",
             "file",
             "Present",
@@ -177,7 +177,7 @@ fn service_search_prunes_stale_items() {
         ))
         .unwrap();
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "stale",
             "file",
             "Stale",
@@ -201,14 +201,14 @@ fn service_launch_missing_path_prunes_item() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let missing_path = std::env::temp_dir().join(format!("swiftfind-launch-missing-{unique}.tmp"));
+    let missing_path = std::env::temp_dir().join(format!("nex-launch-missing-{unique}.tmp"));
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "stale-launch",
             "file",
             "Stale Launch",
@@ -218,7 +218,7 @@ fn service_launch_missing_path_prunes_item() {
 
     let first = service.launch(LaunchTarget::Id("stale-launch"));
     match first {
-        Err(ServiceError::Launch(swiftfind_core::action_executor::LaunchError::MissingPath(_))) => {
+        Err(ServiceError::Launch(nex_core::action_executor::LaunchError::MissingPath(_))) => {
         }
         other => panic!("unexpected first launch result: {other:?}"),
     }
@@ -257,9 +257,9 @@ fn incremental_rebuild_prunes_missing_provider_items() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let initial_path = std::env::temp_dir().join(format!("swiftfind-inc-initial-{unique}.tmp"));
-    let stable_path = std::env::temp_dir().join(format!("swiftfind-inc-stable-{unique}.tmp"));
-    let replacement_path = std::env::temp_dir().join(format!("swiftfind-inc-next-{unique}.tmp"));
+    let initial_path = std::env::temp_dir().join(format!("nex-inc-initial-{unique}.tmp"));
+    let stable_path = std::env::temp_dir().join(format!("nex-inc-stable-{unique}.tmp"));
+    let replacement_path = std::env::temp_dir().join(format!("nex-inc-next-{unique}.tmp"));
     std::fs::write(&initial_path, b"a").unwrap();
     std::fs::write(&stable_path, b"b").unwrap();
     std::fs::write(&replacement_path, b"c").unwrap();
@@ -280,7 +280,7 @@ fn incremental_rebuild_prunes_missing_provider_items() {
     ]));
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_providers(vec![Box::new(MutableProvider::new(
@@ -344,7 +344,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("swiftfind-inc-usage-{unique}.tmp"));
+    let path = std::env::temp_dir().join(format!("nex-inc-usage-{unique}.tmp"));
     std::fs::write(&path, b"ok").unwrap();
 
     let provider_items = Arc::new(Mutex::new(vec![SearchItem::new(
@@ -355,7 +355,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
     )]));
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_providers(vec![Box::new(MutableProvider::new(
@@ -394,13 +394,13 @@ fn service_search_order_is_deterministic_for_mixed_ties() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let app_path = std::env::temp_dir().join(format!("swiftfind-order-app-{unique}.exe"));
-    let file_path = std::env::temp_dir().join(format!("swiftfind-order-file-{unique}.txt"));
+    let app_path = std::env::temp_dir().join(format!("nex-order-app-{unique}.exe"));
+    let file_path = std::env::temp_dir().join(format!("nex-order-file-{unique}.txt"));
     std::fs::write(&app_path, b"app").unwrap();
     std::fs::write(&file_path, b"file").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
@@ -447,13 +447,13 @@ fn query_personalization_boosts_selected_item_for_same_query() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path_a = std::env::temp_dir().join(format!("swiftfind-personal-a-{unique}.exe"));
-    let path_b = std::env::temp_dir().join(format!("swiftfind-personal-b-{unique}.exe"));
+    let path_a = std::env::temp_dir().join(format!("nex-personal-a-{unique}.exe"));
+    let path_b = std::env::temp_dir().join(format!("nex-personal-b-{unique}.exe"));
     std::fs::write(&path_a, b"a").unwrap();
     std::fs::write(&path_b, b"b").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
@@ -527,11 +527,11 @@ fn incremental_rebuild_skips_unchanged_provider_with_stamp() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let stable_path = std::env::temp_dir().join(format!("swiftfind-inc-skip-{unique}.tmp"));
+    let stable_path = std::env::temp_dir().join(format!("nex-inc-skip-{unique}.tmp"));
     std::fs::write(&stable_path, b"a").unwrap();
 
     let config = test_config();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
         .with_providers(vec![Box::new(StampedProvider::new(

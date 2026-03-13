@@ -1,8 +1,8 @@
-# SwiftFind Flow-Launcher Parity Plan
+# Nex Flow-Launcher Parity Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Elevate SwiftFind from a working MVP launcher to a polished, reliable Windows launcher with crisp rendering, strong defaults, and production-grade install/update behavior.
+**Goal:** Elevate Nex from a working MVP launcher to a polished, reliable Windows launcher with crisp rendering, strong defaults, and production-grade install/update behavior.
 
 **Architecture:** Keep the current Rust-native overlay/runtime architecture. Improve quality by hardening rendering (DPI/icon/text), search/ranking behavior, UX interactions, and installer lifecycle. Roll out in small, testable increments with strict pass gates and Windows manual validation at each phase.
 
@@ -94,7 +94,7 @@
 
 ### Task 6: Installer lifecycle hardening
 **Files:**
-- Modify: `scripts/windows/swiftfind.iss`
+- Modify: `scripts/windows/nex.iss`
 - Modify: `scripts/windows/package-windows-installer.ps1`
 - Modify: `docs/engineering/windows-packaging-readiness.md`
 
@@ -122,13 +122,13 @@
 ---
 
 ## Required Pass Gates (every phase)
-- `cargo check -p swiftfind-core`
-- `cargo test -p swiftfind-core`
+- `cargo check -p nex`
+- `cargo test -p nex`
 - `pnpm vitest --run`
-- `cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
+- `cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
 
 ## Required Windows Manual Validation (every phase)
-- `cargo run -p swiftfind-core`
+- `cargo run -p nex`
 - Verify crisp text/icons at 100% / 125% / 150% scaling
 - Verify hotkey opens compact bar and results expand downward
 - Verify launch + close behavior with keyboard and mouse

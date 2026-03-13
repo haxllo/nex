@@ -1,15 +1,15 @@
 [package]
-name = "swiftfind-core"
+name = "nex"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
 
 [lib]
-name = "swiftfind_core"
+name = "nex_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "swiftfind-core"
+name = "nex"
 path = "src/main.rs"
 
 [dependencies]

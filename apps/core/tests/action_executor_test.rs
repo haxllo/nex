@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use swiftfind_core::action_executor::{launch_open_target, launch_path, LaunchError};
+use nex_core::action_executor::{launch_open_target, launch_path, LaunchError};
 
 fn unique_temp_path(label: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -10,7 +10,7 @@ fn unique_temp_path(label: &str) -> PathBuf {
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "swiftfind-{label}-{}-{unique}.tmp",
+        "nex-{label}-{}-{unique}.tmp",
         std::process::id()
     ))
 }

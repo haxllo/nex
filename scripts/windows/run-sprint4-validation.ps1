@@ -8,9 +8,9 @@ $ErrorActionPreference = 'Stop'
 Write-Host '== Sprint 4 Windows Validation Preflight ==' -ForegroundColor Cyan
 
 if (-not $SkipRust) {
-  $env:SWIFTFIND_WINDOWS_RUNTIME_SMOKE = '1'
+  $env:NEX_WINDOWS_RUNTIME_SMOKE = '1'
   Write-Host '[1/3] Running Windows runtime smoke harness...' -ForegroundColor Yellow
-  cargo test -p swiftfind-core --test windows_runtime_smoke_test -- --exact windows_runtime_smoke_registers_hotkey_and_transport_roundtrip
+  cargo test -p nex --test windows_runtime_smoke_test -- --exact windows_runtime_smoke_registers_hotkey_and_transport_roundtrip
 }
 
 if (-not $SkipSmoke) {

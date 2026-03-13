@@ -3,9 +3,9 @@
 ## Artifact Convention
 
 - Output root: `artifacts/windows/`
-- Staging directory: `artifacts/windows/swiftfind-<version>-windows-x64-stage/`
-- Zip artifact: `artifacts/windows/swiftfind-<version>-windows-x64.zip`
-- Build manifest: `artifacts/windows/swiftfind-<version>-windows-x64-manifest.json`
+- Staging directory: `artifacts/windows/nex-<version>-windows-x64-stage/`
+- Zip artifact: `artifacts/windows/nex-<version>-windows-x64.zip`
+- Build manifest: `artifacts/windows/nex-<version>-windows-x64-manifest.json`
 
 ## Version Stamping Policy
 
@@ -33,28 +33,28 @@ Signed packaging (PFX):
 scripts/windows/package-windows-artifact.ps1 `
   -Version "0.5.0" `
   -Sign `
-  -CertPath "C:\secure\certs\swiftfind-signing.pfx" `
+  -CertPath "C:\secure\certs\nex-signing.pfx" `
   -CertPassword "<PFX_PASSWORD>"
 ```
 
 Expected outputs:
 
-- `artifacts/windows/swiftfind-0.5.0-windows-x64.zip`
-- `artifacts/windows/swiftfind-0.5.0-windows-x64-manifest.json`
-- `artifacts/windows/swiftfind-0.5.0-windows-x64-stage/`
-- `artifacts/windows/swiftfind-0.5.0-windows-x64-setup.exe`
+- `artifacts/windows/nex-0.5.0-windows-x64.zip`
+- `artifacts/windows/nex-0.5.0-windows-x64-manifest.json`
+- `artifacts/windows/nex-0.5.0-windows-x64-stage/`
+- `artifacts/windows/nex-0.5.0-windows-x64-setup.exe`
 
 ## Included Payload
 
 Paths below are inside the staged artifact layout:
 
-- `bin/swiftfind-core.exe`
-- `assets/swiftfinder.svg`
+- `bin/nex.exe`
+- `assets/nex.svg`
 - `docs/windows-runtime-validation-checklist.md`
 - `docs/release-notes-template.md`
-- `scripts/install-swiftfind.ps1`
-- `scripts/uninstall-swiftfind.ps1`
-- `scripts/update-swiftfind.ps1`
+- `scripts/install-nex.ps1`
+- `scripts/uninstall-nex.ps1`
+- `scripts/update-nex.ps1`
 
 ## Signing Requirements
 
@@ -64,7 +64,7 @@ Paths below are inside the staged artifact layout:
 
 If `-Sign` is enabled, packaging script will:
 
-1. Sign `target/release/swiftfind-core.exe`
+1. Sign `target/release/nex.exe`
 2. Verify signature via `signtool verify`
 3. Validate status via `Get-AuthenticodeSignature`
 
@@ -74,7 +74,7 @@ If any of these fail, packaging fails.
 
 - This milestone prepares a deterministic zip payload and manifest.
 - Manifest includes channel and SHA256 integrity data for zip/setup artifacts.
-- Inno Setup consumes the staging directory directly via `scripts/windows/swiftfind.iss`.
+- Inno Setup consumes the staging directory directly via `scripts/windows/nex.iss`.
 - Keep staging layout stable to avoid installer script churn.
 - Inno `[UninstallRun]` entries include `RunOnceId` values to prevent duplicate execution/warnings.
 - Uninstall path performs graceful quit, startup key cleanup, and hard-stop fallback for leftover runtime process.
@@ -103,7 +103,7 @@ After packaging, upload installer to the existing tag/release:
 
 ```powershell
 gh release upload v0.5.0 `
-  artifacts/windows/swiftfind-0.5.0-windows-x64-setup.exe `
+  artifacts/windows/nex-0.5.0-windows-x64-setup.exe `
   --clobber
 ```
 
@@ -116,13 +116,13 @@ Channel and rollout policy:
 Run on Windows PowerShell:
 
 ```powershell
-scripts/windows/install-swiftfind.ps1
+scripts/windows/install-nex.ps1
 ```
 
 End-user note:
 
 - Rust/Cargo is **not required** when installing from the packaged release zip.
-- The installer script uses the prebuilt `bin/swiftfind-core.exe` from the zip.
+- The installer script uses the prebuilt `bin/nex.exe` from the zip.
 
 Optional flags:
 
@@ -135,11 +135,11 @@ Optional flags:
 Uninstall:
 
 ```powershell
-scripts/windows/uninstall-swiftfind.ps1
+scripts/windows/uninstall-nex.ps1
 ```
 
 Optional:
 
-- `-PurgeUserData` (also removes `%APPDATA%\SwiftFind`)
+- `-PurgeUserData` (also removes `%APPDATA%\Nex`)
 - `-InstallScope CurrentUser|AllUsers` (default `CurrentUser`; `AllUsers` requires elevated PowerShell)
 - `-InstallRoot "<path>"` (explicit install path override)

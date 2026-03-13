@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use swiftfind_core::contract::{CoreRequest, CoreResponse, LaunchRequest, SearchRequest};
-use swiftfind_core::core_service::CoreService;
+use nex_core::contract::{CoreRequest, CoreResponse, LaunchRequest, SearchRequest};
+use nex_core::core_service::CoreService;
 
 #[test]
 fn serializes_and_deserializes_search_request() {
@@ -22,15 +22,15 @@ fn handles_search_command_and_serializes_response() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let item_path = std::env::temp_dir().join(format!("swiftfind-contract-search-{unique}.tmp"));
+    let item_path = std::env::temp_dir().join(format!("nex-contract-search-{unique}.tmp"));
     std::fs::write(&item_path, b"ok").unwrap();
 
-    let config = swiftfind_core::config::Config::default();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "s1",
             "app",
             "Visual Studio Code",
@@ -66,11 +66,11 @@ fn handles_launch_command_by_path() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("swiftfind-contract-launch-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-contract-launch-{unique}.tmp"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
-    let config = swiftfind_core::config::Config::default();
-    let db = swiftfind_core::index_store::open_memory().unwrap();
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
     let response = service
@@ -84,6 +84,6 @@ fn handles_launch_command_by_path() {
 
     assert_eq!(
         response,
-        CoreResponse::Launch(swiftfind_core::contract::LaunchResponse { launched: true })
+        CoreResponse::Launch(nex_core::contract::LaunchResponse { launched: true })
     );
 }

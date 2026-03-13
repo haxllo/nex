@@ -1,14 +1,14 @@
-use swiftfind_core::contract::{CoreRequest, SearchRequest};
-use swiftfind_core::core_service::CoreService;
-use swiftfind_core::hotkey_runtime::{default_hotkey_registrar, HotkeyRegistration};
-use swiftfind_core::transport::TransportResponse;
+use nex_core::contract::{CoreRequest, SearchRequest};
+use nex_core::core_service::CoreService;
+use nex_core::hotkey_runtime::{default_hotkey_registrar, HotkeyRegistration};
+use nex_core::transport::TransportResponse;
 
 fn seed_service() -> CoreService {
-    let config = swiftfind_core::config::Config::default();
-    let db = swiftfind_core::index_store::open_memory().expect("in-memory db should open");
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().expect("in-memory db should open");
     let service = CoreService::with_connection(config, db).expect("service should initialize");
     service
-        .upsert_item(&swiftfind_core::model::SearchItem::new(
+        .upsert_item(&nex_core::model::SearchItem::new(
             "seed",
             "app",
             "Visual Studio Code",
@@ -38,7 +38,7 @@ fn non_windows_fallback_smoke_still_roundtrips() {
         query: "code".into(),
         limit: Some(5),
     });
-    let response = swiftfind_core::transport::handle_request(&service, request);
+    let response = nex_core::transport::handle_request(&service, request);
 
     match response {
         TransportResponse::Ok { response: _ } => {}
@@ -49,9 +49,9 @@ fn non_windows_fallback_smoke_still_roundtrips() {
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_runtime_smoke_registers_hotkey_and_transport_roundtrip() {
-    if std::env::var("SWIFTFIND_WINDOWS_RUNTIME_SMOKE").as_deref() != Ok("1") {
+    if std::env::var("NEX_WINDOWS_RUNTIME_SMOKE").as_deref() != Ok("1") {
         eprintln!(
-            "skipping windows runtime smoke (set SWIFTFIND_WINDOWS_RUNTIME_SMOKE=1 to enable)"
+            "skipping windows runtime smoke (set NEX_WINDOWS_RUNTIME_SMOKE=1 to enable)"
         );
         return;
     }
@@ -87,7 +87,7 @@ fn windows_runtime_smoke_registers_hotkey_and_transport_roundtrip() {
     }))
     .expect("request should serialize");
 
-    let response = swiftfind_core::transport::handle_json(&service, &payload);
+    let response = nex_core::transport::handle_json(&service, &payload);
     let parsed: TransportResponse =
         serde_json::from_str(&response).expect("response should deserialize");
 

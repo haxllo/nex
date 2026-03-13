@@ -18,12 +18,28 @@ function Test-IsAdministrator {
   return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Resolve-RuntimePath {
+  param(
+    [string]$BaseDir,
+    [string[]]$RelativeCandidates
+  )
+
+  foreach ($relative in $RelativeCandidates) {
+    $candidate = Join-Path $BaseDir $relative
+    if (Test-Path $candidate) {
+      return $candidate
+    }
+  }
+
+  return $null
+}
+
 if (-not $InstallRoot -or $InstallRoot.Trim().Length -eq 0) {
   if ($InstallScope -eq "AllUsers") {
-    $InstallRoot = Join-Path $env:ProgramFiles "SwiftFind"
+    $InstallRoot = Join-Path $env:ProgramFiles "Nex"
   }
   else {
-    $InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\SwiftFind"
+    $InstallRoot = Join-Path $env:LOCALAPPDATA "Programs\Nex"
   }
 }
 
@@ -31,7 +47,7 @@ if ($InstallScope -eq "AllUsers" -and -not (Test-IsAdministrator)) {
   throw "AllUsers install requires an elevated PowerShell session (Run as administrator)."
 }
 
-Write-Host "== SwiftFind Install ==" -ForegroundColor Cyan
+Write-Host "== Nex Install ==" -ForegroundColor Cyan
 Write-Host "Install scope: $InstallScope"
 Write-Host "Install root: $InstallRoot"
 
@@ -43,10 +59,14 @@ if ($SkipBuild) {
 if (-not $SourceExe -or $SourceExe.Trim().Length -eq 0) {
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   $candidates = @(
-    (Join-Path $scriptDir "..\bin\swiftfind-core.exe"),              # packaged zip layout
-    (Join-Path $scriptDir "..\..\target\release\swiftfind-core.exe"), # repo layout
-    (Join-Path (Get-Location) "bin\swiftfind-core.exe"),
-    (Join-Path (Get-Location) "target\release\swiftfind-core.exe")
+    (Join-Path $scriptDir "..\bin\nex.exe"),              # packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\nex.exe"), # repo layout
+    (Join-Path $scriptDir "..\bin\nex-core.exe"),          # legacy packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\nex-core.exe"), # legacy repo layout
+    (Join-Path (Get-Location) "bin\nex.exe"),
+    (Join-Path (Get-Location) "target\release\nex.exe"),
+    (Join-Path (Get-Location) "bin\nex-core.exe"),
+    (Join-Path (Get-Location) "target\release\nex-core.exe")
   )
 
   foreach ($candidate in $candidates) {
@@ -59,13 +79,16 @@ if (-not $SourceExe -or $SourceExe.Trim().Length -eq 0) {
 
 if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-  $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
+    $repoRoot = Resolve-Path (Join-Path $scriptDir "..\..")
   Write-Host "[1/5] Building release binary from source..." -ForegroundColor Yellow
   Push-Location $repoRoot
   try {
-    cargo build -p swiftfind-core --release --quiet
-    $built = Join-Path $repoRoot "target\release\swiftfind-core.exe"
-    if (Test-Path $built) {
+    cargo build -p nex --release --quiet
+    $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
+      "target\release\nex.exe",
+      "target\release\nex-core.exe"
+    )
+    if ($built -and (Test-Path $built)) {
       $SourceExe = $built
     }
   }
@@ -76,14 +99,14 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
 
 if (-not $SourceExe -or -not (Test-Path $SourceExe)) {
   throw @"
-Could not find swiftfind-core.exe to install.
+Could not find the Nex runtime executable to install.
 
 For end users:
 - Extract the release zip and run this script from that extracted folder.
-- The zip should contain bin\swiftfind-core.exe.
+- The zip should contain bin\nex.exe.
 
 For developers:
-- Re-run with -BuildFromSource, or pass -SourceExe "<full path to swiftfind-core.exe>".
+- Re-run with -BuildFromSource, or pass -SourceExe "<full path to nex.exe>".
 "@
 }
 
@@ -97,16 +120,22 @@ New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
 Write-Host "[3/5] Copying runtime files..."
-Copy-Item $SourceExe (Join-Path $binDir "swiftfind-core.exe") -Force
+Copy-Item $SourceExe (Join-Path $binDir "nex.exe") -Force
+foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {
+  $legacyPath = Join-Path $binDir $legacyName
+  if (Test-Path -LiteralPath $legacyPath) {
+    Remove-Item -LiteralPath $legacyPath -Force
+  }
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $assetCandidates = @(
-  (Join-Path $scriptDir "..\assets\swiftfinder.svg"),              # packaged zip layout
-  (Join-Path $scriptDir "..\..\apps\assets\swiftfinder.svg")       # repo layout
+  (Join-Path $scriptDir "..\assets\nex.svg"),              # packaged zip layout
+  (Join-Path $scriptDir "..\..\apps\assets\nex.svg")       # repo layout
 )
 foreach ($asset in $assetCandidates) {
   if (Test-Path $asset) {
-    Copy-Item $asset (Join-Path $assetsDir "swiftfinder.svg") -Force
+    Copy-Item $asset (Join-Path $assetsDir "nex.svg") -Force
     break
   }
 }
@@ -122,7 +151,7 @@ foreach ($runbook in $runbookCandidates) {
   }
 }
 
-$installedExe = Join-Path $binDir "swiftfind-core.exe"
+$installedExe = Join-Path $binDir "nex.exe"
 
 Write-Host "[4/5] Preparing config and startup sync..."
 & $installedExe --ensure-config
@@ -137,7 +166,7 @@ switch ($LaunchAtStartup) {
   }
   default {
     if ([Environment]::UserInteractive) {
-      $answer = Read-Host "Launch SwiftFind automatically at Windows sign-in? (y/N)"
+      $answer = Read-Host "Launch Nex automatically at Windows sign-in? (y/N)"
       if ($answer -match '^(y|yes)$') {
         $enableLaunchAtStartup = $true
       }
@@ -155,10 +184,10 @@ else {
   & $installedExe --set-launch-at-startup=false
 }
 
-Write-Host "Note: launch-at-startup can be changed later in $env:APPDATA\SwiftFind\config.toml"
+Write-Host "Note: launch-at-startup can be changed later in $env:APPDATA\Nex\config.toml"
 
 if ($StartAfterInstall) {
-  Write-Host "[5/5] Starting SwiftFind in background..."
+  Write-Host "[5/5] Starting Nex in background..."
   Start-Process -FilePath $installedExe -ArgumentList "--background" -WindowStyle Hidden
 }
 else {
@@ -167,4 +196,4 @@ else {
 
 Write-Host "Install complete." -ForegroundColor Green
 Write-Host "Executable: $installedExe"
-Write-Host "Config: $env:APPDATA\SwiftFind\config.toml"
+Write-Host "Config: $env:APPDATA\Nex\config.toml"

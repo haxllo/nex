@@ -3,13 +3,13 @@
 ## Stack Direction
 
 - Core service: Rust
-- UI shell: Native Win32 owner-draw overlay (inside `swiftfind-core`)
+- UI shell: Native Win32 owner-draw overlay (inside `nex`)
 - Local storage: SQLite
 - Config format: JSON
 
 ## Process Model
 
-- `swiftfind-core.exe`
+- `nex.exe`
 - Always-on background process
 - Owns hotkey registration, indexing, search, ranking, and launching
 - Hosts and renders the floating search bar overlay directly (no separate UI process)

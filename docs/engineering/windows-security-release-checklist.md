@@ -7,9 +7,9 @@ Use this checklist before publishing any Windows release (`stable` or `beta`).
 - Build from clean `master` state (no uncommitted local changes).
 - Tag/version in artifact names matches release notes.
 - Artifact set is complete:
-  - `swiftfind-<version>-windows-x64.zip`
-  - `swiftfind-<version>-windows-x64-manifest.json`
-  - `swiftfind-<version>-windows-x64-setup.exe`
+  - `nex-<version>-windows-x64.zip`
+  - `nex-<version>-windows-x64-manifest.json`
+  - `nex-<version>-windows-x64-setup.exe`
 - Manifest includes integrity data:
   - `artifacts.zip.sha256`
   - `artifacts.setup.sha256`
@@ -25,19 +25,19 @@ Use this checklist before publishing any Windows release (`stable` or `beta`).
 
 - No telemetry enabled by default.
 - No raw query text exfiltration path introduced.
-- Logs remain local under `%APPDATA%\SwiftFind\logs`.
+- Logs remain local under `%APPDATA%\Nex\logs`.
 - Logs do not include secrets/tokens/passwords.
-- Config remains local under `%APPDATA%\SwiftFind\config.toml`.
+- Config remains local under `%APPDATA%\Nex\config.toml`.
 
 ## 4. Dependency and Test Gates
 
 Required pass gates:
 
 ```powershell
-cargo check -p swiftfind-core
-cargo test -p swiftfind-core
+cargo check -p nex
+cargo test -p nex
 pnpm vitest --run
-cargo test -p swiftfind-core --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 ```
 
 Security-focused checks:

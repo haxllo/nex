@@ -72,8 +72,8 @@ mod imp {
         WS_VISIBLE,
     };
 
-    const CLASS_NAME: &str = "SwiftFindOverlayWindowClass";
-    const WINDOW_TITLE: &str = "SwiftFind Launcher";
+    const CLASS_NAME: &str = "NexOverlayWindowClass";
+    const WINDOW_TITLE: &str = "Nex Launcher";
     const INPUT_CLASS: &str = "EDIT";
     const LIST_CLASS: &str = "LISTBOX";
     const STATUS_CLASS: &str = "STATIC";
@@ -138,15 +138,15 @@ mod imp {
     const STATIC_RIGHT_STYLE: u32 = 0x00000002; // SS_RIGHT
     const EX_NOACTIVATE_STYLE: u32 = 0x08000000; // WS_EX_NOACTIVATE
 
-    const SWIFTFIND_WM_ESCAPE: u32 = WM_APP + 1;
-    const SWIFTFIND_WM_QUERY_CHANGED: u32 = WM_APP + 2;
-    const SWIFTFIND_WM_MOVE_UP: u32 = WM_APP + 3;
-    const SWIFTFIND_WM_MOVE_DOWN: u32 = WM_APP + 4;
-    const SWIFTFIND_WM_SUBMIT: u32 = WM_APP + 5;
-    const SWIFTFIND_WM_EXTERNAL_SHOW: u32 = WM_APP + 16;
-    const SWIFTFIND_WM_EXTERNAL_QUIT: u32 = WM_APP + 17;
-    const SWIFTFIND_WM_TRAY_ICON: u32 = WM_APP + 18;
-    const SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
+    const NEX_WM_ESCAPE: u32 = WM_APP + 1;
+    const NEX_WM_QUERY_CHANGED: u32 = WM_APP + 2;
+    const NEX_WM_MOVE_UP: u32 = WM_APP + 3;
+    const NEX_WM_MOVE_DOWN: u32 = WM_APP + 4;
+    const NEX_WM_SUBMIT: u32 = WM_APP + 5;
+    const NEX_WM_EXTERNAL_SHOW: u32 = WM_APP + 16;
+    const NEX_WM_EXTERNAL_QUIT: u32 = WM_APP + 17;
+    const NEX_WM_TRAY_ICON: u32 = WM_APP + 18;
+    const NEX_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
     const EM_GETRECT: u32 = 0x00B2;
     const EM_SETRECTNP: u32 = 0x00B4;
     const TRAY_ICON_ID: u32 = 1;
@@ -627,7 +627,7 @@ mod imp {
             shell.hide_immediate();
             if let Err(error) = shell.initialize_tray_icon() {
                 crate::logging::warn(&format!(
-                    "[swiftfind-core] tray icon init warning: {error}"
+                    "[nex] tray icon init warning: {error}"
                 ));
             }
             Ok(shell)
@@ -1085,7 +1085,7 @@ mod imp {
                     return Ok(());
                 }
 
-                if msg.message == SWIFTFIND_WM_QUERY_CHANGED {
+                if msg.message == NEX_WM_QUERY_CHANGED {
                     // Coalesce bursts of EN_CHANGE notifications into one query update.
                     let mut drain: MSG = unsafe { std::mem::zeroed() };
                     loop {
@@ -1093,8 +1093,8 @@ mod imp {
                             PeekMessageW(
                                 &mut drain,
                                 std::ptr::null_mut(),
-                                SWIFTFIND_WM_QUERY_CHANGED,
-                                SWIFTFIND_WM_QUERY_CHANGED,
+                                NEX_WM_QUERY_CHANGED,
+                                NEX_WM_QUERY_CHANGED,
                                 PM_REMOVE,
                             )
                         };
@@ -1115,13 +1115,13 @@ mod imp {
 
                 match msg.message {
                     WM_HOTKEY => on_event(OverlayEvent::Hotkey(msg.wParam as i32)),
-                    SWIFTFIND_WM_MOVE_UP => on_event(OverlayEvent::MoveSelection(-1)),
-                    SWIFTFIND_WM_MOVE_DOWN => on_event(OverlayEvent::MoveSelection(1)),
-                    SWIFTFIND_WM_SUBMIT => on_event(OverlayEvent::Submit),
-                    SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE => on_event(OverlayEvent::TrayToggleGameMode),
-                    SWIFTFIND_WM_ESCAPE => on_event(OverlayEvent::Escape),
-                    SWIFTFIND_WM_EXTERNAL_SHOW => on_event(OverlayEvent::ExternalShow),
-                    SWIFTFIND_WM_EXTERNAL_QUIT => on_event(OverlayEvent::ExternalQuit),
+                    NEX_WM_MOVE_UP => on_event(OverlayEvent::MoveSelection(-1)),
+                    NEX_WM_MOVE_DOWN => on_event(OverlayEvent::MoveSelection(1)),
+                    NEX_WM_SUBMIT => on_event(OverlayEvent::Submit),
+                    NEX_WM_TRAY_TOGGLE_GAME_MODE => on_event(OverlayEvent::TrayToggleGameMode),
+                    NEX_WM_ESCAPE => on_event(OverlayEvent::Escape),
+                    NEX_WM_EXTERNAL_SHOW => on_event(OverlayEvent::ExternalShow),
+                    NEX_WM_EXTERNAL_QUIT => on_event(OverlayEvent::ExternalQuit),
                     _ => {}
                 }
 
@@ -1361,7 +1361,7 @@ mod imp {
                     state.help_tip_border_brush =
                         unsafe { CreateSolidBrush(state.palette.panel_border) } as isize;
                     crate::logging::info(&format!(
-                        "[swiftfind-core] overlay_theme mode={}",
+                        "[nex] overlay_theme mode={}",
                         match state.theme {
                             OverlayTheme::Dark => "dark",
                             OverlayTheme::Light => "light",
@@ -1628,19 +1628,19 @@ mod imp {
                     match control_id {
                         TRAY_MENU_SHOW => {
                             unsafe {
-                                PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_SHOW, 0, 0);
+                                PostMessageW(hwnd, NEX_WM_EXTERNAL_SHOW, 0, 0);
                             }
                             return 0;
                         }
                         TRAY_MENU_GAME_MODE => {
                             unsafe {
-                                PostMessageW(hwnd, SWIFTFIND_WM_TRAY_TOGGLE_GAME_MODE, 0, 0);
+                                PostMessageW(hwnd, NEX_WM_TRAY_TOGGLE_GAME_MODE, 0, 0);
                             }
                             return 0;
                         }
                         TRAY_MENU_QUIT => {
                             unsafe {
-                                PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_QUIT, 0, 0);
+                                PostMessageW(hwnd, NEX_WM_EXTERNAL_QUIT, 0, 0);
                             }
                             return 0;
                         }
@@ -1657,13 +1657,13 @@ mod imp {
                         }
                     }
                     unsafe {
-                        PostMessageW(hwnd, SWIFTFIND_WM_QUERY_CHANGED, 0, 0);
+                        PostMessageW(hwnd, NEX_WM_QUERY_CHANGED, 0, 0);
                     }
                     return 0;
                 }
                 if control_id == CONTROL_ID_LIST && notification as u32 == LBN_DBLCLK as u32 {
                     unsafe {
-                        PostMessageW(hwnd, SWIFTFIND_WM_SUBMIT, 0, 0);
+                        PostMessageW(hwnd, NEX_WM_SUBMIT, 0, 0);
                     }
                     return 0;
                 }
@@ -1802,7 +1802,7 @@ mod imp {
                         return 0;
                     }
                     unsafe {
-                        PostMessageW(hwnd, SWIFTFIND_WM_ESCAPE, 0, 0);
+                        PostMessageW(hwnd, NEX_WM_ESCAPE, 0, 0);
                     }
                     hide_overlay_immediate(hwnd);
                 }
@@ -1887,11 +1887,11 @@ mod imp {
                 }
                 0
             }
-            SWIFTFIND_WM_TRAY_ICON => {
+            NEX_WM_TRAY_ICON => {
                 if let Some(state) = state_for(hwnd) {
                     match lparam as u32 {
                         WM_LBUTTONUP | WM_LBUTTONDBLCLK => unsafe {
-                            PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_SHOW, 0, 0);
+                            PostMessageW(hwnd, NEX_WM_EXTERNAL_SHOW, 0, 0);
                         },
                         WM_RBUTTONUP => {
                             show_tray_context_menu(hwnd, state);
@@ -1934,11 +1934,11 @@ mod imp {
                 }
                 0
             }
-            SWIFTFIND_WM_ESCAPE
-            | SWIFTFIND_WM_QUERY_CHANGED
-            | SWIFTFIND_WM_MOVE_UP
-            | SWIFTFIND_WM_MOVE_DOWN
-            | SWIFTFIND_WM_SUBMIT => 0,
+            NEX_WM_ESCAPE
+            | NEX_WM_QUERY_CHANGED
+            | NEX_WM_MOVE_UP
+            | NEX_WM_MOVE_DOWN
+            | NEX_WM_SUBMIT => 0,
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
     }
@@ -2010,7 +2010,7 @@ mod imp {
                     }
                     unsafe {
                         InvalidateRect(state.edit_hwnd, std::ptr::null(), 1);
-                        PostMessageW(parent, SWIFTFIND_WM_QUERY_CHANGED, 0, 0);
+                        PostMessageW(parent, NEX_WM_QUERY_CHANGED, 0, 0);
                     }
                     return 0;
                 }
@@ -2034,7 +2034,7 @@ mod imp {
                     );
                     unsafe {
                         InvalidateRect(state.edit_hwnd, std::ptr::null(), 1);
-                        PostMessageW(parent, SWIFTFIND_WM_QUERY_CHANGED, 0, 0);
+                        PostMessageW(parent, NEX_WM_QUERY_CHANGED, 0, 0);
                     }
                     return 0;
                 }
@@ -2048,13 +2048,13 @@ mod imp {
                         set_uninstall_quick_mode(parent, state, true, true);
                         unsafe {
                             InvalidateRect(state.edit_hwnd, std::ptr::null(), 1);
-                            PostMessageW(parent, SWIFTFIND_WM_QUERY_CHANGED, 0, 0);
+                            PostMessageW(parent, NEX_WM_QUERY_CHANGED, 0, 0);
                         }
                         return 0;
                     }
                 }
                 // Suppress default control beep for handled launcher keys.
-                // Enter submits through WM_KEYDOWN -> SWIFTFIND_WM_SUBMIT.
+                // Enter submits through WM_KEYDOWN -> NEX_WM_SUBMIT.
                 match wparam as u32 {
                     10 | 13 | 27 => return 0, // '\n', '\r', ESC
                     _ => {}
@@ -2141,7 +2141,7 @@ mod imp {
                         }
                         unsafe {
                             SendMessageW(hwnd, LB_SETCURSEL, row as usize, 0);
-                            PostMessageW(parent, SWIFTFIND_WM_SUBMIT, 0, 0);
+                            PostMessageW(parent, NEX_WM_SUBMIT, 0, 0);
                         }
                     }
                 }
@@ -2158,25 +2158,25 @@ mod imp {
             match wparam as u16 {
                 VK_ESCAPE => {
                     unsafe {
-                        PostMessageW(parent, SWIFTFIND_WM_ESCAPE, 0, 0);
+                        PostMessageW(parent, NEX_WM_ESCAPE, 0, 0);
                     }
                     return 0;
                 }
                 VK_UP => {
                     unsafe {
-                        PostMessageW(parent, SWIFTFIND_WM_MOVE_UP, 0, 0);
+                        PostMessageW(parent, NEX_WM_MOVE_UP, 0, 0);
                     }
                     return 0;
                 }
                 VK_DOWN => {
                     unsafe {
-                        PostMessageW(parent, SWIFTFIND_WM_MOVE_DOWN, 0, 0);
+                        PostMessageW(parent, NEX_WM_MOVE_DOWN, 0, 0);
                     }
                     return 0;
                 }
                 VK_RETURN => {
                     unsafe {
-                        PostMessageW(parent, SWIFTFIND_WM_SUBMIT, 0, 0);
+                        PostMessageW(parent, NEX_WM_SUBMIT, 0, 0);
                     }
                     return 0;
                 }
@@ -3261,7 +3261,7 @@ mod imp {
                 }
                 // Do not extract icon directly from `.lnk` for app entries:
                 // this is the primary source of shortcut-arrow overlays.
-                if let Some(icon) = shell_icon_with_attrs("swiftfind.exe", FILE_ATTRIBUTE_NORMAL) {
+                if let Some(icon) = shell_icon_with_attrs("nex.exe", FILE_ATTRIBUTE_NORMAL) {
                     return Some(icon);
                 }
                 return None;
@@ -3275,12 +3275,12 @@ mod imp {
         }
 
         if kind == "app" {
-            if let Some(icon) = shell_icon_with_attrs("swiftfind.exe", FILE_ATTRIBUTE_NORMAL) {
+            if let Some(icon) = shell_icon_with_attrs("nex.exe", FILE_ATTRIBUTE_NORMAL) {
                 return Some(icon);
             }
         }
 
-        shell_icon_with_attrs("swiftfind.file", FILE_ATTRIBUTE_NORMAL)
+        shell_icon_with_attrs("nex.file", FILE_ATTRIBUTE_NORMAL)
     }
 
     fn shortcut_target_icon(shortcut_path: &str) -> Option<isize> {
@@ -3683,7 +3683,7 @@ mod imp {
             return;
         }
         crate::logging::info(&format!(
-            "[swiftfind-core] overlay_icon_cache reason={} hits={} misses={} load_failures={} evictions={} cleared_entries={}",
+            "[nex] overlay_icon_cache reason={} hits={} misses={} load_failures={} evictions={} cleared_entries={}",
             reason,
             metrics.hits,
             metrics.misses,
@@ -3712,7 +3712,7 @@ mod imp {
         let working_set_mb = (counters.WorkingSetSize as f64) / mb_divisor;
         let private_mb = (counters.PagefileUsage as f64) / mb_divisor;
         crate::logging::info(&format!(
-            "[swiftfind-core] memory_snapshot reason={} working_set_mb={:.1} private_mb={:.1}",
+            "[nex] memory_snapshot reason={} working_set_mb={:.1} private_mb={:.1}",
             reason, working_set_mb, private_mb
         ));
     }
@@ -3726,7 +3726,7 @@ mod imp {
         let max_entries = ((active_memory_target_mb as usize).saturating_mul(5) / 4).clamp(32, 256);
         ICON_CACHE_MAX_ENTRIES_RUNTIME.store(max_entries, Ordering::Relaxed);
         crate::logging::info(&format!(
-            "[swiftfind-core] overlay_tuning idle_cache_trim_ms={} active_memory_target_mb={} icon_cache_max_entries={}",
+            "[nex] overlay_tuning idle_cache_trim_ms={} active_memory_target_mb={} icon_cache_max_entries={}",
             idle_ms, active_memory_target_mb, max_entries
         ));
     }
@@ -4788,11 +4788,7 @@ mod imp {
     fn open_help_config_file(state: &mut OverlayShellState) -> Result<(), String> {
         let cfg_path = state.help_config_path.trim().to_string();
         let target = if cfg_path.is_empty() {
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                format!("{appdata}\\SwiftFind\\config.toml")
-            } else {
-                return Err("APPDATA is not set; cannot locate config path.".to_string());
-            }
+            crate::config::stable_config_path().to_string_lossy().into_owned()
         } else {
             cfg_path
         };
@@ -4801,7 +4797,7 @@ mod imp {
         open_config_file_with_default_app(path)?;
         state.status_is_error = false;
         state.help_tip_visible = false;
-        let wide = to_wide("Opened config file. Restart SwiftFind after changes.");
+        let wide = to_wide("Opened config file. Restart Nex after changes.");
         unsafe {
             SetWindowTextW(state.status_hwnd, wide.as_ptr());
             InvalidateRect(state.status_hwnd, std::ptr::null(), 1);
@@ -4939,7 +4935,7 @@ mod imp {
             )
         };
         if hr_corner >= 0 {
-            crate::logging::info("[swiftfind-core] overlay_corners mode=dwm_round");
+            crate::logging::info("[nex] overlay_corners mode=dwm_round");
             true
         } else {
             false
@@ -4948,9 +4944,9 @@ mod imp {
 
     fn tray_tooltip_text(game_mode_enabled: bool) -> String {
         if game_mode_enabled {
-            "SwiftFind - Game Mode On".to_string()
+            "Nex - Game Mode On".to_string()
         } else {
-            "SwiftFind".to_string()
+            "Nex".to_string()
         }
     }
 
@@ -4970,7 +4966,7 @@ mod imp {
         data.hWnd = hwnd;
         data.uID = TRAY_ICON_ID;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        data.uCallbackMessage = SWIFTFIND_WM_TRAY_ICON;
+        data.uCallbackMessage = NEX_WM_TRAY_ICON;
         data.hIcon = state.tray_icon_handle as _;
         copy_wide_text_into_buffer(&mut data.szTip, &tray_tooltip_text(state.game_mode_enabled));
         data
@@ -5045,7 +5041,7 @@ mod imp {
             return;
         }
 
-        let open_text = to_wide("Open SwiftFind");
+        let open_text = to_wide("Open Nex");
         let game_mode_text = to_wide("Game Mode");
         let quit_text = to_wide("Quit");
         unsafe {
@@ -5198,7 +5194,10 @@ mod imp {
         FONT_FAMILY_WIDE
             .get_or_init(|| {
                 let family = resolve_font_family(
-                    std::env::var("SWIFTFIND_FONT_FAMILY").ok().as_deref(),
+                    std::env::var("NEX_FONT_FAMILY")
+                        .or_else(|_| std::env::var("SWIFTFIND_FONT_FAMILY"))
+                        .ok()
+                        .as_deref(),
                     register_private_geist_fonts(),
                 );
                 to_wide(&family)
@@ -5242,7 +5241,9 @@ mod imp {
         static REGISTERED: OnceLock<bool> = OnceLock::new();
         *REGISTERED.get_or_init(|| {
             let mut candidates = Vec::new();
-            if let Ok(dir) = std::env::var("SWIFTFIND_FONT_DIR") {
+            if let Ok(dir) =
+                std::env::var("NEX_FONT_DIR").or_else(|_| std::env::var("SWIFTFIND_FONT_DIR"))
+            {
                 let trimmed = dir.trim();
                 if !trimmed.is_empty() {
                     candidates.push(PathBuf::from(trimmed));
@@ -5489,7 +5490,7 @@ mod imp {
             return Ok(false);
         }
 
-        let ok = unsafe { PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_SHOW, 0, 0) };
+        let ok = unsafe { PostMessageW(hwnd, NEX_WM_EXTERNAL_SHOW, 0, 0) };
         if ok == 0 {
             let error = unsafe { GetLastError() };
             return Err(format!("PostMessageW(show) failed with error {error}"));
@@ -5503,7 +5504,7 @@ mod imp {
             return Ok(false);
         }
 
-        let ok = unsafe { PostMessageW(hwnd, SWIFTFIND_WM_EXTERNAL_QUIT, 0, 0) };
+        let ok = unsafe { PostMessageW(hwnd, NEX_WM_EXTERNAL_QUIT, 0, 0) };
         if ok == 0 {
             let error = unsafe { GetLastError() };
             return Err(format!("PostMessageW(quit) failed with error {error}"));

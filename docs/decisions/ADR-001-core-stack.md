@@ -14,14 +14,14 @@ The product requires:
 ## Decision
 
 Original decision:
-- Rust for the core service (`swiftfind-core`)
-- Legacy UI choice at that time: Tauri with React and TypeScript (`swiftfind-ui`, now removed)
+- Rust for the core service (`nex`)
+- Legacy UI choice at that time: a Tauri UI with React and TypeScript (now removed)
 - SQLite for local cache and metadata persistence
 - Two-process model (always-on core + on-demand UI process)
 
 Current state (superseding update):
-- Rust core service (`swiftfind-core`) remains.
-- UI is now a native Win32 owner-draw overlay hosted directly in `swiftfind-core`.
+- Rust core service (`nex`) remains.
+- UI is now a native Win32 owner-draw overlay hosted directly in `nex`.
 - Single-process runtime model is used in production.
 
 ## Rationale

@@ -1,4 +1,4 @@
-# SwiftFind Reliability + UX Improvements Implementation Plan
+# Nex Reliability + UX Improvements Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -8,7 +8,7 @@ Scope note (2026-03-02): Task 4 (icon resolution changes) is deferred from the a
 
 **Architecture:** Keep indexing and launch behavior Windows-native, but separate live runtime updates from index-provider lifecycle and split search caching into app-first hot cache plus DB-backed file/folder retrieval. Add deterministic icon resolution pipeline for `shell:AppsFolder` items with explicit fallback ordering and diagnostics.
 
-**Tech Stack:** Rust (`swiftfind-core`), Windows Shell APIs, PowerShell discovery bridge, SQLite via `rusqlite`, existing overlay runtime (`windows_overlay.rs`), config model (`config.rs`).
+**Tech Stack:** Rust (`nex`), Windows Shell APIs, PowerShell discovery bridge, SQLite via `rusqlite`, existing overlay runtime (`windows_overlay.rs`), config model (`config.rs`).
 
 ---
 
@@ -39,7 +39,7 @@ Script should run:
 
 **Step 3: Verify baseline data capture**
 
-Run: `cargo run -p swiftfind-core -- --status-json`
+Run: `cargo run -p nex -- --status-json`
 Expected: valid JSON including memory + icon sections.
 
 **Step 4: Commit**

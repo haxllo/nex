@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Write-Host "== SwiftFind Start App Source Inspector =="
+Write-Host "== Nex Start App Source Inspector =="
 Write-Host "Pattern: $Pattern"
 Write-Host ""
 

@@ -1,12 +1,12 @@
 # Windows Runtime Behavior (Current)
 
-Current hotkey-to-launcher behavior in `swiftfind-core`:
+Current hotkey-to-launcher behavior in Nex (`nex`):
 
-1. Start runtime with `cargo run -p swiftfind-core`.
+1. Start runtime with `cargo run -p nex`.
 2. Runtime loads config (JSON/JSON5 with comments), logs startup mode/hotkey/paths, builds or opens index.
    - indexing path is incremental-first: unchanged providers can be skipped using provider change stamps
    - periodic reconcile scan still runs after the configured interval to prevent drift
-3. Runtime registers global hotkey from config (default `Ctrl+Shift+Space`).
+3. Runtime registers global hotkey from config (default `Ctrl+Space`).
 4. Runtime creates a native borderless top-most launcher window (hidden by default).
 5. Hotkey behavior:
    - configured hotkey shows launcher and focuses input when hidden.
@@ -17,19 +17,19 @@ Current hotkey-to-launcher behavior in `swiftfind-core`:
    - `Up`/`Down` changes the active result row
    - `Enter` launches selected result and hides launcher immediately on success
    - single-click on a result launches it immediately
-   - typing a query starting with `log` includes a built-in action: `Open SwiftFind Logs Folder`
+   - typing a query starting with `log` includes a built-in action: `Open Nex Logs Folder`
    - `Esc` hides launcher
    - clicking outside launcher hides launcher
    - any close path clears query/results so next open starts fresh
-   - clicking `?` opens `%APPDATA%\SwiftFind\config.toml` for manual edits
+   - clicking `?` opens `%APPDATA%\Nex\config.toml` for manual edits
 7. Search and launch errors are surfaced inside launcher status text.
 8. Settings persistence behavior:
-   - config remains source of truth (`%APPDATA%\SwiftFind\config.toml`)
+   - config remains source of truth (`%APPDATA%\Nex\config.toml`)
    - save path uses safe temp-write + replace flow
    - startup behavior is controlled by config values
    - local file discovery honors include/exclude roots (`discovery_roots`, `discovery_exclude_roots`)
 9. Runtime diagnostics:
-   - runtime writes local logs to `%APPDATA%\SwiftFind\logs`
+   - runtime writes local logs to `%APPDATA%\Nex\logs`
    - panic hook records crash context in log file
    - provider indexing logs include `skipped=true/false` for incremental visibility
 10. Visual/UX polish:
@@ -57,12 +57,12 @@ Current hotkey-to-launcher behavior in `swiftfind-core`:
 - `--restart`: stops runtime (graceful + fallback) and starts again.
 - `--ensure-config`: creates config template if missing.
 - `--sync-startup`: applies `launch_at_startup` from config to Windows Run key.
-- `--diagnostics-bundle`: writes support bundle under `%APPDATA%\SwiftFind\support`.
+- `--diagnostics-bundle`: writes support bundle under `%APPDATA%\Nex\support`.
 
 Update operations:
 
 - runtime does not run a background auto-updater.
-- channel-aware updates are user-triggered via `scripts/windows/update-swiftfind.ps1`.
+- channel-aware updates are user-triggered via `scripts/windows/update-nex.ps1`.
 - updater verifies installer checksum from release manifest and performs rollback restore on failed apply.
 
 Single-instance behavior:
@@ -74,13 +74,13 @@ Known limitations in this milestone:
 
 - Launcher is native Win32 shell (not a full React/WebView overlay).
 - Animations are intentionally lightweight to prioritize runtime stability.
-- Runtime must remain active in its process; stopping `swiftfind-core.exe` unregisters hotkey and closes launcher.
+- Runtime must remain active in its process; stopping `nex.exe` unregisters hotkey and closes launcher.
 - Hotkey registration changes still require process restart to apply globally.
 - Native settings UI is not planned in the near term; `?` keeps config-file edit flow.
 
 ## Spotlight-Parity Direction
 
-SwiftFind now tracks a Spotlight-like architecture direction while staying performance-first:
+Nex now tracks a Spotlight-like architecture direction while staying performance-first:
 
 - keep index and ranking on-device by default
 - keep overlay UI thin and move heavy work to background indexing paths

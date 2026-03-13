@@ -29,7 +29,9 @@ impl From<std::io::Error> for StartupError {
 #[cfg(target_os = "windows")]
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(target_os = "windows")]
-const VALUE_NAME: &str = "SwiftFind";
+const VALUE_NAME: &str = "Nex";
+#[cfg(target_os = "windows")]
+const LEGACY_VALUE_NAME: &str = "SwiftFind";
 const STARTUP_ARG: &str = "--background";
 
 pub fn startup_command_for_executable(executable_path: &Path) -> Result<String, StartupError> {
@@ -67,6 +69,7 @@ pub fn is_enabled() -> Result<bool, StartupError> {
 
     let subkey = to_wide(RUN_SUBKEY);
     let value_name = to_wide(VALUE_NAME);
+    let legacy_value_name = to_wide(LEGACY_VALUE_NAME);
     let mut key = std::ptr::null_mut();
     let status = unsafe {
         RegOpenKeyExW(
@@ -85,27 +88,40 @@ pub fn is_enabled() -> Result<bool, StartupError> {
         return Err(registry_error("query run key", status));
     }
 
-    let mut value_type = 0_u32;
-    let mut size = 0_u32;
-    let status = unsafe {
-        RegQueryValueExW(
-            key,
-            value_name.as_ptr(),
-            std::ptr::null(),
-            &mut value_type,
-            std::ptr::null_mut(),
-            &mut size,
-        )
+    let query_value_exists = |value_name: &[u16]| {
+        let mut value_type = 0_u32;
+        let mut size = 0_u32;
+        unsafe {
+            RegQueryValueExW(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null(),
+                &mut value_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        }
+    };
+    let status = query_value_exists(&value_name);
+    let legacy_status = if status == ERROR_FILE_NOT_FOUND {
+        query_value_exists(&legacy_value_name)
+    } else {
+        ERROR_FILE_NOT_FOUND
     };
     unsafe {
         RegCloseKey(key);
     }
 
-    if status == ERROR_FILE_NOT_FOUND {
+    if status == ERROR_FILE_NOT_FOUND && legacy_status == ERROR_FILE_NOT_FOUND {
         return Ok(false);
     }
     if status != ERROR_SUCCESS {
-        return Err(registry_error("query run value", status));
+        if status != ERROR_FILE_NOT_FOUND {
+            return Err(registry_error("query run value", status));
+        }
+    }
+    if legacy_status != ERROR_SUCCESS && legacy_status != ERROR_FILE_NOT_FOUND {
+        return Err(registry_error("query legacy run value", legacy_status));
     }
 
     Ok(true)
@@ -121,6 +137,7 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
 
     let subkey = to_wide(RUN_SUBKEY);
     let value_name = to_wide(VALUE_NAME);
+    let legacy_value_name = to_wide(LEGACY_VALUE_NAME);
 
     if enabled {
         let value = startup_command_for_executable(executable_path)?;
@@ -154,6 +171,7 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
             )
         };
         unsafe {
+            let _ = RegDeleteValueW(key, legacy_value_name.as_ptr());
             RegCloseKey(key);
         }
 
@@ -181,14 +199,20 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
     }
 
     let status = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
+    let legacy_status = unsafe { RegDeleteValueW(key, legacy_value_name.as_ptr()) };
     unsafe {
         RegCloseKey(key);
     }
-    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+    if (status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND)
+        && (legacy_status == ERROR_SUCCESS || legacy_status == ERROR_FILE_NOT_FOUND)
+    {
         return Ok(());
     }
+    if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+        return Err(registry_error("delete run value", status));
+    }
 
-    Err(registry_error("delete run value", status))
+    Err(registry_error("delete legacy run value", legacy_status))
 }
 
 #[cfg(not(target_os = "windows"))]

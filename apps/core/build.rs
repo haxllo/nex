@@ -1,4 +1,7 @@
 fn main() {
+    println!("cargo:rerun-if-changed=../assets/nex.ico");
+    println!("cargo:rerun-if-changed=../assets/nex.png");
+
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let allow_missing_icon = std::env::var("NEX_ALLOW_MISSING_ICON")
         .or_else(|_| std::env::var("SWIFTFIND_ALLOW_MISSING_ICON"))

@@ -450,6 +450,9 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str(",\n\n");
     text.push_str("  // Optional: folders to exclude from local-file discovery.\n");
     text.push_str("  // Any file/folder under these roots is ignored.\n");
+    text.push_str("  // Nex also skips common system/temp/dev-noise paths automatically\n");
+    text.push_str("  // (for example: Windows, Program Files, AppData, node_modules, .git, __pycache__).\n");
+    text.push_str("  // These built-in exclusions affect file/folder indexing only, not app discovery.\n");
     text.push_str("  \"discovery_exclude_roots\": ");
     text.push_str(&excluded_roots_section);
     text.push_str(",\n\n");
@@ -678,6 +681,9 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&roots_section);
     text.push_str("\n\n");
     text.push_str("# Folders excluded from local-file discovery.\n");
+    text.push_str("# Nex also skips common system/temp/dev-noise paths automatically\n");
+    text.push_str("# (for example: Windows, Program Files, AppData, node_modules, .git, __pycache__).\n");
+    text.push_str("# Built-in exclusions affect file/folder indexing only, not app discovery.\n");
     text.push_str("discovery_exclude_roots = ");
     text.push_str(&excluded_roots_section);
     text.push_str("\n\n");

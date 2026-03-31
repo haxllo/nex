@@ -25,11 +25,18 @@ Expected:
 
 1. Structured status output
 - Run: `cargo run -p nex -- --status-json`
-- Expected: valid JSON with `runtime_state`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
+- Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
+- Expected: `diagnostics.startup_lifecycle` includes:
+  - `overlay_ready`
+  - `hotkey_ready`
+  - `indexing_started`
+  - `indexing_completed`
+  - `cache_applied`
 
 2. Baseline profile harness
 - Run: `scripts/windows/profile-memory-and-icons.ps1`
 - Expected: script updates config for `C:\` profiling, starts runtime, prints `--status-json`, and dumps recent `query_profile`/`memory_snapshot` lines.
+- Expected: recent log output contains `startup_phase` markers for cold-start timing evidence.
 
 3. Memory envelope with broad discovery root
 - Set `discovery_roots = ["C:\\"]` and keep:
@@ -58,6 +65,8 @@ Expected:
 2. Press the configured hotkey with another app focused.
 - Expected: launcher overlay opens; query input is focused.
 - Expected: launcher opens in compact bar state (no visible results list).
+- On the first cold run with an empty cache, expect `Indexing in background...` until the background index finishes.
+- Once that first background index is applied, expect a one-shot `Index ready` status when the overlay is shown idle.
 
 3. Type a query that should match indexed content (for example `code` or `report`).
 - Expected: result list updates with real indexed items.

@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 #[cfg(target_os = "windows")]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -8,6 +9,29 @@ use crate::model::SearchItem;
 
 const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
 const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
+const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "2";
+const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
+    "windows",
+    "program files",
+    "program files (x86)",
+    "$recycle.bin",
+    "system volume information",
+    "appdata",
+];
+const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".gradle",
+    ".m2",
+    ".dropbox.cache",
+    ".ssh",
+];
+const EXCLUDED_FILE_NAMES: &[&str] = &["pagefile.sys", "hiberfil.sys"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
@@ -285,6 +309,9 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
 
     fn change_stamp(&self) -> Option<String> {
         let mut stamp = String::new();
+        stamp.push_str("schema=");
+        stamp.push_str(FILESYSTEM_DISCOVERY_SCHEMA_VERSION);
+        stamp.push(';');
         stamp.push_str("roots=");
         stamp.push_str(&roots_change_stamp(&self.roots));
         stamp.push_str(";exclude=");
@@ -325,10 +352,11 @@ fn discover_filesystem_walk(
     max_items_per_root: usize,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     let mut out = Vec::new();
-    let excluded = normalized_exclusion_roots(excluded_roots);
+    let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
     let total_budget = max_items_total.max(1);
     let per_root_budget = max_items_per_root.max(1).min(total_budget);
     let mut total_added = 0_usize;
+    let mut skipped_due_exclusion = 0_usize;
 
     for root in roots {
         if total_added >= total_budget {
@@ -337,12 +365,22 @@ fn discover_filesystem_walk(
         if !root.exists() {
             continue;
         }
+        if exclusion_policy.should_exclude_path_under_root(root, root) {
+            skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+            continue;
+        }
 
         let mut root_added = 0_usize;
         for entry in walkdir::WalkDir::new(root)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|entry| !is_path_under_any_excluded_root(entry.path(), &excluded))
+            .filter_entry(|entry| {
+                let excluded = exclusion_policy.should_exclude_path_under_root(entry.path(), root);
+                if excluded && entry.path() != root {
+                    skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+                }
+                !excluded
+            })
             .filter_map(Result::ok)
         {
             if total_added >= total_budget || root_added >= per_root_budget {
@@ -404,8 +442,124 @@ fn discover_filesystem_walk(
             total_budget
         ));
     }
+    if skipped_due_exclusion > 0 {
+        crate::logging::info(&format!(
+            "[nex] discovery_exclusion provider=filesystem skipped={} policy_schema={}",
+            skipped_due_exclusion, FILESYSTEM_DISCOVERY_SCHEMA_VERSION
+        ));
+    }
 
     Ok(out)
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveryExclusionPolicy {
+    excluded_roots: Vec<String>,
+    top_level_dir_names: HashSet<&'static str>,
+    any_depth_dir_names: HashSet<&'static str>,
+    file_names: HashSet<&'static str>,
+}
+
+impl DiscoveryExclusionPolicy {
+    fn new(user_excluded_roots: &[PathBuf]) -> Self {
+        Self {
+            excluded_roots: effective_normalized_exclusion_roots(user_excluded_roots),
+            top_level_dir_names: TOP_LEVEL_EXCLUDED_DIR_NAMES.iter().copied().collect(),
+            any_depth_dir_names: ANY_DEPTH_EXCLUDED_DIR_NAMES.iter().copied().collect(),
+            file_names: EXCLUDED_FILE_NAMES.iter().copied().collect(),
+        }
+    }
+
+    fn should_exclude_path_under_root(&self, path: &Path, root: &Path) -> bool {
+        if is_path_under_any_excluded_root(path, &self.excluded_roots) {
+            return true;
+        }
+
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+        let components = relative
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(value) => {
+                    Some(value.to_string_lossy().to_ascii_lowercase())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if components.is_empty() {
+            return false;
+        }
+
+        if self.top_level_dir_names.contains(components[0].as_str()) {
+            return true;
+        }
+
+        let is_dir = path.is_dir();
+        for (index, component) in components.iter().enumerate() {
+            let is_last = index + 1 == components.len();
+            if self.file_names.contains(component.as_str()) {
+                return true;
+            }
+            if self.any_depth_dir_names.contains(component.as_str()) && (!is_last || is_dir) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+fn effective_normalized_exclusion_roots(user_excluded_roots: &[PathBuf]) -> Vec<String> {
+    let mut roots = builtin_exclusion_roots();
+    roots.extend(user_excluded_roots.iter().cloned());
+    normalized_exclusion_roots(&roots)
+}
+
+fn builtin_exclusion_roots() -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut roots = Vec::new();
+
+        if let Ok(system_drive) = std::env::var("SystemDrive") {
+            let trimmed = system_drive.trim();
+            if !trimmed.is_empty() {
+                let drive_root = PathBuf::from(format!("{trimmed}\\"));
+                roots.push(drive_root.join("Windows"));
+                roots.push(drive_root.join("Program Files"));
+                roots.push(drive_root.join("Program Files (x86)"));
+                roots.push(drive_root.join("$Recycle.Bin"));
+                roots.push(drive_root.join("System Volume Information"));
+                roots.push(drive_root.join("pagefile.sys"));
+                roots.push(drive_root.join("hiberfil.sys"));
+            }
+        }
+
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let local = PathBuf::from(local_app_data.trim());
+            if !local.as_os_str().is_empty() {
+                roots.push(local.join("Temp"));
+                roots.push(local.join("Microsoft").join("Windows").join("INetCache"));
+            }
+        }
+
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            let roaming = PathBuf::from(app_data.trim());
+            if !roaming.as_os_str().is_empty() {
+                if let Some(parent) = roaming.parent().and_then(|path| path.parent()) {
+                    roots.push(parent.join("AppData"));
+                    roots.push(parent.join(".ssh"));
+                }
+            }
+        }
+
+        roots
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
 }
 
 fn roots_change_stamp(roots: &[PathBuf]) -> String {
@@ -1276,7 +1430,9 @@ fn discover_windows_search_items(
     if roots_joined.is_empty() {
         return Ok(Vec::new());
     }
-    let excluded_joined = join_windows_paths_for_powershell(excluded_roots);
+    let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
+    let effective_excluded_roots = effective_excluded_roots_for_powershell(excluded_roots);
+    let excluded_joined = join_windows_paths_for_powershell(&effective_excluded_roots);
 
     let script = r#"
 $ErrorActionPreference = 'Stop'
@@ -1380,6 +1536,7 @@ $conn.Close()
     let total_budget = max_items_total.max(1);
     let per_root_budget = max_items_per_root.max(1).min(total_budget);
     let mut skipped_due_cap = 0_usize;
+    let mut skipped_due_exclusion = 0_usize;
     let mut items = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let mut parts = line.splitn(3, '\t');
@@ -1415,6 +1572,10 @@ $conn.Close()
         let Some(root_index) = root_index else {
             continue;
         };
+        if exclusion_policy.should_exclude_path_under_root(Path::new(path), &roots[root_index]) {
+            skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+            continue;
+        }
         if items.len() >= total_budget || root_counts[root_index] >= per_root_budget {
             skipped_due_cap = skipped_due_cap.saturating_add(1);
             continue;
@@ -1434,8 +1595,23 @@ $conn.Close()
             skipped_due_cap, total_budget, per_root_budget
         ));
     }
+    if skipped_due_exclusion > 0 {
+        crate::logging::info(&format!(
+            "[nex] discovery_exclusion provider=windows_search skipped={} policy_schema={}",
+            skipped_due_exclusion, FILESYSTEM_DISCOVERY_SCHEMA_VERSION
+        ));
+    }
 
     Ok(items)
+}
+
+#[cfg(target_os = "windows")]
+fn effective_excluded_roots_for_powershell(user_excluded_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = builtin_exclusion_roots();
+    roots.extend(user_excluded_roots.iter().cloned());
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 #[cfg(target_os = "windows")]

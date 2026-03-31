@@ -35,6 +35,8 @@ const STATUS_ROW_NO_COMMAND_RESULTS: &str = "No command matches";
 const STATUS_ROW_TYPE_TO_SEARCH: &str = "Start typing to search";
 #[cfg(target_os = "windows")]
 const STATUS_ROW_INDEXING: &str = "Indexing in background...";
+#[cfg(target_os = "windows")]
+const STATUS_TEXT_INDEX_READY: &str = "Index ready";
 const QUERY_PROFILE_LOG_THRESHOLD_MS: u128 = 35;
 const SHORT_QUERY_APP_BIAS_MAX_LEN: usize = 2;
 const INDEXED_PREFIX_CACHE_MIN_QUERY_LEN: usize = 1;
@@ -133,7 +135,9 @@ struct BackgroundIndexRefresh {
     cache_applied: bool,
     initial_cache_empty: bool,
     pending_discovery_reindex: bool,
+    ready_notice_pending: bool,
     started_at: Instant,
+    startup_started_at: Instant,
 }
 
 #[derive(Debug)]
@@ -294,6 +298,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         RuntimeCommand::Run => {}
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    let startup_started_at = Instant::now();
     #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut runtime_config = config::load(None)?;
     if !runtime_config.config_path.exists() {
@@ -319,7 +325,17 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
             "[nex] startup cached_items={} (async indexing scheduled)",
             initial_cached_items
         ));
-        start_background_index_refresh(&runtime_config, initial_cached_items == 0)
+        log_info(&format!(
+            "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty={} cached_items={}",
+            startup_started_at.elapsed().as_millis(),
+            initial_cached_items == 0,
+            initial_cached_items
+        ));
+        start_background_index_refresh(
+            &runtime_config,
+            initial_cached_items == 0,
+            startup_started_at,
+        )
     };
     #[cfg(not(target_os = "windows"))]
     {
@@ -393,10 +409,19 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         );
         overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
         log_info("[nex] native overlay shell initialized (hidden)");
+        log_info(&format!(
+            "[nex] startup_phase phase=overlay_ready elapsed_ms={}",
+            startup_started_at.elapsed().as_millis()
+        ));
 
         let mut registrar = default_hotkey_registrar();
         let registration = registrar.register_hotkey(&runtime_config.hotkey)?;
         log_registration(&registration);
+        log_info(&format!(
+            "[nex] startup_phase phase=hotkey_ready elapsed_ms={} hotkey={}",
+            startup_started_at.elapsed().as_millis(),
+            runtime_config.hotkey
+        ));
         log_info("[nex] event loop running (native overlay)");
 
         let mut max_results = runtime_config.max_results as usize;
@@ -431,6 +456,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                     &mut background_index_refresh,
                     &runtime_config,
                 );
+                maybe_show_background_index_ready_notice(&overlay, &mut background_index_refresh);
                 match event {
                     OverlayEvent::Hotkey(_) => {
                         log_info("[nex] hotkey_event received");
@@ -457,6 +483,10 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                                 }
                                 if overlay.query_text().trim().is_empty() {
                                     set_idle_overlay_state(&overlay);
+                                    maybe_show_background_index_ready_notice(
+                                        &overlay,
+                                        &mut background_index_refresh,
+                                    );
                                 }
                             }
                             HotkeyAction::Hide => {
@@ -488,6 +518,10 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         }
                         if overlay.query_text().trim().is_empty() {
                             set_idle_overlay_state(&overlay);
+                            maybe_show_background_index_ready_notice(
+                                &overlay,
+                                &mut background_index_refresh,
+                            );
                         }
                     }
                     OverlayEvent::ExternalQuit => {
@@ -867,6 +901,21 @@ fn command_status() -> Result<(), RuntimeError> {
             ));
         }
         if let Some(snapshot) = load_status_diagnostics_snapshot() {
+            if let Some(line) = snapshot.overlay_ready_line {
+                log_info(&format!("[nex] status last_overlay_ready {line}"));
+            }
+            if let Some(line) = snapshot.hotkey_ready_line {
+                log_info(&format!("[nex] status last_hotkey_ready {line}"));
+            }
+            if let Some(line) = snapshot.indexing_started_line {
+                log_info(&format!("[nex] status last_indexing_started {line}"));
+            }
+            if let Some(line) = snapshot.indexing_completed_line {
+                log_info(&format!("[nex] status last_indexing_completed {line}"));
+            }
+            if let Some(line) = snapshot.cache_applied_line {
+                log_info(&format!("[nex] status last_cache_applied {line}"));
+            }
             if let Some(line) = snapshot.startup_index_line {
                 log_info(&format!("[nex] status last_indexing {line}"));
             }
@@ -999,6 +1048,11 @@ fn command_diagnostics_bundle() -> Result<(), RuntimeError> {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct StatusDiagnosticsSnapshot {
+    overlay_ready_line: Option<String>,
+    hotkey_ready_line: Option<String>,
+    indexing_started_line: Option<String>,
+    indexing_completed_line: Option<String>,
+    cache_applied_line: Option<String>,
     startup_index_line: Option<String>,
     last_provider_line: Option<String>,
     last_icon_cache_line: Option<String>,
@@ -1058,6 +1112,13 @@ fn load_query_profile_status_report() -> Option<QueryProfileStatusReport> {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsSnapshot> {
+    let overlay_ready_line = latest_line_with_token(content, "startup_phase phase=overlay_ready ");
+    let hotkey_ready_line = latest_line_with_token(content, "startup_phase phase=hotkey_ready ");
+    let indexing_started_line =
+        latest_line_with_token(content, "startup_phase phase=indexing_started ");
+    let indexing_completed_line =
+        latest_line_with_token(content, "startup_phase phase=indexing_completed ");
+    let cache_applied_line = latest_line_with_token(content, "startup_phase phase=cache_applied ");
     let startup_index_line = latest_line_with_token(content, "startup indexed_items=");
     let last_provider_line = latest_line_with_token(content, "index_provider name=");
     let last_icon_cache_line = latest_line_with_token(content, "overlay_icon_cache reason=");
@@ -1065,7 +1126,12 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
     let last_config_reload_line = latest_line_with_token(content, "config reloaded ");
 
-    if startup_index_line.is_none()
+    if overlay_ready_line.is_none()
+        && hotkey_ready_line.is_none()
+        && indexing_started_line.is_none()
+        && indexing_completed_line.is_none()
+        && cache_applied_line.is_none()
+        && startup_index_line.is_none()
         && last_provider_line.is_none()
         && last_icon_cache_line.is_none()
         && last_overlay_tuning_line.is_none()
@@ -1076,6 +1142,11 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     }
 
     Some(StatusDiagnosticsSnapshot {
+        overlay_ready_line,
+        hotkey_ready_line,
+        indexing_started_line,
+        indexing_completed_line,
+        cache_applied_line,
         startup_index_line,
         last_provider_line,
         last_icon_cache_line,
@@ -1118,6 +1189,11 @@ fn summarize_query_profile_status_report(content: &str) -> Option<QueryProfileSt
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_json::Value {
+    let overlay_ready = build_phase_status_json(snapshot.overlay_ready_line.as_ref());
+    let hotkey_ready = build_phase_status_json(snapshot.hotkey_ready_line.as_ref());
+    let indexing_started = build_phase_status_json(snapshot.indexing_started_line.as_ref());
+    let indexing_completed = build_phase_status_json(snapshot.indexing_completed_line.as_ref());
+    let cache_applied = build_phase_status_json(snapshot.cache_applied_line.as_ref());
     let startup_indexing = snapshot
         .startup_index_line
         .as_ref()
@@ -1148,6 +1224,13 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         .and_then(|line| parse_log_line_epoch_secs(line));
 
     serde_json::json!({
+        "startup_lifecycle": {
+            "overlay_ready": overlay_ready,
+            "hotkey_ready": hotkey_ready,
+            "indexing_started": indexing_started,
+            "indexing_completed": indexing_completed,
+            "cache_applied": cache_applied,
+        },
         "startup_indexing": startup_indexing,
         "provider": provider,
         "icon_cache": icon_cache,
@@ -1156,6 +1239,11 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         "config_reload": config_reload,
         "config_reload_epoch_secs": config_reload_epoch_secs,
         "raw": {
+            "overlay_ready_line": snapshot.overlay_ready_line,
+            "hotkey_ready_line": snapshot.hotkey_ready_line,
+            "indexing_started_line": snapshot.indexing_started_line,
+            "indexing_completed_line": snapshot.indexing_completed_line,
+            "cache_applied_line": snapshot.cache_applied_line,
             "startup_indexing_line": snapshot.startup_index_line,
             "provider_line": snapshot.last_provider_line,
             "icon_cache_line": snapshot.last_icon_cache_line,
@@ -1163,6 +1251,17 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
             "memory_snapshot_line": snapshot.last_memory_snapshot_line,
             "config_reload_line": snapshot.last_config_reload_line,
         }
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn build_phase_status_json(line: Option<&String>) -> serde_json::Value {
+    let tokens = line.and_then(|value| parse_key_value_tokens(value));
+    let epoch_secs = line.and_then(|value| parse_log_line_epoch_secs(value));
+    serde_json::json!({
+        "tokens": tokens,
+        "epoch_secs": epoch_secs,
+        "line": line.cloned(),
     })
 }
 
@@ -2537,6 +2636,7 @@ fn is_likely_game_path(process_path: &str) -> bool {
 fn start_background_index_refresh(
     config: &Config,
     initial_cache_empty: bool,
+    startup_started_at: Instant,
 ) -> BackgroundIndexRefresh {
     let completed = Arc::new(AtomicBool::new(false));
     let result = Arc::new(Mutex::new(None));
@@ -2562,7 +2662,9 @@ fn start_background_index_refresh(
         cache_applied: false,
         initial_cache_empty,
         pending_discovery_reindex: false,
+        ready_notice_pending: false,
         started_at: Instant::now(),
+        startup_started_at,
     }
 }
 
@@ -2590,6 +2692,16 @@ fn maybe_apply_background_index_refresh(
     match outcome {
         Some(Ok(report)) => {
             let elapsed_ms = state.started_at.elapsed().as_millis();
+            let startup_elapsed_ms = state.startup_started_at.elapsed().as_millis();
+            log_info(&format!(
+                "[nex] startup_phase phase=indexing_completed elapsed_ms={} worker_elapsed_ms={} indexed_items={} discovered={} upserted={} removed={}",
+                startup_elapsed_ms,
+                elapsed_ms,
+                report.indexed_total,
+                report.discovered_total,
+                report.upserted_total,
+                report.removed_total
+            ));
             match service.reload_cache_from_store() {
                 Ok(cached_items) => {
                     log_info(&format!(
@@ -2600,6 +2712,12 @@ fn maybe_apply_background_index_refresh(
                         report.removed_total,
                         elapsed_ms,
                         cached_items
+                    ));
+                    log_info(&format!(
+                        "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
+                        startup_elapsed_ms,
+                        cached_items,
+                        state.initial_cache_empty
                     ));
                     for provider in &report.providers {
                         log_info(&format!(
@@ -2619,6 +2737,9 @@ fn maybe_apply_background_index_refresh(
                     ));
                 }
             }
+            if state.initial_cache_empty {
+                state.ready_notice_pending = true;
+            }
         }
         Some(Err(error)) => {
             log_warn(&format!("[nex] {error}"));
@@ -2634,13 +2755,36 @@ fn maybe_apply_background_index_refresh(
         log_info(
             "[nex] discovery settings queued during indexing; starting pending reindex",
         );
-        *state = start_background_index_refresh(runtime_config, false);
+        log_info(&format!(
+            "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
+            state.startup_started_at.elapsed().as_millis(),
+            service.cached_items_len()
+        ));
+        *state = start_background_index_refresh(runtime_config, false, state.startup_started_at);
     }
 }
 
 #[cfg(target_os = "windows")]
 fn should_show_indexing_status(state: &BackgroundIndexRefresh) -> bool {
     state.initial_cache_empty && !state.cache_applied
+}
+
+#[cfg(target_os = "windows")]
+fn maybe_show_background_index_ready_notice(
+    overlay: &NativeOverlayShell,
+    state: &mut BackgroundIndexRefresh,
+) {
+    if !state.ready_notice_pending || !overlay.is_visible() {
+        return;
+    }
+    if !overlay.query_text().trim().is_empty() {
+        return;
+    }
+
+    set_idle_overlay_state(overlay);
+    overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
+    overlay.set_status_text(STATUS_TEXT_INDEX_READY);
+    state.ready_notice_pending = false;
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -3088,7 +3232,11 @@ fn maybe_apply_runtime_config_reload(
                 } else {
                     if background_index_refresh.cache_applied {
                         *background_index_refresh =
-                            start_background_index_refresh(runtime_config, false);
+                            start_background_index_refresh(
+                                runtime_config,
+                                false,
+                                background_index_refresh.startup_started_at,
+                            );
                         log_info("[nex] discovery settings changed; background reindex started");
                     } else {
                         background_index_refresh.pending_discovery_reindex = true;
@@ -3579,8 +3727,9 @@ fn log_warn(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_indexed_seed_limit, can_use_indexed_prefix_cache, candidate_limit_for_query,
-        dedupe_overlay_results, filter_suppressed_uninstall_results, launch_overlay_selection,
+        adaptive_indexed_seed_limit, build_status_diagnostics_json,
+        can_use_indexed_prefix_cache, candidate_limit_for_query, dedupe_overlay_results,
+        filter_suppressed_uninstall_results, launch_overlay_selection,
         maybe_expand_uninstall_quick_shortcut, next_selection_index, parse_cli_args,
         parse_status_diagnostics_snapshot, parse_tasklist_pid_lines, result_limit_for_query,
         search_overlay_results, search_overlay_results_with_session,
@@ -4273,12 +4422,42 @@ mod tests {
     #[test]
     fn parses_status_diagnostics_snapshot_from_log_content() {
         let content = "\
+[0] [INFO] [nex] startup_phase phase=overlay_ready elapsed_ms=41
+[0] [INFO] [nex] startup_phase phase=hotkey_ready elapsed_ms=56 hotkey=Ctrl+Space
+[0] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=7 initial_cache_empty=true cached_items=0
+[0] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2815 worker_elapsed_ms=2809 indexed_items=310 discovered=320 upserted=16 removed=4
+[0] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2820 cached_items=310 initial_cache_empty=true
 [1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
 [2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
 [3] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9
 ";
 
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
+        assert!(snapshot
+            .overlay_ready_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("phase=overlay_ready"));
+        assert!(snapshot
+            .hotkey_ready_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("phase=hotkey_ready"));
+        assert!(snapshot
+            .indexing_started_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("phase=indexing_started"));
+        assert!(snapshot
+            .indexing_completed_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("phase=indexing_completed"));
+        assert!(snapshot
+            .cache_applied_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("phase=cache_applied"));
         assert!(snapshot
             .startup_index_line
             .as_deref()
@@ -4294,6 +4473,44 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("overlay_icon_cache reason=cache_clear"));
+    }
+
+    #[test]
+    fn status_diagnostics_json_includes_startup_lifecycle_tokens() {
+        let content = "\
+[1773000001] [INFO] [nex] startup_phase phase=overlay_ready elapsed_ms=33
+[1773000002] [INFO] [nex] startup_phase phase=hotkey_ready elapsed_ms=48 hotkey=Ctrl+Space
+[1773000003] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=6 initial_cache_empty=true cached_items=0
+[1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
+[1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
+";
+        let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
+        let json = build_status_diagnostics_json(&snapshot);
+
+        assert_eq!(
+            json["startup_lifecycle"]["overlay_ready"]["tokens"]["elapsed_ms"],
+            serde_json::json!(33)
+        );
+        assert_eq!(
+            json["startup_lifecycle"]["hotkey_ready"]["tokens"]["hotkey"],
+            serde_json::json!("Ctrl+Space")
+        );
+        assert_eq!(
+            json["startup_lifecycle"]["indexing_started"]["tokens"]["initial_cache_empty"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            json["startup_lifecycle"]["indexing_completed"]["tokens"]["worker_elapsed_ms"],
+            serde_json::json!(2593)
+        );
+        assert_eq!(
+            json["startup_lifecycle"]["cache_applied"]["tokens"]["cached_items"],
+            serde_json::json!(310)
+        );
+        assert_eq!(
+            json["startup_lifecycle"]["cache_applied"]["epoch_secs"],
+            serde_json::json!(1773000029_u64)
+        );
     }
 
     #[test]

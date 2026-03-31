@@ -25,13 +25,22 @@ Expected:
 
 1. Structured status output
 - Run: `cargo run -p nex -- --status-json`
-- Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
+- Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.cache_compaction`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
 - Expected: `diagnostics.startup_lifecycle` includes:
   - `overlay_ready`
   - `hotkey_ready`
   - `indexing_started`
   - `indexing_completed`
   - `cache_applied`
+- Expected: `diagnostics.cache_compaction` exposes:
+  - `input_total`
+  - `retained`
+  - `dropped`
+  - `retained_apps`
+  - `retained_file_folders`
+  - `effective_file_seed_cap`
+  - `broad_root_mode`
+- Expected: `diagnostics.icon_cache` exposes `live_entries` and `max_entries`.
 
 2. Baseline profile harness
 - Run: `scripts/windows/profile-memory-and-icons.ps1`
@@ -45,6 +54,8 @@ Expected:
 - `index_max_items_total`, `index_max_items_per_root`, `index_max_items_per_query_seed` at defaults unless testing overrides.
 - Exercise launcher with short and medium queries for at least 2 minutes.
 - Expected: active working set tracks close to `active_memory_target_mb`; idle trims occur after hide.
+- Expected: `cache_compaction` shows `broad_root_mode = true` and a smaller `effective_file_seed_cap` than the configured `index_max_items_per_query_seed`.
+- Expected: app results remain complete even when file/folder cache compaction is active.
 
 4. Live config apply (no restart for discovery/search tuning)
 - Keep runtime running.

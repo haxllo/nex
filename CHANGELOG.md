@@ -6,6 +6,10 @@ This changelog is intentionally backfilled from the most reliable sources in the
 
 ## [Unreleased]
 
+No unreleased entries yet.
+
+## [6.4.0] - 2026-03-31
+
 ### Added
 - On-demand updater entry points inside Nex.
   - Added built-in `Check for Updates` command action.

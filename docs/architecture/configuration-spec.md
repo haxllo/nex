@@ -37,7 +37,13 @@ Additional generated fields may also exist in persisted config (for example `ver
 
 - Local file discovery scans only `discovery_roots`.
 - Any file/folder path under `discovery_exclude_roots` is skipped.
-- Exclusion is path-root based (case-insensitive normalized path comparison).
+- Nex also applies built-in file/folder exclusions for common low-value or high-churn paths:
+  - system roots like `Windows`, `Program Files`, `$Recycle.Bin`, `System Volume Information`
+  - user-noise roots like `AppData`
+  - dev/cache directories like `node_modules`, `.git`, `.venv`, `venv`, `__pycache__`, `dist`, `build`, `.gradle`, `.m2`
+  - sensitive/noise directories like `.ssh` and `.dropbox.cache`
+  - special files like `pagefile.sys` and `hiberfil.sys`
+- Exclusion is path-root based plus built-in path-segment filtering.
 - Start-menu app discovery is independent of these filesystem roots.
 
 ## Reload/Apply Behavior

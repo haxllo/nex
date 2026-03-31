@@ -271,6 +271,87 @@ fn file_system_provider_honors_item_caps() {
 }
 
 #[test]
+fn file_system_provider_excludes_common_noise_directories_by_default() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let root = std::env::temp_dir().join(format!("nex-default-noise-roots-{unique}"));
+    let project = root.join("project");
+    let docs = project.join("docs");
+    let node_modules = project.join("node_modules").join("left-pad");
+    let git_dir = project.join(".git");
+    let pycache = project.join("__pycache__");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::create_dir_all(&node_modules).unwrap();
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::create_dir_all(&pycache).unwrap();
+
+    let keep_file = docs.join("Keep.md");
+    let skipped_node_file = node_modules.join("index.js");
+    let skipped_git_file = git_dir.join("config");
+    let skipped_pycache_file = pycache.join("mod.pyc");
+    std::fs::write(&keep_file, b"keep").unwrap();
+    std::fs::write(&skipped_node_file, b"skip").unwrap();
+    std::fs::write(&skipped_git_file, b"skip").unwrap();
+    std::fs::write(&skipped_pycache_file, b"skip").unwrap();
+
+    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 8, vec![]);
+    let items = provider.discover().unwrap();
+    let paths: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
+
+    assert!(paths.iter().any(|p| p.ends_with("Keep.md")));
+    assert!(!paths.iter().any(|p| p.contains("node_modules")));
+    assert!(!paths.iter().any(|p| p.contains(".git")));
+    assert!(!paths.iter().any(|p| p.contains("__pycache__")));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn file_system_provider_excludes_explicit_system_roots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let root = std::env::temp_dir().join(format!("nex-system-like-roots-{unique}"));
+    let windows_root = root.join("Windows");
+    let system32 = windows_root.join("System32");
+    let docs = root.join("Users").join("Admin").join("Documents");
+    std::fs::create_dir_all(&system32).unwrap();
+    std::fs::create_dir_all(&docs).unwrap();
+
+    let skipped_file = system32.join("kernel32.dll");
+    let keep_file = docs.join("UserNote.txt");
+    std::fs::write(&skipped_file, b"skip").unwrap();
+    std::fs::write(&keep_file, b"keep").unwrap();
+
+    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 8, vec![]);
+    let items = provider.discover().unwrap();
+    let paths: Vec<String> = items.iter().map(|i| i.path.clone()).collect();
+
+    assert!(paths.iter().any(|p| p.ends_with("UserNote.txt")));
+    assert!(!paths.iter().any(|p| p.ends_with("kernel32.dll")));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn runtime_providers_keep_start_menu_apps_when_file_like_paths_are_excluded() {
+    let config = nex_core::config::Config::default();
+    let db = nex_core::index_store::open_memory().unwrap();
+    let service = CoreService::with_connection(config, db)
+        .unwrap()
+        .with_runtime_providers();
+
+    let provider_names = service.configured_provider_names();
+    assert!(provider_names.iter().any(|name| name == "start-menu-apps"));
+    assert!(provider_names.iter().any(|name| name == "filesystem"));
+}
+
+#[test]
 fn runtime_provider_reconfigure_applies_new_roots() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

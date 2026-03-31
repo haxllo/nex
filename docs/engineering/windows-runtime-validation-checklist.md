@@ -135,6 +135,8 @@ Expected:
 - Install from packaged artifact (`setup.exe` or install script from zip).
 - Expected: install completes without requiring Rust/Cargo.
 - Expected: runtime can start and hotkey works on first launch.
+- Force a hotkey conflict with another launcher or temporary test app.
+- Expected: runtime still starts, tray stays available, log includes `hotkey_registration_issue`, and `Open Config` is available from the tray menu.
 
 13. Upgrade-over-existing checks.
 - Install a newer build over an existing installed build.

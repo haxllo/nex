@@ -88,6 +88,36 @@ fn line_contains_runtime_log_marker(line: &str, marker: &str) -> bool {
     runtime_log_prefixes().any(|prefix| line.contains(&runtime_log_marker(prefix, marker)))
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn hotkey_registration_recovery_message(hotkey: &str, config_path: &std::path::Path) -> String {
+    let suggestions = crate::settings::suggested_hotkey_presets(hotkey, 3);
+    if suggestions.is_empty() {
+        return format!(
+            "Hotkey '{hotkey}' is unavailable. Open {} and choose a different modifier+key combination.",
+            config_path.display()
+        );
+    }
+
+    format!(
+        "Hotkey '{hotkey}' is unavailable. Try {}. Edit {} to change it.",
+        suggestions.join(", "),
+        config_path.display()
+    )
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn hotkey_registration_status_text(hotkey: &str) -> String {
+    let suggestions = crate::settings::suggested_hotkey_presets(hotkey, 2);
+    if suggestions.is_empty() {
+        return format!("Hotkey unavailable: {hotkey}. Open config from the tray.");
+    }
+
+    format!(
+        "Hotkey unavailable: {hotkey}. Try {}.",
+        suggestions.join(" or ")
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 struct OverlaySearchSession {
     indexed_prefix_cache: Option<IndexedPrefixCache>,
@@ -419,8 +449,31 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
 
         let mut registrar = default_hotkey_registrar();
-        let registration = registrar.register_hotkey(&runtime_config.hotkey)?;
-        log_registration(&registration);
+        let hotkey_issue_status = match registrar.register_hotkey(&runtime_config.hotkey) {
+            Ok(registration) => {
+                log_registration(&registration);
+                overlay.set_hotkey_issue_active(false);
+                None
+            }
+            Err(error) => {
+                let recovery_message = hotkey_registration_recovery_message(
+                    &runtime_config.hotkey,
+                    &runtime_config.config_path,
+                );
+                let suggested = crate::settings::suggested_hotkey_presets(
+                    &runtime_config.hotkey,
+                    3,
+                )
+                .join("|");
+                log_warn(&format!(
+                    "[nex] hotkey_registration_issue hotkey={} suggestions={} error={:?}",
+                    runtime_config.hotkey, suggested, error
+                ));
+                log_warn(&format!("[nex] {recovery_message}"));
+                overlay.set_hotkey_issue_active(true);
+                Some(hotkey_registration_status_text(&runtime_config.hotkey))
+            }
+        };
         log_info(&format!(
             "[nex] startup_phase phase=hotkey_ready elapsed_ms={} hotkey={}",
             startup_started_at.elapsed().as_millis(),
@@ -487,6 +540,9 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                                 }
                                 if overlay.query_text().trim().is_empty() {
                                     set_idle_overlay_state(&overlay);
+                                    if let Some(issue) = hotkey_issue_status.as_deref() {
+                                        overlay.set_status_text(issue);
+                                    }
                                     maybe_show_background_index_ready_notice(
                                         &overlay,
                                         &mut background_index_refresh,
@@ -522,6 +578,9 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                         }
                         if overlay.query_text().trim().is_empty() {
                             set_idle_overlay_state(&overlay);
+                            if let Some(issue) = hotkey_issue_status.as_deref() {
+                                overlay.set_status_text(issue);
+                            }
                             maybe_show_background_index_ready_notice(
                                 &overlay,
                                 &mut background_index_refresh,
@@ -905,6 +964,9 @@ fn command_status() -> Result<(), RuntimeError> {
             ));
         }
         if let Some(snapshot) = load_status_diagnostics_snapshot() {
+            if let Some(line) = snapshot.hotkey_registration_issue_line {
+                log_warn(&format!("[nex] status last_hotkey_issue {line}"));
+            }
             if let Some(line) = snapshot.overlay_ready_line {
                 log_info(&format!("[nex] status last_overlay_ready {line}"));
             }
@@ -1061,6 +1123,7 @@ fn command_diagnostics_bundle() -> Result<(), RuntimeError> {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct StatusDiagnosticsSnapshot {
+    hotkey_registration_issue_line: Option<String>,
     overlay_ready_line: Option<String>,
     hotkey_ready_line: Option<String>,
     indexing_started_line: Option<String>,
@@ -1128,6 +1191,8 @@ fn load_query_profile_status_report() -> Option<QueryProfileStatusReport> {
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsSnapshot> {
+    let hotkey_registration_issue_line =
+        latest_line_with_token(content, "hotkey_registration_issue ");
     let overlay_ready_line = latest_line_with_token(content, "startup_phase phase=overlay_ready ");
     let hotkey_ready_line = latest_line_with_token(content, "startup_phase phase=hotkey_ready ");
     let indexing_started_line =
@@ -1145,7 +1210,8 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
     let last_config_reload_line = latest_line_with_token(content, "config reloaded ");
 
-    if overlay_ready_line.is_none()
+    if hotkey_registration_issue_line.is_none()
+        && overlay_ready_line.is_none()
         && hotkey_ready_line.is_none()
         && indexing_started_line.is_none()
         && indexing_completed_line.is_none()
@@ -1164,6 +1230,7 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     }
 
     Some(StatusDiagnosticsSnapshot {
+        hotkey_registration_issue_line,
         overlay_ready_line,
         hotkey_ready_line,
         indexing_started_line,
@@ -1214,6 +1281,7 @@ fn summarize_query_profile_status_report(content: &str) -> Option<QueryProfileSt
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_json::Value {
+    let hotkey_issue = build_phase_status_json(snapshot.hotkey_registration_issue_line.as_ref());
     let overlay_ready = build_phase_status_json(snapshot.overlay_ready_line.as_ref());
     let hotkey_ready = build_phase_status_json(snapshot.hotkey_ready_line.as_ref());
     let indexing_started = build_phase_status_json(snapshot.indexing_started_line.as_ref());
@@ -1268,6 +1336,7 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
             "indexing_completed": indexing_completed,
             "cache_applied": cache_applied,
         },
+        "hotkey_issue": hotkey_issue,
         "startup_indexing": startup_indexing,
         "provider": provider,
         "provider_freshness": provider_freshness,
@@ -1279,6 +1348,7 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         "config_reload": config_reload,
         "config_reload_epoch_secs": config_reload_epoch_secs,
         "raw": {
+            "hotkey_issue_line": snapshot.hotkey_registration_issue_line,
             "overlay_ready_line": snapshot.overlay_ready_line,
             "hotkey_ready_line": snapshot.hotkey_ready_line,
             "indexing_started_line": snapshot.indexing_started_line,
@@ -3823,6 +3893,7 @@ mod tests {
         adaptive_indexed_seed_limit, build_status_diagnostics_json,
         can_use_indexed_prefix_cache, candidate_limit_for_query, dedupe_overlay_results,
         filter_suppressed_uninstall_results, launch_overlay_selection,
+        hotkey_registration_recovery_message, hotkey_registration_status_text,
         maybe_expand_uninstall_quick_shortcut, next_selection_index, parse_cli_args,
         parse_status_diagnostics_snapshot, parse_tasklist_pid_lines, result_limit_for_query,
         queued_discovery_reindex_is_due,
@@ -3892,7 +3963,7 @@ mod tests {
         service
             .upsert_item(&SearchItem::new(
                 "item-1",
-                "file",
+                "app",
                 "Code Launcher",
                 launch_path.to_string_lossy().as_ref(),
             ))
@@ -4518,6 +4589,7 @@ mod tests {
         let content = "\
 [0] [INFO] [nex] startup_phase phase=overlay_ready elapsed_ms=41
 [0] [INFO] [nex] startup_phase phase=hotkey_ready elapsed_ms=56 hotkey=Ctrl+Space
+[0] [WARN] [nex] hotkey_registration_issue hotkey=Ctrl+Space suggestions=Ctrl+Shift+Space|Alt+Space error=conflict
 [0] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=7 initial_cache_empty=true cached_items=0
 [0] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2815 worker_elapsed_ms=2809 indexed_items=310 discovered=320 upserted=16 removed=4
 [0] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2820 cached_items=310 initial_cache_empty=true
@@ -4540,6 +4612,11 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("phase=hotkey_ready"));
+        assert!(snapshot
+            .hotkey_registration_issue_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("hotkey_registration_issue hotkey=Ctrl+Space"));
         assert!(snapshot
             .indexing_started_line
             .as_deref()
@@ -4592,6 +4669,7 @@ mod tests {
         let content = "\
 [1773000001] [INFO] [nex] startup_phase phase=overlay_ready elapsed_ms=33
 [1773000002] [INFO] [nex] startup_phase phase=hotkey_ready elapsed_ms=48 hotkey=Ctrl+Space
+[1773000002] [WARN] [nex] hotkey_registration_issue hotkey=Ctrl+Space suggestions=Ctrl+Shift+Space|Alt+Space error=conflict
 [1773000003] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=6 initial_cache_empty=true cached_items=0
 [1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
 [1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
@@ -4610,6 +4688,14 @@ mod tests {
         assert_eq!(
             json["startup_lifecycle"]["hotkey_ready"]["tokens"]["hotkey"],
             serde_json::json!("Ctrl+Space")
+        );
+        assert_eq!(
+            json["hotkey_issue"]["tokens"]["suggestions"],
+            serde_json::json!("Ctrl+Shift+Space|Alt+Space")
+        );
+        assert_eq!(
+            json["hotkey_issue"]["epoch_secs"],
+            serde_json::json!(1773000002_u64)
         );
         assert_eq!(
             json["startup_lifecycle"]["indexing_started"]["tokens"]["initial_cache_empty"],
@@ -4673,6 +4759,21 @@ mod tests {
     fn returns_none_for_status_snapshot_without_diagnostics_tokens() {
         let content = "[1] [INFO] [nex] status: running\n";
         assert!(parse_status_diagnostics_snapshot(content).is_none());
+    }
+
+    #[test]
+    fn hotkey_registration_messages_include_recovery_guidance() {
+        let message = hotkey_registration_recovery_message(
+            "Ctrl+Space",
+            std::path::Path::new("C:\\Users\\Admin\\AppData\\Roaming\\Nex\\config.toml"),
+        );
+        assert!(message.contains("Hotkey 'Ctrl+Space' is unavailable."));
+        assert!(message.contains("Ctrl+Shift+Space"));
+        assert!(message.contains("config.toml"));
+
+        let status = hotkey_registration_status_text("Ctrl+Space");
+        assert!(status.contains("Hotkey unavailable: Ctrl+Space."));
+        assert!(status.contains("Ctrl+Shift+Space"));
     }
 
     #[test]

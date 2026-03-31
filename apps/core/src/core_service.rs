@@ -1401,6 +1401,8 @@ mod tests {
     #[test]
     fn broad_root_mode_detects_drive_roots() {
         let mut cfg = Config::default();
+        cfg.show_files = true;
+        cfg.show_folders = true;
         cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
         assert!(broad_root_discovery_enabled(&cfg));
     }
@@ -1414,6 +1416,8 @@ mod tests {
     #[test]
     fn broad_root_mode_reduces_file_folder_cache_cap() {
         let mut cfg = Config::default();
+        cfg.show_files = true;
+        cfg.show_folders = true;
         cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
         cfg.index_max_items_per_query_seed = 5_000;
         cfg.active_memory_target_mb = 72;
@@ -1424,6 +1428,8 @@ mod tests {
     #[test]
     fn cache_compaction_keeps_apps_but_tightens_files_for_broad_roots() {
         let mut cfg = Config::default();
+        cfg.show_files = true;
+        cfg.show_folders = true;
         cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
         cfg.index_max_items_per_query_seed = 5_000;
         cfg.active_memory_target_mb = 72;

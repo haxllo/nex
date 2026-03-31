@@ -58,6 +58,20 @@ pub fn validate_max_results(value: u16) -> Result<(), String> {
     }
 }
 
+pub fn suggested_hotkey_presets(current: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let current_canonical = validate_hotkey(current).ok();
+    SAFE_HOTKEY_PRESETS
+        .iter()
+        .filter_map(|preset| validate_hotkey(preset).ok())
+        .filter(|preset| current_canonical.as_ref() != Some(preset))
+        .take(limit)
+        .collect()
+}
+
 fn normalize_modifier(input: &str) -> Result<&'static str, String> {
     match input.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => Ok("Ctrl"),

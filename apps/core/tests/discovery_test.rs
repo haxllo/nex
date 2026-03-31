@@ -125,6 +125,7 @@ fn runtime_providers_use_configured_roots() {
     std::fs::write(&file_path, b"runtime").unwrap();
 
     let mut config = nex_core::config::Config::default();
+    config.show_files = true;
     config.discovery_roots = vec![root.clone()];
     // Ensure this test root is not filtered by default exclude roots (which may include %TEMP%).
     config.discovery_exclude_roots = vec![];
@@ -368,6 +369,7 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     std::fs::write(&file_b, b"b").unwrap();
 
     let mut cfg_a = nex_core::config::Config::default();
+    cfg_a.show_files = true;
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];
     cfg_a.windows_search_enabled = false;

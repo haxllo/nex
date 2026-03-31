@@ -55,7 +55,7 @@ try {
     Write-Host "[5/5] Show recent query/memory lines"
     $logPath = "$env:APPDATA\Nex\logs\nex.log"
     if (Test-Path -LiteralPath $logPath) {
-        Get-Content $logPath | Select-String -Pattern "query_profile|memory_snapshot|overlay_icon_cache|config reloaded|index_provider" | Select-Object -Last 120 | Out-Host
+        Get-Content $logPath | Select-String -Pattern "query_profile|memory_snapshot|overlay_icon_cache|cache_compaction|provider_freshness|stale_prune|startup_phase|config reloaded|index_provider" | Select-Object -Last 150 | Out-Host
     } else {
         Write-Host "Log file not found: $logPath"
     }

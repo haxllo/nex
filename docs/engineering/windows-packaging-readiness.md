@@ -10,8 +10,10 @@
 ## Version Stamping Policy
 
 - Preferred: explicit `-Version` argument in packaging command.
-- Fallback: `git describe --tags --always`.
+- Default fallback: `apps/core/Cargo.toml` package version.
+- Secondary fallback: `git describe --tags --always`.
 - If git metadata is unavailable: `0.0.0-local`.
+- Recommended release tags going forward: semver, for example `v6.3.0`.
 
 ## Packaging Command
 

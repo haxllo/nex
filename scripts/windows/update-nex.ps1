@@ -20,7 +20,36 @@ function Normalize-Version([string]$TagOrVersion) {
   if ($value.StartsWith("v")) {
     return $value.Substring(1)
   }
+  if ($value -match '^(\d+)\.(\d+)([-+].*)?$') {
+    $suffix = $Matches[3]
+    if (-not $suffix) {
+      $suffix = ''
+    }
+    return "$($Matches[1]).$($Matches[2]).0$suffix"
+  }
   return $value
+}
+
+function Get-ArtifactBaseCandidates([string]$TagOrVersion) {
+  $value = [string]$TagOrVersion
+  if (-not $value) {
+    return @()
+  }
+
+  $trimmed = $value.Trim()
+  if ($trimmed.StartsWith("v")) {
+    $trimmed = $trimmed.Substring(1)
+  }
+
+  $candidates = @()
+  $normalized = Normalize-Version $trimmed
+  if ($normalized) {
+    $candidates += "nex-$normalized-windows-x64"
+  }
+  if ($trimmed -and $trimmed -ne $normalized) {
+    $candidates += "nex-$trimmed-windows-x64"
+  }
+  return $candidates | Select-Object -Unique
 }
 
 function Is-BetaRelease($release) {
@@ -75,12 +104,12 @@ function Resolve-TargetRelease {
 function Resolve-ReleaseAsset {
   param(
     $Release,
-    [string]$AssetName
+    [string[]]$AssetNames
   )
 
-  $asset = $Release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+  $asset = $Release.assets | Where-Object { $AssetNames -contains $_.name } | Select-Object -First 1
   if (-not $asset) {
-    throw "Release '$($Release.tag_name)' is missing asset '$AssetName'."
+    throw "Release '$($Release.tag_name)' is missing assets: $($AssetNames -join ', ')."
   }
   return $asset
 }
@@ -200,21 +229,22 @@ if ($releases.Count -eq 0) {
 
 $targetRelease = Resolve-TargetRelease -Releases $releases -ChannelName $Channel -RequestedVersion $Version
 $resolvedVersion = Normalize-Version ([string]$targetRelease.tag_name)
-$artifactBase = "nex-$resolvedVersion-windows-x64"
-$setupName = "$artifactBase-setup.exe"
-$manifestName = "$artifactBase-manifest.json"
+$artifactBaseCandidates = Get-ArtifactBaseCandidates ([string]$targetRelease.tag_name)
+$artifactBase = $artifactBaseCandidates | Select-Object -First 1
+$setupNames = $artifactBaseCandidates | ForEach-Object { "$_-setup.exe" }
+$manifestNames = $artifactBaseCandidates | ForEach-Object { "$_-manifest.json" }
 
 Write-Host "Target release: $($targetRelease.tag_name)" -ForegroundColor Green
 
-$setupAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetName $setupName
-$manifestAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetName $manifestName
+$setupAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $setupNames
+$manifestAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $manifestNames
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $workDir = Join-Path $CacheRoot "$artifactBase-update-$stamp"
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 
-$setupPath = Join-Path $workDir $setupName
-$manifestPath = Join-Path $workDir $manifestName
+$setupPath = Join-Path $workDir $setupAsset.name
+$manifestPath = Join-Path $workDir $manifestAsset.name
 
 Write-Host "[1/5] Downloading manifest and installer..." -ForegroundColor Yellow
 Download-ReleaseAsset -Asset $manifestAsset -OutFile $manifestPath

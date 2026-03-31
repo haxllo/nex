@@ -147,13 +147,15 @@ mod imp {
     const NEX_WM_EXTERNAL_QUIT: u32 = WM_APP + 17;
     const NEX_WM_TRAY_ICON: u32 = WM_APP + 18;
     const NEX_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
+    const NEX_WM_TRAY_CHECK_UPDATES: u32 = WM_APP + 20;
     const EM_GETRECT: u32 = 0x00B2;
     const EM_SETRECTNP: u32 = 0x00B4;
     const TRAY_ICON_ID: u32 = 1;
     const TRAY_MENU_SHOW: usize = 41001;
     const TRAY_MENU_OPEN_CONFIG: usize = 41002;
-    const TRAY_MENU_GAME_MODE: usize = 41003;
-    const TRAY_MENU_QUIT: usize = 41004;
+    const TRAY_MENU_CHECK_UPDATES: usize = 41003;
+    const TRAY_MENU_GAME_MODE: usize = 41004;
+    const TRAY_MENU_QUIT: usize = 41005;
 
     const TIMER_WINDOW_ANIM: usize = 0xBEF1;
     const TIMER_HELP_HOVER: usize = 0xBEF3;
@@ -366,6 +368,7 @@ mod imp {
         MoveSelection(i32),
         Submit,
         TrayToggleGameMode,
+        TrayCheckForUpdates,
         Escape,
         ExternalShow,
         ExternalQuit,
@@ -1129,6 +1132,7 @@ mod imp {
                     NEX_WM_MOVE_DOWN => on_event(OverlayEvent::MoveSelection(1)),
                     NEX_WM_SUBMIT => on_event(OverlayEvent::Submit),
                     NEX_WM_TRAY_TOGGLE_GAME_MODE => on_event(OverlayEvent::TrayToggleGameMode),
+                    NEX_WM_TRAY_CHECK_UPDATES => on_event(OverlayEvent::TrayCheckForUpdates),
                     NEX_WM_ESCAPE => on_event(OverlayEvent::Escape),
                     NEX_WM_EXTERNAL_SHOW => on_event(OverlayEvent::ExternalShow),
                     NEX_WM_EXTERNAL_QUIT => on_event(OverlayEvent::ExternalQuit),
@@ -1645,6 +1649,12 @@ mod imp {
                         TRAY_MENU_OPEN_CONFIG => {
                             if let Some(state) = state_for(hwnd) {
                                 let _ = open_help_config_file(state);
+                            }
+                            return 0;
+                        }
+                        TRAY_MENU_CHECK_UPDATES => {
+                            unsafe {
+                                PostMessageW(hwnd, NEX_WM_TRAY_CHECK_UPDATES, 0, 0);
                             }
                             return 0;
                         }
@@ -5068,11 +5078,13 @@ mod imp {
 
         let open_text = to_wide("Open Nex");
         let config_text = to_wide("Open Config");
+        let updates_text = to_wide("Check for Updates");
         let game_mode_text = to_wide("Game Mode");
         let quit_text = to_wide("Quit");
         unsafe {
             AppendMenuW(menu, MF_STRING, TRAY_MENU_SHOW, open_text.as_ptr());
             AppendMenuW(menu, MF_STRING, TRAY_MENU_OPEN_CONFIG, config_text.as_ptr());
+            AppendMenuW(menu, MF_STRING, TRAY_MENU_CHECK_UPDATES, updates_text.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             AppendMenuW(
                 menu,

@@ -1,7 +1,7 @@
 use crate::action_registry::{
-    search_actions_with_mode, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
-    ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID, ACTION_TRIM_MEMORY_ID,
-    ACTION_WEB_SEARCH_PREFIX,
+    search_actions_with_mode, ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID,
+    ACTION_DIAGNOSTICS_BUNDLE_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID,
+    ACTION_REBUILD_INDEX_ID, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::{self, Config, ConfigError};
@@ -116,6 +116,16 @@ fn hotkey_registration_status_text(hotkey: &str) -> String {
         "Hotkey unavailable: {hotkey}. Try {}.",
         suggestions.join(" or ")
     )
+}
+
+fn launch_stable_updater() -> Result<std::path::PathBuf, String> {
+    let script_path = crate::updater::launch_updater(crate::updater::UpdateChannel::Stable)
+        .map_err(|error| error.to_string())?;
+    log_info(&format!(
+        "[nex] updater_launch channel=stable script={}",
+        script_path.display()
+    ));
+    Ok(script_path)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -599,6 +609,17 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                     }
                     OverlayEvent::TrayToggleGameMode => {
                         toggle_game_mode_from_tray(&overlay, &mut runtime_config);
+                    }
+                    OverlayEvent::TrayCheckForUpdates => {
+                        match launch_stable_updater() {
+                            Ok(_) => overlay.set_status_text("Updater launched"),
+                            Err(error) => {
+                                log_warn(&format!(
+                                    "[nex] updater launch failed from tray: {error}"
+                                ));
+                                overlay.set_status_text("Could not launch updater");
+                            }
+                        }
                     }
                     OverlayEvent::Escape => {
                         if overlay_state.on_escape() {
@@ -3818,6 +3839,9 @@ fn execute_action_selection(
             ));
             Ok(())
         }
+        ACTION_CHECK_UPDATES_ID => launch_stable_updater()
+            .map(|_| ())
+            .map_err(|error| format!("check for updates failed: {error}")),
         ACTION_TRIM_MEMORY_ID => {
             log_info("[nex] trim memory action invoked");
             Ok(())

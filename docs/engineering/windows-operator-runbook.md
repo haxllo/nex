@@ -79,6 +79,12 @@ scripts/windows/update-nex.ps1 -Channel beta
 scripts/windows/update-nex.ps1 -Channel stable -Version "1.2.0"
 ```
 
+In-app entry points:
+
+- Command mode action: `Check for Updates`
+- Tray menu: `Check for Updates`
+- Both launch the stable updater script on demand; no background polling is performed by `nex.exe`.
+
 Updater behavior:
 
 - Downloads release `manifest.json` + `setup.exe` from GitHub release assets.

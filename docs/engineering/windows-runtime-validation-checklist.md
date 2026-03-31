@@ -145,6 +145,8 @@ Expected:
 - Expected: config file in `%APPDATA%\Nex\config.toml` is preserved.
 
 14. Channel updater checks.
+- Trigger `Check for Updates` from command mode and from the tray menu.
+- Expected: both entry points launch the stable updater flow without requiring a background updater service.
 - Run `scripts/windows/update-nex.ps1 -Channel stable`.
 - Expected: manifest and installer are downloaded.
 - Expected: installer checksum is verified before apply.

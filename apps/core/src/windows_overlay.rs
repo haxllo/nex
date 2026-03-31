@@ -3674,6 +3674,8 @@ mod imp {
 
     fn log_icon_cache_metrics(state: &mut OverlayShellState, reason: &str, cleared_entries: usize) {
         let metrics = state.icon_cache_metrics;
+        let live_entries = state.icon_cache.len();
+        let max_entries = runtime_icon_cache_max_entries();
         if metrics.hits == 0
             && metrics.misses == 0
             && metrics.load_failures == 0
@@ -3683,13 +3685,15 @@ mod imp {
             return;
         }
         crate::logging::info(&format!(
-            "[nex] overlay_icon_cache reason={} hits={} misses={} load_failures={} evictions={} cleared_entries={}",
+            "[nex] overlay_icon_cache reason={} hits={} misses={} load_failures={} evictions={} cleared_entries={} live_entries={} max_entries={}",
             reason,
             metrics.hits,
             metrics.misses,
             metrics.load_failures,
             metrics.evictions,
-            cleared_entries
+            cleared_entries,
+            live_entries,
+            max_entries
         ));
         state.icon_cache_metrics = IconCacheMetrics::default();
     }

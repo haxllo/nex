@@ -922,6 +922,9 @@ fn command_status() -> Result<(), RuntimeError> {
             if let Some(line) = snapshot.last_provider_line {
                 log_info(&format!("[nex] status last_provider {line}"));
             }
+            if let Some(line) = snapshot.last_cache_compaction_line {
+                log_info(&format!("[nex] status last_cache_compaction {line}"));
+            }
             if let Some(line) = snapshot.last_icon_cache_line {
                 log_info(&format!("[nex] status last_icon_cache {line}"));
             }
@@ -1055,6 +1058,7 @@ struct StatusDiagnosticsSnapshot {
     cache_applied_line: Option<String>,
     startup_index_line: Option<String>,
     last_provider_line: Option<String>,
+    last_cache_compaction_line: Option<String>,
     last_icon_cache_line: Option<String>,
     last_overlay_tuning_line: Option<String>,
     last_memory_snapshot_line: Option<String>,
@@ -1121,6 +1125,7 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     let cache_applied_line = latest_line_with_token(content, "startup_phase phase=cache_applied ");
     let startup_index_line = latest_line_with_token(content, "startup indexed_items=");
     let last_provider_line = latest_line_with_token(content, "index_provider name=");
+    let last_cache_compaction_line = latest_line_with_token(content, "cache_compaction ");
     let last_icon_cache_line = latest_line_with_token(content, "overlay_icon_cache reason=");
     let last_overlay_tuning_line = latest_line_with_token(content, "overlay_tuning ");
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
@@ -1133,6 +1138,7 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
         && cache_applied_line.is_none()
         && startup_index_line.is_none()
         && last_provider_line.is_none()
+        && last_cache_compaction_line.is_none()
         && last_icon_cache_line.is_none()
         && last_overlay_tuning_line.is_none()
         && last_memory_snapshot_line.is_none()
@@ -1149,6 +1155,7 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
         cache_applied_line,
         startup_index_line,
         last_provider_line,
+        last_cache_compaction_line,
         last_icon_cache_line,
         last_overlay_tuning_line,
         last_memory_snapshot_line,
@@ -1202,6 +1209,10 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         .last_provider_line
         .as_ref()
         .and_then(|line| parse_key_value_tokens(line));
+    let cache_compaction = snapshot
+        .last_cache_compaction_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
     let icon_cache = snapshot
         .last_icon_cache_line
         .as_ref()
@@ -1233,6 +1244,7 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         },
         "startup_indexing": startup_indexing,
         "provider": provider,
+        "cache_compaction": cache_compaction,
         "icon_cache": icon_cache,
         "overlay_tuning": overlay_tuning,
         "memory_snapshot": memory_snapshot,
@@ -1246,6 +1258,7 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
             "cache_applied_line": snapshot.cache_applied_line,
             "startup_indexing_line": snapshot.startup_index_line,
             "provider_line": snapshot.last_provider_line,
+            "cache_compaction_line": snapshot.last_cache_compaction_line,
             "icon_cache_line": snapshot.last_icon_cache_line,
             "overlay_tuning_line": snapshot.last_overlay_tuning_line,
             "memory_snapshot_line": snapshot.last_memory_snapshot_line,
@@ -4429,7 +4442,8 @@ mod tests {
 [0] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2820 cached_items=310 initial_cache_empty=true
 [1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
 [2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
-[3] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9
+[3] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
+[4] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
 
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
@@ -4469,6 +4483,11 @@ mod tests {
             .unwrap_or_default()
             .contains("index_provider name=start-menu-apps"));
         assert!(snapshot
+            .last_cache_compaction_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cache_compaction input_total=812"));
+        assert!(snapshot
             .last_icon_cache_line
             .as_deref()
             .unwrap_or_default()
@@ -4483,6 +4502,8 @@ mod tests {
 [1773000003] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=6 initial_cache_empty=true cached_items=0
 [1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
 [1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
+[1773000030] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
+[1773000031] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
         let json = build_status_diagnostics_json(&snapshot);
@@ -4510,6 +4531,18 @@ mod tests {
         assert_eq!(
             json["startup_lifecycle"]["cache_applied"]["epoch_secs"],
             serde_json::json!(1773000029_u64)
+        );
+        assert_eq!(
+            json["cache_compaction"]["effective_file_seed_cap"],
+            serde_json::json!(576)
+        );
+        assert_eq!(
+            json["cache_compaction"]["broad_root_mode"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            json["icon_cache"]["max_entries"],
+            serde_json::json!(90)
         );
     }
 

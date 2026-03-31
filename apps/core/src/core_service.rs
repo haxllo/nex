@@ -687,13 +687,20 @@ impl CoreService {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&self.db)?;
         let latest_apps = collect_app_items(&latest_full);
+        let summary = cache_compaction_summary(&latest_full, &config_snapshot);
         let latest = compact_cached_items(&latest_full, &config_snapshot);
-        if latest.len() < latest_full.len() {
+        if summary.dropped_total > 0 {
             crate::logging::info(&format!(
-                "[nex] cache_compaction retained={} dropped={} file_seed_cap={}",
-                latest.len(),
-                latest_full.len().saturating_sub(latest.len()),
-                config_snapshot.index_max_items_per_query_seed
+                "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
+                summary.input_total,
+                summary.retained_total,
+                summary.dropped_total,
+                summary.retained_apps,
+                summary.retained_file_folders,
+                summary.retained_other,
+                summary.effective_file_seed_cap,
+                summary.broad_root_mode,
+                summary.active_memory_target_mb
             ));
         }
         match self.cached_items.write() {
@@ -884,22 +891,136 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheCompactionSummary {
+    input_total: usize,
+    retained_total: usize,
+    dropped_total: usize,
+    retained_apps: usize,
+    retained_file_folders: usize,
+    retained_other: usize,
+    effective_file_seed_cap: usize,
+    broad_root_mode: bool,
+    active_memory_target_mb: u16,
+}
+
 fn compact_cached_items(items: &[SearchItem], cfg: &Config) -> Vec<SearchItem> {
-    let file_seed_cap = (cfg.index_max_items_per_query_seed as usize).max(250);
-    let mut out = Vec::with_capacity(items.len().min(file_seed_cap + 2048));
+    cache_compaction_summary(items, cfg)
+        .retain_items(items)
+        .0
+}
+
+fn cache_compaction_summary(items: &[SearchItem], cfg: &Config) -> CacheCompactionSummary {
+    let effective_file_seed_cap = effective_file_folder_cache_cap(cfg);
+    let broad_root_mode = broad_root_discovery_enabled(cfg);
+    let (retained_total, retained_apps, retained_file_folders, retained_other) =
+        retained_cache_counts(items, effective_file_seed_cap);
+
+    CacheCompactionSummary {
+        input_total: items.len(),
+        retained_total,
+        dropped_total: items.len().saturating_sub(retained_total),
+        retained_apps,
+        retained_file_folders,
+        retained_other,
+        effective_file_seed_cap,
+        broad_root_mode,
+        active_memory_target_mb: cfg.active_memory_target_mb,
+    }
+}
+
+impl CacheCompactionSummary {
+    fn retain_items(&self, items: &[SearchItem]) -> (Vec<SearchItem>, usize) {
+        let mut out = Vec::with_capacity(items.len().min(self.effective_file_seed_cap + 2048));
+        let mut file_or_folder_count = 0_usize;
+
+        for item in items {
+            if is_file_or_folder_kind(item.kind.as_str()) {
+                if file_or_folder_count >= self.effective_file_seed_cap {
+                    continue;
+                }
+                file_or_folder_count += 1;
+            }
+            out.push(item.clone());
+        }
+
+        (out, file_or_folder_count)
+    }
+}
+
+fn retained_cache_counts(
+    items: &[SearchItem],
+    effective_file_seed_cap: usize,
+) -> (usize, usize, usize, usize) {
+    let mut retained_total = 0_usize;
+    let mut retained_apps = 0_usize;
+    let mut retained_file_folders = 0_usize;
+    let mut retained_other = 0_usize;
     let mut file_or_folder_count = 0_usize;
 
     for item in items {
         if is_file_or_folder_kind(item.kind.as_str()) {
-            if file_or_folder_count >= file_seed_cap {
+            if file_or_folder_count >= effective_file_seed_cap {
                 continue;
             }
             file_or_folder_count += 1;
+            retained_file_folders += 1;
+        } else if item.kind.eq_ignore_ascii_case("app") {
+            retained_apps += 1;
+        } else {
+            retained_other += 1;
         }
-        out.push(item.clone());
+        retained_total += 1;
     }
 
-    out
+    (
+        retained_total,
+        retained_apps,
+        retained_file_folders,
+        retained_other,
+    )
+}
+
+fn effective_file_folder_cache_cap(cfg: &Config) -> usize {
+    let base_cap = (cfg.index_max_items_per_query_seed as usize).max(250);
+    if !broad_root_discovery_enabled(cfg) {
+        return base_cap;
+    }
+
+    let memory_scaled_cap = ((cfg.active_memory_target_mb as usize).saturating_mul(8)).clamp(250, 1500);
+    base_cap.min(memory_scaled_cap)
+}
+
+fn broad_root_discovery_enabled(cfg: &Config) -> bool {
+    if !(cfg.show_files || cfg.show_folders) {
+        return false;
+    }
+    cfg.discovery_roots
+        .iter()
+        .any(|root| is_broad_discovery_root(root))
+}
+
+fn is_broad_discovery_root(path: &Path) -> bool {
+    let raw = path.to_string_lossy().trim().replace('/', "\\");
+    if raw.is_empty() {
+        return false;
+    }
+    if raw == "\\" || raw == "/" {
+        return true;
+    }
+    if raw.len() == 2 {
+        let bytes = raw.as_bytes();
+        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            return true;
+        }
+    }
+    if raw.len() == 3 {
+        let bytes = raw.as_bytes();
+        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() && (bytes[2] == b'\\' || bytes[2] == b'/') {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_file_or_folder_kind(kind: &str) -> bool {
@@ -1075,11 +1196,15 @@ fn now_epoch_secs() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::CoreService;
+    use super::{
+        broad_root_discovery_enabled, cache_compaction_summary, compact_cached_items,
+        effective_file_folder_cache_cap, CoreService,
+    };
     use crate::config::{Config, SearchMode};
     use crate::index_store::open_memory;
     use crate::model::SearchItem;
     use crate::search::SearchFilter;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1202,5 +1327,71 @@ mod tests {
         for path in temp_paths {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn broad_root_mode_detects_drive_roots() {
+        let mut cfg = Config::default();
+        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
+        assert!(broad_root_discovery_enabled(&cfg));
+    }
+
+    #[test]
+    fn broad_root_mode_ignores_default_profile_roots() {
+        let cfg = Config::default();
+        assert!(!broad_root_discovery_enabled(&cfg));
+    }
+
+    #[test]
+    fn broad_root_mode_reduces_file_folder_cache_cap() {
+        let mut cfg = Config::default();
+        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
+        cfg.index_max_items_per_query_seed = 5_000;
+        cfg.active_memory_target_mb = 72;
+
+        assert_eq!(effective_file_folder_cache_cap(&cfg), 576);
+    }
+
+    #[test]
+    fn cache_compaction_keeps_apps_but_tightens_files_for_broad_roots() {
+        let mut cfg = Config::default();
+        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
+        cfg.index_max_items_per_query_seed = 5_000;
+        cfg.active_memory_target_mb = 72;
+
+        let mut items = Vec::new();
+        for idx in 0..20 {
+            items.push(SearchItem::new(
+                &format!("app-{idx}"),
+                "app",
+                &format!("App {idx}"),
+                &format!(r"C:\Apps\App{idx}.lnk"),
+            ));
+        }
+        for idx in 0..700 {
+            items.push(SearchItem::new(
+                &format!("file-{idx}"),
+                "file",
+                &format!("File {idx}"),
+                &format!(r"C:\Data\File{idx}.txt"),
+            ));
+        }
+
+        let summary = cache_compaction_summary(&items, &cfg);
+        let retained = compact_cached_items(&items, &cfg);
+
+        assert!(summary.broad_root_mode);
+        assert_eq!(summary.retained_apps, 20);
+        assert_eq!(summary.effective_file_seed_cap, 576);
+        assert_eq!(summary.retained_file_folders, 576);
+        assert_eq!(summary.retained_total, 596);
+        assert_eq!(retained.len(), 596);
+        assert_eq!(
+            retained
+                .iter()
+                .filter(|item| item.kind.eq_ignore_ascii_case("app"))
+                .count(),
+            20
+        );
     }
 }

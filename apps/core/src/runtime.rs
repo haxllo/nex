@@ -45,6 +45,8 @@ const INDEXED_PREFIX_CACHE_MAX_SEED_LIMIT: usize = 480;
 const QUERY_PROFILE_STATUS_SAMPLE_WINDOW: usize = 400;
 const FINAL_QUERY_CACHE_MAX_ENTRIES: usize = 32;
 const ADAPTIVE_INDEXED_LATENCY_WINDOW: usize = 24;
+#[cfg(target_os = "windows")]
+const QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS: u64 = 1200;
 #[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
 const UNINSTALL_QUERY_RESULT_LIMIT: usize = 160;
 #[cfg(target_os = "windows")]
@@ -135,6 +137,8 @@ struct BackgroundIndexRefresh {
     cache_applied: bool,
     initial_cache_empty: bool,
     pending_discovery_reindex: bool,
+    pending_discovery_reindex_due_at: Option<Instant>,
+    pending_discovery_reindex_requests: usize,
     ready_notice_pending: bool,
     started_at: Instant,
     startup_started_at: Instant,
@@ -922,6 +926,12 @@ fn command_status() -> Result<(), RuntimeError> {
             if let Some(line) = snapshot.last_provider_line {
                 log_info(&format!("[nex] status last_provider {line}"));
             }
+            if let Some(line) = snapshot.last_provider_freshness_line {
+                log_info(&format!("[nex] status last_provider_freshness {line}"));
+            }
+            if let Some(line) = snapshot.last_stale_prune_line {
+                log_info(&format!("[nex] status last_stale_prune {line}"));
+            }
             if let Some(line) = snapshot.last_cache_compaction_line {
                 log_info(&format!("[nex] status last_cache_compaction {line}"));
             }
@@ -1058,6 +1068,8 @@ struct StatusDiagnosticsSnapshot {
     cache_applied_line: Option<String>,
     startup_index_line: Option<String>,
     last_provider_line: Option<String>,
+    last_provider_freshness_line: Option<String>,
+    last_stale_prune_line: Option<String>,
     last_cache_compaction_line: Option<String>,
     last_icon_cache_line: Option<String>,
     last_overlay_tuning_line: Option<String>,
@@ -1125,6 +1137,8 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
     let cache_applied_line = latest_line_with_token(content, "startup_phase phase=cache_applied ");
     let startup_index_line = latest_line_with_token(content, "startup indexed_items=");
     let last_provider_line = latest_line_with_token(content, "index_provider name=");
+    let last_provider_freshness_line = latest_line_with_token(content, "provider_freshness ");
+    let last_stale_prune_line = latest_line_with_token(content, "stale_prune ");
     let last_cache_compaction_line = latest_line_with_token(content, "cache_compaction ");
     let last_icon_cache_line = latest_line_with_token(content, "overlay_icon_cache reason=");
     let last_overlay_tuning_line = latest_line_with_token(content, "overlay_tuning ");
@@ -1138,6 +1152,8 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
         && cache_applied_line.is_none()
         && startup_index_line.is_none()
         && last_provider_line.is_none()
+        && last_provider_freshness_line.is_none()
+        && last_stale_prune_line.is_none()
         && last_cache_compaction_line.is_none()
         && last_icon_cache_line.is_none()
         && last_overlay_tuning_line.is_none()
@@ -1155,6 +1171,8 @@ fn parse_status_diagnostics_snapshot(content: &str) -> Option<StatusDiagnosticsS
         cache_applied_line,
         startup_index_line,
         last_provider_line,
+        last_provider_freshness_line,
+        last_stale_prune_line,
         last_cache_compaction_line,
         last_icon_cache_line,
         last_overlay_tuning_line,
@@ -1209,6 +1227,14 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         .last_provider_line
         .as_ref()
         .and_then(|line| parse_key_value_tokens(line));
+    let provider_freshness = snapshot
+        .last_provider_freshness_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let stale_prune = snapshot
+        .last_stale_prune_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
     let cache_compaction = snapshot
         .last_cache_compaction_line
         .as_ref()
@@ -1244,6 +1270,8 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
         },
         "startup_indexing": startup_indexing,
         "provider": provider,
+        "provider_freshness": provider_freshness,
+        "stale_prune": stale_prune,
         "cache_compaction": cache_compaction,
         "icon_cache": icon_cache,
         "overlay_tuning": overlay_tuning,
@@ -1258,6 +1286,8 @@ fn build_status_diagnostics_json(snapshot: &StatusDiagnosticsSnapshot) -> serde_
             "cache_applied_line": snapshot.cache_applied_line,
             "startup_indexing_line": snapshot.startup_index_line,
             "provider_line": snapshot.last_provider_line,
+            "provider_freshness_line": snapshot.last_provider_freshness_line,
+            "stale_prune_line": snapshot.last_stale_prune_line,
             "cache_compaction_line": snapshot.last_cache_compaction_line,
             "icon_cache_line": snapshot.last_icon_cache_line,
             "overlay_tuning_line": snapshot.last_overlay_tuning_line,
@@ -2675,6 +2705,8 @@ fn start_background_index_refresh(
         cache_applied: false,
         initial_cache_empty,
         pending_discovery_reindex: false,
+        pending_discovery_reindex_due_at: None,
+        pending_discovery_reindex_requests: 0,
         ready_notice_pending: false,
         started_at: Instant::now(),
         startup_started_at,
@@ -2688,6 +2720,7 @@ fn maybe_apply_background_index_refresh(
     runtime_config: &Config,
 ) {
     if state.cache_applied {
+        maybe_start_queued_discovery_reindex(service, state, runtime_config);
         return;
     }
     if !state.completed.load(Ordering::Acquire) {
@@ -2765,21 +2798,64 @@ fn maybe_apply_background_index_refresh(
     state.cache_applied = true;
 
     if state.pending_discovery_reindex {
-        log_info(
-            "[nex] discovery settings queued during indexing; starting pending reindex",
-        );
-        log_info(&format!(
-            "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
-            state.startup_started_at.elapsed().as_millis(),
-            service.cached_items_len()
-        ));
-        *state = start_background_index_refresh(runtime_config, false, state.startup_started_at);
+        log_info("[nex] discovery settings queued during indexing; pending reindex remains scheduled");
+        maybe_start_queued_discovery_reindex(service, state, runtime_config);
     }
 }
 
 #[cfg(target_os = "windows")]
 fn should_show_indexing_status(state: &BackgroundIndexRefresh) -> bool {
     state.initial_cache_empty && !state.cache_applied
+}
+
+#[cfg(target_os = "windows")]
+fn queue_discovery_reindex_after_active_index(state: &mut BackgroundIndexRefresh) {
+    state.pending_discovery_reindex = true;
+    state.pending_discovery_reindex_requests =
+        state.pending_discovery_reindex_requests.saturating_add(1);
+    state.pending_discovery_reindex_due_at = Some(
+        Instant::now() + Duration::from_millis(QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS),
+    );
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn queued_discovery_reindex_is_due(
+    cache_applied: bool,
+    pending: bool,
+    due_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    cache_applied && pending && due_at.is_some_and(|due| now >= due)
+}
+
+#[cfg(target_os = "windows")]
+fn maybe_start_queued_discovery_reindex(
+    service: &CoreService,
+    state: &mut BackgroundIndexRefresh,
+    runtime_config: &Config,
+) {
+    if !queued_discovery_reindex_is_due(
+        state.cache_applied,
+        state.pending_discovery_reindex,
+        state.pending_discovery_reindex_due_at,
+        Instant::now(),
+    ) {
+        return;
+    }
+
+    let request_count = state.pending_discovery_reindex_requests.max(1);
+    let startup_started_at = state.startup_started_at;
+    log_info(&format!(
+        "[nex] discovery settings queued during indexing; starting debounced reindex requests={} debounce_ms={}",
+        request_count,
+        QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS
+    ));
+    log_info(&format!(
+        "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
+        startup_started_at.elapsed().as_millis(),
+        service.cached_items_len()
+    ));
+    *state = start_background_index_refresh(runtime_config, false, startup_started_at);
 }
 
 #[cfg(target_os = "windows")]
@@ -3252,9 +3328,13 @@ fn maybe_apply_runtime_config_reload(
                             );
                         log_info("[nex] discovery settings changed; background reindex started");
                     } else {
-                        background_index_refresh.pending_discovery_reindex = true;
+                        queue_discovery_reindex_after_active_index(background_index_refresh);
                         discovery_reindex_queued = true;
-                        log_info("[nex] discovery settings changed while indexing is active; reindex queued");
+                        log_info(&format!(
+                            "[nex] discovery settings changed while indexing is active; reindex queued debounce_ms={} requests={}",
+                            QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS,
+                            background_index_refresh.pending_discovery_reindex_requests
+                        ));
                     }
                 }
             }
@@ -3278,7 +3358,7 @@ fn maybe_apply_runtime_config_reload(
 
             if discovery_config_changed {
                 if discovery_reindex_queued {
-                    overlay.set_status_text("Discovery settings queued; reindex starts next");
+                    overlay.set_status_text("Discovery settings queued; reindex starts after debounce");
                 } else {
                     overlay.set_status_text("Discovery settings updated; reindexing...");
                 }
@@ -3745,6 +3825,7 @@ mod tests {
         filter_suppressed_uninstall_results, launch_overlay_selection,
         maybe_expand_uninstall_quick_shortcut, next_selection_index, parse_cli_args,
         parse_status_diagnostics_snapshot, parse_tasklist_pid_lines, result_limit_for_query,
+        queued_discovery_reindex_is_due,
         search_overlay_results, search_overlay_results_with_session,
         should_block_hotkey_for_foreground_window, should_hide_known_start_menu_doc_sample_entry,
         should_skip_non_searchable_query, summarize_query_profiles,
@@ -3763,7 +3844,7 @@ mod tests {
     use crate::plugin_sdk::PluginRegistry;
     use crate::query_dsl::ParsedQuery;
     use crate::search::SearchFilter;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn overlay_search_returns_ranked_results() {
@@ -4442,8 +4523,10 @@ mod tests {
 [0] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2820 cached_items=310 initial_cache_empty=true
 [1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
 [2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
-[3] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
-[4] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
+[3] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
+[4] [INFO] [nex] stale_prune scanned=512 removed=3 cached_items_remaining=738
+[5] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
+[6] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
 
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
@@ -4483,6 +4566,16 @@ mod tests {
             .unwrap_or_default()
             .contains("index_provider name=start-menu-apps"));
         assert!(snapshot
+            .last_provider_freshness_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provider_freshness name=filesystem"));
+        assert!(snapshot
+            .last_stale_prune_line
+            .as_deref()
+            .unwrap_or_default()
+            .contains("stale_prune scanned=512"));
+        assert!(snapshot
             .last_cache_compaction_line
             .as_deref()
             .unwrap_or_default()
@@ -4502,8 +4595,10 @@ mod tests {
 [1773000003] [INFO] [nex] startup_phase phase=indexing_started elapsed_ms=6 initial_cache_empty=true cached_items=0
 [1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
 [1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
-[1773000030] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
-[1773000031] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
+[1773000030] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
+[1773000031] [INFO] [nex] stale_prune scanned=512 removed=3 cached_items_remaining=738
+[1773000032] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
+[1773000033] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
         let snapshot = parse_status_diagnostics_snapshot(content).expect("snapshot should parse");
         let json = build_status_diagnostics_json(&snapshot);
@@ -4533,6 +4628,14 @@ mod tests {
             serde_json::json!(1773000029_u64)
         );
         assert_eq!(
+            json["provider_freshness"]["reconcile_interval_secs"],
+            serde_json::json!(1800)
+        );
+        assert_eq!(
+            json["stale_prune"]["removed"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
             json["cache_compaction"]["effective_file_seed_cap"],
             serde_json::json!(576)
         );
@@ -4544,6 +4647,26 @@ mod tests {
             json["icon_cache"]["max_entries"],
             serde_json::json!(90)
         );
+    }
+
+    #[test]
+    fn queued_reindex_starts_only_after_due_time() {
+        let now = Instant::now();
+        assert!(!queued_discovery_reindex_is_due(
+            true,
+            true,
+            Some(now + std::time::Duration::from_millis(5)),
+            now
+        ));
+        assert!(queued_discovery_reindex_is_due(
+            true,
+            true,
+            Some(now),
+            now
+        ));
+        assert!(!queued_discovery_reindex_is_due(true, false, Some(now), now));
+        assert!(!queued_discovery_reindex_is_due(false, true, Some(now), now));
+        assert!(!queued_discovery_reindex_is_due(true, true, None, now));
     }
 
     #[test]

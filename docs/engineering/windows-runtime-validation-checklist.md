@@ -40,12 +40,22 @@ Expected:
   - `retained_file_folders`
   - `effective_file_seed_cap`
   - `broad_root_mode`
+- Expected: `diagnostics.provider_freshness` exposes:
+  - `name`
+  - `skipped`
+  - `last_scan_age_secs`
+  - `reconcile_interval_secs`
+  - `has_stamp`
+- Expected: `diagnostics.stale_prune` exposes:
+  - `scanned`
+  - `removed`
+  - `cached_items_remaining`
 - Expected: `diagnostics.icon_cache` exposes `live_entries` and `max_entries`.
 
 2. Baseline profile harness
 - Run: `scripts/windows/profile-memory-and-icons.ps1`
 - Expected: script updates config for `C:\` profiling, starts runtime, prints `--status-json`, and dumps recent `query_profile`/`memory_snapshot` lines.
-- Expected: recent log output contains `startup_phase` markers for cold-start timing evidence.
+- Expected: recent log output contains `startup_phase`, `cache_compaction`, `provider_freshness`, and `stale_prune` markers.
 
 3. Memory envelope with broad discovery root
 - Set `discovery_roots = ["C:\\"]` and keep:
@@ -56,13 +66,14 @@ Expected:
 - Expected: active working set tracks close to `active_memory_target_mb`; idle trims occur after hide.
 - Expected: `cache_compaction` shows `broad_root_mode = true` and a smaller `effective_file_seed_cap` than the configured `index_max_items_per_query_seed`.
 - Expected: app results remain complete even when file/folder cache compaction is active.
+- Expected: `provider_freshness` shows low `last_scan_age_secs` after a fresh reindex and `has_stamp = true` for incremental providers.
 
 4. Live config apply (no restart for discovery/search tuning)
 - Keep runtime running.
 - Edit and save `%APPDATA%\Nex\config.toml` fields:
 - hot-apply fields: `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`, `clipboard_*`, `plugins_*`, `web_search_*`, `idle_cache_trim_ms`, `active_memory_target_mb`, `index_max_items_*`.
 - provider-refresh fields: `discovery_roots`, `discovery_exclude_roots`, `windows_search_enabled`, `windows_search_fallback_filesystem`.
-- Expected: launcher status updates to `Settings applied` or `Discovery settings updated; reindexing...`; no process restart required.
+- Expected: launcher status updates to `Settings applied`, `Discovery settings updated; reindexing...`, or `Discovery settings queued; reindex starts after debounce`; no process restart required.
 
 5. Restart-required behavior
 - Change `hotkey` or `index_db_path` and save config.

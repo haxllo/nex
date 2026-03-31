@@ -430,13 +430,19 @@ impl CoreService {
                 )?
             {
                 provider_reports.push(ProviderRefreshReport {
-                    provider: provider_name,
+                    provider: provider_name.clone(),
                     discovered: 0,
                     upserted: 0,
                     removed: 0,
                     skipped: true,
                     elapsed_ms: started.elapsed().as_millis(),
                 });
+                log_provider_freshness_status(
+                    &self.db,
+                    &provider_name,
+                    now_epoch_secs,
+                    true,
+                )?;
                 continue;
             }
 
@@ -502,6 +508,12 @@ impl CoreService {
                     &provider_name,
                     provider_stamp.as_deref(),
                     now_epoch_secs,
+                )?;
+                log_provider_freshness_status(
+                    &self.db,
+                    &provider_name,
+                    now_epoch_secs,
+                    false,
                 )?;
             }
         }
@@ -840,6 +852,13 @@ impl CoreService {
             }
         }
 
+        crate::logging::info(&format!(
+            "[nex] stale_prune scanned={} removed={} cached_items_remaining={}",
+            candidates.len(),
+            stale_ids.len(),
+            self.cached_len()
+        ));
+
         Ok(())
     }
 
@@ -902,6 +921,13 @@ struct CacheCompactionSummary {
     effective_file_seed_cap: usize,
     broad_root_mode: bool,
     active_memory_target_mb: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderFreshnessStatus {
+    last_scan_age_secs: i64,
+    reconcile_interval_secs: i64,
+    has_stamp: bool,
 }
 
 fn compact_cached_items(items: &[SearchItem], cfg: &Config) -> Vec<SearchItem> {
@@ -1185,6 +1211,49 @@ fn provider_stamp_meta_key(provider_name: &str) -> String {
 
 fn provider_last_scan_meta_key(provider_name: &str) -> String {
     format!("provider_last_scan_epoch:{provider_name}")
+}
+
+fn load_provider_freshness_status(
+    db: &Connection,
+    provider_name: &str,
+    now_epoch_secs: i64,
+) -> Result<ProviderFreshnessStatus, ServiceError> {
+    let last_scan_key = provider_last_scan_meta_key(provider_name);
+    let last_scan_epoch = index_store::get_meta(db, &last_scan_key)?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let stamp_key = provider_stamp_meta_key(provider_name);
+    let has_stamp = index_store::get_meta(db, &stamp_key)?
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    Ok(ProviderFreshnessStatus {
+        last_scan_age_secs: if last_scan_epoch > 0 {
+            now_epoch_secs.saturating_sub(last_scan_epoch).max(0)
+        } else {
+            -1
+        },
+        reconcile_interval_secs: PROVIDER_RECONCILE_INTERVAL_SECS,
+        has_stamp,
+    })
+}
+
+fn log_provider_freshness_status(
+    db: &Connection,
+    provider_name: &str,
+    now_epoch_secs: i64,
+    skipped: bool,
+) -> Result<(), ServiceError> {
+    let freshness = load_provider_freshness_status(db, provider_name, now_epoch_secs)?;
+    crate::logging::info(&format!(
+        "[nex] provider_freshness name={} skipped={} last_scan_age_secs={} reconcile_interval_secs={} has_stamp={}",
+        provider_name,
+        skipped,
+        freshness.last_scan_age_secs,
+        freshness.reconcile_interval_secs,
+        freshness.has_stamp
+    ));
+    Ok(())
 }
 
 fn now_epoch_secs() -> i64 {

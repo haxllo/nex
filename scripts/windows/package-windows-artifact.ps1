@@ -12,9 +12,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Resolve-VersionFromCargo {
+  $cargoToml = Join-Path $PSScriptRoot "..\..\apps\core\Cargo.toml"
+  if (-not (Test-Path $cargoToml)) {
+    return $null
+  }
+
+  $match = Select-String -Path $cargoToml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1
+  if (-not $match) {
+    return $null
+  }
+
+  return $match.Matches[0].Groups[1].Value.Trim()
+}
+
 if (-not $Version -or $Version.Trim().Length -eq 0) {
   try {
-    $Version = (git describe --tags --always).Trim()
+    $Version = Resolve-VersionFromCargo
+    if (-not $Version -or $Version.Trim().Length -eq 0) {
+      $Version = (git describe --tags --always).Trim()
+    }
   }
   catch {
     $Version = "0.0.0-local"

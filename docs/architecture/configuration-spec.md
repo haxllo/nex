@@ -12,6 +12,8 @@
 hotkey = "Ctrl+Space"
 launch_at_startup = false
 max_results = 20
+show_files = false
+show_folders = false
 
 discovery_roots = [
   "C:\\Users\\<user>",
@@ -29,6 +31,7 @@ Additional generated fields may also exist in persisted config (for example `ver
 
 - `hotkey` must parse as Modifier+Key and pass runtime hotkey validation
 - `max_results` range: `5..100`
+- `show_files` / `show_folders` default to `false` so new installs start app-first
 - `index_db_path` and `config_path` must be present
 - `discovery_roots` entries must be non-empty paths
 - `discovery_exclude_roots` entries must be non-empty paths

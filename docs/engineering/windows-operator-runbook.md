@@ -294,6 +294,7 @@ Recommended capture points:
 
 1. Hotkey does not trigger:
    - Check startup log for `hotkey registered native_id=...`.
+   - If the log shows `hotkey_registration_issue`, use the tray menu and choose `Open Config`.
    - Try changing hotkey in `%APPDATA%\Nex\config.toml` to avoid OS/app conflicts.
    - Restart runtime after config change.
    - Check if another launcher utility (PowerToys, Flow Launcher, etc.) is intercepting your chosen hotkey.

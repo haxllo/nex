@@ -151,8 +151,9 @@ mod imp {
     const EM_SETRECTNP: u32 = 0x00B4;
     const TRAY_ICON_ID: u32 = 1;
     const TRAY_MENU_SHOW: usize = 41001;
-    const TRAY_MENU_GAME_MODE: usize = 41002;
-    const TRAY_MENU_QUIT: usize = 41003;
+    const TRAY_MENU_OPEN_CONFIG: usize = 41002;
+    const TRAY_MENU_GAME_MODE: usize = 41003;
+    const TRAY_MENU_QUIT: usize = 41004;
 
     const TIMER_WINDOW_ANIM: usize = 0xBEF1;
     const TIMER_HELP_HOVER: usize = 0xBEF3;
@@ -466,6 +467,7 @@ mod imp {
         icon_cache_lru: VecDeque<String>,
         icon_cache_metrics: IconCacheMetrics,
         game_mode_enabled: bool,
+        hotkey_issue_active: bool,
         tray_icon_added: bool,
         tray_icon_handle: isize,
     }
@@ -548,6 +550,7 @@ mod imp {
                 icon_cache_lru: VecDeque::new(),
                 icon_cache_metrics: IconCacheMetrics::default(),
                 game_mode_enabled: false,
+                hotkey_issue_active: false,
                 tray_icon_added: false,
                 tray_icon_handle: 0,
             }
@@ -818,6 +821,13 @@ mod imp {
         pub fn set_game_mode_enabled(&self, enabled: bool) {
             if let Some(state) = state_for(self.hwnd) {
                 state.game_mode_enabled = enabled;
+                let _ = update_tray_icon(self.hwnd, state);
+            }
+        }
+
+        pub fn set_hotkey_issue_active(&self, active: bool) {
+            if let Some(state) = state_for(self.hwnd) {
+                state.hotkey_issue_active = active;
                 let _ = update_tray_icon(self.hwnd, state);
             }
         }
@@ -1629,6 +1639,12 @@ mod imp {
                         TRAY_MENU_SHOW => {
                             unsafe {
                                 PostMessageW(hwnd, NEX_WM_EXTERNAL_SHOW, 0, 0);
+                            }
+                            return 0;
+                        }
+                        TRAY_MENU_OPEN_CONFIG => {
+                            if let Some(state) = state_for(hwnd) {
+                                let _ = open_help_config_file(state);
                             }
                             return 0;
                         }
@@ -4946,8 +4962,10 @@ mod imp {
         }
     }
 
-    fn tray_tooltip_text(game_mode_enabled: bool) -> String {
-        if game_mode_enabled {
+    fn tray_tooltip_text(game_mode_enabled: bool, hotkey_issue_active: bool) -> String {
+        if hotkey_issue_active {
+            "Nex - Hotkey unavailable".to_string()
+        } else if game_mode_enabled {
             "Nex - Game Mode On".to_string()
         } else {
             "Nex".to_string()
@@ -4972,7 +4990,10 @@ mod imp {
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = NEX_WM_TRAY_ICON;
         data.hIcon = state.tray_icon_handle as _;
-        copy_wide_text_into_buffer(&mut data.szTip, &tray_tooltip_text(state.game_mode_enabled));
+        copy_wide_text_into_buffer(
+            &mut data.szTip,
+            &tray_tooltip_text(state.game_mode_enabled, state.hotkey_issue_active),
+        );
         data
     }
 
@@ -5046,10 +5067,12 @@ mod imp {
         }
 
         let open_text = to_wide("Open Nex");
+        let config_text = to_wide("Open Config");
         let game_mode_text = to_wide("Game Mode");
         let quit_text = to_wide("Quit");
         unsafe {
             AppendMenuW(menu, MF_STRING, TRAY_MENU_SHOW, open_text.as_ptr());
+            AppendMenuW(menu, MF_STRING, TRAY_MENU_OPEN_CONFIG, config_text.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             AppendMenuW(
                 menu,

@@ -35,8 +35,8 @@ fn accepts_default_config() {
         cfg.index_db_path.to_string_lossy().contains("nex")
             || cfg.index_db_path.to_string_lossy().contains("Nex")
     );
-    assert!(cfg.show_files);
-    assert!(cfg.show_folders);
+    assert!(!cfg.show_files);
+    assert!(!cfg.show_folders);
     assert!(cfg.uninstall_actions_enabled);
     assert!(
         cfg.config_path.to_string_lossy().contains("nex")
@@ -176,8 +176,8 @@ fn writes_user_template_with_comments_and_loads_it() {
     assert!(raw.contains("\"discovery_exclude_roots\":"));
     assert!(raw.contains("\"windows_search_enabled\": true"));
     assert!(raw.contains("\"windows_search_fallback_filesystem\": true"));
-    assert!(raw.contains("\"show_files\": true"));
-    assert!(raw.contains("\"show_folders\": true"));
+    assert!(raw.contains("\"show_files\": false"));
+    assert!(raw.contains("\"show_folders\": false"));
     assert!(raw.contains("\"uninstall_actions_enabled\": true"));
     assert!(raw.contains("\"web_search_provider\": \"google\""));
     assert!(raw.contains("\"index_max_items_total\":"));
@@ -254,8 +254,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert_eq!(loaded.active_memory_target_mb, 72);
     assert!(loaded.windows_search_enabled);
     assert!(loaded.windows_search_fallback_filesystem);
-    assert!(loaded.show_files);
-    assert!(loaded.show_folders);
+    assert!(!loaded.show_files);
+    assert!(!loaded.show_folders);
     assert!(loaded.uninstall_actions_enabled);
     assert_eq!(loaded.index_max_items_total, 120_000);
     assert_eq!(loaded.index_max_items_per_root, 40_000);
@@ -271,8 +271,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"active_memory_target_mb\": 72"));
     assert!(updated_raw.contains("\"windows_search_enabled\": true"));
     assert!(updated_raw.contains("\"windows_search_fallback_filesystem\": true"));
-    assert!(updated_raw.contains("\"show_files\": true"));
-    assert!(updated_raw.contains("\"show_folders\": true"));
+    assert!(updated_raw.contains("\"show_files\": false"));
+    assert!(updated_raw.contains("\"show_folders\": false"));
     assert!(updated_raw.contains("\"uninstall_actions_enabled\": true"));
     assert!(updated_raw.contains("\"index_max_items_total\": 120000"));
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));

@@ -154,8 +154,8 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             windows_search_enabled: true,
             windows_search_fallback_filesystem: true,
-            show_files: true,
-            show_folders: true,
+            show_files: false,
+            show_folders: false,
             hotkey: "Ctrl+Space".to_string(),
             launch_at_startup: false,
             hotkey_help: format!(

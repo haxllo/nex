@@ -8,6 +8,7 @@ pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__nex_action_clear_clipboard__";
 pub const ACTION_OPEN_CONFIG_ID: &str = "__nex_action_open_config__";
 pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle__";
 pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
+pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
 
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +50,12 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
             title: "Create Diagnostics Bundle",
             subtitle: "Export logs and sanitized config for support",
             keywords: &["diagnostics", "support", "bundle", "debug"],
+        },
+        BuiltInAction {
+            id: ACTION_CHECK_UPDATES_ID,
+            title: "Check for Updates",
+            subtitle: "Run the stable Windows updater",
+            keywords: &["update", "upgrade", "stable", "install latest"],
         },
         BuiltInAction {
             id: ACTION_TRIM_MEMORY_ID,
@@ -177,7 +184,10 @@ fn url_encode_component(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{search_actions, search_actions_with_mode, ACTION_WEB_SEARCH_PREFIX};
+    use super::{
+        search_actions, search_actions_with_mode, ACTION_CHECK_UPDATES_ID,
+        ACTION_WEB_SEARCH_PREFIX,
+    };
     use crate::config::{Config, WebSearchProvider};
 
     #[test]
@@ -226,5 +236,14 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|action| action.id.starts_with(ACTION_WEB_SEARCH_PREFIX)));
+    }
+
+    #[test]
+    fn built_in_actions_include_check_for_updates() {
+        let cfg = Config::default();
+        let actions = search_actions_with_mode("update", 10, true, &cfg);
+        assert!(actions
+            .iter()
+            .any(|action| action.id == ACTION_CHECK_UPDATES_ID));
     }
 }

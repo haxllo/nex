@@ -47,6 +47,7 @@ SetupIconFile={#SetupIconPath}
 [Files]
 Source: "{#StageDir}\bin\nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [InstallDelete]
 Type: files; Name: "{app}\bin\nex-core.exe"

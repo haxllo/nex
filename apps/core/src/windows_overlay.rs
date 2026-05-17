@@ -43,33 +43,31 @@ mod imp {
     };
     use windows_sys::Win32::UI::Shell::{
         ExtractIconExW, FindExecutableW, HlinkResolveShortcutToString, SHGetFileInfoW,
-        SHParseDisplayName, Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
-        NIM_ADD, NIM_DELETE, NIM_MODIFY, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION,
-        SHGFI_LARGEICON, SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+        SHParseDisplayName, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+        NIM_MODIFY, NOTIFYICONDATAW, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON,
+        SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AnimateWindow, AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW,
         DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, DrawIconEx, FindWindowW,
-        GetClientRect, GetCursorPos,
-        GetForegroundWindow, GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW,
-        GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, IsChild, KillTimer,
-        LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
-        SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TrackPopupMenu,
+        GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW, GetParent, GetSystemMetrics,
+        GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HideCaret, IsChild,
+        KillTimer, LoadCursorW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage,
+        RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
+        SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TrackPopupMenu,
         TranslateMessage, AW_ACTIVATE, AW_BLEND, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
         CW_USEDEFAULT, DI_NORMAL, EN_CHANGE, ES_AUTOHSCROLL, ES_MULTILINE, GWLP_USERDATA,
         GWLP_WNDPROC, GWL_STYLE, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LBN_DBLCLK,
         LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, LB_ADDSTRING,
         LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTOPINDEX, LB_ITEMFROMPOINT,
         LB_RESETCONTENT, LB_SETCURSEL, LB_SETTOPINDEX, LWA_ALPHA, MF_CHECKED, MF_SEPARATOR,
-        MF_STRING, MF_UNCHECKED, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-        SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP,
-        WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
-        WM_DESTROY, WM_DRAWITEM, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-        WM_MEASUREITEM, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-        WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSW,
-        WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_TABSTOP,
-        WS_VISIBLE,
+        MF_STRING, MF_UNCHECKED, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_HIDE,
+        SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_APP, WM_CLOSE,
+        WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY,
+        WM_DRAWITEM, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM,
+        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONUP,
+        WM_SETFOCUS, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD,
+        WS_CLIPCHILDREN, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
     };
 
     const CLASS_NAME: &str = "NexOverlayWindowClass";
@@ -632,9 +630,7 @@ mod imp {
             shell.apply_rounded_corners();
             shell.hide_immediate();
             if let Err(error) = shell.initialize_tray_icon() {
-                crate::logging::warn(&format!(
-                    "[nex] tray icon init warning: {error}"
-                ));
+                crate::logging::warn(&format!("[nex] tray icon init warning: {error}"));
             }
             Ok(shell)
         }
@@ -1325,7 +1321,6 @@ mod imp {
                 false,
             );
         }
-
     }
 
     extern "system" fn overlay_wnd_proc(
@@ -1960,10 +1955,7 @@ mod imp {
                 }
                 0
             }
-            NEX_WM_ESCAPE
-            | NEX_WM_QUERY_CHANGED
-            | NEX_WM_MOVE_UP
-            | NEX_WM_MOVE_DOWN
+            NEX_WM_ESCAPE | NEX_WM_QUERY_CHANGED | NEX_WM_MOVE_UP | NEX_WM_MOVE_DOWN
             | NEX_WM_SUBMIT => 0,
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
@@ -4684,8 +4676,9 @@ mod imp {
             SetTextColor(hdc, text_color);
             let text_wide = to_wide_no_nul(text);
             let text_size = measure_text_size(hdc, text);
-            let text_y =
-                content_top + ((content_height - text_size.cy).max(0) / 2) + FOOTER_KEY_TEXT_SHIFT_Y;
+            let text_y = content_top
+                + ((content_height - text_size.cy).max(0) / 2)
+                + FOOTER_KEY_TEXT_SHIFT_Y;
             TextOutW(
                 hdc,
                 left,
@@ -4818,7 +4811,9 @@ mod imp {
     fn open_help_config_file(state: &mut OverlayShellState) -> Result<(), String> {
         let cfg_path = state.help_config_path.trim().to_string();
         let target = if cfg_path.is_empty() {
-            crate::config::stable_config_path().to_string_lossy().into_owned()
+            crate::config::stable_config_path()
+                .to_string_lossy()
+                .into_owned()
         } else {
             cfg_path
         };
@@ -4987,7 +4982,10 @@ mod imp {
             return;
         }
         let wide = to_wide(text);
-        let copy_len = wide.len().saturating_sub(1).min(buffer.len().saturating_sub(1));
+        let copy_len = wide
+            .len()
+            .saturating_sub(1)
+            .min(buffer.len().saturating_sub(1));
         buffer[..copy_len].copy_from_slice(&wide[..copy_len]);
         buffer[copy_len] = 0;
     }
@@ -5008,18 +5006,12 @@ mod imp {
     }
 
     fn load_tray_icon_handle() -> Result<isize, String> {
-        let exe = std::env::current_exe().map_err(|error| format!("current_exe failed: {error}"))?;
+        let exe =
+            std::env::current_exe().map_err(|error| format!("current_exe failed: {error}"))?;
         let wide = path_to_wide(&exe);
         let mut small_icon = std::ptr::null_mut();
-        let extracted = unsafe {
-            ExtractIconExW(
-                wide.as_ptr(),
-                0,
-                std::ptr::null_mut(),
-                &mut small_icon,
-                1,
-            )
-        };
+        let extracted =
+            unsafe { ExtractIconExW(wide.as_ptr(), 0, std::ptr::null_mut(), &mut small_icon, 1) };
         if extracted == 0 || small_icon.is_null() {
             return Err("ExtractIconExW did not return a small icon".to_string());
         }
@@ -5084,11 +5076,21 @@ mod imp {
         unsafe {
             AppendMenuW(menu, MF_STRING, TRAY_MENU_SHOW, open_text.as_ptr());
             AppendMenuW(menu, MF_STRING, TRAY_MENU_OPEN_CONFIG, config_text.as_ptr());
-            AppendMenuW(menu, MF_STRING, TRAY_MENU_CHECK_UPDATES, updates_text.as_ptr());
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                TRAY_MENU_CHECK_UPDATES,
+                updates_text.as_ptr(),
+            );
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             AppendMenuW(
                 menu,
-                MF_STRING | if state.game_mode_enabled { MF_CHECKED } else { MF_UNCHECKED },
+                MF_STRING
+                    | if state.game_mode_enabled {
+                        MF_CHECKED
+                    } else {
+                        MF_UNCHECKED
+                    },
                 TRAY_MENU_GAME_MODE,
                 game_mode_text.as_ptr(),
             );

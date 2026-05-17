@@ -9,10 +9,7 @@ fn unique_temp_path(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "nex-{label}-{}-{unique}.tmp",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("nex-{label}-{}-{unique}.tmp", std::process::id()))
 }
 
 #[test]

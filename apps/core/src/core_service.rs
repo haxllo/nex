@@ -437,12 +437,7 @@ impl CoreService {
                     skipped: true,
                     elapsed_ms: started.elapsed().as_millis(),
                 });
-                log_provider_freshness_status(
-                    &self.db,
-                    &provider_name,
-                    now_epoch_secs,
-                    true,
-                )?;
+                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
                 continue;
             }
 
@@ -509,12 +504,7 @@ impl CoreService {
                     provider_stamp.as_deref(),
                     now_epoch_secs,
                 )?;
-                log_provider_freshness_status(
-                    &self.db,
-                    &provider_name,
-                    now_epoch_secs,
-                    false,
-                )?;
+                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, false)?;
             }
         }
 
@@ -931,9 +921,7 @@ struct ProviderFreshnessStatus {
 }
 
 fn compact_cached_items(items: &[SearchItem], cfg: &Config) -> Vec<SearchItem> {
-    cache_compaction_summary(items, cfg)
-        .retain_items(items)
-        .0
+    cache_compaction_summary(items, cfg).retain_items(items).0
 }
 
 fn cache_compaction_summary(items: &[SearchItem], cfg: &Config) -> CacheCompactionSummary {
@@ -1013,7 +1001,8 @@ fn effective_file_folder_cache_cap(cfg: &Config) -> usize {
         return base_cap;
     }
 
-    let memory_scaled_cap = ((cfg.active_memory_target_mb as usize).saturating_mul(8)).clamp(250, 1500);
+    let memory_scaled_cap =
+        ((cfg.active_memory_target_mb as usize).saturating_mul(8)).clamp(250, 1500);
     base_cap.min(memory_scaled_cap)
 }
 
@@ -1042,7 +1031,10 @@ fn is_broad_discovery_root(path: &Path) -> bool {
     }
     if raw.len() == 3 {
         let bytes = raw.as_bytes();
-        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() && (bytes[2] == b'\\' || bytes[2] == b'/') {
+        if bytes[1] == b':'
+            && bytes[0].is_ascii_alphabetic()
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+        {
             return true;
         }
     }

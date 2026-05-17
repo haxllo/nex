@@ -1,6 +1,6 @@
 fn main() {
-    println!("cargo:rerun-if-changed=../assets/nex.ico");
-    println!("cargo:rerun-if-changed=../assets/nex.png");
+    println!("cargo:rerun-if-changed=nex.ico");
+    println!("cargo:rerun-if-changed=nex.png");
 
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let allow_missing_icon = std::env::var("NEX_ALLOW_MISSING_ICON")
@@ -12,7 +12,7 @@ fn main() {
         return;
     }
 
-    let icon_path = "../assets/nex.ico";
+    let icon_path = "nex.ico";
     if !std::path::Path::new(icon_path).exists() {
         if profile == "release" && !allow_missing_icon {
             panic!(

@@ -470,11 +470,8 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
                     &runtime_config.hotkey,
                     &runtime_config.config_path,
                 );
-                let suggested = crate::settings::suggested_hotkey_presets(
-                    &runtime_config.hotkey,
-                    3,
-                )
-                .join("|");
+                let suggested =
+                    crate::settings::suggested_hotkey_presets(&runtime_config.hotkey, 3).join("|");
                 log_warn(&format!(
                     "[nex] hotkey_registration_issue hotkey={} suggestions={} error={:?}",
                     runtime_config.hotkey, suggested, error
@@ -1022,19 +1019,13 @@ fn command_status() -> Result<(), RuntimeError> {
                 log_info(&format!("[nex] status last_icon_cache {line}"));
             }
             if let Some(line) = snapshot.last_overlay_tuning_line {
-                log_info(&format!(
-                    "[nex] status last_overlay_tuning {line}"
-                ));
+                log_info(&format!("[nex] status last_overlay_tuning {line}"));
             }
             if let Some(line) = snapshot.last_memory_snapshot_line {
-                log_info(&format!(
-                    "[nex] status last_memory_snapshot {line}"
-                ));
+                log_info(&format!("[nex] status last_memory_snapshot {line}"));
             }
             if let Some(line) = snapshot.last_config_reload_line {
-                log_info(&format!(
-                    "[nex] status last_config_reload {line}"
-                ));
+                log_info(&format!("[nex] status last_config_reload {line}"));
             }
         }
         if let Some(report) = load_query_profile_status_report() {
@@ -1786,7 +1777,9 @@ fn runtime_process_pids_excluding_current() -> Result<Vec<u32>, RuntimeError> {
     for exe_name in runtime_executable_names() {
         let output = std::process::Command::new("cmd")
             .arg("/C")
-            .arg(format!("tasklist /FI \"IMAGENAME eq {exe_name}\" /FO LIST /NH"))
+            .arg(format!(
+                "tasklist /FI \"IMAGENAME eq {exe_name}\" /FO LIST /NH"
+            ))
             .output()
             .map_err(RuntimeError::Io)?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2437,9 +2430,7 @@ fn next_selection_index(current: usize, len: usize, direction: i32) -> usize {
 fn log_registration(registration: &HotkeyRegistration) {
     match registration {
         HotkeyRegistration::Native(id) => {
-            log_info(&format!(
-                "[nex] hotkey registered native_id={id}"
-            ));
+            log_info(&format!("[nex] hotkey registered native_id={id}"));
         }
         HotkeyRegistration::Noop(label) => {
             log_info(&format!("[nex] hotkey registered noop={label}"));
@@ -2615,8 +2606,7 @@ fn collect_foreground_window_snapshot() -> Option<ForegroundWindowSnapshot> {
         && rect.bottom >= monitor_info.rcMonitor.bottom - fuzz;
 
     let style = unsafe { GetWindowLongPtrW(foreground, GWL_STYLE) as u32 };
-    let has_standard_frame =
-        style & ((WS_CAPTION | WS_THICKFRAME | WS_SYSMENU) as u32) != 0;
+    let has_standard_frame = style & ((WS_CAPTION | WS_THICKFRAME | WS_SYSMENU) as u32) != 0;
 
     let mut placement = WINDOWPLACEMENT {
         length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
@@ -2708,8 +2698,7 @@ fn is_shell_surface_class_name(class_name: &str) -> bool {
 fn is_known_non_game_process(process_name: &str) -> bool {
     matches!(
         process_name,
-        ""
-            | "explorer.exe"
+        "" | "explorer.exe"
             | "taskmgr.exe"
             | "chrome.exe"
             | "msedge.exe"
@@ -2889,7 +2878,9 @@ fn maybe_apply_background_index_refresh(
     state.cache_applied = true;
 
     if state.pending_discovery_reindex {
-        log_info("[nex] discovery settings queued during indexing; pending reindex remains scheduled");
+        log_info(
+            "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
+        );
         maybe_start_queued_discovery_reindex(service, state, runtime_config);
     }
 }
@@ -2904,9 +2895,8 @@ fn queue_discovery_reindex_after_active_index(state: &mut BackgroundIndexRefresh
     state.pending_discovery_reindex = true;
     state.pending_discovery_reindex_requests =
         state.pending_discovery_reindex_requests.saturating_add(1);
-    state.pending_discovery_reindex_due_at = Some(
-        Instant::now() + Duration::from_millis(QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS),
-    );
+    state.pending_discovery_reindex_due_at =
+        Some(Instant::now() + Duration::from_millis(QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS));
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -3400,9 +3390,7 @@ fn maybe_apply_runtime_config_reload(
                 ));
             }
             if index_db_path_changed {
-                log_warn(
-                    "[nex] config index_db_path changed; restart required to apply",
-                );
+                log_warn("[nex] config index_db_path changed; restart required to apply");
             }
             if discovery_config_changed {
                 if let Err(error) = service.reconfigure_runtime_providers(runtime_config) {
@@ -3411,12 +3399,11 @@ fn maybe_apply_runtime_config_reload(
                     ));
                 } else {
                     if background_index_refresh.cache_applied {
-                        *background_index_refresh =
-                            start_background_index_refresh(
-                                runtime_config,
-                                false,
-                                background_index_refresh.startup_started_at,
-                            );
+                        *background_index_refresh = start_background_index_refresh(
+                            runtime_config,
+                            false,
+                            background_index_refresh.startup_started_at,
+                        );
                         log_info("[nex] discovery settings changed; background reindex started");
                     } else {
                         queue_discovery_reindex_after_active_index(background_index_refresh);
@@ -3449,7 +3436,9 @@ fn maybe_apply_runtime_config_reload(
 
             if discovery_config_changed {
                 if discovery_reindex_queued {
-                    overlay.set_status_text("Discovery settings queued; reindex starts after debounce");
+                    overlay.set_status_text(
+                        "Discovery settings queued; reindex starts after debounce",
+                    );
                 } else {
                     overlay.set_status_text("Discovery settings updated; reindexing...");
                 }
@@ -3821,7 +3810,10 @@ fn execute_action_selection(
                 .map_err(|error| format!("rebuild index failed: {error}"))?;
             log_info(&format!(
                 "[nex] action_rebuild_index indexed={} discovered={} upserted={} removed={}",
-                report.indexed_total, report.discovered_total, report.upserted_total, report.removed_total
+                report.indexed_total,
+                report.discovered_total,
+                report.upserted_total,
+                report.removed_total
             ));
             Ok(())
         }
@@ -3914,17 +3906,15 @@ fn log_warn(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_indexed_seed_limit, build_status_diagnostics_json,
-        can_use_indexed_prefix_cache, candidate_limit_for_query, dedupe_overlay_results,
-        filter_suppressed_uninstall_results, launch_overlay_selection,
+        adaptive_indexed_seed_limit, build_status_diagnostics_json, can_use_indexed_prefix_cache,
+        candidate_limit_for_query, dedupe_overlay_results, filter_suppressed_uninstall_results,
         hotkey_registration_recovery_message, hotkey_registration_status_text,
-        maybe_expand_uninstall_quick_shortcut, next_selection_index, parse_cli_args,
-        parse_status_diagnostics_snapshot, parse_tasklist_pid_lines, result_limit_for_query,
-        queued_discovery_reindex_is_due,
-        search_overlay_results, search_overlay_results_with_session,
-        should_block_hotkey_for_foreground_window, should_hide_known_start_menu_doc_sample_entry,
-        should_skip_non_searchable_query, summarize_query_profiles,
-        track_uninstall_title_suppression,
+        launch_overlay_selection, maybe_expand_uninstall_quick_shortcut, next_selection_index,
+        parse_cli_args, parse_status_diagnostics_snapshot, parse_tasklist_pid_lines,
+        queued_discovery_reindex_is_due, result_limit_for_query, search_overlay_results,
+        search_overlay_results_with_session, should_block_hotkey_for_foreground_window,
+        should_hide_known_start_menu_doc_sample_entry, should_skip_non_searchable_query,
+        summarize_query_profiles, track_uninstall_title_suppression,
         uninstall_confirmation_results, uninstall_target_title_from_action_title,
         ForegroundWindowSnapshot, IndexedPrefixCache, OverlaySearchSession, RuntimeCommand,
         RuntimeOptions, ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
@@ -4480,8 +4470,7 @@ mod tests {
             .expect("clock should be valid")
             .as_nanos();
         let app_path = std::env::temp_dir().join(format!("nex-short-query-app-{unique}.tmp"));
-        let file_path =
-            std::env::temp_dir().join(format!("nex-short-query-file-{unique}.tmp"));
+        let file_path = std::env::temp_dir().join(format!("nex-short-query-file-{unique}.tmp"));
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
@@ -4741,10 +4730,7 @@ mod tests {
             json["provider_freshness"]["reconcile_interval_secs"],
             serde_json::json!(1800)
         );
-        assert_eq!(
-            json["stale_prune"]["removed"],
-            serde_json::json!(3)
-        );
+        assert_eq!(json["stale_prune"]["removed"], serde_json::json!(3));
         assert_eq!(
             json["cache_compaction"]["effective_file_seed_cap"],
             serde_json::json!(576)
@@ -4753,10 +4739,7 @@ mod tests {
             json["cache_compaction"]["broad_root_mode"],
             serde_json::json!(true)
         );
-        assert_eq!(
-            json["icon_cache"]["max_entries"],
-            serde_json::json!(90)
-        );
+        assert_eq!(json["icon_cache"]["max_entries"], serde_json::json!(90));
     }
 
     #[test]
@@ -4768,14 +4751,19 @@ mod tests {
             Some(now + std::time::Duration::from_millis(5)),
             now
         ));
-        assert!(queued_discovery_reindex_is_due(
+        assert!(queued_discovery_reindex_is_due(true, true, Some(now), now));
+        assert!(!queued_discovery_reindex_is_due(
             true,
+            false,
+            Some(now),
+            now
+        ));
+        assert!(!queued_discovery_reindex_is_due(
+            false,
             true,
             Some(now),
             now
         ));
-        assert!(!queued_discovery_reindex_is_due(true, false, Some(now), now));
-        assert!(!queued_discovery_reindex_is_due(false, true, Some(now), now));
         assert!(!queued_discovery_reindex_is_due(true, true, None, now));
     }
 

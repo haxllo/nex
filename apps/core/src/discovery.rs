@@ -1,6 +1,6 @@
-use std::collections::HashSet;
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;

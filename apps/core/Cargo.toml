@@ -1,6 +1,6 @@
 [package]
-name = "nex-launch"
-version = "6.4.0"
+name = "nex-cli"
+version = "6.4.1"
 edition = "2021"
 description = "A keyboard-first launcher for Windows"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "nex_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nex-launch"
+name = "nex"
 path = "src/main.rs"
 
 [dependencies]

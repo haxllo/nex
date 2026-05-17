@@ -7,9 +7,7 @@ fn inserts_and_reads_search_item() {
         .with_usage(3, 1_700_000_000);
 
     nex_core::index_store::upsert_item(&db, &item).unwrap();
-    let got = nex_core::index_store::get_item(&db, "1")
-        .unwrap()
-        .unwrap();
+    let got = nex_core::index_store::get_item(&db, "1").unwrap().unwrap();
 
     assert_eq!(got.title, "Code");
     assert_eq!(got.use_count, 3);
@@ -28,13 +26,9 @@ fn persists_items_across_reopen() {
 
     {
         let db = nex_core::index_store::open_file(&db_path).unwrap();
-        let item = nex_core::model::SearchItem::new(
-            "persist-1",
-            "file",
-            "Report",
-            "C:\\Report.xlsx",
-        )
-        .with_usage(7, 1_800_000_000);
+        let item =
+            nex_core::model::SearchItem::new("persist-1", "file", "Report", "C:\\Report.xlsx")
+                .with_usage(7, 1_800_000_000);
         nex_core::index_store::upsert_item(&db, &item).unwrap();
     }
 

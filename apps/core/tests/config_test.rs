@@ -53,8 +53,7 @@ fn opens_index_store_from_config_path() {
         .join("cfg-open.sqlite3");
 
     let db = nex_core::index_store::open_from_config(&cfg).unwrap();
-    let item =
-        nex_core::model::SearchItem::new("cfg-1", "app", "Terminal", "C:\\Terminal.exe");
+    let item = nex_core::model::SearchItem::new("cfg-1", "app", "Terminal", "C:\\Terminal.exe");
     nex_core::index_store::upsert_item(&db, &item).unwrap();
 
     let got = nex_core::index_store::get_item(&db, "cfg-1").unwrap();
@@ -107,10 +106,7 @@ fn saves_and_reloads_config_file() {
     assert!(loaded.launch_at_startup);
     assert_eq!(loaded.discovery_roots.len(), 1);
     assert_eq!(loaded.discovery_exclude_roots.len(), 1);
-    assert_eq!(
-        loaded.version,
-        nex_core::config::CURRENT_CONFIG_VERSION
-    );
+    assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
 
     std::fs::remove_file(&config_path).unwrap();
 }
@@ -138,10 +134,7 @@ fn loads_partial_config_with_migration_safe_defaults() {
     let loaded = nex_core::config::load(Some(&config_path)).unwrap();
 
     assert_eq!(loaded.max_results, 25);
-    assert_eq!(
-        loaded.version,
-        nex_core::config::CURRENT_CONFIG_VERSION
-    );
+    assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
     assert_eq!(loaded.hotkey, "Ctrl+Space");
     assert!(!loaded.launch_at_startup);
     assert_eq!(loaded.config_path, config_path);
@@ -243,10 +236,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     .unwrap();
 
     let loaded = nex_core::config::load(Some(&config_path)).unwrap();
-    assert_eq!(
-        loaded.version,
-        nex_core::config::CURRENT_CONFIG_VERSION
-    );
+    assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
     assert_eq!(loaded.hotkey, "Ctrl+Alt+P");
     assert_eq!(loaded.max_results, 33);
     assert!(loaded.launch_at_startup);
@@ -324,10 +314,7 @@ ignore_hotkeys_on_fullscreen = true
     .unwrap();
 
     let loaded = nex_core::config::load(Some(&config_path)).unwrap();
-    assert_eq!(
-        loaded.version,
-        nex_core::config::CURRENT_CONFIG_VERSION
-    );
+    assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
     assert!(!loaded.game_mode_enabled);
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();

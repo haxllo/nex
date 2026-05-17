@@ -1,10 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use std::sync::{Arc, Mutex};
 use nex_core::config::SearchMode;
 use nex_core::core_service::{CoreService, LaunchTarget, ServiceError};
 use nex_core::discovery::{DiscoveryProvider, ProviderError};
 use nex_core::model::SearchItem;
+use std::sync::{Arc, Mutex};
 
 fn test_config() -> nex_core::config::Config {
     nex_core::config::Config::default()
@@ -218,8 +218,7 @@ fn service_launch_missing_path_prunes_item() {
 
     let first = service.launch(LaunchTarget::Id("stale-launch"));
     match first {
-        Err(ServiceError::Launch(nex_core::action_executor::LaunchError::MissingPath(_))) => {
-        }
+        Err(ServiceError::Launch(nex_core::action_executor::LaunchError::MissingPath(_))) => {}
         other => panic!("unexpected first launch result: {other:?}"),
     }
 

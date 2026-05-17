@@ -50,9 +50,7 @@ fn non_windows_fallback_smoke_still_roundtrips() {
 #[test]
 fn windows_runtime_smoke_registers_hotkey_and_transport_roundtrip() {
     if std::env::var("NEX_WINDOWS_RUNTIME_SMOKE").as_deref() != Ok("1") {
-        eprintln!(
-            "skipping windows runtime smoke (set NEX_WINDOWS_RUNTIME_SMOKE=1 to enable)"
-        );
+        eprintln!("skipping windows runtime smoke (set NEX_WINDOWS_RUNTIME_SMOKE=1 to enable)");
         return;
     }
 

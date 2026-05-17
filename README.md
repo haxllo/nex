@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="apps/assets/nex.svg" alt="Nex" height="80" />
+<img src="apps/assets/nex.png" alt="Nex" height="80" />
 
 # Nex
 

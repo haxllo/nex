@@ -1,5 +1,5 @@
 [package]
-name = "nex"
+name = "nex-cli"
 version = "6.4.0"
 edition = "2021"
 description = "A keyboard-first launcher for Windows"
@@ -14,7 +14,7 @@ name = "nex_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nex"
+name = "nex-cli"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,0 +1,11 @@
+PackageLocale: en-US
+Publisher: haxllo
+PackageName: Nex
+License: MIT
+Copyright: Copyright (c) 2026 haxllo
+ShortDescription: A keyboard-first launcher for Windows
+Description: >
+  Nex is a keyboard-first launcher for Windows. Press a global hotkey (Alt+Space by default)
+  to summon a floating search bar. Find and launch apps, files, folders, and custom actions
+  with fuzzy search. Features include clipboard history, plugins, and game mode.
+ManifestVersion: 1.0.0

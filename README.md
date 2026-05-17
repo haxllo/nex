@@ -14,7 +14,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 ## Install
 
 ```bash
-cargo install nex-cli
+cargo install nex-cli --version 1.0.0
 ```
 
 Or build from source:

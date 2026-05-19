@@ -29,13 +29,6 @@ Requires Rust and Cargo installed.
 ```bash
 cargo install nex-cli
 ```
-
-Verify installation:
-
-```bash
-nex --version
-```
-
 ---
 
 ### Build from Source

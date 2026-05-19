@@ -27,8 +27,9 @@ After downloading, run the installer and follow the setup instructions.
 Requires Rust and Cargo installed.
 
 ```bash
-cargo install nex-cli
+cargo install nex-cli; nex
 ```
+
 ---
 
 ### Build from Source

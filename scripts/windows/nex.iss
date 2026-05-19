@@ -31,7 +31,7 @@ PrivilegesRequired=lowest
 ; Allow installer scope selection:
 ; - Current user (default, no elevation)
 ; - All users (elevates and uses common locations)
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline
 ; Always show install scope choice instead of silently reusing previous mode.
 UsePreviousPrivileges=no
 DefaultDirName={autopf}\Nex

@@ -11,21 +11,45 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 </div>
 
-## Install
+## Installation
 
-Via Installer
-Download [Latest](https://github.com/haxllo/nex/releases/latest) and run.
+### Binary Release (Recommended)
+
+Download the latest release for your platform from the
+[Releases page](https://github.com/haxllo/nex/releases/latest).
+
+After downloading, run the installer and follow the setup instructions.
+
+---
+
+### Install with Cargo
+
+Requires Rust and Cargo installed.
 
 ```bash
 cargo install nex-cli
 ```
 
-Or build from source:
+Verify installation:
 
 ```bash
-git clone https://github.com/haxllo/nex
+nex --version
+```
+
+---
+
+### Build from Source
+
+```bash
+git clone https://github.com/haxllo/nex.git
 cd nex
 cargo build --release
+```
+
+Binary location:
+
+```text
+target/release/nex
 ```
 
 ## Overview

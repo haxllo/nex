@@ -13,6 +13,9 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 ## Install
 
+Via Installer
+Download [![latest](https://github.com/haxllo/nex/releases/latest)] and run.
+
 ```bash
 cargo install nex-cli
 ```

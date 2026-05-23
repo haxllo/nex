@@ -6,6 +6,8 @@ use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse}
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
+#[cfg(target_os = "windows")]
+use crate::everything::EverythingSearchProvider;
 use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
@@ -189,6 +191,17 @@ impl CoreService {
 fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvider>> {
     let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
     providers.push(Box::new(StartMenuAppDiscoveryProvider::default()));
+
+    // Register Everything SDK provider when enabled.
+    #[cfg(target_os = "windows")]
+    if config.everything_search_enabled {
+        providers.push(Box::new(EverythingSearchProvider::new(
+            config.discovery_roots.clone(),
+            &config.discovery_exclude_roots,
+            config.show_files,
+            config.show_folders,
+        )));
+    }
     // Always register filesystem provider so toggling file/folder discovery off
     // can actively prune stale file/folder records from the index.
     providers.push(Box::new(
@@ -196,8 +209,6 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
             config.discovery_roots.clone(),
             5,
             config.discovery_exclude_roots.clone(),
-            config.windows_search_enabled,
-            config.windows_search_fallback_filesystem,
             config.show_files,
             config.show_folders,
         )
@@ -412,6 +423,10 @@ impl CoreService {
         let mut removed_total = 0_usize;
         let mut provider_reports = Vec::with_capacity(providers_guard.len());
         let now_epoch_secs = now_epoch_secs();
+        // When Everything SDK returns results, it covers the full file/folder
+        // namespace (Everything's index is real-time). Skip the filesystem
+        // provider to avoid unnecessary COM / walkdir work.
+        let mut everything_covered_files = false;
 
         for provider in providers_guard.iter() {
             let started = Instant::now();
@@ -441,7 +456,43 @@ impl CoreService {
                 continue;
             }
 
+            // Optimisation: if Everything already covered the file/folder
+            // namespace, skip the filesystem walk to avoid duplicate work.
+            // Everything's index is real-time, so it's strictly more complete.
+            if provider_name == "filesystem" && everything_covered_files {
+                let elapsed_ms = started.elapsed().as_millis();
+                provider_reports.push(ProviderRefreshReport {
+                    provider: provider_name.clone(),
+                    discovered: 0,
+                    upserted: 0,
+                    removed: 0,
+                    skipped: true,
+                    elapsed_ms,
+                });
+                if incremental_mode {
+                    persist_provider_discovery_state(
+                        &self.db,
+                        &provider_name,
+                        provider_stamp.as_deref(),
+                        now_epoch_secs,
+                    )?;
+                    log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
+                }
+                crate::logging::info(&format!(
+                    "[nex] provider_skipped_by_everything_guard provider={provider_name}"
+                ));
+                continue;
+            }
+
             let discovered = provider.discover()?;
+
+            if provider_name == "everything" && !discovered.is_empty() {
+                everything_covered_files = true;
+                crate::logging::info(&format!(
+                    "[nex] everything_covered_files=true count={}",
+                    discovered.len()
+                ));
+            }
             let discovered_count = discovered.len();
             discovered_total += discovered_count;
 
@@ -1126,7 +1177,7 @@ fn provider_manages_kind(provider_name: &str, kind: &str) -> bool {
     let kind = kind.to_ascii_lowercase();
     match provider_name {
         "start-menu-apps" | "app" => kind == "app",
-        "filesystem" | "file" => kind == "file" || kind == "folder",
+        "filesystem" | "file" | "everything" => kind == "file" || kind == "folder",
         _ => false,
     }
 }

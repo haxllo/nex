@@ -12,6 +12,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# Everything SDK download URL
+# ---------------------------------------------------------------------------
+$EverythingSdkUrl = "https://www.voidtools.com/Everything-SDK.zip"
+$EverythingDllName = "Everything64.dll"
+
 function Resolve-VersionFromCargo {
   $cargoToml = Join-Path $PSScriptRoot "..\..\apps\core\Cargo.toml"
   if (-not (Test-Path $cargoToml)) {
@@ -110,6 +116,34 @@ else {
 }
 
 Copy-Item $coreExe (Join-Path $stageDir "bin/nex.exe") -Force
+
+# -----------------------------------------------------------------------
+# Download and bundle Everything SDK DLL
+# -----------------------------------------------------------------------
+$everythingDllDir = Join-Path $stageDir "bin"
+$everythingDllPath = Join-Path $everythingDllDir $EverythingDllName
+$everythingDllBundled = $false
+try {
+  Write-Host "Downloading Everything SDK from $EverythingSdkUrl ..." -ForegroundColor Yellow
+  $sdkZip = Join-Path $env:TEMP "Everything-SDK.zip"
+  Invoke-WebRequest -Uri $EverythingSdkUrl -OutFile $sdkZip -UseBasicParsing -ErrorAction Stop
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = [System.IO.Compression.ZipArchive]::new([System.IO.File]::OpenRead($sdkZip))
+  $entry = $zip.Entries | Where-Object { $_.Name -eq $EverythingDllName } | Select-Object -First 1
+  if ($entry) {
+    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $everythingDllPath, $true)
+    Write-Host "Bundled $EverythingDllName next to nex.exe" -ForegroundColor Green
+    $everythingDllBundled = $true
+  } else {
+    Write-Host "WARNING: $EverythingDllName not found in Everything-SDK.zip" -ForegroundColor Yellow
+  }
+  $zip.Dispose()
+  Remove-Item $sdkZip -Force -ErrorAction SilentlyContinue
+}
+catch {
+  Write-Host "WARNING: Failed to download Everything SDK: $_" -ForegroundColor Yellow
+  Write-Host "Nex will still work but Everything search will be unavailable until the DLL is placed manually." -ForegroundColor Yellow
+}
 if (Test-Path "apps/assets/nex.svg") {
   Copy-Item "apps/assets/nex.svg" (Join-Path $stageDir "assets/nex.svg") -Force
 }

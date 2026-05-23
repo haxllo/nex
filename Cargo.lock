@@ -160,6 +160,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "459427e2af2b9c839b132acb702a1c654d95e10f8c326bfc2ad11310e458b1c5"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -181,6 +191,7 @@ name = "nex-cli"
 version = "1.0.1"
 dependencies = [
  "json5",
+ "libloading",
  "rusqlite",
  "serde",
  "serde_json",
@@ -464,6 +475,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys",
 ]
+
+[[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
 name = "windows-sys"

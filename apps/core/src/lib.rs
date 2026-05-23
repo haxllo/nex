@@ -5,6 +5,8 @@ pub mod config;
 pub mod contract;
 pub mod core_service;
 pub mod discovery;
+#[cfg(target_os = "windows")]
+pub mod everything;
 pub mod hotkey;
 pub mod hotkey_runtime;
 pub mod index_store;
@@ -14,6 +16,17 @@ pub mod overlay_state;
 pub mod plugin_sdk;
 pub mod query_dsl;
 pub mod runtime;
+pub(crate) mod runtime_actions;
+pub(crate) mod runtime_commands;
+pub(crate) mod runtime_diagnostics;
+pub(crate) mod runtime_hotkey;
+pub(crate) mod runtime_index;
+#[cfg(target_os = "windows")]
+pub(crate) mod runtime_loop;
+#[cfg(target_os = "windows")]
+pub(crate) mod runtime_overlay_rows;
+pub(crate) mod runtime_process;
+pub(crate) mod runtime_search_session;
 pub mod search;
 pub mod settings;
 pub mod startup;

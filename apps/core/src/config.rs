@@ -15,7 +15,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 11;
+pub const CURRENT_CONFIG_VERSION: u32 = 13;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -24,14 +24,10 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "max_results",
     "discovery_roots",
     "discovery_exclude_roots",
-    "windows_search_enabled",
-    "windows_search_fallback_filesystem",
     "show_files",
     "show_folders",
     "search_mode_default",
     "search_dsl_enabled",
-    "search_query_results_with_delay",
-    "search_delay_time_ms",
     "uninstall_actions_enabled",
     "web_search_provider",
     "web_search_custom_template",
@@ -47,6 +43,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "index_max_items_total",
     "index_max_items_per_root",
     "index_max_items_per_query_seed",
+    "everything_search_enabled",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -112,8 +109,6 @@ pub struct Config {
     pub config_path: PathBuf,
     pub discovery_roots: Vec<PathBuf>,
     pub discovery_exclude_roots: Vec<PathBuf>,
-    pub windows_search_enabled: bool,
-    pub windows_search_fallback_filesystem: bool,
     pub show_files: bool,
     pub show_folders: bool,
     pub hotkey: String,
@@ -122,14 +117,13 @@ pub struct Config {
     pub hotkey_recommended: Vec<String>,
     pub search_mode_default: SearchMode,
     pub search_dsl_enabled: bool,
-    pub search_query_results_with_delay: bool,
-    pub search_delay_time_ms: u16,
     pub uninstall_actions_enabled: bool,
     pub web_search_provider: WebSearchProvider,
     pub web_search_custom_template: String,
     pub clipboard_enabled: bool,
     pub clipboard_retention_minutes: u32,
     pub clipboard_exclude_sensitive_patterns: Vec<String>,
+    pub everything_search_enabled: bool,
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
@@ -152,8 +146,6 @@ impl Default for Config {
             config_path,
             discovery_roots: default_discovery_roots(),
             discovery_exclude_roots: default_discovery_exclude_roots(),
-            windows_search_enabled: true,
-            windows_search_fallback_filesystem: true,
             show_files: false,
             show_folders: false,
             hotkey: "Ctrl+Space".to_string(),
@@ -171,8 +163,6 @@ impl Default for Config {
             ],
             search_mode_default: SearchMode::All,
             search_dsl_enabled: true,
-            search_query_results_with_delay: true,
-            search_delay_time_ms: 90,
             uninstall_actions_enabled: true,
             web_search_provider: WebSearchProvider::Google,
             web_search_custom_template: String::new(),
@@ -187,6 +177,7 @@ impl Default for Config {
                 "apikey".to_string(),
                 "api_key".to_string(),
             ],
+            everything_search_enabled: true,
             plugins_enabled: true,
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
@@ -460,22 +451,6 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  \"discovery_exclude_roots\": ");
     text.push_str(&excluded_roots_section);
     text.push_str(",\n\n");
-    text.push_str("  // Use Windows Search index for file/folder discovery when available.\n");
-    text.push_str("  \"windows_search_enabled\": ");
-    text.push_str(if cfg.windows_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  // Fall back to direct filesystem scan when Windows Search is unavailable.\n");
-    text.push_str("  \"windows_search_fallback_filesystem\": ");
-    text.push_str(if cfg.windows_search_fallback_filesystem {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n\n");
     text.push_str("  // Toggle file and folder visibility in results.\n");
     text.push_str("  \"show_files\": ");
     text.push_str(if cfg.show_files { "true" } else { "false" });
@@ -503,18 +478,6 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     } else {
         "false"
     });
-    text.push_str(",\n");
-    text.push_str("  // Delay query execution while typing for smoother UI updates\n");
-    text.push_str("  \"search_query_results_with_delay\": ");
-    text.push_str(if cfg.search_query_results_with_delay {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  // Typing delay in milliseconds (valid range: 10..2000)\n");
-    text.push_str("  \"search_delay_time_ms\": ");
-    text.push_str(&cfg.search_delay_time_ms.to_string());
     text.push_str(",\n");
     text.push_str("  // Enable command mode uninstall actions (e.g. > uninstall appname)\n");
     text.push_str("  \"uninstall_actions_enabled\": ");
@@ -572,6 +535,16 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
         text.push('\n');
     }
     text.push_str("  ],\n\n");
+
+    text.push_str("  // Use voidtools Everything SDK for instant file/folder search.\n");
+    text.push_str("  // Requires Everything (voidtools.com) to be installed.\n");
+    text.push_str("  \"everything_search_enabled\": ");
+    text.push_str(if cfg.everything_search_enabled {
+        "true"
+    } else {
+        "false"
+    });
+    text.push_str(",\n\n");
 
     text.push_str("  // Plugin SDK settings\n");
     text.push_str("  \"plugins_enabled\": ");
@@ -694,23 +667,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&excluded_roots_section);
     text.push_str("\n\n");
 
-    text.push_str("# Use Windows Search index for file/folder discovery when available.\n");
-    text.push_str("windows_search_enabled = ");
-    text.push_str(if cfg.windows_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push('\n');
-    text.push_str("# Fall back to direct filesystem scan when Windows Search is unavailable.\n");
-    text.push_str("windows_search_fallback_filesystem = ");
-    text.push_str(if cfg.windows_search_fallback_filesystem {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str("\n\n");
-
     text.push_str("# Toggle file and folder visibility in results.\n");
     text.push_str("show_files = ");
     text.push_str(if cfg.show_files { "true" } else { "false" });
@@ -738,18 +694,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     } else {
         "false"
     });
-    text.push('\n');
-    text.push_str("# Delay query execution while typing for smoother UI updates\n");
-    text.push_str("search_query_results_with_delay = ");
-    text.push_str(if cfg.search_query_results_with_delay {
-        "true"
-    } else {
-        "false"
-    });
-    text.push('\n');
-    text.push_str("# Typing delay in milliseconds (valid range: 10..2000)\n");
-    text.push_str("search_delay_time_ms = ");
-    text.push_str(&cfg.search_delay_time_ms.to_string());
     text.push('\n');
     text.push_str("# Enable command mode uninstall actions (e.g. > uninstall appname)\n");
     text.push_str("uninstall_actions_enabled = ");
@@ -798,6 +742,16 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# Substring patterns skipped when capturing clipboard entries\n");
     text.push_str("clipboard_exclude_sensitive_patterns = ");
     text.push_str(&clipboard_patterns_section);
+    text.push_str("\n\n");
+
+    text.push_str("# Use voidtools Everything SDK for instant file/folder search.\n");
+    text.push_str("# Requires Everything (voidtools.com) to be installed.\n");
+    text.push_str("everything_search_enabled = ");
+    text.push_str(if cfg.everything_search_enabled {
+        "true"
+    } else {
+        "false"
+    });
     text.push_str("\n\n");
 
     text.push_str("# Plugin SDK settings\n");
@@ -880,10 +834,6 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.active_memory_target_mb < 20 || cfg.active_memory_target_mb > 512 {
         return Err("active_memory_target_mb out of range".into());
     }
-    if cfg.search_delay_time_ms < 10 || cfg.search_delay_time_ms > 2_000 {
-        return Err("search_delay_time_ms out of range".into());
-    }
-
     if cfg.index_max_items_total < 10_000 || cfg.index_max_items_total > 2_000_000 {
         return Err("index_max_items_total out of range".into());
     }
@@ -1121,18 +1071,6 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         }
     }
 
-    if source_version < 4 {
-        if !raw_has_key(raw, "windows_search_enabled") {
-            cfg.windows_search_enabled = Config::default().windows_search_enabled;
-            changed = true;
-        }
-        if !raw_has_key(raw, "windows_search_fallback_filesystem") {
-            cfg.windows_search_fallback_filesystem =
-                Config::default().windows_search_fallback_filesystem;
-            changed = true;
-        }
-    }
-
     if source_version < 5 {
         if !raw_has_key(raw, "show_files") {
             cfg.show_files = Config::default().show_files;
@@ -1169,15 +1107,9 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
-    if source_version < 9 {
-        if !raw_has_key(raw, "search_query_results_with_delay") {
-            cfg.search_query_results_with_delay = Config::default().search_query_results_with_delay;
-            changed = true;
-        }
-        if !raw_has_key(raw, "search_delay_time_ms") {
-            cfg.search_delay_time_ms = Config::default().search_delay_time_ms;
-            changed = true;
-        }
+    if source_version < 12 && !raw_has_key(raw, "everything_search_enabled") {
+        cfg.everything_search_enabled = Config::default().everything_search_enabled;
+        changed = true;
     }
 
     if TEMPLATE_REQUIRED_KEYS

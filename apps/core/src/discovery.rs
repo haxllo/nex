@@ -206,8 +206,6 @@ pub struct FileSystemDiscoveryProvider {
     roots: Vec<PathBuf>,
     excluded_roots: Vec<PathBuf>,
     max_depth: usize,
-    windows_search_enabled: bool,
-    windows_search_fallback_filesystem: bool,
     show_files: bool,
     show_folders: bool,
     max_items_total: usize,
@@ -216,33 +214,13 @@ pub struct FileSystemDiscoveryProvider {
 
 impl FileSystemDiscoveryProvider {
     pub fn new(roots: Vec<PathBuf>, max_depth: usize, excluded_roots: Vec<PathBuf>) -> Self {
-        Self::with_options(roots, max_depth, excluded_roots, true, true, true, true)
-    }
-
-    pub fn with_windows_search_options(
-        roots: Vec<PathBuf>,
-        max_depth: usize,
-        excluded_roots: Vec<PathBuf>,
-        windows_search_enabled: bool,
-        windows_search_fallback_filesystem: bool,
-    ) -> Self {
-        Self::with_options(
-            roots,
-            max_depth,
-            excluded_roots,
-            windows_search_enabled,
-            windows_search_fallback_filesystem,
-            true,
-            true,
-        )
+        Self::with_options(roots, max_depth, excluded_roots, true, true)
     }
 
     pub fn with_options(
         roots: Vec<PathBuf>,
         max_depth: usize,
         excluded_roots: Vec<PathBuf>,
-        windows_search_enabled: bool,
-        windows_search_fallback_filesystem: bool,
         show_files: bool,
         show_folders: bool,
     ) -> Self {
@@ -250,8 +228,6 @@ impl FileSystemDiscoveryProvider {
             roots,
             excluded_roots,
             max_depth,
-            windows_search_enabled,
-            windows_search_fallback_filesystem,
             show_files,
             show_folders,
             max_items_total: DEFAULT_INDEX_MAX_ITEMS_TOTAL,
@@ -278,24 +254,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             return Ok(Vec::new());
         }
 
-        #[cfg(target_os = "windows")]
-        if self.windows_search_enabled {
-            match discover_windows_search_items(
-                &self.roots,
-                &self.excluded_roots,
-                self.show_files,
-                self.show_folders,
-                self.max_items_total,
-                self.max_items_per_root,
-            ) {
-                Ok(items) if !items.is_empty() => return Ok(items),
-                Ok(_) if !self.windows_search_fallback_filesystem => return Ok(Vec::new()),
-                Ok(_) => {}
-                Err(error) if !self.windows_search_fallback_filesystem => return Err(error),
-                Err(_) => {}
-            }
-        }
-
         discover_filesystem_walk(
             &self.roots,
             &self.excluded_roots,
@@ -318,18 +276,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         stamp.push_str(&roots_change_stamp(&self.excluded_roots));
         stamp.push_str(";depth=");
         stamp.push_str(&self.max_depth.to_string());
-        stamp.push_str(";windows_search=");
-        stamp.push_str(if self.windows_search_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        });
-        stamp.push_str(";fallback=");
-        stamp.push_str(if self.windows_search_fallback_filesystem {
-            "filesystem"
-        } else {
-            "none"
-        });
         stamp.push_str(";show_files=");
         stamp.push_str(if self.show_files { "true" } else { "false" });
         stamp.push_str(";show_folders=");
@@ -455,6 +401,7 @@ fn discover_filesystem_walk(
 #[derive(Debug, Clone)]
 struct DiscoveryExclusionPolicy {
     excluded_roots: Vec<String>,
+    user_excluded_roots: Vec<String>,
     top_level_dir_names: HashSet<&'static str>,
     any_depth_dir_names: HashSet<&'static str>,
     file_names: HashSet<&'static str>,
@@ -463,7 +410,8 @@ struct DiscoveryExclusionPolicy {
 impl DiscoveryExclusionPolicy {
     fn new(user_excluded_roots: &[PathBuf]) -> Self {
         Self {
-            excluded_roots: effective_normalized_exclusion_roots(user_excluded_roots),
+            excluded_roots: normalized_exclusion_roots(&builtin_exclusion_roots()),
+            user_excluded_roots: normalized_exclusion_roots(user_excluded_roots),
             top_level_dir_names: TOP_LEVEL_EXCLUDED_DIR_NAMES.iter().copied().collect(),
             any_depth_dir_names: ANY_DEPTH_EXCLUDED_DIR_NAMES.iter().copied().collect(),
             file_names: EXCLUDED_FILE_NAMES.iter().copied().collect(),
@@ -471,13 +419,21 @@ impl DiscoveryExclusionPolicy {
     }
 
     fn should_exclude_path_under_root(&self, path: &Path, root: &Path) -> bool {
-        if is_path_under_any_excluded_root(path, &self.excluded_roots) {
-            return true;
+        // The explicitly configured root is never excluded.
+        if path == root {
+            return false;
         }
 
         let Ok(relative) = path.strip_prefix(root) else {
-            return false;
+            // Path outside the explicit root: check absolute exclusion (built-in + user).
+            return is_path_under_any_excluded_root(path, &self.excluded_roots)
+                || is_path_under_any_excluded_root(path, &self.user_excluded_roots);
         };
+        // Path under the explicit root: check user-provided absolute exclusions
+        // and component-based exclusions, but NOT built-in exclusions.
+        if is_path_under_any_excluded_root(path, &self.user_excluded_roots) {
+            return true;
+        }
         let components = relative
             .components()
             .filter_map(|component| match component {
@@ -508,12 +464,6 @@ impl DiscoveryExclusionPolicy {
 
         false
     }
-}
-
-fn effective_normalized_exclusion_roots(user_excluded_roots: &[PathBuf]) -> Vec<String> {
-    let mut roots = builtin_exclusion_roots();
-    roots.extend(user_excluded_roots.iter().cloned());
-    normalized_exclusion_roots(&roots)
 }
 
 fn builtin_exclusion_roots() -> Vec<PathBuf> {
@@ -1409,225 +1359,6 @@ fn should_exclude_non_app_start_reference(title: &str, reference: &str) -> bool 
     }
 
     false
-}
-
-#[cfg(target_os = "windows")]
-fn discover_windows_search_items(
-    roots: &[PathBuf],
-    excluded_roots: &[PathBuf],
-    show_files: bool,
-    show_folders: bool,
-    max_items_total: usize,
-    max_items_per_root: usize,
-) -> Result<Vec<SearchItem>, ProviderError> {
-    use std::collections::HashSet;
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let roots_joined = join_windows_paths_for_powershell(roots);
-    if roots_joined.is_empty() {
-        return Ok(Vec::new());
-    }
-    let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
-    let effective_excluded_roots = effective_excluded_roots_for_powershell(excluded_roots);
-    let excluded_joined = join_windows_paths_for_powershell(&effective_excluded_roots);
-
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$separator = [char]0x1f
-$roots = @()
-$excludes = @()
-if ($env:NEX_WS_ROOTS) { $roots = $env:NEX_WS_ROOTS -split $separator }
-elseif ($env:SWIFTFIND_WS_ROOTS) { $roots = $env:SWIFTFIND_WS_ROOTS -split $separator }
-if ($env:NEX_WS_EXCLUDES) { $excludes = $env:NEX_WS_EXCLUDES -split $separator }
-elseif ($env:SWIFTFIND_WS_EXCLUDES) { $excludes = $env:SWIFTFIND_WS_EXCLUDES -split $separator }
-
-$conn = New-Object -ComObject ADODB.Connection
-$conn.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows'")
-$seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-
-foreach ($root in $roots) {
-  if ([string]::IsNullOrWhiteSpace($root)) { continue }
-  $scope = $root.Trim().Replace('\', '/')
-  if (-not $scope.EndsWith('/')) { $scope += '/' }
-  $scope = $scope.Replace("'", "''")
-  $query = "SELECT System.ItemPathDisplay, System.ItemName, System.FileAttributes FROM SYSTEMINDEX WHERE scope='file:$scope'"
-  $recordset = $conn.Execute($query)
-
-  while (-not $recordset.EOF) {
-    $path = [string]$recordset.Fields.Item("System.ItemPathDisplay").Value
-    $name = [string]$recordset.Fields.Item("System.ItemName").Value
-    $attrsValue = $recordset.Fields.Item("System.FileAttributes").Value
-    $attrs = 0
-    if ($null -ne $attrsValue -and "$attrsValue" -ne "") { $attrs = [int64]$attrsValue }
-
-    if (-not [string]::IsNullOrWhiteSpace($path)) {
-      $skip = $false
-      foreach ($exclude in $excludes) {
-        if ([string]::IsNullOrWhiteSpace($exclude)) { continue }
-        if ($path.StartsWith($exclude, [System.StringComparison]::OrdinalIgnoreCase)) {
-          $skip = $true
-          break
-        }
-      }
-
-      if (-not $skip -and $seen.Add($path)) {
-        if ([string]::IsNullOrWhiteSpace($name)) { $name = [System.IO.Path]::GetFileName($path) }
-        if ([string]::IsNullOrWhiteSpace($name)) { $name = $path }
-        $kind = if (($attrs -band 16) -ne 0) { "folder" } else { "file" }
-        "{0}`t{1}`t{2}" -f $kind, $name, $path
-      }
-    }
-
-    $recordset.MoveNext()
-  }
-
-  $recordset.Close()
-}
-
-$conn.Close()
-"#;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .env("NEX_WS_ROOTS", &roots_joined)
-        .env("SWIFTFIND_WS_ROOTS", roots_joined)
-        .env("NEX_WS_EXCLUDES", &excluded_joined)
-        .env("SWIFTFIND_WS_EXCLUDES", excluded_joined)
-        .creation_flags(CREATE_NO_WINDOW);
-
-    let output = command.output().map_err(|error| {
-        ProviderError::new(format!(
-            "Windows Search provider invocation failed: {error}"
-        ))
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ProviderError::new(format!(
-            "Windows Search provider failed (status={}): {}",
-            output.status,
-            if stderr.is_empty() {
-                "no stderr"
-            } else {
-                stderr.as_str()
-            }
-        )));
-    }
-
-    let mut seen_ids = HashSet::new();
-    let normalized_roots = roots
-        .iter()
-        .map(|root| normalize_root_for_stamp(root))
-        .collect::<Vec<_>>();
-    let mut root_counts = vec![0_usize; normalized_roots.len()];
-    let total_budget = max_items_total.max(1);
-    let per_root_budget = max_items_per_root.max(1).min(total_budget);
-    let mut skipped_due_cap = 0_usize;
-    let mut skipped_due_exclusion = 0_usize;
-    let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.splitn(3, '\t');
-        let Some(kind_raw) = parts.next() else {
-            continue;
-        };
-        let Some(title_raw) = parts.next() else {
-            continue;
-        };
-        let Some(path_raw) = parts.next() else {
-            continue;
-        };
-        let kind = kind_raw.trim().to_ascii_lowercase();
-        if kind != "file" && kind != "folder" {
-            continue;
-        }
-        if kind == "file" && !show_files {
-            continue;
-        }
-        if kind == "folder" && !show_folders {
-            continue;
-        }
-        let path = path_raw.trim();
-        if path.is_empty() {
-            continue;
-        }
-        let normalized_path = normalize_id_path(path);
-        let root_index = normalized_roots.iter().position(|root| {
-            normalized_path == *root
-                || (normalized_path.starts_with(root)
-                    && normalized_path[root.len()..].starts_with('\\'))
-        });
-        let Some(root_index) = root_index else {
-            continue;
-        };
-        if exclusion_policy.should_exclude_path_under_root(Path::new(path), &roots[root_index]) {
-            skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
-            continue;
-        }
-        if items.len() >= total_budget || root_counts[root_index] >= per_root_budget {
-            skipped_due_cap = skipped_due_cap.saturating_add(1);
-            continue;
-        }
-        let title = title_raw.trim();
-        let display_title = if title.is_empty() { path } else { title };
-        let id = format!("{kind}:{normalized_path}");
-        if seen_ids.insert(id.clone()) {
-            items.push(SearchItem::new(&id, &kind, display_title, path));
-            root_counts[root_index] += 1;
-        }
-    }
-
-    if skipped_due_cap > 0 {
-        crate::logging::info(&format!(
-            "[nex] discovery_cap provider=windows_search skipped_due_cap={} total_cap={} per_root_cap={}",
-            skipped_due_cap, total_budget, per_root_budget
-        ));
-    }
-    if skipped_due_exclusion > 0 {
-        crate::logging::info(&format!(
-            "[nex] discovery_exclusion provider=windows_search skipped={} policy_schema={}",
-            skipped_due_exclusion, FILESYSTEM_DISCOVERY_SCHEMA_VERSION
-        ));
-    }
-
-    Ok(items)
-}
-
-#[cfg(target_os = "windows")]
-fn effective_excluded_roots_for_powershell(user_excluded_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = builtin_exclusion_roots();
-    roots.extend(user_excluded_roots.iter().cloned());
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
-#[cfg(target_os = "windows")]
-fn join_windows_paths_for_powershell(paths: &[PathBuf]) -> String {
-    let mut out = Vec::new();
-    for path in paths {
-        let mut normalized = path.to_string_lossy().replace('/', "\\");
-        while normalized.ends_with('\\') && normalized.len() > 3 {
-            normalized.pop();
-        }
-        let trimmed = normalized.trim();
-        if !trimmed.is_empty() {
-            out.push(trimmed.to_string());
-        }
-    }
-    out.join("\u{1f}")
 }
 
 #[cfg(target_os = "windows")]

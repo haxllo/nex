@@ -46,6 +46,7 @@ SetupIconFile={#SetupIconPath}
 
 [Files]
 Source: "{#StageDir}\bin\nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
@@ -62,9 +63,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "startuplaunch"; Description: "Launch at startup (can be changed later in config.toml)"; GroupDescription: "Startup:"
 
 [Run]
-Filename: "{app}\bin\nex.exe"; Parameters: "--ensure-config"; Flags: runhidden
-Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=true"; Flags: runhidden; Tasks: startuplaunch
-Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=false"; Flags: runhidden; Tasks: not startuplaunch
+Filename: "{app}\bin\nex.exe"; Parameters: "--ensure-config"; Flags: runhidden skipifsilent
+Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=true"; Flags: runhidden skipifsilent; Tasks: startuplaunch
+Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=false"; Flags: runhidden skipifsilent; Tasks: not startuplaunch
 Filename: "{app}\bin\nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent
 
 [UninstallRun]

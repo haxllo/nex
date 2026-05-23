@@ -3,9 +3,12 @@ use crate::model::SearchItem;
 use crate::search::{search_with_filter, SearchFilter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_CLIPBOARD_ENTRIES: usize = 500;
+
+static CLIPBOARD_CACHE: Mutex<Option<Vec<ClipboardEntry>>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClipboardEntry {
@@ -113,6 +116,18 @@ fn resolve_text_for_result(cfg: &Config, result_id: &str) -> Option<String> {
 }
 
 fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
+    {
+        let guard = CLIPBOARD_CACHE.lock().unwrap();
+        if let Some(cached) = guard.as_ref() {
+            return cached.clone();
+        }
+    }
+    let entries = load_entries_from_disk(cfg);
+    *CLIPBOARD_CACHE.lock().unwrap() = Some(entries.clone());
+    entries
+}
+
+fn load_entries_from_disk(cfg: &Config) -> Vec<ClipboardEntry> {
     let path = history_path(cfg);
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -128,7 +143,13 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
     }
     let encoded = serde_json::to_string(entries)
         .map_err(|e| format!("failed to encode clipboard history: {e}"))?;
-    std::fs::write(path, encoded).map_err(|e| format!("failed to write clipboard history: {e}"))
+    std::fs::write(path, encoded).map_err(|e| format!("failed to write clipboard history: {e}"))?;
+    *CLIPBOARD_CACHE.lock().unwrap() = Some(entries.to_vec());
+    Ok(())
+}
+
+pub fn invalidate_entries_cache() {
+    *CLIPBOARD_CACHE.lock().unwrap() = None;
 }
 
 fn prune_entries(cfg: &Config, entries: &mut Vec<ClipboardEntry>, now: i64) {

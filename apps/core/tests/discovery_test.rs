@@ -372,8 +372,6 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     cfg_a.show_files = true;
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];
-    cfg_a.windows_search_enabled = false;
-
     let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(cfg_a.clone(), db)
         .unwrap()

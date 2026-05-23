@@ -23,14 +23,11 @@ fn accepts_default_config() {
         cfg.web_search_provider,
         nex_core::config::WebSearchProvider::Google
     );
-    assert!(cfg.windows_search_enabled);
-    assert!(cfg.windows_search_fallback_filesystem);
     assert_eq!(cfg.index_max_items_total, 120_000);
     assert_eq!(cfg.index_max_items_per_root, 40_000);
     assert_eq!(cfg.index_max_items_per_query_seed, 5_000);
     assert!(!cfg.game_mode_enabled);
-    assert!(cfg.search_query_results_with_delay);
-    assert_eq!(cfg.search_delay_time_ms, 90);
+    assert!(cfg.everything_search_enabled);
     assert!(
         cfg.index_db_path.to_string_lossy().contains("nex")
             || cfg.index_db_path.to_string_lossy().contains("Nex")
@@ -167,8 +164,6 @@ fn writes_user_template_with_comments_and_loads_it() {
     assert!(raw.contains("// \"hotkey\": \"Ctrl+Alt+Space\""));
     assert!(!raw.contains("\"index_db_path\""));
     assert!(raw.contains("\"discovery_exclude_roots\":"));
-    assert!(raw.contains("\"windows_search_enabled\": true"));
-    assert!(raw.contains("\"windows_search_fallback_filesystem\": true"));
     assert!(raw.contains("\"show_files\": false"));
     assert!(raw.contains("\"show_folders\": false"));
     assert!(raw.contains("\"uninstall_actions_enabled\": true"));
@@ -177,8 +172,6 @@ fn writes_user_template_with_comments_and_loads_it() {
     assert!(raw.contains("\"index_max_items_per_root\":"));
     assert!(raw.contains("\"index_max_items_per_query_seed\":"));
     assert!(raw.contains("\"game_mode_enabled\": false"));
-    assert!(raw.contains("\"search_query_results_with_delay\": true"));
-    assert!(raw.contains("\"search_delay_time_ms\": 90"));
     if cfg.discovery_exclude_roots.is_empty() {
         assert!(raw.contains("\"discovery_exclude_roots\": []"));
     } else {
@@ -242,8 +235,6 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(loaded.launch_at_startup);
     assert_eq!(loaded.idle_cache_trim_ms, 900);
     assert_eq!(loaded.active_memory_target_mb, 72);
-    assert!(loaded.windows_search_enabled);
-    assert!(loaded.windows_search_fallback_filesystem);
     assert!(!loaded.show_files);
     assert!(!loaded.show_folders);
     assert!(loaded.uninstall_actions_enabled);
@@ -251,16 +242,13 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert_eq!(loaded.index_max_items_per_root, 40_000);
     assert_eq!(loaded.index_max_items_per_query_seed, 5_000);
     assert!(!loaded.game_mode_enabled);
-    assert!(loaded.search_query_results_with_delay);
-    assert_eq!(loaded.search_delay_time_ms, 90);
+    assert!(loaded.everything_search_enabled);
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(updated_raw.contains("\"hotkey\": \"Ctrl+Alt+P\""));
     assert!(updated_raw.contains("\"max_results\": 33"));
     assert!(updated_raw.contains("\"idle_cache_trim_ms\": 900"));
     assert!(updated_raw.contains("\"active_memory_target_mb\": 72"));
-    assert!(updated_raw.contains("\"windows_search_enabled\": true"));
-    assert!(updated_raw.contains("\"windows_search_fallback_filesystem\": true"));
     assert!(updated_raw.contains("\"show_files\": false"));
     assert!(updated_raw.contains("\"show_folders\": false"));
     assert!(updated_raw.contains("\"uninstall_actions_enabled\": true"));
@@ -268,8 +256,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));
     assert!(updated_raw.contains("\"index_max_items_per_query_seed\": 5000"));
     assert!(updated_raw.contains("\"game_mode_enabled\": false"));
-    assert!(updated_raw.contains("\"search_query_results_with_delay\": true"));
-    assert!(updated_raw.contains("\"search_delay_time_ms\": 90"));
+    assert!(updated_raw.contains("\"everything_search_enabled\": true"));
 
     let backups: Vec<_> = std::fs::read_dir(&config_dir)
         .unwrap()
@@ -319,6 +306,7 @@ ignore_hotkeys_on_fullscreen = true
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(updated_raw.contains("game_mode_enabled = false"));
+    assert!(updated_raw.contains("everything_search_enabled = true"));
     assert!(!updated_raw.contains("ignore_hotkeys_on_fullscreen"));
 
     std::fs::remove_file(&config_path).unwrap();

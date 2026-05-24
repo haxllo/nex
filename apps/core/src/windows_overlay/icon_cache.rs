@@ -223,9 +223,9 @@ fn immediate_fallback_icon_for_row(row: &OverlayRow) -> Option<isize> {
     }
     if row.kind.eq_ignore_ascii_case("app") {
         return shell_icon_with_attrs("nex.exe", FILE_ATTRIBUTE_NORMAL)
-            .or_else(|| shell_icon_with_attrs("nex.file", FILE_ATTRIBUTE_NORMAL));
+            .or_else(|| shell_icon_with_attrs("file.txt", FILE_ATTRIBUTE_NORMAL));
     }
-    shell_icon_with_attrs("nex.file", FILE_ATTRIBUTE_NORMAL)
+    shell_icon_with_attrs("file.txt", FILE_ATTRIBUTE_NORMAL)
 }
 
 pub(crate) fn load_shell_icon_for_values(kind: &str, icon_path: &str) -> Option<isize> {
@@ -293,7 +293,7 @@ fn load_shell_icon_for_row(row: &OverlayRow) -> Option<isize> {
         }
     }
 
-    shell_icon_with_attrs("nex.file", FILE_ATTRIBUTE_NORMAL)
+    shell_icon_with_attrs("file.txt", FILE_ATTRIBUTE_NORMAL)
 }
 
 fn shortcut_target_icon(shortcut_path: &str) -> Option<isize> {

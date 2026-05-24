@@ -125,6 +125,7 @@ fn runtime_providers_use_configured_roots() {
     std::fs::write(&file_path, b"runtime").unwrap();
 
     let mut config = nex_core::config::Config::default();
+    config.everything_search_enabled = false;
     config.show_files = true;
     config.discovery_roots = vec![root.clone()];
     // Ensure this test root is not filtered by default exclude roots (which may include %TEMP%).
@@ -341,7 +342,8 @@ fn file_system_provider_excludes_explicit_system_roots() {
 
 #[test]
 fn runtime_providers_keep_start_menu_apps_when_file_like_paths_are_excluded() {
-    let config = nex_core::config::Config::default();
+    let mut config = nex_core::config::Config::default();
+    config.everything_search_enabled = false;
     let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()
@@ -369,6 +371,7 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     std::fs::write(&file_b, b"b").unwrap();
 
     let mut cfg_a = nex_core::config::Config::default();
+    cfg_a.everything_search_enabled = false;
     cfg_a.show_files = true;
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];

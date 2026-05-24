@@ -13,6 +13,7 @@ use crate::model::SearchItem;
 use crate::search::SearchFilter;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -76,6 +77,7 @@ pub struct CoreService {
     cached_app_items: RwLock<Vec<SearchItem>>,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
+    everything_covered_files: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +122,7 @@ impl CoreService {
             cached_app_items: RwLock::new(cached_apps),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
+            everything_covered_files: AtomicBool::new(false),
         })
     }
 
@@ -201,9 +204,13 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
             config.show_files,
             config.show_folders,
         )));
+        // Filesystem provider is still added below as fallback.
+        // When Everything actually covers files (DLL loaded, results returned)
+        // the runtime skip guard in rebuild_index_internal avoids the walkdir.
     }
-    // Always register filesystem provider so toggling file/folder discovery off
-    // can actively prune stale file/folder records from the index.
+    // Register filesystem provider for roots-based file/folder discovery.
+    // When Everything is active and has covered the namespace, this provider
+    // is skipped at runtime via the everything_covered_files flag.
     providers.push(Box::new(
         FileSystemDiscoveryProvider::with_options(
             config.discovery_roots.clone(),
@@ -486,12 +493,19 @@ impl CoreService {
 
             let discovered = provider.discover()?;
 
-            if provider_name == "everything" && !discovered.is_empty() {
-                everything_covered_files = true;
-                crate::logging::info(&format!(
-                    "[nex] everything_covered_files=true count={}",
-                    discovered.len()
-                ));
+            if provider_name == "everything" {
+                if !discovered.is_empty() {
+                    everything_covered_files = true;
+                    self.everything_covered_files.store(true, Ordering::SeqCst);
+                    crate::logging::info(&format!(
+                        "[nex] everything_covered_files=true count={}",
+                        discovered.len()
+                    ));
+                } else {
+                    crate::logging::info(
+                        "[nex] everything_covered_files=false (no items from provider)",
+                    );
+                }
             }
             let discovered_count = discovered.len();
             discovered_total += discovered_count;
@@ -501,8 +515,6 @@ impl CoreService {
 
             for mut item in discovered {
                 if let Some(previous) = existing_by_id.get(&item.id) {
-                    // Discovery providers do not carry usage metrics; preserve learned
-                    // launch signals across incremental/full refreshes.
                     if item.use_count == 0 {
                         item.use_count = previous.use_count;
                     }
@@ -512,6 +524,19 @@ impl CoreService {
                 }
 
                 discovered_ids.insert(item.id.clone());
+
+                // When Everything covers the file/folder namespace, skip SQLite
+                // persistence for file/folder items. They are served at query
+                // time via live_everything_search() — no need to persist them.
+                let is_file_or_folder = item.kind.eq_ignore_ascii_case("file")
+                    || item.kind.eq_ignore_ascii_case("folder");
+                let skip_persist = everything_covered_files && is_file_or_folder;
+
+                if skip_persist {
+                    existing_by_id.insert(item.id.clone(), item);
+                    continue;
+                }
+
                 let changed = existing_by_id
                     .get(&item.id)
                     .map(|previous| previous != &item)
@@ -739,22 +764,45 @@ impl CoreService {
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&self.db)?;
+        // Only filter legacy file/folder items from the DB when Everything
+        // actually covered the file namespace during an index rebuild.  The
+        // config flag alone is not sufficient — the SDK DLL may not be
+        // available, in which case the filesystem provider handles files.
+        let latest_full = if config_snapshot.everything_search_enabled
+            && self.everything_covered_files.load(Ordering::SeqCst)
+        {
+            filter_file_items(&latest_full)
+        } else {
+            latest_full
+        };
         let latest_apps = collect_app_items(&latest_full);
+        let compact_started = std::time::Instant::now();
         let summary = cache_compaction_summary(&latest_full, &config_snapshot);
         let latest = compact_cached_items(&latest_full, &config_snapshot);
-        if summary.dropped_total > 0 {
-            crate::logging::info(&format!(
-                "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
-                summary.input_total,
-                summary.retained_total,
-                summary.dropped_total,
-                summary.retained_apps,
-                summary.retained_file_folders,
-                summary.retained_other,
-                summary.effective_file_seed_cap,
-                summary.broad_root_mode,
-                summary.active_memory_target_mb
-            ));
+        let compact_elapsed_ms = compact_started.elapsed().as_millis();
+        if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
+            if compact_elapsed_ms > 100 {
+                crate::logging::info(&format!(
+                    "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
+                    summary.input_total,
+                    summary.retained_total,
+                    summary.dropped_total,
+                    compact_elapsed_ms,
+                ));
+            } else {
+                crate::logging::info(&format!(
+                    "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
+                    summary.input_total,
+                    summary.retained_total,
+                    summary.dropped_total,
+                    summary.retained_apps,
+                    summary.retained_file_folders,
+                    summary.retained_other,
+                    summary.effective_file_seed_cap,
+                    summary.broad_root_mode,
+                    summary.active_memory_target_mb
+                ));
+            }
         }
         match self.cached_items.write() {
             Ok(mut guard) => {
@@ -947,6 +995,16 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
     items
         .iter()
         .filter(|item| item.kind.eq_ignore_ascii_case("app"))
+        .cloned()
+        .collect()
+}
+
+fn filter_file_items(items: &[SearchItem]) -> Vec<SearchItem> {
+    items
+        .iter()
+        .filter(|item| {
+            !item.kind.eq_ignore_ascii_case("file") && !item.kind.eq_ignore_ascii_case("folder")
+        })
         .cloned()
         .collect()
 }

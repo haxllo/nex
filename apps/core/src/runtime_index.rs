@@ -119,15 +119,6 @@ pub(crate) fn maybe_apply_background_index_refresh(
             match service.reload_cache_from_store() {
                 Ok(cached_items) => {
                     log_info(&format!(
-                        "[nex] startup indexed_items={} discovered={} upserted={} removed={} elapsed_ms={} cached_items={}",
-                        report.indexed_total,
-                        report.discovered_total,
-                        report.upserted_total,
-                        report.removed_total,
-                        elapsed_ms,
-                        cached_items
-                    ));
-                    log_info(&format!(
                         "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
                         startup_elapsed_ms,
                         cached_items,

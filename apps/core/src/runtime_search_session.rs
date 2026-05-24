@@ -214,12 +214,18 @@ pub(crate) fn search_overlay_results_with_session(
     #[cfg(not(target_os = "windows"))]
     let everything_added = 0_usize;
     #[cfg(target_os = "windows")]
-    if !short_query_app_bias
-        && !parsed_query.command_mode
+    if !parsed_query.command_mode
         && cfg.everything_search_enabled
         && (cfg.show_files || cfg.show_folders)
         && !normalized_query.is_empty()
     {
+        // Everything is the primary file search source. For very short queries
+        // (1-2 chars), cap max_results lower to keep IPC latency acceptable.
+        let everything_limit = if normalized_query.len() <= 2 {
+            candidate_limit.min(8)
+        } else {
+            candidate_limit
+        };
         let everything_started = Instant::now();
         if let Some(everything_items) = crate::everything::live_everything_search(
             text_query,
@@ -227,7 +233,7 @@ pub(crate) fn search_overlay_results_with_session(
             &cfg.discovery_exclude_roots,
             cfg.show_files,
             cfg.show_folders,
-            candidate_limit as u32,
+            everything_limit as u32,
         ) {
             let pre_len = merged.len();
             for item in everything_items {

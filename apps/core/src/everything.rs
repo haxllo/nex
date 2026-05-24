@@ -9,6 +9,8 @@
 
 #![cfg(target_os = "windows")]
 
+use std::sync::OnceLock;
+
 use std::path::PathBuf;
 
 use libloading::{Library, Symbol};
@@ -187,6 +189,7 @@ impl EverythingSearchProvider {
 
         let total_results = get_num_results();
         if total_results == 0 {
+            crate::logging::info("[nex] everything_query returned 0 results");
             reset_fn();
             return Ok(Vec::new());
         }
@@ -324,6 +327,9 @@ impl DiscoveryProvider for EverythingSearchProvider {
 /// Try to load the Everything SDK DLL from well-known locations.
 ///
 /// Looks for `Everything64.dll` first (64-bit), then `Everything32.dll`.
+///
+/// The hot-path caller should prefer [`load_everything_dll_cached`] which
+/// caches the result after the first attempt.
 fn load_everything_dll() -> Result<Library, String> {
     // Attempt 1: standard DLL name — may be found via PATH / app-local.
     if let Ok(lib) = unsafe { Library::new("Everything64.dll") } {
@@ -381,6 +387,19 @@ fn load_everything_dll() -> Result<Library, String> {
     }
 
     Err("Everything64.dll not found in PATH, app directory, or common install directories".into())
+}
+
+/// Cached variant used by the hot path ([`live_everything_search`]).
+///
+/// Only attempts to load the DLL once; subsequent calls return the cached
+/// result (success or failure) instantly, avoiding expensive LoadLibrary /
+/// registry / filesystem checks on every keystroke.
+fn load_everything_dll_cached() -> Option<&'static Library> {
+    static LOADED: OnceLock<Result<Library, String>> = OnceLock::new();
+    match LOADED.get_or_init(load_everything_dll) {
+        Ok(lib) => Some(lib),
+        Err(_) => None,
+    }
 }
 
 /// Safely resolve a symbol from the loaded library.
@@ -585,9 +604,9 @@ pub fn live_everything_search(
         return None;
     }
 
-    let lib = match load_everything_dll() {
-        Ok(lib) => lib,
-        Err(_) => return None,
+    let lib = match load_everything_dll_cached() {
+        Some(lib) => lib,
+        None => return None,
     };
 
     let excluded: Vec<String> = exclude_roots

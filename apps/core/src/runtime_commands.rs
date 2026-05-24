@@ -4,7 +4,9 @@ use crate::runtime::{
     run_with_options, RuntimeError, RuntimeOptions,
 };
 #[cfg(target_os = "windows")]
-use crate::runtime_process::{inspect_runtime_process_state, stop_runtime_instance, StopRuntimeOutcome};
+use crate::runtime_process::{
+    inspect_runtime_process_state, stop_runtime_instance, StopRuntimeOutcome,
+};
 
 pub(crate) fn command_ensure_config() -> Result<(), RuntimeError> {
     let cfg = config::load(None)?;
@@ -15,7 +17,10 @@ pub(crate) fn command_ensure_config() -> Result<(), RuntimeError> {
             cfg.config_path.display()
         ));
     }
-    log_info(&format!("[nex] config ready at {}", cfg.config_path.display()));
+    log_info(&format!(
+        "[nex] config ready at {}",
+        cfg.config_path.display()
+    ));
     Ok(())
 }
 

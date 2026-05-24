@@ -4,6 +4,16 @@ All notable changes to Nex are documented in this file.
 
 This changelog is intentionally backfilled from the most reliable sources in the repo: tagged milestones, release notes, and shipped commit history. Older tags can be expanded later if you want a full historical pass.
 
+## [1.1.1] - 2026-05-24
+
+### Changed
+- **Search is now fully async** — query processing moved to a dedicated background thread. The UI thread no longer blocks during search, keeping the overlay responsive even during heavy queries.
+
+### Fixed
+- **Overlay no longer freezes during search** — previously, every keystroke triggered a synchronous search on the UI thread, blocking window message processing. Now handled by `SearchWorker` with stale-request draining and `PostMessageW` result notification.
+- **Thread safety for CoreService** — `Arc<Mutex<CoreService>>` ensures the SQLite connection is never accessed concurrently.
+- **Worker thread lifecycle** — `SearchWorker::Drop` signals thread exit via channel closure and joins the thread cleanly.
+
 ## [1.1.0] - 2026-05-24
 
 ### Added

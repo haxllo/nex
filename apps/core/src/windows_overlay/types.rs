@@ -87,6 +87,7 @@ pub(crate) const NEX_WM_EXTERNAL_QUIT: u32 = WM_APP + 17;
 pub(crate) const NEX_WM_TRAY_ICON: u32 = WM_APP + 18;
 pub(crate) const NEX_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
 pub(crate) const NEX_WM_TRAY_CHECK_UPDATES: u32 = WM_APP + 20;
+pub(crate) const NEX_WM_SEARCH_RESULTS_READY: u32 = WM_APP + 21;
 pub(crate) const EM_GETRECT: u32 = 0x00B2;
 pub(crate) const EM_SETRECTNP: u32 = 0x00B4;
 pub(crate) const TRAY_ICON_ID: u32 = 1;
@@ -313,6 +314,7 @@ pub enum OverlayEvent {
     Escape,
     ExternalShow,
     ExternalQuit,
+    SearchResultsReady,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

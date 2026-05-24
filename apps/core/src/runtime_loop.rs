@@ -1,4 +1,6 @@
 #[cfg(target_os = "windows")]
+use std::sync::{Arc, Mutex};
+
 use crate::clipboard_history;
 #[cfg(target_os = "windows")]
 use crate::config::Config;
@@ -14,11 +16,6 @@ use crate::plugin_sdk::PluginRegistry;
 use crate::query_dsl::ParsedQuery;
 #[cfg(target_os = "windows")]
 use crate::runtime::{log_info, log_warn, RuntimeError};
-#[cfg(target_os = "windows")]
-use crate::runtime_process::{
-    acquire_single_instance_guard, hotkey_registration_recovery_message,
-    hotkey_registration_status_text, launch_stable_updater, log_registration,
-};
 #[cfg(target_os = "windows")]
 use crate::runtime_actions::{
     execute_action_selection, launch_overlay_selection, should_suppress_failed_uninstall,
@@ -42,10 +39,18 @@ use crate::runtime_overlay_rows::{
     STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
 };
 #[cfg(target_os = "windows")]
-use crate::runtime_search_session::{
-    maybe_expand_uninstall_quick_shortcut, result_limit_for_query,
-    search_overlay_results_with_session, OverlaySearchSession,
+use crate::runtime_process::{
+    acquire_single_instance_guard, hotkey_registration_recovery_message,
+    hotkey_registration_status_text, launch_stable_updater, log_registration,
 };
+#[cfg(target_os = "windows")]
+use crate::runtime_search_session::{
+    maybe_expand_uninstall_quick_shortcut, result_limit_for_query, OverlaySearchSession,
+};
+#[cfg(target_os = "windows")]
+use crate::search_worker::SearchWorker;
+#[cfg(target_os = "windows")]
+use crate::windows_overlay::types::NEX_WM_SEARCH_RESULTS_READY;
 #[cfg(target_os = "windows")]
 use crate::windows_overlay::{signal_existing_instance_show, NativeOverlayShell, OverlayEvent};
 #[cfg(target_os = "windows")]
@@ -75,6 +80,7 @@ pub(crate) fn run_windows_runtime(
             startup_started_at,
         )
     };
+    let service = Arc::new(Mutex::new(service));
 
     let mut plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
@@ -123,6 +129,14 @@ pub(crate) fn run_windows_runtime(
         startup_started_at.elapsed().as_millis()
     ));
 
+    let search_worker = SearchWorker::new(
+        service.clone(),
+        runtime_config.clone(),
+        Arc::new(plugin_registry.clone()),
+        overlay.hwnd as isize,
+        NEX_WM_SEARCH_RESULTS_READY,
+    );
+
     let mut registrar = default_hotkey_registrar();
     let hotkey_issue_status = match registrar.register_hotkey(&runtime_config.hotkey) {
         Ok(registration) => {
@@ -164,13 +178,14 @@ pub(crate) fn run_windows_runtime(
     let mut pending_uninstall_confirmation: Option<PendingUninstallConfirmation> = None;
     let mut selected_index = 0_usize;
     let mut last_query = String::new();
+    let mut last_sent_generation: u64 = 0;
     let mut search_session = OverlaySearchSession::default();
 
     overlay
         .run_message_loop_with_events(|event| {
             maybe_apply_runtime_config_reload(
                 &overlay,
-                &service,
+                &*service.lock().unwrap(),
                 &mut runtime_config,
                 &mut plugin_registry,
                 &mut search_session,
@@ -180,7 +195,7 @@ pub(crate) fn run_windows_runtime(
                 &mut background_index_refresh,
             );
             maybe_apply_background_index_refresh(
-                &service,
+                &*service.lock().unwrap(),
                 &mut background_index_refresh,
                 &runtime_config,
             );
@@ -224,9 +239,11 @@ pub(crate) fn run_windows_runtime(
                             );
                             pending_uninstall_confirmation = None;
                             last_query.clear();
+                            last_sent_generation = 0;
                             search_session.clear();
+                            search_worker.clear_session();
                             maybe_apply_background_index_refresh(
-                                &service,
+                                &*service.lock().unwrap(),
                                 &mut background_index_refresh,
                                 &runtime_config,
                             );
@@ -254,6 +271,7 @@ pub(crate) fn run_windows_runtime(
                 OverlayEvent::ExternalQuit => {
                     overlay.hide_now();
                     last_query.clear();
+                    last_sent_generation = 0;
                     search_session.clear();
                     unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
@@ -281,6 +299,7 @@ pub(crate) fn run_windows_runtime(
                         );
                         pending_uninstall_confirmation = None;
                         last_query.clear();
+                        last_sent_generation = 0;
                         search_session.clear();
                     }
                 }
@@ -288,17 +307,26 @@ pub(crate) fn run_windows_runtime(
                     apply_query_change(
                         query,
                         &overlay,
-                        &service,
+                        &search_worker,
                         &runtime_config,
-                        &plugin_registry,
                         max_results,
-                        &background_index_refresh,
-                        &mut search_session,
                         &mut pending_uninstall_confirmation,
-                        &suppressed_uninstall_titles,
                         &mut current_results,
                         &mut selected_index,
                         &mut last_query,
+                        &mut last_sent_generation,
+                    );
+                }
+                OverlayEvent::SearchResultsReady => {
+                    apply_search_results(
+                        &search_worker,
+                        &overlay,
+                        &runtime_config,
+                        &background_index_refresh,
+                        &suppressed_uninstall_titles,
+                        &mut current_results,
+                        &mut selected_index,
+                        last_sent_generation,
                     );
                 }
                 OverlayEvent::MoveSelection(direction) => {
@@ -348,7 +376,7 @@ pub(crate) fn run_windows_runtime(
                             overlay.hide_now();
                             overlay_state.on_escape();
                             match execute_action_selection(
-                                &service,
+                                &*service.lock().unwrap(),
                                 &runtime_config,
                                 &plugin_registry,
                                 &pending.uninstall_action,
@@ -365,7 +393,9 @@ pub(crate) fn run_windows_runtime(
                                         &mut selected_index,
                                     );
                                     last_query.clear();
+                                    last_sent_generation = 0;
                                     search_session.clear();
+                            search_worker.clear_session();
                                 }
                                 Err(error) => {
                                     if should_suppress_failed_uninstall(error.as_str()) {
@@ -471,7 +501,7 @@ pub(crate) fn run_windows_runtime(
                     }
 
                     match launch_overlay_selection(
-                        &service,
+                        &*service.lock().unwrap(),
                         &runtime_config,
                         &plugin_registry,
                         &current_results,
@@ -489,7 +519,9 @@ pub(crate) fn run_windows_runtime(
                             );
                             pending_uninstall_confirmation = None;
                             last_query.clear();
+                            last_sent_generation = 0;
                             search_session.clear();
+                            search_worker.clear_session();
                         }
                         Err(error) => {
                             overlay.set_status_text(&format!("Launch error: {error}"));
@@ -517,21 +549,19 @@ fn reset_overlay_session(
 
 #[cfg(target_os = "windows")]
 fn apply_query_change(
-    mut query: String,
+    query: String,
     overlay: &NativeOverlayShell,
-    service: &CoreService,
+    search_worker: &SearchWorker,
     runtime_config: &Config,
-    plugin_registry: &PluginRegistry,
     max_results: usize,
-    background_index_refresh: &BackgroundIndexRefresh,
-    search_session: &mut OverlaySearchSession,
     pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
-    suppressed_uninstall_titles: &[String],
     current_results: &mut Vec<crate::model::SearchItem>,
     selected_index: &mut usize,
     last_query: &mut String,
+    last_sent_generation: &mut u64,
 ) {
     *pending_uninstall_confirmation = None;
+    let mut query = query;
     if let Some(expanded) = maybe_expand_uninstall_quick_shortcut(&query, last_query.as_str()) {
         overlay.set_query_text(&expanded);
         query = expanded;
@@ -542,7 +572,7 @@ fn apply_query_change(
         current_results.clear();
         *selected_index = 0;
         last_query.clear();
-        search_session.clear();
+        *last_sent_generation = 0;
         *pending_uninstall_confirmation = None;
         set_idle_overlay_state(overlay);
         return;
@@ -554,45 +584,62 @@ fn apply_query_change(
     let parsed_query = ParsedQuery::parse(trimmed, runtime_config.search_dsl_enabled);
     let query_result_limit = result_limit_for_query(max_results, &parsed_query);
 
-    match search_overlay_results_with_session(
-        service,
-        runtime_config,
-        plugin_registry,
-        &parsed_query,
-        query_result_limit,
-        search_session,
-    ) {
-        Ok(mut results) => {
-            crate::runtime_overlay_rows::dedupe_overlay_results(&mut results);
-            if !suppressed_uninstall_titles.is_empty() {
-                filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
-            }
-            *current_results = results;
-            *selected_index = 0;
-            if current_results.is_empty() {
-                if should_show_indexing_status(background_index_refresh) {
-                    set_status_row_overlay_state(overlay, STATUS_ROW_INDEXING);
+    let gen = search_worker.send_request(parsed_query, query_result_limit);
+    *last_sent_generation = gen;
+}
+
+#[cfg(target_os = "windows")]
+fn apply_search_results(
+    search_worker: &SearchWorker,
+    overlay: &NativeOverlayShell,
+    _runtime_config: &Config,
+    background_index_refresh: &BackgroundIndexRefresh,
+    suppressed_uninstall_titles: &[String],
+    current_results: &mut Vec<crate::model::SearchItem>,
+    selected_index: &mut usize,
+    last_sent_generation: u64,
+) {
+    let Some(result) = search_worker.try_recv() else {
+        return;
+    };
+
+    if result.generation < last_sent_generation {
+        return;
+    }
+
+    let command_mode = result.command_mode;
+
+    if let Some(error) = result.error {
+        current_results.clear();
+        *selected_index = 0;
+        overlay.set_results(&[], 0);
+        overlay.set_status_text(&format!("Search error: {error}"));
+        return;
+    }
+
+    let mut results = result.results;
+    crate::runtime_overlay_rows::dedupe_overlay_results(&mut results);
+    if !suppressed_uninstall_titles.is_empty() {
+        filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
+    }
+    *current_results = results;
+    *selected_index = 0;
+
+    if current_results.is_empty() {
+        if should_show_indexing_status(background_index_refresh) {
+            set_status_row_overlay_state(overlay, STATUS_ROW_INDEXING);
+        } else {
+            set_status_row_overlay_state(
+                overlay,
+                if command_mode {
+                    STATUS_ROW_NO_COMMAND_RESULTS
                 } else {
-                    set_status_row_overlay_state(
-                        overlay,
-                        if parsed_query.command_mode {
-                            STATUS_ROW_NO_COMMAND_RESULTS
-                        } else {
-                            STATUS_ROW_NO_RESULTS
-                        },
-                    );
-                }
-            } else {
-                let rows = overlay_rows(current_results, parsed_query.command_mode);
-                overlay.set_results(&rows, *selected_index);
-            }
+                    STATUS_ROW_NO_RESULTS
+                },
+            );
         }
-        Err(error) => {
-            current_results.clear();
-            *selected_index = 0;
-            search_session.clear();
-            overlay.set_results(&[], 0);
-            overlay.set_status_text(&format!("Search error: {error}"));
-        }
+    } else {
+        let rows = overlay_rows(current_results, command_mode);
+        overlay.set_results(&rows, *selected_index);
     }
 }

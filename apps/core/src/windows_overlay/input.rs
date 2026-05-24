@@ -7,8 +7,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GetCursorPos, GetParent, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextLengthW, HideCaret, KillTimer, LoadCursorW, PostMessageW, SendMessageW, SetCursor,
     SetTimer, SetWindowTextW, ShowWindow, GWLP_USERDATA, IDC_HAND, LB_GETCOUNT, LB_GETTOPINDEX,
-    LB_ITEMFROMPOINT, LB_SETCURSEL, LB_SETTOPINDEX, SW_HIDE, SW_SHOW, WM_KEYDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SETREDRAW,
+    LB_ITEMFROMPOINT, LB_SETCURSEL, LB_SETTOPINDEX, SW_HIDE, SW_SHOW, WM_KEYDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SETREDRAW,
 };
 
 use crate::windows_overlay::layout::{apply_edit_text_rect, visible_row_capacity};

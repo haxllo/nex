@@ -610,6 +610,10 @@ impl NativeOverlayShell {
                 on_event(OverlayEvent::QueryChanged(self.query_text()));
                 continue;
             }
+            if msg.message == NEX_WM_SEARCH_RESULTS_READY {
+                on_event(OverlayEvent::SearchResultsReady);
+                continue;
+            }
             match msg.message {
                 WM_HOTKEY => on_event(OverlayEvent::Hotkey(msg.wParam as i32)),
                 NEX_WM_MOVE_UP => on_event(OverlayEvent::MoveSelection(-1)),
@@ -1509,8 +1513,12 @@ extern "system" fn overlay_wnd_proc(
             }
             0
         }
-        NEX_WM_ESCAPE | NEX_WM_QUERY_CHANGED | NEX_WM_MOVE_UP | NEX_WM_MOVE_DOWN
-        | NEX_WM_SUBMIT => 0,
+        NEX_WM_ESCAPE
+        | NEX_WM_QUERY_CHANGED
+        | NEX_WM_MOVE_UP
+        | NEX_WM_MOVE_DOWN
+        | NEX_WM_SUBMIT
+        | NEX_WM_SEARCH_RESULTS_READY => 0,
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }

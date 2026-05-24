@@ -28,6 +28,7 @@ pub(crate) mod runtime_overlay_rows;
 pub(crate) mod runtime_process;
 pub(crate) mod runtime_search_session;
 pub mod search;
+pub(crate) mod search_worker;
 pub mod settings;
 pub mod startup;
 pub mod transport;

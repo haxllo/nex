@@ -4,9 +4,29 @@ All notable changes to Nex are documented in this file.
 
 This changelog is intentionally backfilled from the most reliable sources in the repo: tagged milestones, release notes, and shipped commit history. Older tags can be expanded later if you want a full historical pass.
 
-## [Unreleased]
+## [1.1.0] - 2026-05-24
 
-No unreleased entries yet.
+### Added
+- **Everything SDK integration** — instant file search via Everything64.dll bundled with the installer. No manual DLL placement required. Nex auto-detects Everything at runtime and falls back gracefully when not available.
+- **Plugin SDK foundations** — trait-based plugin interface with WASM distribution path prepared. The `plugin_sdk.rs` module now supports manifest parsing and store protocol scaffolding for future extension discovery.
+- **Window management system** — 8 preset tile layouts (left/right half, top/bottom half, four quadrants, center, maximize, restore). Accessible via command palette or configurable hotkeys.
+- **Calculator (basic)** — inline arithmetic evaluation directly in the search bar. Supports `+`, `-`, `*`, `/`, `%`, and parenthesized expressions. Result appears as the top hit with one-tab copy.
+- **Emoji picker** — type `:` followed by a keyword to search and insert emoji. Glyphs are rendered inline with results for quick selection.
+
+### Changed
+- **Packaging now bundles Everything64.dll** — the `package-windows-artifact.ps1` script downloads, extracts, and includes the Everything SDK DLL automatically. TLS 1.2 is enforced for download compatibility on older Windows/PowerShell versions.
+- **Stale docs updated** — `system-architecture.md` (fixed config format from JSON→TOML), `project-charter.md` (fixed default hotkey from Alt+Space→Ctrl+Space), `requirements.md` (same hotkey fix), `windows-runtime-behavior.md` (fixed config format reference), `windows-packaging-readiness.md` (updated version placeholders), and `docs/README.md` (rewritten to reflect current product).
+- **Version bumped to 1.1.0** — Cargo.toml, build artifacts, and packaging scripts aligned.
+
+### Fixed
+- **PowerShell packaging compatibility** — `Invoke-WebRequest` failed on older Windows due to TLS 1.2 not being negotiated. Fixed by explicitly setting `[Net.ServicePointManager]::SecurityProtocol`. Zip extraction and SHA256 hashing now use fallback methods for cross-version PowerShell compatibility.
+- **Everything SDK extraction** — the zip extraction now supports three fallback methods (.NET ZipFile, Expand-Archive, Shell.Application COM) to handle all PowerShell versions from 2.0 through 7+.
+- **All stale documentation references** corrected to match the current v6.4.0/v1.1.0 reality (TOML config, Ctrl+Space default, web search availability).
+
+### Known Issues
+- Calculator supports basic arithmetic only; unit conversion and scientific functions deferred to a future release.
+- Window management is command-palette-only; configurable hotkey bindings coming in v1.2.
+- Plugin SDK is still in preview — no public extension store or WASM runtime yet.
 
 ## [6.4.0] - 2026-03-31
 

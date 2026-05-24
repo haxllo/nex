@@ -20,31 +20,31 @@
 Run on Windows PowerShell:
 
 ```powershell
-scripts/windows/package-windows-artifact.ps1 -Version "0.5.0" -Channel "stable"
+scripts/windows/package-windows-artifact.ps1 -Version "1.1.0" -Channel "stable"
 ```
 
 Build Windows `Setup.exe` (Inno Setup) from the staged artifact:
 
 ```powershell
-scripts/windows/package-windows-installer.ps1 -Version "0.5.0" -Channel "stable"
+scripts/windows/package-windows-installer.ps1 -Version "1.1.0" -Channel "stable"
 ```
 
 Signed packaging (PFX):
 
 ```powershell
 scripts/windows/package-windows-artifact.ps1 `
-  -Version "0.5.0" `
+  -Version "1.1.0" `
   -Sign `
-  -CertPath "C:\secure\certs\nex-signing.pfx" `
+  -CertPath "C:\secure\certs\nex-signing.pfx" \`
   -CertPassword "<PFX_PASSWORD>"
 ```
 
 Expected outputs:
 
-- `artifacts/windows/nex-0.5.0-windows-x64.zip`
-- `artifacts/windows/nex-0.5.0-windows-x64-manifest.json`
-- `artifacts/windows/nex-0.5.0-windows-x64-stage/`
-- `artifacts/windows/nex-0.5.0-windows-x64-setup.exe`
+- `artifacts/windows/nex-1.1.0-windows-x64.zip`
+- `artifacts/windows/nex-1.1.0-windows-x64-manifest.json`
+- `artifacts/windows/nex-1.1.0-windows-x64-stage/`
+- `artifacts/windows/nex-1.1.0-windows-x64-setup.exe`
 
 ## Included Payload
 
@@ -104,8 +104,8 @@ scripts/windows/package-windows-installer.ps1 `
 After packaging, upload installer to the existing tag/release:
 
 ```powershell
-gh release upload v0.5.0 `
-  artifacts/windows/nex-0.5.0-windows-x64-setup.exe `
+gh release upload v1.1.0 `
+  artifacts/windows/nex-1.1.0-windows-x64-setup.exe \`
   --clobber
 ```
 

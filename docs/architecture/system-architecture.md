@@ -5,7 +5,7 @@
 - Core service: Rust
 - UI shell: Native Win32 owner-draw overlay (inside `nex`)
 - Local storage: SQLite
-- Config format: JSON
+- Config format: TOML
 
 ## Process Model
 
@@ -41,8 +41,8 @@ Rationale:
 - `SettingsService`
 - Reads and validates user config, emits updates to subscribed components
 
-- `TelemetryService` (optional)
-- Local metrics in MVP, remote only if user opt-in exists
+- `TelemetryService` (optional, not yet implemented)
+- Local metrics only in current phase; remote telemetry is opt-in and deferred
 
 ## Data Flow
 

@@ -2,7 +2,7 @@
 
 ## Product Name
 
-Working name: `Nex`.
+Product name: `Nex`.
 
 ## Problem Statement
 
@@ -26,12 +26,13 @@ Build a fast local launcher for Windows: a lightweight floating fuzzy-finder tha
 - Modern UI with fully keyboard-driven interactions
 - Configurable behavior without sacrificing speed
 
-## Non-Goals (MVP)
+## Non-Goals (MVP, historical)
 
-- Web search integration
-- AI assistant features
+- AI assistant features (deferred)
 - Deep content search inside files
 - Cloud sync
+
+Note: Web search integration was delivered post-MVP and is now supported via configurable web search providers.
 
 ## Success Metrics
 

@@ -1,7 +1,7 @@
 use crate::config;
+use crate::runtime::{log_info, RuntimeError};
 #[cfg(target_os = "windows")]
 use crate::runtime_process::inspect_runtime_process_state;
-use crate::runtime::{log_info, RuntimeError};
 use std::path::Path;
 
 pub(crate) const QUERY_PROFILE_LOG_THRESHOLD_MS: u128 = 35;

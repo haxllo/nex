@@ -2,11 +2,10 @@ use std::collections::HashSet;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn,
-    FrameRgn, GetDC, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, TextOutW, DT_CENTER, DT_EDITCONTROL,
-    DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, TEXTMETRICW,
-    TRANSPARENT,
+    BeginPaint, CreateRoundRectRgn, DeleteObject, DrawTextW, EndPaint, FillRect, FillRgn, FrameRgn,
+    GetDC, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, ReleaseDC, RoundRect,
+    SelectObject, SetBkMode, SetTextColor, TextOutW, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS,
+    DT_LEFT, DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -967,7 +966,11 @@ fn draw_footer_hints_centered(
 ) {
     let full_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER])
         + FOOTER_HINT_GROUP_GAP
-        + footer_group_width(hdc, FOOTER_HINT_LABEL_MOVE, &[FOOTER_KEY_UP, FOOTER_KEY_DOWN])
+        + footer_group_width(
+            hdc,
+            FOOTER_HINT_LABEL_MOVE,
+            &[FOOTER_KEY_UP, FOOTER_KEY_DOWN],
+        )
         + FOOTER_HINT_GROUP_GAP
         + footer_group_width(hdc, FOOTER_HINT_LABEL_CLOSE, &[FOOTER_KEY_ESC]);
     let medium_width = footer_group_width(hdc, FOOTER_HINT_LABEL_OPEN, &[FOOTER_KEY_ENTER])
@@ -1122,7 +1125,13 @@ fn draw_footer_keycap_right(
         let text_size = measure_text_size(hdc, text);
         let text_y =
             content_top + ((content_height - text_size.cy).max(0) / 2) + FOOTER_KEY_TEXT_SHIFT_Y;
-        TextOutW(hdc, left, text_y, text_wide.as_ptr(), text_wide.len() as i32);
+        TextOutW(
+            hdc,
+            left,
+            text_y,
+            text_wide.as_ptr(),
+            text_wide.len() as i32,
+        );
 
         if !old_font.is_null() {
             SelectObject(hdc, old_font);
@@ -1148,7 +1157,13 @@ fn draw_footer_label_right(
         let text_size = measure_text_size(hdc, text);
         let content_height = (content_bottom - content_top).max(1);
         let text_y = content_top + ((content_height - text_size.cy).max(0) / 2);
-        TextOutW(hdc, left, text_y, text_wide.as_ptr(), text_wide.len() as i32);
+        TextOutW(
+            hdc,
+            left,
+            text_y,
+            text_wide.as_ptr(),
+            text_wide.len() as i32,
+        );
     }
     left
 }

@@ -12,6 +12,8 @@ use std::time::Instant;
 
 // Re-exports from runtime_diagnostics module (extracted for modularity)
 #[cfg(test)]
+pub(crate) use crate::runtime_actions::{launch_overlay_selection, uninstall_confirmation_results};
+#[cfg(test)]
 pub(crate) use crate::runtime_diagnostics::{
     build_status_diagnostics_json, parse_status_diagnostics_snapshot, summarize_query_profiles,
 };
@@ -19,8 +21,6 @@ pub(crate) use crate::runtime_diagnostics::{
     command_diagnostics_bundle, command_probe_everything, command_status_json, env_var_with_legacy,
     load_query_profile_status_report, load_status_diagnostics_snapshot, write_diagnostics_bundle,
 };
-#[cfg(test)]
-pub(crate) use crate::runtime_actions::{launch_overlay_selection, uninstall_confirmation_results};
 #[cfg(test)]
 pub(crate) use crate::runtime_overlay_rows::{
     dedupe_overlay_results, filter_suppressed_uninstall_results, next_selection_index,
@@ -36,13 +36,12 @@ pub(crate) use crate::runtime_search_session::{
     OverlaySearchSession, INDEXED_PREFIX_CACHE_MAX_SEED_LIMIT, INDEXED_PREFIX_CACHE_MIN_SEED_LIMIT,
 };
 
-#[cfg(target_os = "windows")]
-use crate::runtime_process::{runtime_mode, spawn_background_process};
 #[cfg(test)]
 pub(crate) use crate::runtime_process::{
-    hotkey_registration_recovery_message, hotkey_registration_status_text,
-    parse_tasklist_pid_lines,
+    hotkey_registration_recovery_message, hotkey_registration_status_text, parse_tasklist_pid_lines,
 };
+#[cfg(target_os = "windows")]
+use crate::runtime_process::{runtime_mode, spawn_background_process};
 
 #[cfg(test)]
 pub(crate) use crate::runtime_hotkey::{

@@ -102,7 +102,7 @@ if (-not (Test-Path $setupPath)) {
 
 $manifestPath = Join-Path $outputRootAbs "$artifactName-manifest.json"
 if (Test-Path $manifestPath) {
-  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 10
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
   if (-not $manifest.artifacts) {
     $manifest | Add-Member -NotePropertyName artifacts -NotePropertyValue ([PSCustomObject]@{})
   }
@@ -113,7 +113,16 @@ if (Test-Path $manifestPath) {
   $manifest.channel = $Channel
   $manifest.artifacts.setup.name = [System.IO.Path]::GetFileName($setupPath)
   $manifest.artifacts.setup.size_bytes = (Get-Item -LiteralPath $setupPath).Length
-  $manifest.artifacts.setup.sha256 = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  # SHA256 with fallback for older PowerShell
+  try {
+    $manifest.artifacts.setup.sha256 = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  } catch {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($setupPath)
+    $hashBytes = $sha256.ComputeHash($stream)
+    $stream.Close()
+    $manifest.artifacts.setup.sha256 = [System.BitConverter]::ToString($hashBytes).Replace('-', '').ToLowerInvariant()
+  }
   $manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 -LiteralPath $manifestPath
   Write-Host "Updated manifest with setup hash: $manifestPath" -ForegroundColor Green
 }

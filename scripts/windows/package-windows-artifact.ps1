@@ -126,18 +126,70 @@ $everythingDllBundled = $false
 try {
   Write-Host "Downloading Everything SDK from $EverythingSdkUrl ..." -ForegroundColor Yellow
   $sdkZip = Join-Path $env:TEMP "Everything-SDK.zip"
+  # Ensure TLS 1.2 for older Windows PowerShell versions
+  if (-not [Net.ServicePointManager]::SecurityProtocol.ToString().Contains('Tls12')) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  }
   Invoke-WebRequest -Uri $EverythingSdkUrl -OutFile $sdkZip -UseBasicParsing -ErrorAction Stop
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $zip = [System.IO.Compression.ZipArchive]::new([System.IO.File]::OpenRead($sdkZip))
-  $entry = $zip.Entries | Where-Object { $_.Name -eq $EverythingDllName } | Select-Object -First 1
-  if ($entry) {
-    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $everythingDllPath, $true)
+  # Try multiple extraction methods for PowerShell version compatibility
+  $extracted = $false
+  # Method 1: .NET ZipFile (PS 5.0+ with Add-Type)
+  if (-not $extracted) {
+    try {
+      Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+      $zip = [System.IO.Compression.ZipFile]::OpenRead($sdkZip)
+      $entry = $zip.Entries | Where-Object { $_.Name -eq $EverythingDllName } | Select-Object -First 1
+      if ($entry) {
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $everythingDllPath, $true)
+        $extracted = $true
+      }
+      $zip.Dispose()
+    } catch {
+      Write-Host "Method 1 (ZipFile) failed, trying fallback..." -ForegroundColor DarkGray
+    }
+  }
+  # Method 2: Expand-Archive (PS 5.0+)
+  if (-not $extracted) {
+    try {
+      $extractDir = Join-Path $env:TEMP "everything-sdk-extract"
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+      Expand-Archive -Path $sdkZip -DestinationPath $extractDir -ErrorAction Stop
+      $dllPath = Get-ChildItem -Recurse -Path $extractDir -Filter $EverythingDllName | Select-Object -First 1
+      if ($dllPath) {
+        Copy-Item $dllPath.FullName $everythingDllPath -Force
+        $extracted = $true
+      }
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+    } catch {
+      Write-Host "Method 2 (Expand-Archive) failed, trying fallback..." -ForegroundColor DarkGray
+    }
+  }
+  # Method 3: Shell.Application COM (legacy PS)
+  if (-not $extracted) {
+    try {
+      $extractDir = Join-Path $env:TEMP "everything-sdk-extract"
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+      $shell = New-Object -ComObject Shell.Application
+      $zipObj = $shell.NameSpace($sdkZip)
+      $dest = $shell.NameSpace($extractDir)
+      $dest.CopyHere($zipObj.Items(), 0x14)
+      $dllPath = Get-ChildItem -Recurse -Path $extractDir -Filter $EverythingDllName | Select-Object -First 1
+      if ($dllPath) {
+        Copy-Item $dllPath.FullName $everythingDllPath -Force
+        $extracted = $true
+      }
+      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+    } catch {
+      Write-Host "Method 3 (Shell.Application) failed." -ForegroundColor DarkGray
+    }
+  }
+  if ($extracted) {
     Write-Host "Bundled $EverythingDllName next to nex.exe" -ForegroundColor Green
     $everythingDllBundled = $true
   } else {
-    Write-Host "WARNING: $EverythingDllName not found in Everything-SDK.zip" -ForegroundColor Yellow
+    Write-Host "WARNING: Could not extract $EverythingDllName from Everything-SDK.zip" -ForegroundColor Yellow
   }
-  $zip.Dispose()
   Remove-Item $sdkZip -Force -ErrorAction SilentlyContinue
 }
 catch {
@@ -159,10 +211,26 @@ Copy-Item "scripts/windows/update-nex.ps1" (Join-Path $stageDir "scripts/update-
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
 
-$zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+function Compute-Sha256Hash($path) {
+  if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+    return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  # Fallback for older PowerShell / .NET
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($path)
+    $hashBytes = $sha256.ComputeHash($stream)
+    $stream.Close()
+    return [System.BitConverter]::ToString($hashBytes).Replace('-', '').ToLowerInvariant()
+  } catch {
+    throw "Unable to compute SHA256: $_"
+  }
+}
+
+$zipHash = Compute-Sha256Hash $zipPath
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
 $exePath = Join-Path $stageDir "bin/nex.exe"
-$exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$exeHash = Compute-Sha256Hash $exePath
 $exeSize = (Get-Item -LiteralPath $exePath).Length
 
 $stageDirPrefix = (Resolve-Path -LiteralPath $stageDir).Path
@@ -176,7 +244,7 @@ $stageFiles = Get-ChildItem -LiteralPath $stageDir -Recurse -File | ForEach-Obje
   [ordered]@{
     path = $relative
     size_bytes = $_.Length
-    sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    sha256 = (Compute-Sha256Hash $fullPath)
   }
 }
 

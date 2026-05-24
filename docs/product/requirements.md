@@ -3,7 +3,7 @@
 ## Functional Requirements
 
 - `FR-001` Global Hotkey
-- Register a user-configurable global shortcut (default `Alt+Space`) to show or hide launcher.
+- Register a user-configurable global shortcut (default `Ctrl+Space`) to show or hide launcher.
 
 - `FR-002` Floating Search Bar
 - Show centered, always-on-top, borderless UI with input focused on open.

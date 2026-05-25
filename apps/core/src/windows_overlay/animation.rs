@@ -8,9 +8,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::windows_overlay::state::{OverlayShellState, WindowAnimation};
-use crate::windows_overlay::types::{
-    ANIM_FRAME_MS, RESULTS_CONTENT_FADE_MS, TIMER_ICON_LOAD_POLL, TIMER_WINDOW_ANIM,
-};
+use crate::windows_overlay::types::{ANIM_FRAME_MS, RESULTS_CONTENT_FADE_MS, TIMER_WINDOW_ANIM};
 
 pub(crate) fn apply_window_state(hwnd: HWND, x: i32, y: i32, width: i32, height: i32, alpha: u8) {
     unsafe {
@@ -25,9 +23,6 @@ pub(crate) fn hide_overlay_immediate(hwnd: HWND) {
         unsafe {
             KillTimer(hwnd, TIMER_WINDOW_ANIM);
         }
-    }
-    unsafe {
-        KillTimer(hwnd, TIMER_ICON_LOAD_POLL);
     }
     apply_window_state(hwnd, 0, 0, 0, 0, 0);
     unsafe {
@@ -139,6 +134,9 @@ pub(crate) fn results_content_animation_tick(hwnd: HWND, state: &OverlayShellSta
     }
     unsafe {
         InvalidateRect(hwnd, std::ptr::null(), 0);
+        if !state.list_hwnd.is_null() {
+            InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
+        }
     }
     true
 }

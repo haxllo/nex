@@ -34,6 +34,8 @@ pub(crate) const ROW_HEIGHT: i32 = 58;
 pub(crate) const LIST_RADIUS: i32 = 16;
 pub(crate) const MAX_VISIBLE_ROWS: usize = 8;
 pub(crate) const ROW_INSET_X: i32 = 10;
+// Base icon sizes at 96 DPI; scaled at runtime by state.dpi.
+// These are kept as defaults for tests and before DPI query.
 pub(crate) const ROW_ICON_SIZE: i32 = 34;
 pub(crate) const ROW_ICON_DRAW_SIZE: i32 = 32;
 pub(crate) const ROW_ICON_GAP: i32 = 10;
@@ -88,6 +90,7 @@ pub(crate) const NEX_WM_TRAY_ICON: u32 = WM_APP + 18;
 pub(crate) const NEX_WM_TRAY_TOGGLE_GAME_MODE: u32 = WM_APP + 19;
 pub(crate) const NEX_WM_TRAY_CHECK_UPDATES: u32 = WM_APP + 20;
 pub(crate) const NEX_WM_SEARCH_RESULTS_READY: u32 = WM_APP + 21;
+pub(crate) const NEX_WM_ICON_LOADED: u32 = WM_APP + 22;
 pub(crate) const EM_GETRECT: u32 = 0x00B2;
 pub(crate) const EM_SETRECTNP: u32 = 0x00B4;
 pub(crate) const TRAY_ICON_ID: u32 = 1;
@@ -102,7 +105,6 @@ pub(crate) const TIMER_HELP_HOVER: usize = 0xBEF3;
 pub(crate) const TIMER_ICON_CACHE_IDLE: usize = 0xBEF4;
 pub(crate) const TIMER_RESULTS_CONTENT_FADE: usize = 0xBEF5;
 pub(crate) const TIMER_COMMAND_BADGE_FADE: usize = 0xBEF6;
-pub(crate) const TIMER_ICON_LOAD_POLL: usize = 0xBEF7;
 
 pub(crate) const OVERLAY_ANIM_MS: u32 = 150;
 pub(crate) const OVERLAY_ALPHA_OPAQUE: u8 = 255;
@@ -131,7 +133,7 @@ pub(crate) const FONT_HINT_HEIGHT: i32 = -11;
 pub(crate) const FONT_HELP_TIP_HEIGHT: i32 = -11;
 pub(crate) const FONT_HELP_ICON_HEIGHT: i32 = -14;
 pub(crate) const FONT_FOOTER_HEIGHT: i32 = -13;
-pub(crate) const FONT_COMMAND_ICON_HEIGHT: i32 = -16;
+pub(crate) const FONT_COMMAND_ICON_HEIGHT: i32 = -24;
 pub(crate) const FONT_COMMAND_PREFIX_HEIGHT: i32 = -22;
 pub(crate) const FONT_COMMAND_BADGE_HEIGHT: i32 = -24;
 pub(crate) const FONT_WEIGHT_INPUT: i32 = 400;

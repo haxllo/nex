@@ -7,3 +7,4 @@ devsync.policy.toml
 .DS_Store
 target/
 artifacts
+nul

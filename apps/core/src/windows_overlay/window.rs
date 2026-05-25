@@ -5,8 +5,8 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AddFontResourceExW, CreateFontW, CreateSolidBrush, InvalidateRect, SetBkColor, SetBkMode,
-    SetTextColor, ANTIALIASED_QUALITY, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE,
-    OPAQUE, OUT_DEFAULT_PRECIS, TRANSPARENT,
+    SetTextColor, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -425,7 +425,6 @@ impl NativeOverlayShell {
                 state.results_content_anim_start = None;
                 unsafe {
                     KillTimer(self.hwnd, TIMER_RESULTS_CONTENT_FADE);
-                    KillTimer(self.hwnd, TIMER_ICON_LOAD_POLL);
                 }
                 if state.results_visible && !state.rows.is_empty() {
                     self.collapse_results();
@@ -515,8 +514,6 @@ impl NativeOverlayShell {
                 }
             }
             unsafe {
-                // Start polling for async-loaded icons while results are visible.
-                SetTimer(self.hwnd, TIMER_ICON_LOAD_POLL, 33, None);
                 SendMessageW(state.list_hwnd, WM_SETREDRAW as u32, 1, 0);
                 InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
                 InvalidateRect(self.hwnd, std::ptr::null(), 0);
@@ -836,6 +833,15 @@ extern "system" fn overlay_wnd_proc(
         }
         WM_CREATE => {
             if let Some(state) = state_for(hwnd) {
+                state.overlay_hwnd = hwnd;
+                unsafe {
+                    state.dpi = windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd);
+                }
+                if state.dpi < 96 {
+                    state.dpi = 96;
+                }
+                state.icon_draw_size = ((ROW_ICON_DRAW_SIZE * state.dpi as i32) + 48) / 96;
+                state.icon_container_size = ((ROW_ICON_SIZE * state.dpi as i32) + 48) / 96;
                 state.theme = detect_system_theme();
                 state.palette = palette_for_theme(state.theme);
                 state.dwm_rounded_enabled = try_enable_dwm_rounded_corners(hwnd);
@@ -890,12 +896,12 @@ extern "system" fn overlay_wnd_proc(
                 state.command_badge_font =
                     create_font(FONT_COMMAND_BADGE_HEIGHT, FONT_WEIGHT_COMMAND_BADGE);
                 state.command_icon_font = create_font_with_family(
-                    FONT_COMMAND_ICON_HEIGHT,
+                    -((-FONT_COMMAND_ICON_HEIGHT * state.dpi as i32 + 48) / 96),
                     FONT_WEIGHT_COMMAND_ICON,
                     icon_font_family_primary_wide(),
                 );
                 state.command_icon_fallback_font = create_font_with_family(
-                    FONT_COMMAND_ICON_HEIGHT,
+                    -((-FONT_COMMAND_ICON_HEIGHT * state.dpi as i32 + 48) / 96),
                     FONT_WEIGHT_COMMAND_ICON,
                     icon_font_family_fallback_wide(),
                 );
@@ -1437,29 +1443,28 @@ extern "system" fn overlay_wnd_proc(
                     }
                 }
             }
-            if wparam == TIMER_ICON_LOAD_POLL {
-                if let Some(state) = state_for(hwnd) {
-                    let results = state
-                        .icon_load_receiver
-                        .as_ref()
-                        .map(|r| {
-                            let mut v = Vec::new();
-                            while let Ok(result) = r.try_recv() {
-                                v.push(result);
-                            }
-                            v
-                        })
-                        .unwrap_or_default();
-                    if !results.is_empty() {
-                        for r in results {
-                            state.pending_icon_loads.remove(&r.key);
-                            if r.handle != 0 {
-                                insert_icon_cache_entry(state, r.key, r.handle);
-                            }
+            0
+        }
+        NEX_WM_ICON_LOADED => {
+            if let Some(state) = state_for(hwnd) {
+                let results = state
+                    .icon_load_receiver
+                    .as_ref()
+                    .map(|r| {
+                        let mut v = Vec::new();
+                        while let Ok(result) = r.try_recv() {
+                            v.push(result);
                         }
-                        unsafe {
-                            InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
-                        }
+                        v
+                    })
+                    .unwrap_or_default();
+                if !results.is_empty() {
+                    for r in results {
+                        state.pending_icon_loads.remove(&r.key);
+                        insert_icon_cache_entry(state, r.key, r.handle);
+                    }
+                    unsafe {
+                        InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
                     }
                 }
             }
@@ -1500,7 +1505,6 @@ extern "system" fn overlay_wnd_proc(
                 KillTimer(hwnd, TIMER_ICON_CACHE_IDLE);
                 KillTimer(hwnd, TIMER_RESULTS_CONTENT_FADE);
                 KillTimer(hwnd, TIMER_COMMAND_BADGE_FADE);
-                KillTimer(hwnd, TIMER_ICON_LOAD_POLL);
             }
             let state_ptr =
                 unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayShellState };
@@ -1651,7 +1655,7 @@ fn create_font(height: i32, weight: i32) -> isize {
 }
 
 fn create_font_with_family(height: i32, weight: i32, family_wide: &[u16]) -> isize {
-    create_font_with_family_quality(height, weight, family_wide, ANTIALIASED_QUALITY as u32)
+    create_font_with_family_quality(height, weight, family_wide, CLEARTYPE_QUALITY as u32)
 }
 
 fn create_font_with_family_quality(

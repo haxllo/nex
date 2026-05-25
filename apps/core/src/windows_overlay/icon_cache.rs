@@ -1,16 +1,18 @@
 use std::sync::atomic::Ordering;
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Foundation::{HWND, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
-    DrawTextW, SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_SINGLELINE, DT_VCENTER, HDC,
-    TRANSPARENT,
+    CreateBitmap, DeleteObject, DrawTextW, GetObjectW, SelectObject, SetBkMode, SetTextColor,
+    DT_CENTER, DT_SINGLELINE, DT_VCENTER, HBITMAP, HDC, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Shell::{
-    ExtractIconExW, FindExecutableW, HlinkResolveShortcutToString, SHGetFileInfoW,
-    SHParseDisplayName, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON, SHGFI_PIDL,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    ExtractIconExW, FindExecutableW, HlinkResolveShortcutToString, SHCreateItemFromParsingName,
+    SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION,
+    SHGFI_LARGEICON, SHGFI_PIDL, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, KillTimer, SetTimer};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateIconIndirect, DestroyIcon, DrawIconEx, KillTimer, SetTimer, ICONINFO,
+};
 
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -23,8 +25,190 @@ use crate::windows_overlay::types::*;
 const DI_NORMAL: u32 = 0x0000_0000;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const SHGFI_SHELLICONSIZE: u32 = 0x0000_0004;
 extern "system" {
     fn ImageList_GetIcon(himl: isize, i: i32, flags: u32) -> *mut core::ffi::c_void;
+}
+
+// ==================== IShellItemImageFactory COM interface ====================
+// Not available in windows-sys 0.59.x; define manually.
+// IShellItemImageFactory GUID: {bcc18b79-ba16-442f-80c4-8a59c30c463b}
+
+// SIIGBF flags (from windows-sys, but kept local for clarity)
+const SIIGBF_RESIZETOFIT: i32 = 0i32;
+const SIIGBF_BIGGERSIZEOK: i32 = 1i32;
+const SIIGBF_ICONONLY: i32 = 4i32;
+
+#[allow(non_snake_case, non_upper_case_globals, dead_code)]
+mod com_defs {
+    use windows_sys::core::GUID;
+    use windows_sys::Win32::Foundation::SIZE;
+    use windows_sys::Win32::Graphics::Gdi::HBITMAP;
+
+    pub(crate) const IID_IShellItem: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+    pub(crate) const IID_IShellItemImageFactory: GUID =
+        GUID::from_u128(0xbcc18b79_ba16_442f_80c4_8a59c30c463b);
+
+    pub(crate) struct IShellItemImageFactoryVtbl {
+        #[allow(dead_code)]
+        pub(crate) parent: IUnknownVtbl,
+        pub(crate) GetImage: unsafe extern "system" fn(
+            this: *mut core::ffi::c_void,
+            size: SIZE,
+            flags: i32,
+            phbm: *mut HBITMAP,
+        ) -> i32,
+    }
+
+    #[repr(C)]
+    pub(crate) struct IUnknownVtbl {
+        pub(crate) QueryInterface: unsafe extern "system" fn(
+            this: *mut core::ffi::c_void,
+            riid: *const GUID,
+            ppv: *mut *mut core::ffi::c_void,
+        ) -> i32,
+        pub(crate) AddRef: unsafe extern "system" fn(this: *mut core::ffi::c_void) -> u32,
+        pub(crate) Release: unsafe extern "system" fn(this: *mut core::ffi::c_void) -> u32,
+    }
+}
+use com_defs::*;
+
+/// Load a shell icon via `IShellItemImageFactory::GetImage`.
+/// This is the modern, DPI-aware replacement for `SHGetFileInfoW`.
+fn shell_icon_via_image_factory(path: &str, desired_size: i32) -> Option<isize> {
+    let wide_path = to_wide(path);
+    let mut shell_item: *mut core::ffi::c_void = std::ptr::null_mut();
+
+    // 1. Create IShellItem from parsing name
+    let hr = unsafe {
+        SHCreateItemFromParsingName(
+            wide_path.as_ptr(),
+            std::ptr::null_mut(),
+            &IID_IShellItem,
+            &mut shell_item,
+        )
+    };
+    if hr < 0 || shell_item.is_null() {
+        if hr < 0 {
+            crate::logging::info(&format!(
+                "[nex] shell_icon_via_image_factory: SHCreateItemFromParsingName failed for path={} hr={:#x}",
+                path, hr
+            ));
+        }
+        return None;
+    }
+
+    // 2. QI for IShellItemImageFactory
+    let mut factory: *mut core::ffi::c_void = std::ptr::null_mut();
+    let hr = unsafe {
+        let vtbl = &*(shell_item as *const *const IUnknownVtbl);
+        ((*(*vtbl)).QueryInterface)(shell_item, &IID_IShellItemImageFactory, &mut factory)
+    };
+    if hr < 0 || factory.is_null() {
+        crate::logging::info(&format!(
+            "[nex] shell_icon_via_image_factory: QI for IShellItemImageFactory failed hr={:#x}",
+            hr
+        ));
+        unsafe {
+            let vtbl = &*(shell_item as *const *const IUnknownVtbl);
+            ((*(*vtbl)).Release)(shell_item);
+        }
+        return None;
+    }
+
+    // 3. Request the image at the desired size
+    let size = SIZE {
+        cx: desired_size,
+        cy: desired_size,
+    };
+    let flags = SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK;
+    let mut hbitmap: HBITMAP = std::ptr::null_mut();
+    let hr = unsafe {
+        let vtbl = &*(factory as *const *const IShellItemImageFactoryVtbl);
+        ((*(*vtbl)).GetImage)(factory, size, flags, &mut hbitmap)
+    };
+
+    // Release factory
+    unsafe {
+        let vtbl = &*(factory as *const *const IUnknownVtbl);
+        ((*(*vtbl)).Release)(factory);
+    }
+    // Release shell item
+    unsafe {
+        let vtbl = &*(shell_item as *const *const IUnknownVtbl);
+        ((*(*vtbl)).Release)(shell_item);
+    }
+
+    if hr < 0 || hbitmap.is_null() {
+        if hr < 0 {
+            crate::logging::info(&format!(
+                "[nex] shell_icon_via_image_factory: GetImage failed for size={} hr={:#x}",
+                desired_size, hr
+            ));
+        }
+        return None;
+    }
+
+    // 4. Convert HBITMAP to HICON
+    let hicon = hbitmap_to_icon(hbitmap);
+    unsafe {
+        DeleteObject(hbitmap as _);
+    }
+    if hicon.is_none() {
+        crate::logging::info("[nex] shell_icon_via_image_factory: hbitmap_to_icon failed");
+    }
+    hicon
+}
+
+/// Convert a 32-bit PARGB HBITMAP to an HICON.
+/// We create a 1x1 monochrome AND-mask (all zeros = use alpha channel)
+/// and call CreateIconIndirect.
+fn hbitmap_to_icon(hbitmap: HBITMAP) -> Option<isize> {
+    // Get bitmap dimensions
+    let mut bm: windows_sys::Win32::Graphics::Gdi::BITMAP = unsafe { std::mem::zeroed() };
+    let got_size = unsafe {
+        GetObjectW(
+            hbitmap as _,
+            std::mem::size_of::<windows_sys::Win32::Graphics::Gdi::BITMAP>() as i32,
+            &mut bm as *mut _ as *mut core::ffi::c_void,
+        )
+    };
+    if got_size == 0 {
+        return None;
+    }
+
+    let width = bm.bmWidth;
+    let height = bm.bmHeight;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    // Create monochrome mask bitmap: all zeros = alpha channel controls transparency
+    let mask_row_bytes = ((width + 15) / 16 * 2) as usize;
+    let mask_data = vec![0u8; mask_row_bytes * height as usize];
+    let hbm_mask = unsafe { CreateBitmap(width, height, 1, 1, mask_data.as_ptr() as _) };
+    if hbm_mask.is_null() {
+        return None;
+    }
+
+    let icon_info = ICONINFO {
+        fIcon: 1, // TRUE = icon, not cursor
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: hbm_mask,
+        hbmColor: hbitmap,
+    };
+
+    let hicon = unsafe { CreateIconIndirect(&icon_info) };
+    unsafe {
+        DeleteObject(hbm_mask as _);
+    }
+
+    if hicon.is_null() {
+        None
+    } else {
+        Some(hicon as isize)
+    }
 }
 
 pub(crate) enum ActionIconKind {
@@ -73,17 +257,24 @@ fn action_icon_codepoint(kind: ActionIconKind) -> u32 {
     }
 }
 
-pub(crate) fn draw_action_icon(
+fn kind_icon_codepoint(kind: &str) -> Option<u32> {
+    match kind.to_ascii_lowercase().as_str() {
+        "app" => Some(0xE714),    // Program
+        "folder" => Some(0xE8B7), // Folder
+        "file" => Some(0xE8A5),   // Document
+        _ => None,
+    }
+}
+
+/// Render any single codepoint glyph using the icon fonts.
+/// Shared by action icons and kind-based file-type icons.
+fn draw_glyph_with_icon_font(
     hdc: HDC,
     icon_rect: &RECT,
-    row: &OverlayRow,
     state: &OverlayShellState,
+    codepoint: u32,
     color: u32,
 ) -> bool {
-    if !row.kind.eq_ignore_ascii_case("action") {
-        return false;
-    }
-    let codepoint = action_icon_codepoint(action_icon_kind_for_title(&row.title));
     let Some(glyph) = char::from_u32(codepoint) else {
         return false;
     };
@@ -129,6 +320,38 @@ pub(crate) fn draw_action_icon(
     false
 }
 
+pub(crate) fn draw_action_icon(
+    hdc: HDC,
+    icon_rect: &RECT,
+    row: &OverlayRow,
+    state: &OverlayShellState,
+    color: u32,
+) -> bool {
+    if !row.kind.eq_ignore_ascii_case("action") {
+        return false;
+    }
+    let codepoint = action_icon_codepoint(action_icon_kind_for_title(&row.title));
+    draw_glyph_with_icon_font(hdc, icon_rect, state, codepoint, color)
+}
+
+/// Draw an icon font glyph for non-action rows based on their kind.
+/// Falls between shell icons (background-loaded) and the plain-text letter fallback.
+pub(crate) fn draw_kind_icon(
+    hdc: HDC,
+    icon_rect: &RECT,
+    row: &OverlayRow,
+    state: &OverlayShellState,
+    color: u32,
+) -> bool {
+    if row.kind.eq_ignore_ascii_case("action") || row.kind.eq_ignore_ascii_case("clipboard") {
+        return false;
+    }
+    let Some(codepoint) = kind_icon_codepoint(&row.kind) else {
+        return false;
+    };
+    draw_glyph_with_icon_font(hdc, icon_rect, state, codepoint, color)
+}
+
 pub(crate) fn draw_row_icon(
     hdc: HDC,
     icon_rect: &RECT,
@@ -138,9 +361,9 @@ pub(crate) fn draw_row_icon(
     let Some(icon_handle) = icon_handle_for_row(state, row) else {
         return false;
     };
-    let icon_size = ROW_ICON_DRAW_SIZE;
-    let x = icon_rect.left + (ROW_ICON_SIZE - icon_size) / 2;
-    let y = icon_rect.top + (ROW_ICON_SIZE - icon_size) / 2;
+    let icon_size = state.icon_draw_size;
+    let x = icon_rect.left + (state.icon_container_size - icon_size) / 2;
+    let y = icon_rect.top + (state.icon_container_size - icon_size) / 2;
     unsafe {
         DrawIconEx(
             hdc,
@@ -165,36 +388,28 @@ fn icon_handle_for_row(state: &mut OverlayShellState, row: &OverlayRow) -> Optio
     }
     state.icon_cache_metrics.misses = state.icon_cache_metrics.misses.saturating_add(1);
 
-    let fallback_handle = immediate_fallback_icon_for_row(row).unwrap_or(0);
-    if fallback_handle != 0 {
-        insert_icon_cache_entry(state, key.clone(), fallback_handle);
-    }
-
     if should_queue_specific_icon_load(row) {
-        state.pending_icon_loads.insert(key.clone());
-        if let Some(ref sender) = state.icon_load_sender {
-            let request = IconLoadRequest {
-                key: key.clone(),
-                kind: row.kind.clone(),
-                icon_path: row.icon_path.clone(),
-            };
-            if sender.send(request).is_err() {
-                state.pending_icon_loads.remove(&key);
+        if state.pending_icon_loads.insert(key.clone()) {
+            if let Some(ref sender) = state.icon_load_sender {
+                let request = IconLoadRequest {
+                    key: key.clone(),
+                    kind: row.kind.clone(),
+                    icon_path: row.icon_path.clone(),
+                    hwnd: state.overlay_hwnd as isize,
+                };
+                if sender.send(request).is_err() {
+                    state.pending_icon_loads.remove(&key);
+                    state.icon_cache_metrics.load_failures =
+                        state.icon_cache_metrics.load_failures.saturating_add(1);
+                }
+            } else {
                 state.icon_cache_metrics.load_failures =
                     state.icon_cache_metrics.load_failures.saturating_add(1);
             }
-        } else {
-            state.pending_icon_loads.remove(&key);
-            state.icon_cache_metrics.load_failures =
-                state.icon_cache_metrics.load_failures.saturating_add(1);
         }
     }
 
-    if fallback_handle == 0 {
-        None
-    } else {
-        Some(fallback_handle)
-    }
+    None
 }
 
 fn icon_cache_key(row: &OverlayRow) -> String {
@@ -208,24 +423,7 @@ fn icon_cache_key(row: &OverlayRow) -> String {
 }
 
 fn should_queue_specific_icon_load(row: &OverlayRow) -> bool {
-    if row.kind.eq_ignore_ascii_case("action") || row.kind.eq_ignore_ascii_case("clipboard") {
-        return false;
-    }
-    !row.icon_path.trim().is_empty()
-}
-
-fn immediate_fallback_icon_for_row(row: &OverlayRow) -> Option<isize> {
-    if row.kind.eq_ignore_ascii_case("action") || row.kind.eq_ignore_ascii_case("clipboard") {
-        return None;
-    }
-    if row.kind.eq_ignore_ascii_case("folder") {
-        return shell_icon_with_attrs("folder", FILE_ATTRIBUTE_DIRECTORY);
-    }
-    if row.kind.eq_ignore_ascii_case("app") {
-        return shell_icon_with_attrs("nex.exe", FILE_ATTRIBUTE_NORMAL)
-            .or_else(|| shell_icon_with_attrs("file.txt", FILE_ATTRIBUTE_NORMAL));
-    }
-    shell_icon_with_attrs("file.txt", FILE_ATTRIBUTE_NORMAL)
+    !(row.kind.eq_ignore_ascii_case("action") || row.kind.eq_ignore_ascii_case("clipboard"))
 }
 
 pub(crate) fn load_shell_icon_for_values(kind: &str, icon_path: &str) -> Option<isize> {
@@ -283,6 +481,9 @@ fn load_shell_icon_for_row(row: &OverlayRow) -> Option<isize> {
             return Some(icon);
         }
         if let Some(icon) = shell_icon_with_attrs(source, FILE_ATTRIBUTE_NORMAL) {
+            return Some(icon);
+        }
+        if let Some(icon) = shell_icon_via_image_factory(source, ROW_ICON_DRAW_SIZE) {
             return Some(icon);
         }
     }
@@ -424,7 +625,7 @@ fn shell_icon_for_existing_path(path: &str) -> Option<isize> {
     let wide = to_wide(path);
     // Prefer direct shell icon extraction for concrete files/apps.
     // This tends to pick a better source icon than generic image-list lookup.
-    let flags = SHGFI_ICON | SHGFI_LARGEICON;
+    let flags = SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE;
     let result = unsafe {
         SHGetFileInfoW(
             wide.as_ptr(),
@@ -444,7 +645,8 @@ fn shell_icon_for_existing_path(path: &str) -> Option<isize> {
 fn shell_icon_with_attrs(path_hint: &str, attrs: u32) -> Option<isize> {
     let mut sfi: SHFILEINFOW = unsafe { std::mem::zeroed() };
     let wide = to_wide(path_hint);
-    let flags = SHGFI_SYSICONINDEX | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES;
+    let flags =
+        SHGFI_SYSICONINDEX | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES | SHGFI_SHELLICONSIZE;
     let result = unsafe {
         SHGetFileInfoW(
             wide.as_ptr(),
@@ -469,7 +671,7 @@ fn shell_icon_with_attrs(path_hint: &str, attrs: u32) -> Option<isize> {
 fn shortcut_system_icon_without_overlay(shortcut_path: &str) -> Option<isize> {
     let mut sfi: SHFILEINFOW = unsafe { std::mem::zeroed() };
     let wide = to_wide(shortcut_path);
-    let flags = SHGFI_SYSICONINDEX | SHGFI_LARGEICON;
+    let flags = SHGFI_SYSICONINDEX | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE;
     let result = unsafe {
         SHGetFileInfoW(
             wide.as_ptr(),
@@ -615,7 +817,7 @@ fn shell_icon_from_display_name(display_name: &str) -> Option<isize> {
     }
 
     let mut sfi: SHFILEINFOW = unsafe { std::mem::zeroed() };
-    let flags = SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON;
+    let flags = SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE;
     let result = unsafe {
         SHGetFileInfoW(
             pidl as *const u16,

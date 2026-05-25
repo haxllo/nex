@@ -11,10 +11,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
 // ==================== ASYNC ICON LOADER TYPES ====================
 
 /// A request to load a shell icon on the background thread.
+/// NOTE: `hwnd` is stored as `isize` because `HWND` (`*mut c_void`) is not `Send`.
 pub(crate) struct IconLoadRequest {
     pub(crate) key: String,
     pub(crate) kind: String,
     pub(crate) icon_path: String,
+    pub(crate) hwnd: isize,
 }
 
 /// A completed icon load delivered back to the UI thread.
@@ -126,6 +128,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) footer_hint_hwnd: HWND,
     pub(crate) mode_strip_hwnd: HWND,
     pub(crate) everything_hwnd: HWND,
+    pub(crate) overlay_hwnd: HWND,
 
     pub(crate) edit_prev_proc: isize,
     pub(crate) list_prev_proc: isize,
@@ -203,6 +206,11 @@ pub(crate) struct OverlayShellState {
     pub(crate) icon_load_receiver: Option<mpsc::Receiver<IconLoadResult>>,
     pub(crate) icon_load_thread: Option<JoinHandle<()>>,
     pub(crate) pending_icon_loads: HashSet<String>,
+
+    // DPI-aware sizing
+    pub(crate) dpi: u32,
+    pub(crate) icon_draw_size: i32,
+    pub(crate) icon_container_size: i32,
 }
 
 impl Default for OverlayShellState {
@@ -216,6 +224,7 @@ impl Default for OverlayShellState {
             footer_hint_hwnd: std::ptr::null_mut(),
             mode_strip_hwnd: std::ptr::null_mut(),
             everything_hwnd: std::ptr::null_mut(),
+            overlay_hwnd: std::ptr::null_mut(),
             edit_prev_proc: 0,
             list_prev_proc: 0,
             help_prev_proc: 0,
@@ -285,6 +294,9 @@ impl Default for OverlayShellState {
             icon_load_receiver: None,
             icon_load_thread: None,
             pending_icon_loads: HashSet::new(),
+            dpi: 96,
+            icon_draw_size: 32,
+            icon_container_size: 34,
         }
     }
 }

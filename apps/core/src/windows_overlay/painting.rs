@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use std::time::Instant;
 
 use crate::windows_overlay::animation::blend_color;
-use crate::windows_overlay::icon_cache::{draw_action_icon, draw_row_icon};
+use crate::windows_overlay::icon_cache::{draw_action_icon, draw_kind_icon, draw_row_icon};
 use crate::windows_overlay::layout::{
     apply_edit_text_rect, compute_input_text_rect, input_line_height_for_edit, visible_row_capacity,
 };
@@ -506,28 +506,29 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
             } else {
                 ROW_TITLE_BLOCK_HEIGHT
             };
-            let icon_top = text_top + (content_height - ROW_ICON_SIZE) / 2;
+            let icon_top = text_top + (content_height - state.icon_container_size) / 2;
             let icon_rect = RECT {
                 left: dis.rcItem.left + ROW_INSET_X,
                 top: icon_top,
-                right: dis.rcItem.left + ROW_INSET_X + ROW_ICON_SIZE,
-                bottom: icon_top + ROW_ICON_SIZE,
+                right: dis.rcItem.left + ROW_INSET_X + state.icon_container_size,
+                bottom: icon_top + state.icon_container_size,
             };
             let icon_drawn = draw_row_icon(dis.hDC, &icon_rect, &row, state);
             if !icon_drawn {
                 FillRect(dis.hDC, &icon_rect, state.icon_brush as _);
-                let icon_tint =
-                    blend_color(palette.results_bg, palette.icon_text, content_progress);
+                let icon_tint = palette.icon_text;
                 if !draw_action_icon(dis.hDC, &icon_rect, &row, state, icon_tint) {
-                    let mut icon_text_rect = icon_rect;
-                    SetTextColor(dis.hDC, icon_tint);
-                    DrawTextW(
-                        dis.hDC,
-                        to_wide(icon_glyph_for_row(&row)).as_ptr(),
-                        -1,
-                        &mut icon_text_rect,
-                        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-                    );
+                    if !draw_kind_icon(dis.hDC, &icon_rect, &row, state, icon_tint) {
+                        let mut icon_text_rect = icon_rect;
+                        SetTextColor(dis.hDC, icon_tint);
+                        DrawTextW(
+                            dis.hDC,
+                            to_wide(icon_glyph_for_row(&row)).as_ptr(),
+                            -1,
+                            &mut icon_text_rect,
+                            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+                        );
+                    }
                 }
             }
             SetTextColor(dis.hDC, primary_text);

@@ -124,7 +124,7 @@ pub(crate) fn complete_window_animation_if_running(hwnd: HWND, state: &OverlaySh
     }
 }
 
-pub(crate) fn results_content_animation_tick(hwnd: HWND, state: &OverlayShellState) -> bool {
+pub(crate) fn results_content_animation_tick(_hwnd: HWND, state: &OverlayShellState) -> bool {
     let Some(start) = state.results_content_anim_start else {
         return false;
     };
@@ -133,7 +133,11 @@ pub(crate) fn results_content_animation_tick(hwnd: HWND, state: &OverlayShellSta
         return false;
     }
     unsafe {
-        InvalidateRect(hwnd, std::ptr::null(), 0);
+        // Only invalidate the listbox — the panel background does not change
+        // during content-fade animation.  Invalidating the parent overlay here
+        // would trigger a D2D BeginDraw → EndDraw → DXGI Present that races
+        // ahead of GDI child-window painting on WS_EX_LAYERED windows, causing
+        // a visible flash frame.
         if !state.list_hwnd.is_null() {
             InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
         }

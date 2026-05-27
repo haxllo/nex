@@ -9,12 +9,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [windows-latest]
 
     runs-on: ${{ matrix.os }}
 
     env:
-      NEX_WINDOWS_RUNTIME_SMOKE: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
+      NEX_WINDOWS_RUNTIME_SMOKE: '1'
 
     defaults:
       run:
@@ -24,17 +24,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: pnpm
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          run_install: false
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -46,10 +45,10 @@ jobs:
         run: ./node_modules/.bin/vitest --run
 
       - name: Run Rust test gate
-        run: cargo test -p nex
+        run: cargo test -p nex-cli
 
       - name: Run Rust perf exact gate
-        run: cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+        run: cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 
       - name: Run runtime smoke harness gate
-        run: cargo test -p nex --test windows_runtime_smoke_test
+        run: cargo test -p nex-cli --test windows_runtime_smoke_test

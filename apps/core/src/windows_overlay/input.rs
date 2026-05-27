@@ -6,15 +6,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GetCursorPos, GetParent, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextLengthW, HideCaret, KillTimer, LoadCursorW, PostMessageW, SendMessageW, SetCursor,
-    SetTimer, SetWindowTextW, ShowWindow, GWLP_USERDATA, IDC_HAND, LB_GETCOUNT, LB_GETTOPINDEX,
-    LB_ITEMFROMPOINT, LB_SETCURSEL, LB_SETTOPINDEX, SW_HIDE, SW_SHOW, WM_KEYDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SETREDRAW,
+    SetTimer, SetWindowTextW, ShowWindow, GWLP_USERDATA, IDC_HAND, LB_GETCOUNT, LB_GETITEMRECT,
+    LB_GETTOPINDEX, LB_ITEMFROMPOINT, LB_SETCURSEL, LB_SETTOPINDEX, SW_HIDE, SW_SHOW, WM_KEYDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SETREDRAW,
 };
 
 use crate::windows_overlay::layout::{apply_edit_text_rect, visible_row_capacity};
 use crate::windows_overlay::painting::{
     help_hint_text, invalidate_list_row, paint_edit_command_prefix, paint_edit_placeholder,
-    paint_footer_hint, paint_help_tip, row_is_selectable, set_uninstall_quick_mode,
+    paint_edit_search_icon, paint_footer_hint, paint_help_tip, row_is_selectable, set_uninstall_quick_mode,
 };
 use crate::windows_overlay::state::{state_for, OverlayShellState};
 use crate::windows_overlay::types::*;
@@ -159,14 +159,8 @@ pub(crate) extern "system" fn control_subclass_proc(
                 row
             };
 
-            // During expand/collapse animation, ignore hover-driven selection sync to
-            // avoid listbox auto-scroll side effects (top row can jump out of view).
+            // During expand/collapse animation, ignore hover-driven selection sync.
             if state.window_anim.is_some() {
-                if state.hover_index != -1 {
-                    let previous_hover = state.hover_index;
-                    state.hover_index = -1;
-                    invalidate_list_row(hwnd, previous_hover);
-                }
                 return 0;
             }
 
@@ -174,19 +168,43 @@ pub(crate) extern "system" fn control_subclass_proc(
             // cursor does not immediately steal active row/scroll state from row 0.
             if state.suppress_next_hover_sync {
                 state.suppress_next_hover_sync = false;
-                if state.hover_index != -1 {
-                    let previous_hover = state.hover_index;
-                    state.hover_index = -1;
-                    invalidate_list_row(hwnd, previous_hover);
-                }
                 return 0;
             }
 
             if next_hover != state.hover_index {
                 let previous_hover = state.hover_index;
                 state.hover_index = next_hover;
-                invalidate_list_row(hwnd, previous_hover);
-                invalidate_list_row(hwnd, next_hover);
+                // Invalidate a single rect covering both rows so Windows paints
+                // them together in one WM_PAINT cycle — avoids the "retro swipe"
+                // of sequential item repaints.
+                let list = state.list_hwnd;
+                unsafe {
+                    let mut rc_prev: RECT = std::mem::zeroed();
+                    let mut rc_next: RECT = std::mem::zeroed();
+                    let ok_prev = SendMessageW(
+                        list, LB_GETITEMRECT, previous_hover.max(0) as usize,
+                        &mut rc_prev as *mut _ as isize,
+                    );
+                    let ok_next = SendMessageW(
+                        list, LB_GETITEMRECT, next_hover.max(0) as usize,
+                        &mut rc_next as *mut _ as isize,
+                    );
+                    if ok_prev != 0 && ok_next != 0 {
+                        let top = rc_prev.top.min(rc_next.top);
+                        let bottom = rc_prev.bottom.max(rc_next.bottom);
+                        let merged = RECT {
+                            left: rc_prev.left.min(rc_next.left),
+                            top,
+                            right: rc_prev.right.max(rc_next.right),
+                            bottom,
+                        };
+                        InvalidateRect(list, &merged, 0);
+                    } else {
+                        // Fallback: invalidate individually if rects unavailable.
+                        invalidate_list_row(list, previous_hover);
+                        invalidate_list_row(list, next_hover);
+                    }
+                }
             }
         }
         if message == WM_LBUTTONUP && hwnd == state.list_hwnd {
@@ -277,6 +295,7 @@ pub(crate) extern "system" fn control_subclass_proc(
     };
     let result = unsafe { CallWindowProcW(prev_proc, hwnd, message, wparam, lparam) };
     if hwnd == state.edit_hwnd && message == WM_PAINT {
+        paint_edit_search_icon(hwnd, state);
         paint_edit_placeholder(hwnd, state);
         paint_edit_command_prefix(hwnd, state);
     }

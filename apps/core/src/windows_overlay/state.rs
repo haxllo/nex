@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{CreatePen, CreateSolidBrush, PS_SOLID};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
@@ -50,6 +51,7 @@ impl GdiObjectCache {
         *entry
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pen(&mut self, color: u32) -> isize {
         let entry = self
             .pens
@@ -145,11 +147,21 @@ pub(crate) struct OverlayShellState {
     pub(crate) hint_font: isize,
     pub(crate) help_tip_font: isize,
     pub(crate) help_icon_font: isize,
+    pub(crate) search_icon_font: isize,
     pub(crate) footer_font: isize,
     pub(crate) command_prefix_font: isize,
     pub(crate) command_badge_font: isize,
     pub(crate) command_icon_font: isize,
     pub(crate) command_icon_fallback_font: isize,
+
+    // GDI+ font handles (pre-created from GDI fonts)
+    pub(crate) gdiplus_title_font: isize,
+    pub(crate) gdiplus_meta_font: isize,
+    pub(crate) gdiplus_status_font: isize,
+    pub(crate) gdiplus_header_font: isize,
+    pub(crate) gdiplus_help_tip_font: isize,
+    pub(crate) gdiplus_footer_font: isize,
+    pub(crate) gdiplus_hint_font: isize,
 
     pub(crate) panel_brush: isize,
     pub(crate) border_brush: isize,
@@ -161,8 +173,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) row_separator_brush: isize,
     pub(crate) selection_accent_brush: isize,
     pub(crate) icon_brush: isize,
-    pub(crate) help_tip_brush: isize,
-    pub(crate) help_tip_border_brush: isize,
+
     pub(crate) theme: OverlayTheme,
     pub(crate) palette: OverlayPalette,
 
@@ -211,6 +222,9 @@ pub(crate) struct OverlayShellState {
     pub(crate) dpi: u32,
     pub(crate) icon_draw_size: i32,
     pub(crate) icon_container_size: i32,
+
+    // GDI+ for antialiased selection highlight
+    pub(crate) gdiplus: Option<GdiplusContext>,
 }
 
 impl Default for OverlayShellState {
@@ -239,11 +253,19 @@ impl Default for OverlayShellState {
             hint_font: 0,
             help_tip_font: 0,
             help_icon_font: 0,
+            search_icon_font: 0,
             footer_font: 0,
             command_prefix_font: 0,
             command_badge_font: 0,
             command_icon_font: 0,
             command_icon_fallback_font: 0,
+            gdiplus_title_font: 0,
+            gdiplus_meta_font: 0,
+            gdiplus_status_font: 0,
+            gdiplus_header_font: 0,
+            gdiplus_help_tip_font: 0,
+            gdiplus_footer_font: 0,
+            gdiplus_hint_font: 0,
             panel_brush: 0,
             border_brush: 0,
             input_brush: 0,
@@ -254,8 +276,6 @@ impl Default for OverlayShellState {
             row_separator_brush: 0,
             selection_accent_brush: 0,
             icon_brush: 0,
-            help_tip_brush: 0,
-            help_tip_border_brush: 0,
             theme: OverlayTheme::Dark,
             palette: PALETTE_DARK,
             status_is_error: false,
@@ -297,6 +317,7 @@ impl Default for OverlayShellState {
             dpi: 96,
             icon_draw_size: 32,
             icon_container_size: 34,
+            gdiplus: None,
         }
     }
 }

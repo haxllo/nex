@@ -10,6 +10,16 @@ fn test_config() -> nex_core::config::Config {
     nex_core::config::Config::default()
 }
 
+fn kill_notepad() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let _ = Command::new("taskkill")
+            .args(["/f", "/im", "notepad.exe"])
+            .output();
+    }
+}
+
 #[test]
 fn service_search_returns_ranked_results() {
     let config = test_config();
@@ -57,7 +67,7 @@ fn service_launch_by_id_uses_indexed_path() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("nex-service-launch-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-service-launch-{unique}.txt"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
@@ -74,6 +84,7 @@ fn service_launch_by_id_uses_indexed_path() {
         .unwrap();
 
     let launched = service.launch(LaunchTarget::Id("launch-id"));
+    kill_notepad();
     std::fs::remove_file(&launch_path).unwrap();
 
     assert!(launched.is_ok());
@@ -85,7 +96,7 @@ fn service_launch_by_id_records_usage_signals() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("nex-launch-usage-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-launch-usage-{unique}.txt"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
@@ -110,6 +121,7 @@ fn service_launch_by_id_records_usage_signals() {
     assert_eq!(updated.use_count, 1);
     assert!(updated.last_accessed_epoch_secs > 0);
 
+    kill_notepad();
     std::fs::remove_file(&launch_path).unwrap();
 }
 
@@ -343,7 +355,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("nex-inc-usage-{unique}.tmp"));
+    let path = std::env::temp_dir().join(format!("nex-inc-usage-{unique}.txt"));
     std::fs::write(&path, b"ok").unwrap();
 
     let provider_items = Arc::new(Mutex::new(vec![SearchItem::new(
@@ -384,6 +396,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
     assert!(updated.use_count >= 1);
     assert!(updated.last_accessed_epoch_secs > 0);
 
+    kill_notepad();
     std::fs::remove_file(path).unwrap();
 }
 

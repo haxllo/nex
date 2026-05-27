@@ -66,7 +66,7 @@ fn handles_launch_command_by_path() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let launch_path = std::env::temp_dir().join(format!("nex-contract-launch-{unique}.tmp"));
+    let launch_path = std::env::temp_dir().join(format!("nex-contract-launch-{unique}.txt"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = nex_core::config::Config::default();
@@ -80,6 +80,14 @@ fn handles_launch_command_by_path() {
         }))
         .unwrap();
 
+    // ShellExecuteW on .txt opens Notepad asynchronously; kill it so remove_file succeeds
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let _ = Command::new("taskkill")
+            .args(["/f", "/im", "notepad.exe"])
+            .output();
+    }
     std::fs::remove_file(&launch_path).unwrap();
 
     assert_eq!(

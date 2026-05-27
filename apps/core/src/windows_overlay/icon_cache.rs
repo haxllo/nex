@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::atomic::Ordering;
 
 use windows_sys::Win32::Foundation::{HWND, RECT, SIZE};
@@ -412,7 +414,7 @@ fn icon_handle_for_row(state: &mut OverlayShellState, row: &OverlayRow) -> Optio
     None
 }
 
-fn icon_cache_key(row: &OverlayRow) -> String {
+pub(crate) fn icon_cache_key(row: &OverlayRow) -> String {
     let kind = row.kind.to_ascii_lowercase();
     let source = row.icon_path.trim().to_ascii_lowercase();
     if source.is_empty() {

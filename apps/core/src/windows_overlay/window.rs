@@ -47,8 +47,6 @@ use crate::windows_overlay::layout::{
     initial_visible_row_count, layout_children, row_index_for_result_index, row_result_index,
     target_top_index_for_selection, try_enable_dwm_rounded_corners,
 };
-use windows::Win32::Foundation::HWND as WindowsHWND;
-use crate::windows_overlay::d2d_renderer::D2dRenderer;
 use crate::windows_overlay::painting::{
     command_badge_animation_tick, draw_list_row, draw_panel_background, handle_wheel_input,
     hide_input_caret, is_cursor_over_window, set_uninstall_quick_mode,
@@ -855,20 +853,7 @@ extern "system" fn overlay_wnd_proc(
                 state.palette = palette_for_theme(state.theme);
                 state.dwm_rounded_enabled = try_enable_dwm_rounded_corners(hwnd);
 
-                // Initialize D2D/DWrite renderer (best-effort, fall back to GDI if fails)
-                let init_result = D2dRenderer::new(WindowsHWND(hwnd), WINDOW_WIDTH as u32, COMPACT_HEIGHT as u32);
-                match init_result {
-                    Ok(mut renderer) => {
-                        renderer.precreate_all_text_formats();
-                        state.d2d = Some(renderer);
-                        crate::logging::info("[nex] D2D/DWrite renderer initialized");
-                    }
-                    Err(e) => {
-                        crate::logging::warn(&format!("[nex] D2D init failed, falling back to GDI: {e}"));
-                    }
-                }
-
-                // Initialize GDI+ for antialiased selection highlight
+                // Initialize GDI+ for all rendering
                 state.gdiplus = crate::windows_overlay::gdiplus_rendering::GdiplusContext::new();
                 if state.gdiplus.is_some() {
                     crate::logging::info("[nex] GDI+ initialized");
@@ -1370,11 +1355,6 @@ extern "system" fn overlay_wnd_proc(
         }
         WM_SIZE => {
             if let Some(state) = state_for(hwnd) {
-                let width = (lparam & 0xFFFF) as u32;
-                let height = ((lparam >> 16) & 0xFFFF) as u32;
-                if let Some(ref mut renderer) = state.d2d {
-                    renderer.resize(WindowsHWND(hwnd), width.max(1), height.max(1));
-                }
                 layout_children(hwnd, state);
             }
             apply_rounded_corners_hwnd(hwnd);
@@ -1551,12 +1531,8 @@ extern "system" fn overlay_wnd_proc(
                 unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayShellState };
             if !state_ptr.is_null() {
                 unsafe {
-                    // Clean up GDI resources (D2D renderer drops via Box::from_raw below)
                     cleanup_state_resources(&mut *state_ptr);
-                    let mut state = Box::from_raw(state_ptr);
-                    if let Some(ref mut r) = state.d2d {
-                        r.destroy();
-                    }
+                    let _ = Box::from_raw(state_ptr);
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
             }

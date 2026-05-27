@@ -3,6 +3,8 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+use crate::windows_overlay::d2d_renderer::D2dRenderer;
+use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{CreatePen, CreateSolidBrush, PS_SOLID};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
@@ -50,6 +52,7 @@ impl GdiObjectCache {
         *entry
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pen(&mut self, color: u32) -> isize {
         let entry = self
             .pens
@@ -145,6 +148,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) hint_font: isize,
     pub(crate) help_tip_font: isize,
     pub(crate) help_icon_font: isize,
+    pub(crate) search_icon_font: isize,
     pub(crate) footer_font: isize,
     pub(crate) command_prefix_font: isize,
     pub(crate) command_badge_font: isize,
@@ -211,6 +215,12 @@ pub(crate) struct OverlayShellState {
     pub(crate) dpi: u32,
     pub(crate) icon_draw_size: i32,
     pub(crate) icon_container_size: i32,
+
+    // D2D + DirectWrite renderer
+    pub(crate) d2d: Option<D2dRenderer>,
+
+    // GDI+ for antialiased selection highlight
+    pub(crate) gdiplus: Option<GdiplusContext>,
 }
 
 impl Default for OverlayShellState {
@@ -239,6 +249,7 @@ impl Default for OverlayShellState {
             hint_font: 0,
             help_tip_font: 0,
             help_icon_font: 0,
+            search_icon_font: 0,
             footer_font: 0,
             command_prefix_font: 0,
             command_badge_font: 0,
@@ -297,6 +308,8 @@ impl Default for OverlayShellState {
             dpi: 96,
             icon_draw_size: 32,
             icon_container_size: 34,
+            d2d: None,
+            gdiplus: None,
         }
     }
 }

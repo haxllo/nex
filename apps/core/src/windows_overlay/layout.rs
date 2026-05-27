@@ -14,6 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AW_ACTIVATE, AW_BLEND, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
 };
 
+use crate::windows_overlay::d2d_renderer::FontRole;
 use crate::windows_overlay::icon_cache::{clear_icon_cache, log_memory_snapshot};
 use crate::windows_overlay::state::{state_for, OverlayShellState};
 use crate::windows_overlay::types::*;
@@ -333,13 +334,18 @@ pub(crate) fn compute_input_text_rect(
     } else {
         0
     };
+    let search_left_pad = if !command_mode_input {
+        INPUT_TEXT_SEARCH_PAD
+    } else {
+        0
+    };
     let quick_badge_left_pad = if command_mode_input && command_uninstall_quick_mode {
         COMMAND_BADGE_INPUT_PAD
     } else {
         0
     };
     let mut text_rect = RECT {
-        left: INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + prefix_left_pad + quick_badge_left_pad,
+        left: INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + prefix_left_pad + quick_badge_left_pad + search_left_pad,
         top,
         right: width - INPUT_TEXT_RIGHT_INSET + INPUT_TEXT_SHIFT_X,
         bottom: top + line_height,
@@ -355,6 +361,16 @@ pub(crate) fn compute_input_text_rect(
 }
 
 pub(crate) fn input_line_height_for_edit(edit_hwnd: HWND, fallback_font: isize) -> i32 {
+    // Prefer DWrite-based measurement: font_role_size * ~1.45 for line height
+    if fallback_font == 0 {
+        if let Some(state) = state_for(unsafe { GetParent(edit_hwnd) }) {
+            if state.d2d.is_some() {
+                let line_height = (19.0 * 1.45) as i32;
+                return line_height.max(1);
+            }
+        }
+    }
+
     let hdc = unsafe { GetDC(edit_hwnd) };
     if hdc.is_null() {
         return INPUT_TEXT_LINE_HEIGHT_FALLBACK;
@@ -421,6 +437,12 @@ fn apply_help_tip_rounded_corners(help_tip_hwnd: HWND, width: i32, height: i32) 
 }
 
 fn help_tip_width_for_text(state: &OverlayShellState) -> i32 {
+    if let Some(ref renderer) = state.d2d {
+        if let Some(format) = renderer.text_format(FontRole::HelpTip) {
+            let width = renderer.measure_text_width(format, HOTKEY_HELP_TEXT_FALLBACK);
+            return (width as i32 + HELP_TIP_TEXT_PAD_X * 2).max(HELP_TIP_WIDTH);
+        }
+    }
     let text = to_wide(HOTKEY_HELP_TEXT_FALLBACK);
     let hdc = unsafe { GetDC(state.help_tip_hwnd) };
     if hdc.is_null() {
@@ -568,9 +590,10 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
         }
     }
     if state.help_icon_font != 0 {
-        unsafe {
-            DeleteObject(state.help_icon_font as _);
-        }
+        unsafe { DeleteObject(state.help_icon_font as _); }
+    }
+    if state.search_icon_font != 0 {
+        unsafe { DeleteObject(state.search_icon_font as _); }
     }
     if state.footer_font != 0 {
         unsafe {
@@ -701,7 +724,7 @@ mod tests {
     #[test]
     fn compute_input_text_rect_basic_layout() {
         let rect = compute_input_text_rect(400, 36, 18, false, false);
-        assert_eq!(rect.left, INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X);
+        assert_eq!(rect.left, INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + INPUT_TEXT_SEARCH_PAD);
         assert_eq!(
             rect.right,
             400 - INPUT_TEXT_RIGHT_INSET + INPUT_TEXT_SHIFT_X
@@ -714,7 +737,7 @@ mod tests {
     fn compute_input_text_rect_command_mode_adds_prefix_pad() {
         let normal = compute_input_text_rect(400, 36, 18, false, false);
         let command = compute_input_text_rect(400, 36, 18, true, false);
-        assert_eq!(command.left, normal.left + COMMAND_PREFIX_INPUT_PAD);
+        assert_eq!(command.left, normal.left - INPUT_TEXT_SEARCH_PAD + COMMAND_PREFIX_INPUT_PAD);
     }
 
     #[test]

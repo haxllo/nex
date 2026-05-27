@@ -878,10 +878,6 @@ extern "system" fn overlay_wnd_proc(
                 state.selection_accent_brush =
                     unsafe { CreateSolidBrush(state.palette.selection_accent) } as isize;
                 state.icon_brush = unsafe { CreateSolidBrush(state.palette.icon_bg) } as isize;
-                state.help_tip_brush =
-                    unsafe { CreateSolidBrush(state.palette.help_tip_bg) } as isize;
-                state.help_tip_border_brush =
-                    unsafe { CreateSolidBrush(state.palette.panel_border) } as isize;
                 crate::logging::info(&format!(
                     "[nex] overlay_theme mode={}",
                     match state.theme {
@@ -932,11 +928,12 @@ extern "system" fn overlay_wnd_proc(
                 if state.gdiplus.is_some() {
                     let temp_dc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut()) };
                     if !temp_dc.is_null() {
-                        let pairs: [(isize, &mut isize); 4] = [
+                        let pairs: [(isize, &mut isize); 5] = [
                             (state.title_font, &mut state.gdiplus_title_font),
                             (state.meta_font, &mut state.gdiplus_meta_font),
                             (state.status_font, &mut state.gdiplus_status_font),
                             (state.header_font, &mut state.gdiplus_header_font),
+                            (state.help_tip_font, &mut state.gdiplus_help_tip_font),
                         ];
                         for (gdi_font, gp_dest) in pairs {
                             if gdi_font != 0 {
@@ -1280,14 +1277,6 @@ extern "system" fn overlay_wnd_proc(
         WM_CTLCOLORSTATIC => {
             if let Some(state) = state_for(hwnd) {
                 let target = lparam as HWND;
-                if target == state.help_tip_hwnd {
-                    unsafe {
-                        SetTextColor(wparam as _, state.palette.help_tip_text);
-                        SetBkColor(wparam as _, state.palette.help_tip_bg);
-                        SetBkMode(wparam as _, OPAQUE as i32);
-                    }
-                    return state.help_tip_brush;
-                }
                 if target == state.help_hwnd {
                     let base_help_color = blend_color(
                         state.palette.input_bg,

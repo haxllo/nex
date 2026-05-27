@@ -4,15 +4,15 @@ use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-    FillRgn, FrameRgn, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject,
+    BeginPaint, DrawTextW, EndPaint, FillRect,
+    GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject,
     SetBkMode, SetTextColor, TextOutW, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
     DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DrawIconEx, GetClientRect, GetCursorPos, GetWindowRect, GetWindowTextLengthW, HideCaret, KillTimer,
-    SendMessageW, SetTimer, DI_NORMAL, LB_GETCOUNT, LB_GETITEMRECT, LB_GETTOPINDEX, LB_SETTOPINDEX,
+    GetClientRect, GetCursorPos, GetWindowRect, GetWindowTextLengthW, HideCaret, KillTimer,
+    SendMessageW, SetTimer, LB_GETCOUNT, LB_GETITEMRECT, LB_GETTOPINDEX, LB_SETTOPINDEX,
     WM_SETREDRAW,
 };
 
@@ -909,7 +909,8 @@ fn icon_glyph_for_row(row: &OverlayRow) -> &'static str {
 // ==================== PAINT HELPERS (recovered) ====================
 
 pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {
-    if state.help_tip_brush == 0 || state.help_tip_border_brush == 0 {
+    let Some(ref gdiplus) = state.gdiplus else { return; };
+    if state.gdiplus_help_tip_font == 0 {
         return;
     }
     unsafe {
@@ -924,50 +925,32 @@ pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {
             EndPaint(hwnd, &paint);
             return;
         }
-        let bg_region = CreateRoundRectRgn(
-            0,
-            0,
-            width + 1,
-            height + 1,
-            HELP_TIP_RADIUS,
-            HELP_TIP_RADIUS,
-        );
-        FillRgn(hdc, bg_region, state.help_tip_brush as _);
-        DeleteObject(bg_region as _);
-        let border_region = CreateRoundRectRgn(
-            0,
-            0,
-            width + 1,
-            height + 1,
-            HELP_TIP_RADIUS,
-            HELP_TIP_RADIUS,
-        );
-        FrameRgn(hdc, border_region, state.help_tip_border_brush as _, 1, 1);
-        DeleteObject(border_region as _);
-        let old_font = if state.help_tip_font != 0 {
-            SelectObject(hdc, state.help_tip_font as _)
-        } else {
-            std::ptr::null_mut()
+
+        let Some(graphics) = gdiplus.create_graphics(hdc as isize) else {
+            EndPaint(hwnd, &paint);
+            return;
         };
-        SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, state.palette.help_tip_text);
-        let mut text_rect = RECT {
-            left: HELP_TIP_TEXT_PAD_X,
-            top: 0,
-            right: width - HELP_TIP_TEXT_PAD_X,
-            bottom: height,
+        GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_HIGH_QUALITY);
+
+        let bg_color = GdiplusContext::gdi_color_to_argb(state.palette.help_tip_bg);
+        let border_color = GdiplusContext::gdi_color_to_argb(state.palette.panel_border);
+        let text_color = GdiplusContext::gdi_color_to_argb(state.palette.help_tip_text);
+
+        gdiplus.fill_rounded_rect_on_graphics(graphics, 0, 0, width, height, HELP_TIP_RADIUS, bg_color);
+        gdiplus.draw_rounded_rect_border_on_graphics(graphics, 0, 0, width, height, HELP_TIP_RADIUS, border_color, 1.0);
+
+        let text = help_hint_text(state);
+        let text_w = (width - HELP_TIP_TEXT_PAD_X * 2).max(0);
+        let layout_rect = GpRectF {
+            x: HELP_TIP_TEXT_PAD_X as f32,
+            y: 0.0,
+            width: text_w as f32,
+            height: height as f32,
         };
-        let text = to_wide(&help_hint_text(state));
-        DrawTextW(
-            hdc,
-            text.as_ptr(),
-            -1,
-            &mut text_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-        );
-        if !old_font.is_null() {
-            SelectObject(hdc, old_font);
-        }
+        let wide = to_wide(&text);
+        gdiplus.draw_string(graphics, &wide, state.gdiplus_help_tip_font, &layout_rect, text_color);
+
+        GdiplusContext::delete_graphics(graphics);
         EndPaint(hwnd, &paint);
     }
 }

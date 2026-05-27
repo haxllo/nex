@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     AW_ACTIVATE, AW_BLEND, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
 };
 
-use crate::windows_overlay::d2d_renderer::FontRole;
+
 use crate::windows_overlay::icon_cache::{clear_icon_cache, log_memory_snapshot};
 use crate::windows_overlay::state::{state_for, OverlayShellState};
 use crate::windows_overlay::types::*;
@@ -437,12 +437,6 @@ fn apply_help_tip_rounded_corners(help_tip_hwnd: HWND, width: i32, height: i32) 
 }
 
 fn help_tip_width_for_text(state: &OverlayShellState) -> i32 {
-    if let Some(ref renderer) = state.d2d {
-        if let Some(format) = renderer.text_format(FontRole::HelpTip) {
-            let width = renderer.measure_text_width(format, HOTKEY_HELP_TEXT_FALLBACK);
-            return (width as i32 + HELP_TIP_TEXT_PAD_X * 2).max(HELP_TIP_WIDTH);
-        }
-    }
     let text = to_wide(HOTKEY_HELP_TEXT_FALLBACK);
     let hdc = unsafe { GetDC(state.help_tip_hwnd) };
     if hdc.is_null() {
@@ -589,6 +583,7 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
             DeleteObject(state.help_tip_font as _);
         }
     }
+    // Clean up pre-created GDI+ font handles
     if state.help_icon_font != 0 {
         unsafe { DeleteObject(state.help_icon_font as _); }
     }
@@ -670,22 +665,12 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
             DeleteObject(state.icon_brush as _);
         }
     }
-    if state.help_tip_brush != 0 {
-        unsafe {
-            DeleteObject(state.help_tip_brush as _);
-        }
-    }
-    if state.help_tip_border_brush != 0 {
-        unsafe {
-            DeleteObject(state.help_tip_border_brush as _);
-        }
-    }
-    // Clean up pre-created GDI+ font handles
     use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
     if state.gdiplus_title_font != 0 { GdiplusContext::delete_font(state.gdiplus_title_font); state.gdiplus_title_font = 0; }
     if state.gdiplus_meta_font != 0 { GdiplusContext::delete_font(state.gdiplus_meta_font); state.gdiplus_meta_font = 0; }
     if state.gdiplus_status_font != 0 { GdiplusContext::delete_font(state.gdiplus_status_font); state.gdiplus_status_font = 0; }
     if state.gdiplus_header_font != 0 { GdiplusContext::delete_font(state.gdiplus_header_font); state.gdiplus_header_font = 0; }
+    if state.gdiplus_help_tip_font != 0 { GdiplusContext::delete_font(state.gdiplus_help_tip_font); state.gdiplus_help_tip_font = 0; }
 
     state.gdi_cache.clear();
     clear_icon_cache(state);

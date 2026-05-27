@@ -160,6 +160,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) gdiplus_meta_font: isize,
     pub(crate) gdiplus_status_font: isize,
     pub(crate) gdiplus_header_font: isize,
+    pub(crate) gdiplus_help_tip_font: isize,
 
     pub(crate) panel_brush: isize,
     pub(crate) border_brush: isize,
@@ -171,8 +172,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) row_separator_brush: isize,
     pub(crate) selection_accent_brush: isize,
     pub(crate) icon_brush: isize,
-    pub(crate) help_tip_brush: isize,
-    pub(crate) help_tip_border_brush: isize,
+
     pub(crate) theme: OverlayTheme,
     pub(crate) palette: OverlayPalette,
 
@@ -265,6 +265,7 @@ impl Default for OverlayShellState {
             gdiplus_meta_font: 0,
             gdiplus_status_font: 0,
             gdiplus_header_font: 0,
+            gdiplus_help_tip_font: 0,
             panel_brush: 0,
             border_brush: 0,
             input_brush: 0,
@@ -275,8 +276,6 @@ impl Default for OverlayShellState {
             row_separator_brush: 0,
             selection_accent_brush: 0,
             icon_brush: 0,
-            help_tip_brush: 0,
-            help_tip_border_brush: 0,
             theme: OverlayTheme::Dark,
             palette: PALETTE_DARK,
             status_is_error: false,

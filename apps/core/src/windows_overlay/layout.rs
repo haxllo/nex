@@ -671,6 +671,8 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
     if state.gdiplus_status_font != 0 { GdiplusContext::delete_font(state.gdiplus_status_font); state.gdiplus_status_font = 0; }
     if state.gdiplus_header_font != 0 { GdiplusContext::delete_font(state.gdiplus_header_font); state.gdiplus_header_font = 0; }
     if state.gdiplus_help_tip_font != 0 { GdiplusContext::delete_font(state.gdiplus_help_tip_font); state.gdiplus_help_tip_font = 0; }
+    if state.gdiplus_footer_font != 0 { GdiplusContext::delete_font(state.gdiplus_footer_font); state.gdiplus_footer_font = 0; }
+    if state.gdiplus_hint_font != 0 { GdiplusContext::delete_font(state.gdiplus_hint_font); state.gdiplus_hint_font = 0; }
 
     state.gdi_cache.clear();
     clear_icon_cache(state);

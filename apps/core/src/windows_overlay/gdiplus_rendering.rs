@@ -31,6 +31,7 @@ extern "system" {
     fn GdipCreateFromHDC(hdc: isize, graphics: *mut isize) -> i32;
     fn GdipDeleteGraphics(graphics: isize) -> i32;
     fn GdipSetSmoothingMode(graphics: isize, smoothingMode: i32) -> i32;
+    fn GdipSetTextRenderingHint(graphics: isize, mode: i32) -> i32;
 
     // Brushes
     fn GdipCreateSolidFill(color: u32, brush: *mut isize) -> i32;
@@ -92,6 +93,7 @@ extern "system" {
 const GDI_PLUS_OK: i32 = 0;
 pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
 pub(crate) const SMOOTHING_MODE_HIGH_QUALITY: i32 = 4;
+const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
 const FILL_MODE_ALTERNATE: i32 = 0;
 const UNIT_PIXEL: i32 = 2;
 const FONT_STYLE_REGULAR: i32 = 0;
@@ -154,6 +156,7 @@ impl GdiplusContext {
     pub(crate) fn create_graphics(&self, hdc: isize) -> Option<isize> {
         let mut graphics = 0isize;
         if unsafe { GdipCreateFromHDC(hdc, &mut graphics) } == GDI_PLUS_OK {
+            unsafe { GdipSetTextRenderingHint(graphics, TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT); }
             Some(graphics)
         } else {
             None

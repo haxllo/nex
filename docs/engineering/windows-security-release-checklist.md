@@ -34,8 +34,8 @@ Use this checklist before publishing any Windows release (`stable` or `beta`).
 Required pass gates:
 
 ```powershell
-cargo check -p nex
-cargo test -p nex
+cargo check --bin nex
+cargo test -p nex-cli
 pnpm vitest --run
 cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 ```

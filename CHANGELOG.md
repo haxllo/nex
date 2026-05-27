@@ -4,6 +4,33 @@ All notable changes to Nex are documented in this file.
 
 This changelog is intentionally backfilled from the most reliable sources in the repo: tagged milestones, release notes, and shipped commit history. Older tags can be expanded later if you want a full historical pass.
 
+## [1.3.0] - 2026-05-28
+
+### Changed (Breaking)
+- **D2D/DWrite rendering removed entirely** — all rendering now goes through GDI+ (panel background, help tip, footer, list row highlights). The `d2d_renderer.rs` module (~800 lines) has been deleted. No D2D or DWrite code remains in the codebase. GDI+ is now a hard requirement at startup — the overlay closes with an error if GDI+ cannot initialize (previously warned about a non-existent fallback).
+- **SpaceMono replaced with Inter as bundled font** — Inter v4.1 (Regular, Bold, Medium, SemiBold) is now bundled at `apps/assets/fonts/Inter/`. When private fonts load successfully, the UI uses `"Inter"` instead of `"Segoe UI"`. The SpaceMono font directory has been removed.
+- **Text rendering quality unified** — all GDI+ text now uses ClearType (`TextRenderingHintClearTypeGridFit`). The misleading `SMOOTHING_MODE_HIGH_QUALITY` constant (which was identical to `ANTI_ALIAS`) has been removed.
+- **GDI+ init failure is now fatal** — previously printed a warning about a non-existent "GDI fallback"; now posts `WM_CLOSE` and disables the overlay.
+
+### Fixed
+- **Help tip border clipping** — float-based rounded rectangle path with 0.5px inset ensures full 1px pen stroke visibility.
+- **Footer hint rendering** — background and separator now rendered via GDI+ `fill_rect`; text remains GDI `TextOutW` (required for `WS_CHILD` DC of `WS_EX_LAYERED` parent).
+- **`fill_rounded_rect_on_graphics` degeneration** — when corner diameter ≥ width or height, falls back to `GdipFillRectangleI` to avoid self-intersecting `FILL_MODE_ALTERNATE` paths during panel expand animation.
+- **Pre-created GDI+ font handles** — 7 font objects created once during `WM_CREATE` instead of per-frame `SelectObject`.
+- **`register_private_fonts()`** — now correctly searches for `Inter-Regular.ttf` / `Inter-Bold.ttf` (was searching Inter directories for SpaceMono filenames — always failing).
+- **`resolve_font_family()`** — returns `"Inter"` when private fonts load (was returning `"Segoe UI"` unconditionally — bundled font was never used).
+- **CI workflow** — fixed pnpm setup order (was installing Node.js before pnpm); removed conflicting explicit `pnpm/action-setup` version (now auto-detects from `packageManager`).
+- **Hanging UI tests** — all test files using `.tmp` extension with `ShellExecuteW` now use `.txt` (opens Notepad asynchronously) with `taskkill` cleanup to avoid "How do you want to open this file?" dialogs.
+- **CI multiplied jobs** — dropped `ubuntu-latest` from matrix (Nex is Windows-only); dropped duplicate `push` + `pull_request` triggers.
+- **Scaffold test path** — fixed `windows_overlay.rs` → `windows_overlay/mod.rs`.
+- **All `cargo test -p nex` commands** — corrected to `-p nex-cli` (actual package name).
+
+## [1.2.0] - 2026-05-27
+
+### Fixed
+- **Screen-tear on hover** — eliminated visual desync between D2D and GDI rendering surfaces by ensuring consistent invalidation and ordering.
+- **First-keystroke panel flash** — addressed the degenerate paint during panel expand animation where corner diameter temporarily exceeded panel height.
+
 ## [1.1.1] - 2026-05-24
 
 ### Changed

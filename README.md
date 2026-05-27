@@ -2,37 +2,39 @@
 
 <img src="apps/assets/nex.svg" alt="Nex" height="90" />
 
-A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
+# Nex
+
+A keyboard-first launcher for Windows — press a global hotkey to summon a floating search bar and instantly find and launch anything.
 
 [![crates.io](https://img.shields.io/crates/v/nex-cli?label=crates.io)](https://crates.io/crates/nex-cli)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)](#)
+![CI](https://github.com/haxllo/nex/actions/workflows/ci.yml/badge.svg)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
-[![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
 
 </div>
 
-## Installation
-
-### Binary Release (Recommended)
-
-Download the latest release for your platform from the
-[Releases page](https://github.com/haxllo/nex/releases/latest).
-
-After downloading, run the installer and follow the setup instructions.
-
 ---
 
-### Install with Cargo
+## Features
 
-Requires Rust and Cargo installed.
+- **Global Hotkey** (Ctrl+Space) — summon anywhere
+- **Fuzzy Search** — find apps, files, folders by partial name
+- **Web Search** — `?query` to search the web
+- **Calculator** — inline arithmetic (`2+2`)
+- **Emoji Picker** — `:keyword` to find and insert emoji
+- **Window Management** — tile layouts, maximize, restore
+- **Clipboard History** — recent copied items
+- **Everything SDK** — instant file search when Everything is installed
+- **Game Mode** — suppress launcher while gaming
+- **Extensible** — plugin SDK with WASM distribution path
 
-```bash
-cargo install nex-cli; nex
-```
+## Install
 
----
+### Binary (recommended)
 
-### Build from Source
+Download the latest installer from the [Releases page](https://github.com/haxllo/nex/releases/latest).
+
+### From source
 
 ```bash
 git clone https://github.com/haxllo/nex.git
@@ -40,111 +42,70 @@ cd nex
 cargo build --release
 ```
 
-Binary location:
-
-```text
-target/release/nex
-```
-
-## Overview
-
-Nex is a lightweight, fast launcher that puts your workflow at your fingertips. Built in Rust for minimal memory footprint and near-instant responsiveness.
-
-### Key Features
-
-- **Global Hotkey** - Summon the launcher from anywhere with a customizable keyboard shortcut
-- **Fuzzy Search** - Find apps, files, and folders with intelligent matching
-- **Actions** - Execute custom commands, web searches, and system operations
-- **Clipboard History** - Access recently copied items (optional)
-- **Plugins** - Extend functionality with custom plugins
-- **Game Mode** - Suppress the launcher while gaming
+Binary at `target/release/nex.exe`. Run it once — config is auto-created at `%APPDATA%\Nex\config.toml`.
 
 ## Quick Start
 
-### Run
+| Command | Action |
+|---|---|
+| `nex` | Launch in background (Ctrl+Space to show) |
+| `nex --status` | Check if running |
+| `nex --quit` | Stop the launcher |
+| `nex --restart` | Restart |
 
-```bash
-cargo run --release
-```
-
-Or run the built binary directly:
-
-```bash
-./target/release/nex.exe
-```
-
-### Configuration
-
-On first launch, Nex creates a default config at:
-```
-%APPDATA%\Nex\config.toml
-```
-
-Key settings:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `hotkey` | `Alt+Space` | Global hotkey to summon launcher |
-| `max_results` | `8` | Maximum results to display |
-| `show_files` | `false` | Include files in search |
-| `show_folders` | `false` | Include folders in search |
-| `launch_at_startup` | `false` | Start with Windows |
-
-### CLI Commands
-
-```bash
-nex --status          # Check if running
-nex --quit            # Stop the launcher
-nex --restart         # Restart the launcher
-nex --status-json     # JSON status output
-```
+Type in the search bar to find items. Prefix with `>` for actions, `@` for apps, `:` for files/folders, `?` for web search.
 
 ## Search Syntax
 
-- **Type normally** - Fuzzy search across all indexed items
-- **Prefix commands** - `>` for actions, `@` for apps, `:` for files/folders
-- **Web search** - Prefix with `?` to search the web
+| Input | What it does |
+|---|---|
+| `code` | Fuzzy search apps, files, folders named "code" |
+| `>shutdown` | Run a command action |
+| `@code` | Filter to apps only |
+| `:docs` | Filter to files/folders only |
+| `?rust lang` | Web search |
+| `:smile` | Emoji picker |
+| `= 1024 * 768` | Inline calculation |
 
 ## Project Structure
 
 ```
 nex/
-├── apps/core/          # Main Rust application
-│   ├── src/
-│   │   ├── runtime.rs  # Main entry point & event loop
-│   │   ├── search.rs   # Search indexing & querying
-│   │   ├── discovery.rs # File/app discovery
-│   │   └── ...
-│   └── Cargo.toml
-├── apps/assets/        # Icons & branding
-├── scripts/           # Build & packaging scripts
-├── tests/             # Integration tests
-└── docs/              # Documentation
+├── apps/
+│   ├── core/           # Rust application (crate nex-cli / nex_core)
+│   │   ├── src/
+│   │   │   ├── main.rs           # Binary entry point
+│   │   │   ├── lib.rs            # Library root
+│   │   │   ├── runtime.rs        # Runtime lifecycle
+│   │   │   ├── windows_overlay/  # GDI+ overlay window
+│   │   │   ├── core_service.rs   # Search & launch service
+│   │   │   └── ...
+│   │   └── tests/
+│   └── assets/         # Icons, fonts
+├── tests/              # Integration tests
+├── scripts/            # Build & packaging
+└── docs/               # Architecture & engineering docs
 ```
 
 ## Requirements
 
 - Windows 10/11 (64-bit)
-- Rust 1.75+ (for building from source)
+- Rust 1.75+ (to build from source)
 
 ## Building
 
 ```bash
-# Development build
-cargo build
-
-# Release build
-cargo build --release
-
-# Run tests
-cargo test
+cargo build              # debug
+cargo build --release    # release
+cargo test -p nex-cli    # unit tests
 ```
 
 ## Documentation
 
-- [Architecture Notes](docs/README.md)
-- [Release Notes](CHANGELOG.md)
+- [Architecture](docs/README.md)
+- [Config Reference](docs/architecture/configuration-spec.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT

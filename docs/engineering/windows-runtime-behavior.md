@@ -2,7 +2,7 @@
 
 Current hotkey-to-launcher behavior in Nex (`nex`):
 
-1. Start runtime with `cargo run -p nex`.
+1. Start runtime with `cargo run --bin nex`.
 2. Runtime loads config (TOML with inline comments), logs startup mode/hotkey/paths, builds or opens index.
    - indexing path is incremental-first: unchanged providers can be skipped using provider change stamps
    - periodic reconcile scan still runs after the configured interval to prevent drift

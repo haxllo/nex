@@ -24,7 +24,7 @@ Expected:
 ## v2.1 Reliability Scenarios
 
 1. Structured status output
-- Run: `cargo run -p nex -- --status-json`
+- Run: `cargo run --bin nex -- --status-json`
 - Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.cache_compaction`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
 - Expected: `diagnostics.startup_lifecycle` includes:
   - `overlay_ready`

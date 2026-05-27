@@ -928,12 +928,14 @@ extern "system" fn overlay_wnd_proc(
                 if state.gdiplus.is_some() {
                     let temp_dc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut()) };
                     if !temp_dc.is_null() {
-                        let pairs: [(isize, &mut isize); 5] = [
+                        let pairs: [(isize, &mut isize); 7] = [
                             (state.title_font, &mut state.gdiplus_title_font),
                             (state.meta_font, &mut state.gdiplus_meta_font),
                             (state.status_font, &mut state.gdiplus_status_font),
                             (state.header_font, &mut state.gdiplus_header_font),
                             (state.help_tip_font, &mut state.gdiplus_help_tip_font),
+                            (state.footer_font, &mut state.gdiplus_footer_font),
+                            (state.hint_font, &mut state.gdiplus_hint_font),
                         ];
                         for (gdi_font, gp_dest) in pairs {
                             if gdi_font != 0 {

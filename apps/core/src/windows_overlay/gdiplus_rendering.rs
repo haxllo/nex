@@ -276,13 +276,17 @@ impl GdiplusContext {
         let r = radius.max(0).min(w.min(h) / 2);
         let d = r * 2;
 
-        let Some(brush) = Self::create_solid_brush(color) else { return; };
-
-        if r == 0 {
+        // When the corner diameter exceeds the full height or width, the
+        // path-based rounded rect becomes self-intersecting, causing unfilled
+        // gaps in the center with FILL_MODE_ALTERNATE. Fall back to plain fill.
+        if d >= h || d >= w {
+            let Some(brush) = Self::create_solid_brush(color) else { return; };
             unsafe { GdipFillRectangleI(graphics, brush, x, y, w, h); }
             Self::delete_brush(brush);
             return;
         }
+
+        let Some(brush) = Self::create_solid_brush(color) else { return; };
 
         let mut path = 0isize;
         if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {

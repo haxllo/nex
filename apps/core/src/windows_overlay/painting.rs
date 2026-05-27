@@ -4,9 +4,10 @@ use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, DrawTextW, EndPaint, FillRect,
+    BeginPaint, DrawTextW, EndPaint,
     GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, TextOutW, DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
+    SetBkMode, SetTextColor, TextOutW,
+    DT_CENTER, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
     DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, TRANSPARENT,
 };
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED};
@@ -957,7 +958,8 @@ pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {
 }
 
 pub(crate) fn paint_footer_hint(hwnd: HWND, state: &mut OverlayShellState) {
-    if state.panel_brush == 0 {
+    let Some(ref gdiplus) = state.gdiplus else { return; };
+    if state.gdiplus_footer_font == 0 && state.gdiplus_hint_font == 0 {
         return;
     }
     unsafe {
@@ -974,16 +976,18 @@ pub(crate) fn paint_footer_hint(hwnd: HWND, state: &mut OverlayShellState) {
             EndPaint(hwnd, &paint);
             return;
         }
-        FillRect(hdc, &client, state.panel_brush as _);
-        let separator_brush = state.gdi_cache.brush(state.palette.panel_border);
-        let separator_rect = RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: FOOTER_SEPARATOR_HEIGHT,
-        };
-        FillRect(hdc, &separator_rect, separator_brush as _);
 
+        let Some(graphics) = gdiplus.create_graphics(hdc as isize) else {
+            EndPaint(hwnd, &paint);
+            return;
+        };
+
+        let panel_bg = GdiplusContext::gdi_color_to_argb(state.palette.panel_bg);
+        let panel_border = GdiplusContext::gdi_color_to_argb(state.palette.panel_border);
+        gdiplus.fill_rect(graphics, 0, 0, width, height, panel_bg);
+        gdiplus.fill_rect(graphics, 0, 0, width, FOOTER_SEPARATOR_HEIGHT, panel_border);
+
+        // Keep font selected in DC for measurement functions
         let footer_font = if state.footer_font != 0 {
             state.footer_font
         } else if state.meta_font != 0 {
@@ -996,7 +1000,6 @@ pub(crate) fn paint_footer_hint(hwnd: HWND, state: &mut OverlayShellState) {
         } else {
             std::ptr::null_mut()
         };
-        SetBkMode(hdc, TRANSPARENT as i32);
 
         let content_top = (FOOTER_SEPARATOR_HEIGHT + FOOTER_SEPARATOR_TO_CONTENT_GAP).min(height);
         let content_bottom = (height - FOOTER_CONTENT_PAD_Y).max(content_top + 1);
@@ -1005,6 +1008,7 @@ pub(crate) fn paint_footer_hint(hwnd: HWND, state: &mut OverlayShellState) {
         if !old_hint_font.is_null() {
             SelectObject(hdc, old_hint_font);
         }
+        GdiplusContext::delete_graphics(graphics);
         EndPaint(hwnd, &paint);
     }
 }
@@ -1037,8 +1041,7 @@ fn draw_footer_hints_centered(
         let block_left = available_left + ((available_width - full_width) / 2);
         let mut right_cursor = block_left + full_width;
         right_cursor = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1047,8 +1050,7 @@ fn draw_footer_hints_centered(
         );
         right_cursor -= FOOTER_HINT_GROUP_GAP;
         right_cursor = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1057,8 +1059,7 @@ fn draw_footer_hints_centered(
         );
         right_cursor -= FOOTER_HINT_GROUP_GAP;
         let _ = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1069,8 +1070,7 @@ fn draw_footer_hints_centered(
         let block_left = available_left + ((available_width - medium_width) / 2);
         let mut right_cursor = block_left + medium_width;
         right_cursor = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1079,8 +1079,7 @@ fn draw_footer_hints_centered(
         );
         right_cursor -= FOOTER_HINT_GROUP_GAP;
         let _ = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1091,8 +1090,7 @@ fn draw_footer_hints_centered(
         let block_left = available_left + ((available_width - min_width) / 2);
         let right_cursor = block_left + min_width;
         let _ = draw_footer_hint_group_right(
-            hdc,
-            state,
+            hdc, state,
             right_cursor,
             content_top,
             content_bottom,
@@ -1135,8 +1133,7 @@ fn draw_footer_hint_group_right(
     }
     cursor -= FOOTER_HINT_LABEL_GAP;
     draw_footer_label_right(
-        hdc,
-        cursor,
+        hdc, cursor,
         content_top,
         content_bottom,
         label,
@@ -1160,19 +1157,20 @@ fn draw_footer_keycap_right(
     let left = (right - text_width).max(0);
     let content_height = (content_bottom - content_top).max(1);
 
+    let key_font = if state.hint_font != 0 {
+        state.hint_font
+    } else {
+        state.footer_font
+    };
+    if key_font == 0 {
+        return left;
+    }
+
     unsafe {
-        let key_font = if state.hint_font != 0 {
-            state.hint_font
-        } else {
-            state.footer_font
-        };
-        let old_font = if key_font != 0 {
-            SelectObject(hdc, key_font as _)
-        } else {
-            std::ptr::null_mut()
-        };
+        let old_font = SelectObject(hdc, key_font as _);
         let text_color = blend_color(state.palette.results_bg, state.palette.text_primary, 0.94);
         SetTextColor(hdc, text_color);
+        SetBkMode(hdc, TRANSPARENT as i32);
         let text_wide = to_wide_no_nul(text);
         let text_size = measure_text_size(hdc, text);
         let text_y =
@@ -1184,10 +1182,7 @@ fn draw_footer_keycap_right(
             text_wide.as_ptr(),
             text_wide.len() as i32,
         );
-
-        if !old_font.is_null() {
-            SelectObject(hdc, old_font);
-        }
+        SelectObject(hdc, old_font);
     }
 
     left
@@ -1205,6 +1200,7 @@ fn draw_footer_label_right(
     let left = (right - text_width).max(0);
     unsafe {
         SetTextColor(hdc, color);
+        SetBkMode(hdc, TRANSPARENT as i32);
         let text_wide = to_wide_no_nul(text);
         let text_size = measure_text_size(hdc, text);
         let content_height = (content_bottom - content_top).max(1);

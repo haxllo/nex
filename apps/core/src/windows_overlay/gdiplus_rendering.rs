@@ -92,7 +92,6 @@ extern "system" {
 
 const GDI_PLUS_OK: i32 = 0;
 pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
-pub(crate) const SMOOTHING_MODE_HIGH_QUALITY: i32 = 4;
 const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
 const FILL_MODE_ALTERNATE: i32 = 0;
 const UNIT_PIXEL: i32 = 2;
@@ -440,7 +439,7 @@ impl GdiplusContext {
 
     // --- Icons ---
 
-    pub(crate) fn draw_icon(graphics: isize, hicon: isize, x: i32, y: i32, size: i32) {
+    pub(crate) fn draw_icon(graphics: isize, hicon: isize, x: i32, y: i32, _size: i32) {
         let mut bitmap = 0isize;
         if unsafe { GdipCreateBitmapFromHICON(hicon, &mut bitmap) } != GDI_PLUS_OK {
             return;

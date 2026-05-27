@@ -1,7 +1,3 @@
-use std::collections::HashSet;
-
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, DrawTextW, EndPaint,
@@ -20,7 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use std::time::Instant;
 
 use crate::windows_overlay::animation::blend_color;
-use crate::windows_overlay::gdiplus_rendering::{GdiplusContext, GpRectF, SMOOTHING_MODE_HIGH_QUALITY};
+use crate::windows_overlay::gdiplus_rendering::{GdiplusContext, GpRectF, SMOOTHING_MODE_ANTI_ALIAS};
 use crate::windows_overlay::layout::{
     apply_edit_text_rect, compute_input_text_rect, input_line_height_for_edit, visible_row_capacity,
 };
@@ -447,7 +443,7 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
     let icon_container_size = state.icon_container_size;
 
     let Some(graphics) = gdiplus.create_graphics(dis.hDC as isize) else { return; };
-    GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_HIGH_QUALITY);
+    GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_ANTI_ALIAS);
 
     // Fill row background
     let bg_argb = GdiplusContext::gdi_color_to_argb(palette.results_bg);
@@ -671,192 +667,6 @@ pub(crate) fn is_cursor_over_window(hwnd: HWND) -> bool {
     cursor.x >= rect.left && cursor.x < rect.right && cursor.y >= rect.top && cursor.y < rect.bottom
 }
 
-fn d2d_fit_text_with_ellipsis(
-    renderer: &crate::windows_overlay::d2d_renderer::D2dRenderer,
-    format: &IDWriteTextFormat,
-    text: &str,
-    max_width: f32,
-) -> String {
-    if text.trim().is_empty() {
-        return String::new();
-    }
-    if renderer.measure_text_width(format, text) <= max_width {
-        return text.to_string();
-    }
-
-    let ellipsis = "...";
-    let ellipsis_width = renderer.measure_text_width(format, ellipsis);
-    if ellipsis_width >= max_width {
-        return String::new();
-    }
-
-    let mut output = String::new();
-    for ch in text.chars() {
-        let mut candidate = output.clone();
-        candidate.push(ch);
-        if renderer.measure_text_width(format, &candidate) + ellipsis_width > max_width {
-            break;
-        }
-        output.push(ch);
-    }
-    output.push_str(ellipsis);
-    output
-}
-
-fn d2d_draw_highlighted_title(
-    renderer: &mut crate::windows_overlay::d2d_renderer::D2dRenderer,
-    format: &IDWriteTextFormat,
-    rect: &D2D_RECT_F,
-    title: &str,
-    query: &str,
-    base_color: u32,
-    highlight_color: u32,
-) {
-    let max_width = rect.right - rect.left;
-    if max_width <= 0.0 || title.trim().is_empty() {
-        return;
-    }
-
-    let display = d2d_fit_text_with_ellipsis(renderer, format, title, max_width);
-    if display.is_empty() {
-        return;
-    }
-
-    let highlighted = fuzzy_match_positions(&display, query);
-    if highlighted.is_empty() {
-        renderer.dc_draw_text(&display, rect, base_color, format);
-        return;
-    }
-
-    let mut runs: Vec<(String, bool)> = Vec::new();
-    let mut current = String::new();
-    let mut current_hl = false;
-    for (i, ch) in display.chars().enumerate() {
-        let is_hl = highlighted.contains(&i);
-        if current.is_empty() {
-            current_hl = is_hl;
-            current.push(ch);
-        } else if is_hl == current_hl {
-            current.push(ch);
-        } else {
-            runs.push((std::mem::take(&mut current), current_hl));
-            current_hl = is_hl;
-            current.push(ch);
-        }
-    }
-    if !current.is_empty() {
-        runs.push((current, current_hl));
-    }
-
-    let (_, text_height) = renderer.measure_text_size(format, "Wy");
-    let y = rect.top + ((rect.bottom - rect.top - text_height).max(0.0) / 2.0);
-
-    let mut measurements: Vec<(String, bool, f32)> = Vec::with_capacity(runs.len());
-    for (text, is_hl) in &runs {
-        let w = renderer.measure_text_width(format, text);
-        measurements.push((text.clone(), *is_hl, w));
-    }
-
-    let mut x = rect.left;
-    for (text, is_hl, w) in &measurements {
-        if x >= rect.right {
-            break;
-        }
-        let run_rect = D2D_RECT_F {
-            left: x,
-            top: y,
-            right: (x + w).min(rect.right),
-            bottom: y + text_height,
-        };
-        if run_rect.right > run_rect.left {
-            renderer.dc_draw_text(
-                text,
-                &run_rect,
-                if *is_hl { highlight_color } else { base_color },
-                format,
-            );
-        }
-        x += w;
-    }
-}
-
-fn d2d_draw_icon_glyph(
-    renderer: &mut crate::windows_overlay::d2d_renderer::D2dRenderer,
-    row: &OverlayRow,
-    icon_rect: &D2D_RECT_F,
-    color: u32,
-) -> bool {
-    let is_action = row.kind.eq_ignore_ascii_case("action");
-    let codepoint = if is_action {
-        let lower = row.title.to_ascii_lowercase();
-        if lower.contains("web") || lower.contains("search") {
-            0xE721
-        } else if lower.contains("uninstall") || lower.contains("remove") {
-            0xE74D
-        } else if lower.contains("clipboard") {
-            0xE8C8
-        } else if lower.contains("config") || lower.contains("setting") || lower.contains("prefer") {
-            0xE713
-        } else if lower.contains("diagnostic") || lower.contains("bundle") || lower.contains("support") {
-            0xE8A5
-        } else if lower.contains("log") {
-            0xE8B7
-        } else if lower.contains("rebuild") || lower.contains("index") || lower.contains("refresh") {
-            0xE895
-        } else {
-            0xE756
-        }
-    } else {
-        match row.kind.to_ascii_lowercase().as_str() {
-            "app" => 0xE714,
-            "folder" => 0xE8B7,
-            "file" => 0xE8A5,
-            _ => return false,
-        }
-    };
-
-    let Some(ch) = char::from_u32(codepoint) else { return false };
-    let glyph = ch.to_string();
-
-    if let Some(icon_fmt) = renderer.icon_text_format(true).map(|f| f.clone()) {
-        renderer.dc_draw_text(&glyph, icon_rect, color, &icon_fmt);
-        return true;
-    }
-    if let Some(icon_fmt) = renderer.icon_text_format(false).map(|f| f.clone()) {
-        renderer.dc_draw_text(&glyph, icon_rect, color, &icon_fmt);
-        return true;
-    }
-    false
-}
-
-fn fuzzy_match_positions(text: &str, query: &str) -> HashSet<usize> {
-    let query = query.trim();
-    if query.is_empty() {
-        return HashSet::new();
-    }
-
-    let mut matched = HashSet::new();
-    let mut text_iter = text.chars().enumerate();
-
-    for q in query.chars() {
-        let q_lower = q.to_ascii_lowercase();
-        let mut found = None;
-        for (index, t) in text_iter.by_ref() {
-            if t.to_ascii_lowercase() == q_lower {
-                found = Some(index);
-                break;
-            }
-        }
-        if let Some(index) = found {
-            matched.insert(index);
-        } else {
-            return HashSet::new();
-        }
-    }
-
-    matched
-}
-
 fn measure_text_width(hdc: HDC, text: &str) -> i32 {
     if text.is_empty() {
         return 0;
@@ -931,7 +741,7 @@ pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {
             EndPaint(hwnd, &paint);
             return;
         };
-        GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_HIGH_QUALITY);
+        GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_ANTI_ALIAS);
 
         let bg_color = GdiplusContext::gdi_color_to_argb(state.palette.help_tip_bg);
         let border_color = GdiplusContext::gdi_color_to_argb(state.palette.panel_border);

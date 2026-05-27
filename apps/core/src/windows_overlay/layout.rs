@@ -361,16 +361,6 @@ pub(crate) fn compute_input_text_rect(
 }
 
 pub(crate) fn input_line_height_for_edit(edit_hwnd: HWND, fallback_font: isize) -> i32 {
-    // Prefer DWrite-based measurement: font_role_size * ~1.45 for line height
-    if fallback_font == 0 {
-        if let Some(state) = state_for(unsafe { GetParent(edit_hwnd) }) {
-            if state.d2d.is_some() {
-                let line_height = (19.0 * 1.45) as i32;
-                return line_height.max(1);
-            }
-        }
-    }
-
     let hdc = unsafe { GetDC(edit_hwnd) };
     if hdc.is_null() {
         return INPUT_TEXT_LINE_HEIGHT_FALLBACK;

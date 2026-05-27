@@ -180,7 +180,7 @@ pub(crate) const HELP_TIP_WIDTH: i32 = 132;
 pub(crate) const HELP_TIP_HEIGHT: i32 = 26;
 pub(crate) const HELP_TIP_RADIUS: i32 = 10;
 pub(crate) const HELP_TIP_TEXT_PAD_X: i32 = 8;
-pub(crate) const PRIMARY_FONT_FAMILY: &str = "Segoe UI";
+pub(crate) const PRIMARY_FONT_FAMILY: &str = "Inter";
 pub(crate) const FALLBACK_FONT_CHAIN: &[&str] = &[
     "Segoe UI Variable Display",
     "Segoe UI Variable",

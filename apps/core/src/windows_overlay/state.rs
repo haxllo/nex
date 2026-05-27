@@ -3,7 +3,6 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crate::windows_overlay::d2d_renderer::D2dRenderer;
 use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{CreatePen, CreateSolidBrush, PS_SOLID};
@@ -224,9 +223,6 @@ pub(crate) struct OverlayShellState {
     pub(crate) icon_draw_size: i32,
     pub(crate) icon_container_size: i32,
 
-    // D2D + DirectWrite renderer
-    pub(crate) d2d: Option<D2dRenderer>,
-
     // GDI+ for antialiased selection highlight
     pub(crate) gdiplus: Option<GdiplusContext>,
 }
@@ -321,7 +317,6 @@ impl Default for OverlayShellState {
             dpi: 96,
             icon_draw_size: 32,
             icon_container_size: 34,
-            d2d: None,
             gdiplus: None,
         }
     }

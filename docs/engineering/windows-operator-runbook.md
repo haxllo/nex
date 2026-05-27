@@ -8,7 +8,7 @@ Nex is the product name; the current internal Windows runtime binary remains `ne
 From repo root:
 
 ```powershell
-cargo run -p nex
+cargo run --bin nex
 ```
 
 Installed release mode (recommended for users):
@@ -25,7 +25,7 @@ Notes:
 Background mode (detached, no terminal dependency):
 
 ```powershell
-cargo run -p nex -- --background
+cargo run --bin nex -- --background
 ```
 
 Expected startup logs include:
@@ -255,7 +255,7 @@ After:
 Run these on a real Windows host:
 
 1. Start runtime:
-   - `cargo run -p nex`
+   - `cargo run --bin nex`
 2. Confirm process visibility:
    - Task Manager shows `nex.exe`.
 3. Confirm hotkey:
@@ -330,7 +330,7 @@ Recommended capture points:
      - whether target executable icon differs from shortcut icon
    - Verify the path is launchable from Explorer/Run dialog.
 6. Process not visible:
-   - Ensure `cargo run -p nex` is still running.
+   - Ensure `cargo run --bin nex` is still running.
    - Verify `nex.exe` in Task Manager Details tab.
 7. JS tests flaky on Windows:
    - Use `pnpm vitest --run` with repo `vitest.config.ts` (single-fork mode configured).
@@ -342,8 +342,8 @@ Recommended capture points:
 
 ```powershell
 pnpm vitest --run
-cargo test -p nex
-cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex-cli
+cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 ```
 
 ## Release Lifecycle Validation

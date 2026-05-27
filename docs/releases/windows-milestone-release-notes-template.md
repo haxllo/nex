@@ -19,8 +19,8 @@
 
 - Automated gates passed:
   - `./node_modules/.bin/vitest --run`
-  - `cargo test -p nex`
-  - `cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
+  - `cargo test -p nex-cli`
+  - `cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms`
 - Windows runtime smoke harness status: `<pass/fail>`
 - Manual E2E checklist status: `<pass/fail>`
 - Manual evidence file: `artifacts/windows/manual-e2e-result.json`

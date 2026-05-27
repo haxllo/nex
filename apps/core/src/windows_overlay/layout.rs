@@ -680,6 +680,13 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
             DeleteObject(state.help_tip_border_brush as _);
         }
     }
+    // Clean up pre-created GDI+ font handles
+    use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
+    if state.gdiplus_title_font != 0 { GdiplusContext::delete_font(state.gdiplus_title_font); state.gdiplus_title_font = 0; }
+    if state.gdiplus_meta_font != 0 { GdiplusContext::delete_font(state.gdiplus_meta_font); state.gdiplus_meta_font = 0; }
+    if state.gdiplus_status_font != 0 { GdiplusContext::delete_font(state.gdiplus_status_font); state.gdiplus_status_font = 0; }
+    if state.gdiplus_header_font != 0 { GdiplusContext::delete_font(state.gdiplus_header_font); state.gdiplus_header_font = 0; }
+
     state.gdi_cache.clear();
     clear_icon_cache(state);
 

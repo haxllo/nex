@@ -927,6 +927,28 @@ extern "system" fn overlay_wnd_proc(
                     icon_font_family_fallback_wide(),
                 );
 
+                // Pre-create GDI+ font handles from GDI fonts (avoids per-row
+                // GdipCreateFontFromDC + GdipDeleteFont in draw_list_row).
+                if state.gdiplus.is_some() {
+                    let temp_dc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut()) };
+                    if !temp_dc.is_null() {
+                        let pairs: [(isize, &mut isize); 4] = [
+                            (state.title_font, &mut state.gdiplus_title_font),
+                            (state.meta_font, &mut state.gdiplus_meta_font),
+                            (state.status_font, &mut state.gdiplus_status_font),
+                            (state.header_font, &mut state.gdiplus_header_font),
+                        ];
+                        for (gdi_font, gp_dest) in pairs {
+                            if gdi_font != 0 {
+                                let old = unsafe { windows_sys::Win32::Graphics::Gdi::SelectObject(temp_dc, gdi_font as _) };
+                                *gp_dest = crate::windows_overlay::gdiplus_rendering::GdiplusContext::create_font_from_hdc(temp_dc as isize).unwrap_or(0);
+                                unsafe { windows_sys::Win32::Graphics::Gdi::SelectObject(temp_dc, old); }
+                            }
+                        }
+                        unsafe { windows_sys::Win32::Graphics::Gdi::ReleaseDC(std::ptr::null_mut(), temp_dc); }
+                    }
+                }
+
                 state.edit_hwnd = unsafe {
                     CreateWindowExW(
                         0,

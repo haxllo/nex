@@ -155,6 +155,12 @@ pub(crate) struct OverlayShellState {
     pub(crate) command_icon_font: isize,
     pub(crate) command_icon_fallback_font: isize,
 
+    // GDI+ font handles (pre-created from GDI fonts)
+    pub(crate) gdiplus_title_font: isize,
+    pub(crate) gdiplus_meta_font: isize,
+    pub(crate) gdiplus_status_font: isize,
+    pub(crate) gdiplus_header_font: isize,
+
     pub(crate) panel_brush: isize,
     pub(crate) border_brush: isize,
     pub(crate) input_brush: isize,
@@ -255,6 +261,10 @@ impl Default for OverlayShellState {
             command_badge_font: 0,
             command_icon_font: 0,
             command_icon_fallback_font: 0,
+            gdiplus_title_font: 0,
+            gdiplus_meta_font: 0,
+            gdiplus_status_font: 0,
+            gdiplus_header_font: 0,
             panel_brush: 0,
             border_brush: 0,
             input_brush: 0,

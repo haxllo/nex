@@ -468,20 +468,19 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
         let sect_right = dis.rcItem.right - ROW_INSET_X;
 
         // Draw section title text
-        unsafe { SelectObject(dis.hDC, state.header_font as _); }
-        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+        if state.gdiplus_header_font != 0 {
             let label_h = HEADER_ROW_LABEL_HEIGHT as f32;
             let text_rect = GpRectF {
                 x: sect_left as f32, y: sect_top as f32,
                 width: (sect_right - sect_left) as f32, height: label_h,
             };
             gdiplus.draw_string(
-                graphics, &sect_wide, gp_font, &text_rect,
+                graphics, &sect_wide, state.gdiplus_header_font, &text_rect,
                 GdiplusContext::gdi_color_to_argb(palette.text_section),
             );
 
             // Measure text for separator line position
-            let measured = gdiplus.measure_string(graphics, &sect_wide, gp_font, &text_rect);
+            let measured = gdiplus.measure_string(graphics, &sect_wide, state.gdiplus_header_font, &text_rect);
             if let Some(bounds) = measured {
                 let sect_width = bounds.width as i32;
                 if sect_width > 0 {
@@ -495,7 +494,6 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
                     }
                 }
             }
-            GdiplusContext::delete_font(gp_font);
         }
         GdiplusContext::delete_graphics(graphics);
         return;
@@ -558,51 +556,43 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
 
     if status_row {
         let text = to_wide_no_nul(&row.title);
-        unsafe { SelectObject(dis.hDC, state.status_font as _); }
-        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+        if state.gdiplus_status_font != 0 {
             let text_rect = GpRectF {
                 x: text_left as f32, y: text_top as f32,
                 width: text_w, height: ROW_TITLE_BLOCK_HEIGHT as f32,
             };
             gdiplus.draw_string(
-                graphics, &text, gp_font, &text_rect,
+                graphics, &text, state.gdiplus_status_font, &text_rect,
                 GdiplusContext::gdi_color_to_argb(palette.text_secondary),
             );
-            GdiplusContext::delete_font(gp_font);
         }
     } else {
         // Title
         let title_text = to_wide_no_nul(&row.title);
-        unsafe { SelectObject(dis.hDC, state.title_font as _); }
-        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+        if state.gdiplus_title_font != 0 {
             let text_rect = GpRectF {
                 x: text_left as f32, y: text_top as f32,
                 width: text_w, height: ROW_TITLE_BLOCK_HEIGHT as f32,
             };
             gdiplus.draw_string(
-                graphics, &title_text, gp_font, &text_rect,
+                graphics, &title_text, state.gdiplus_title_font, &text_rect,
                 GdiplusContext::gdi_color_to_argb(palette.text_primary),
             );
-            GdiplusContext::delete_font(gp_font);
         }
 
         // Path meta
-        if has_meta {
+        if has_meta && state.gdiplus_meta_font != 0 {
             let path_text = to_wide_no_nul(&row.path);
-            unsafe { SelectObject(dis.hDC, state.meta_font as _); }
-            if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
-                let path_rect = GpRectF {
-                    x: text_left as f32,
-                    y: (text_top + ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP) as f32,
-                    width: text_w,
-                    height: ROW_META_BLOCK_HEIGHT as f32,
-                };
-                gdiplus.draw_string(
-                    graphics, &path_text, gp_font, &path_rect,
-                    GdiplusContext::gdi_color_to_argb(palette.text_secondary),
-                );
-                GdiplusContext::delete_font(gp_font);
-            }
+            let path_rect = GpRectF {
+                x: text_left as f32,
+                y: (text_top + ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP) as f32,
+                width: text_w,
+                height: ROW_META_BLOCK_HEIGHT as f32,
+            };
+            gdiplus.draw_string(
+                graphics, &path_text, state.gdiplus_meta_font, &path_rect,
+                GdiplusContext::gdi_color_to_argb(palette.text_secondary),
+            );
         }
     }
 

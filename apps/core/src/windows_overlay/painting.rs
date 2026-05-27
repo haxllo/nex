@@ -937,7 +937,8 @@ pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {
         let text_color = GdiplusContext::gdi_color_to_argb(state.palette.help_tip_text);
 
         gdiplus.fill_rounded_rect_on_graphics(graphics, 0, 0, width, height, HELP_TIP_RADIUS, bg_color);
-        gdiplus.draw_rounded_rect_border_on_graphics(graphics, 0, 0, width, height, HELP_TIP_RADIUS, border_color, 1.0);
+        let border_rect = GpRectF { x: 0.5, y: 0.5, width: (width - 1) as f32, height: (height - 1) as f32 };
+        gdiplus.draw_rounded_rect_border_on_graphics_f(graphics, &border_rect, HELP_TIP_RADIUS, border_color, 1.0);
 
         let text = help_hint_text(state);
         let text_w = (width - HELP_TIP_TEXT_PAD_X * 2).max(0);

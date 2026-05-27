@@ -39,7 +39,9 @@ extern "system" {
     // Paths
     fn GdipCreatePath(fillMode: i32, path: *mut isize) -> i32;
     fn GdipAddPathLineI(path: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> i32;
+    fn GdipAddPathLine(path: isize, x1: f32, y1: f32, x2: f32, y2: f32) -> i32;
     fn GdipAddPathArcI(path: isize, x: i32, y: i32, width: i32, height: i32, startAngle: f32, sweepAngle: f32) -> i32;
+    fn GdipAddPathArc(path: isize, x: f32, y: f32, width: f32, height: f32, startAngle: f32, sweepAngle: f32) -> i32;
     fn GdipFillPath(graphics: isize, brush: isize, path: isize) -> i32;
     fn GdipDrawPath(graphics: isize, pen: isize, path: isize) -> i32;
     fn GdipDeletePath(path: isize) -> i32;
@@ -333,6 +335,41 @@ impl GdiplusContext {
             GdipAddPathLineI(path, x + w - r, y + h, x + r, y + h);
             GdipAddPathArcI(path, x, y + h - d, d, d, 90.0, 90.0);
             GdipAddPathLineI(path, x, y + h - r, x, y + r);
+        }
+
+        unsafe { GdipDrawPath(graphics, pen, path); }
+
+        unsafe { GdipDeletePath(path); }
+        Self::delete_pen(pen);
+    }
+
+    pub(crate) fn draw_rounded_rect_border_on_graphics_f(
+        &self, graphics: isize, rect: &GpRectF,
+        radius: i32, color: u32, pen_width: f32,
+    ) {
+        let w = rect.width;
+        let h = rect.height;
+        if w <= 0.0 || h <= 0.0 { return; }
+        let r = (radius as f32).max(0.0).min(w.min(h) / 2.0);
+        let d = r * 2.0;
+
+        let Some(pen) = Self::create_pen(color, pen_width) else { return; };
+
+        let mut path = 0isize;
+        if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
+            Self::delete_pen(pen);
+            return;
+        }
+
+        unsafe {
+            GdipAddPathArc(path, rect.x, rect.y, d, d, 180.0, 90.0);
+            GdipAddPathLine(path, rect.x + r, rect.y, rect.x + w - r, rect.y);
+            GdipAddPathArc(path, rect.x + w - d, rect.y, d, d, 270.0, 90.0);
+            GdipAddPathLine(path, rect.x + w, rect.y + r, rect.x + w, rect.y + h - r);
+            GdipAddPathArc(path, rect.x + w - d, rect.y + h - d, d, d, 0.0, 90.0);
+            GdipAddPathLine(path, rect.x + w - r, rect.y + h, rect.x + r, rect.y + h);
+            GdipAddPathArc(path, rect.x, rect.y + h - d, d, d, 90.0, 90.0);
+            GdipAddPathLine(path, rect.x, rect.y + h - r, rect.x, rect.y + r);
         }
 
         unsafe { GdipDrawPath(graphics, pen, path); }

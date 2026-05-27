@@ -14,6 +14,22 @@ cargo test -p nex-cli --test windows_runtime_smoke_test  # CI-only smoke test
 
 **CI order**: `vitest --run` → `cargo test -p nex-cli` → perf gate → smoke gate.
 
+## Release
+
+```bash
+# 1. Build portable zip + manifest (requires Rust)
+.\scripts\windows\package-windows-artifact.ps1 -Version "x.y.z"
+
+# 2. Build setup.exe (requires Inno Setup 6 at default path)
+.\scripts\windows\package-windows-installer.ps1 -Version "x.y.z"
+
+# 3. Upload assets to GitHub Release
+gh release create vx.y.z --title "vx.y.z" --notes-file docs/releases/vx.y.z-notes.md
+gh release upload vx.y.z artifacts/windows/nex-x.y.z-windows-x64.zip
+gh release upload vx.y.z artifacts/windows/nex-x.y.z-windows-x64-setup.exe
+gh release upload vx.y.z artifacts/windows/nex-x.y.z-windows-x64-manifest.json
+```
+
 ## Running
 
 ```bash

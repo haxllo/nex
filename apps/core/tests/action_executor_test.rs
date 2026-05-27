@@ -9,7 +9,17 @@ fn unique_temp_path(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("nex-{label}-{}-{unique}.tmp", std::process::id()))
+    std::env::temp_dir().join(format!("nex-{label}-{}-{unique}.txt", std::process::id()))
+}
+
+fn kill_notepad() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let _ = Command::new("taskkill")
+            .args(["/f", "/im", "notepad.exe"])
+            .output();
+    }
 }
 
 #[test]
@@ -34,6 +44,7 @@ fn accepts_existing_launch_path() {
 
     fs::write(&file_path, b"ok").expect("should create temp file");
     let result = launch_path(&file_path_str);
+    kill_notepad();
     fs::remove_file(&file_path).expect("should clean temp file");
 
     assert!(result.is_ok());

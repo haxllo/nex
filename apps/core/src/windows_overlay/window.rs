@@ -4,9 +4,10 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AddFontResourceExW, CreateFontW, CreateSolidBrush, InvalidateRect, SetBkColor, SetBkMode,
-    SetTextColor, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE,
-    OUT_DEFAULT_PRECIS, TRANSPARENT,
+    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetTextFaceW,
+    InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+    CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE, OUT_DEFAULT_PRECIS,
+    TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -46,6 +47,8 @@ use crate::windows_overlay::layout::{
     initial_visible_row_count, layout_children, row_index_for_result_index, row_result_index,
     target_top_index_for_selection, try_enable_dwm_rounded_corners,
 };
+use windows::Win32::Foundation::HWND as WindowsHWND;
+use crate::windows_overlay::d2d_renderer::D2dRenderer;
 use crate::windows_overlay::painting::{
     command_badge_animation_tick, draw_list_row, draw_panel_background, handle_wheel_input,
     hide_input_caret, is_cursor_over_window, set_uninstall_quick_mode,
@@ -516,7 +519,12 @@ impl NativeOverlayShell {
             unsafe {
                 SendMessageW(state.list_hwnd, WM_SETREDRAW as u32, 1, 0);
                 InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
-                InvalidateRect(self.hwnd, std::ptr::null(), 0);
+                // Parent overlay (self.hwnd) not invalidated here — the window
+                // class has CS_HREDRAW | CS_VREDRAW which already invalidates
+                // the full client area on any size change from expand_results.
+                // Redundant invalidation would trigger a D2D EndDraw → DXGI
+                // Present before the listbox's GDI content has painted,
+                // causing a D2D/GDI desync flash on WS_EX_LAYERED windows.
             }
         }
     }
@@ -536,6 +544,7 @@ impl NativeOverlayShell {
         }
 
         let Some(clamped) = row_index_for_result_index(state, selected_index) else {
+            state.hover_index = -1;
             unsafe {
                 SendMessageW(state.list_hwnd, LB_SETCURSEL, usize::MAX, 0);
                 InvalidateRect(state.list_hwnd, std::ptr::null(), 0);
@@ -549,7 +558,7 @@ impl NativeOverlayShell {
             count as i32,
             current_top,
         );
-        state.hover_index = -1;
+        state.hover_index = clamped as i32;
         unsafe {
             // Avoid default listbox "scroll into view" animation on keyboard selection changes.
             SendMessageW(state.list_hwnd, WM_SETREDRAW as u32, 0, 0);
@@ -845,6 +854,28 @@ extern "system" fn overlay_wnd_proc(
                 state.theme = detect_system_theme();
                 state.palette = palette_for_theme(state.theme);
                 state.dwm_rounded_enabled = try_enable_dwm_rounded_corners(hwnd);
+
+                // Initialize D2D/DWrite renderer (best-effort, fall back to GDI if fails)
+                let init_result = D2dRenderer::new(WindowsHWND(hwnd), WINDOW_WIDTH as u32, COMPACT_HEIGHT as u32);
+                match init_result {
+                    Ok(mut renderer) => {
+                        renderer.precreate_all_text_formats();
+                        state.d2d = Some(renderer);
+                        crate::logging::info("[nex] D2D/DWrite renderer initialized");
+                    }
+                    Err(e) => {
+                        crate::logging::warn(&format!("[nex] D2D init failed, falling back to GDI: {e}"));
+                    }
+                }
+
+                // Initialize GDI+ for antialiased selection highlight
+                state.gdiplus = crate::windows_overlay::gdiplus_rendering::GdiplusContext::new();
+                if state.gdiplus.is_some() {
+                    crate::logging::info("[nex] GDI+ initialized");
+                } else {
+                    crate::logging::warn("[nex] GDI+ init failed, selection will use GDI fallback");
+                }
+
                 state.panel_brush = unsafe { CreateSolidBrush(state.palette.panel_bg) } as isize;
                 state.border_brush =
                     unsafe { CreateSolidBrush(state.palette.panel_border) } as isize;
@@ -885,6 +916,11 @@ extern "system" fn overlay_wnd_proc(
                 state.help_icon_font = create_font_with_family(
                     FONT_HELP_ICON_HEIGHT,
                     FONT_WEIGHT_HELP_ICON,
+                    icon_font_family_primary_wide(),
+                );
+                state.search_icon_font = create_font_with_family(
+                    FONT_INPUT_HEIGHT,
+                    FONT_WEIGHT_INPUT,
                     icon_font_family_primary_wide(),
                 );
                 state.footer_font = create_font(FONT_FOOTER_HEIGHT, FONT_WEIGHT_FOOTER);
@@ -1334,6 +1370,11 @@ extern "system" fn overlay_wnd_proc(
         }
         WM_SIZE => {
             if let Some(state) = state_for(hwnd) {
+                let width = (lparam & 0xFFFF) as u32;
+                let height = ((lparam >> 16) & 0xFFFF) as u32;
+                if let Some(ref mut renderer) = state.d2d {
+                    renderer.resize(WindowsHWND(hwnd), width.max(1), height.max(1));
+                }
                 layout_children(hwnd, state);
             }
             apply_rounded_corners_hwnd(hwnd);
@@ -1510,8 +1551,12 @@ extern "system" fn overlay_wnd_proc(
                 unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut OverlayShellState };
             if !state_ptr.is_null() {
                 unsafe {
+                    // Clean up GDI resources (D2D renderer drops via Box::from_raw below)
                     cleanup_state_resources(&mut *state_ptr);
-                    let _ = Box::from_raw(state_ptr);
+                    let mut state = Box::from_raw(state_ptr);
+                    if let Some(ref mut r) = state.d2d {
+                        r.destroy();
+                    }
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }
             }
@@ -1548,7 +1593,7 @@ fn font_family_wide() -> &'static [u16] {
                     .or_else(|_| std::env::var("SWIFTFIND_FONT_FAMILY"))
                     .ok()
                     .as_deref(),
-                register_private_geist_fonts(),
+                register_private_fonts(),
             );
             to_wide(&family)
         })
@@ -1576,18 +1621,49 @@ fn command_prefix_font_family_wide() -> &'static [u16] {
         .as_slice()
 }
 
-fn resolve_font_family(font_env: Option<&str>, geist_loaded: bool) -> String {
+fn resolve_font_family(font_env: Option<&str>, primary_loaded: bool) -> String {
     if let Some(value) = font_env.map(|v| v.trim()).filter(|v| !v.is_empty()) {
         return value.to_string();
     }
-    if geist_loaded {
-        GEIST_FONT_FAMILY.to_string()
-    } else {
-        DEFAULT_FONT_FAMILY.to_string()
+    if primary_loaded {
+        return PRIMARY_FONT_FAMILY.to_string();
     }
+    for &family in FALLBACK_FONT_CHAIN {
+        if font_is_available(family) {
+            return family.to_string();
+        }
+    }
+    "Segoe UI".to_string()
 }
 
-fn register_private_geist_fonts() -> bool {
+fn font_is_available(family_name: &str) -> bool {
+    let wide = to_wide(family_name);
+    let hfont = unsafe {
+        CreateFontW(
+            0, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, 0,
+            CLEARTYPE_QUALITY as u32, FF_DONTCARE as u32, wide.as_ptr(),
+        )
+    };
+    if hfont.is_null() {
+        return false;
+    }
+    let hdc = unsafe { GetDC(std::ptr::null_mut()) };
+    if hdc.is_null() {
+        unsafe { DeleteObject(hfont as _); }
+        return false;
+    }
+    let old = unsafe { SelectObject(hdc, hfont as _) };
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetTextFaceW(hdc, 256, buf.as_mut_ptr()) };
+    unsafe { SelectObject(hdc, old); ReleaseDC(std::ptr::null_mut(), hdc); DeleteObject(hfont as _); }
+    if len == 0 {
+        return false;
+    }
+    let actual = String::from_utf16_lossy(&buf[..len as usize - 1]);
+    actual.eq_ignore_ascii_case(family_name)
+}
+
+fn register_private_fonts() -> bool {
     static REGISTERED: OnceLock<bool> = OnceLock::new();
     *REGISTERED.get_or_init(|| {
         let mut candidates = Vec::new();
@@ -1600,22 +1676,25 @@ fn register_private_geist_fonts() -> bool {
             }
         }
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("apps/assets/fonts/Geist/otf"));
-            candidates.push(cwd.join("fonts/Geist/otf"));
-            candidates.push(cwd.join("assets/fonts/Geist/otf"));
+            candidates.push(cwd.join("apps/assets/fonts/Inter/ttf"));
+            candidates.push(cwd.join("fonts/Inter/ttf"));
+            candidates.push(cwd.join("assets/fonts/Inter/ttf"));
+            candidates.push(cwd.join("apps/assets/fonts/Inter"));
+            candidates.push(cwd.join("fonts/Inter"));
+            candidates.push(cwd.join("assets/fonts/Inter"));
         }
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                candidates.push(exe_dir.join("..").join("assets/fonts/Geist/otf"));
-                candidates.push(exe_dir.join("assets/fonts/Geist/otf"));
+                candidates.push(exe_dir.join("..").join("assets/fonts/Inter/ttf"));
+                candidates.push(exe_dir.join("assets/fonts/Inter/ttf"));
+                candidates.push(exe_dir.join("..").join("assets/fonts/Inter"));
+                candidates.push(exe_dir.join("assets/fonts/Inter"));
             }
         }
 
         let files = [
-            "Geist-Regular.otf",
-            "Geist-Medium.otf",
-            "Geist-SemiBold.otf",
-            "Geist-Bold.otf",
+            "SpaceMono-Regular.ttf",
+            "SpaceMono-Bold.ttf",
         ];
 
         for base_dir in candidates {

@@ -6,13 +6,13 @@
 cargo build --bin nex                    # debug build
 cargo build --release --bin nex          # release build
 cargo test -p nex                        # all unit tests (cross-platform)
-cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
-cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
+cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex-cli --test windows_runtime_smoke_test  # CI-only smoke test
 ```
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
-**CI order**: `vitest --run` → `cargo test -p nex` → perf gate → smoke gate.
+**CI order**: `vitest --run` → `cargo test -p nex-cli` → perf gate → smoke gate.
 
 ## Running
 

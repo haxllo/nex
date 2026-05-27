@@ -45,10 +45,10 @@ jobs:
         run: ./node_modules/.bin/vitest --run
 
       - name: Run Rust test gate
-        run: cargo test -p nex
+        run: cargo test -p nex-cli
 
       - name: Run Rust perf exact gate
-        run: cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+        run: cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 
       - name: Run runtime smoke harness gate
-        run: cargo test -p nex --test windows_runtime_smoke_test
+        run: cargo test -p nex-cli --test windows_runtime_smoke_test

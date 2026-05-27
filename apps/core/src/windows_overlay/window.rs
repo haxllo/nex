@@ -853,12 +853,12 @@ extern "system" fn overlay_wnd_proc(
                 state.palette = palette_for_theme(state.theme);
                 state.dwm_rounded_enabled = try_enable_dwm_rounded_corners(hwnd);
 
-                // Initialize GDI+ for all rendering
+                // Initialize GDI+ for all rendering (hard requirement)
                 state.gdiplus = crate::windows_overlay::gdiplus_rendering::GdiplusContext::new();
-                if state.gdiplus.is_some() {
-                    crate::logging::info("[nex] GDI+ initialized");
-                } else {
-                    crate::logging::warn("[nex] GDI+ init failed, selection will use GDI fallback");
+                if state.gdiplus.is_none() {
+                    crate::logging::error("[nex] GDI+ initialization failed, overlay disabled");
+                    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                    return 0;
                 }
 
                 state.panel_brush = unsafe { CreateSolidBrush(state.palette.panel_bg) } as isize;
@@ -1682,8 +1682,8 @@ fn register_private_fonts() -> bool {
         }
 
         let files = [
-            "SpaceMono-Regular.ttf",
-            "SpaceMono-Bold.ttf",
+    "Inter-Regular.ttf",
+    "Inter-Bold.ttf",
         ];
 
         for base_dir in candidates {

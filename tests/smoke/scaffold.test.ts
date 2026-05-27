@@ -5,6 +5,7 @@ describe('scaffold', () => {
   it('has native runtime entry points and bundled fonts', () => {
     expect(existsSync('apps/core/src/main.rs')).toBe(true)
     expect(existsSync('apps/core/src/windows_overlay.rs')).toBe(true)
-    expect(existsSync('apps/assets/fonts/SpaceMono/ttf/SpaceMono-Regular.ttf')).toBe(true)
+    expect(existsSync('apps/assets/fonts/Inter/ttf/Inter-Regular.ttf')).toBe(true)
+    expect(existsSync('apps/assets/fonts/Inter/ttf/Inter-Bold.ttf')).toBe(true)
   })
 })

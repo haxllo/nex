@@ -7,6 +7,10 @@
 #[cfg(target_os = "windows")]
 pub(crate) mod animation;
 #[cfg(target_os = "windows")]
+pub(crate) mod d2d_renderer;
+#[cfg(target_os = "windows")]
+pub(crate) mod gdiplus_rendering;
+#[cfg(target_os = "windows")]
 pub(crate) mod icon_cache;
 #[cfg(target_os = "windows")]
 pub(crate) mod icon_loader;

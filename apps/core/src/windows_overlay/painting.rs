@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use std::time::Instant;
 
 use crate::windows_overlay::animation::blend_color;
+use crate::windows_overlay::gdiplus_rendering::{GdiplusContext, GpRectF, SMOOTHING_MODE_HIGH_QUALITY};
 use crate::windows_overlay::layout::{
     apply_edit_text_rect, compute_input_text_rect, input_line_height_for_edit, visible_row_capacity,
 };
@@ -366,77 +367,56 @@ fn results_content_progress(state: &OverlayShellState) -> f32 {
 }
 
 pub(crate) fn draw_panel_background(hwnd: HWND) {
-    let Some(state) = state_for(hwnd) else {
-        return;
-    };
+    let Some(state) = state_for(hwnd) else { return; };
+    let Some(ref gdiplus) = state.gdiplus else { return; };
 
     let mut client: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetClientRect(hwnd, &mut client) };
 
-    // D2D path: use renderer for hardware-accelerated painting
-    if state.d2d.is_some() {
-        let width_f = (client.right - client.left).max(0) as f32;
-        let height_f = (client.bottom - client.top).max(0) as f32;
-        if width_f <= 0.0 || height_f <= 0.0 { return; }
+    let w = (client.right - client.left).max(0);
+    let h = (client.bottom - client.top).max(0);
+    if w <= 0 || h <= 0 { return; }
 
-        // Must call BeginPaint/EndPaint to validate the update region even in D2D path
-        let mut paint: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-        let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
-        let needs_end_paint = !hdc.is_null();
+    let mut paint: PAINTSTRUCT = unsafe { std::mem::zeroed() };
+    let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+    if hdc.is_null() { return; }
 
-        let panel_bg = state.palette.panel_bg;
-        let panel_border = state.palette.panel_border;
-        let dwm = state.dwm_rounded_enabled;
-        let draw_divider = state.results_visible;
-
-        let renderer = state.d2d.as_mut().unwrap();
-        if !renderer.begin_draw() {
-            if needs_end_paint { unsafe { EndPaint(hwnd, &paint); } }
-            return;
-        }
-
-        renderer.clear(panel_bg);
-
-        if dwm {
-            renderer.fill_rectangle(
-                &D2D_RECT_F { left: 0.0, top: 0.0, right: width_f, bottom: height_f },
-                panel_bg,
-            );
-        } else {
-            let radius = PANEL_RADIUS as f32;
-            renderer.fill_rounded_rectangle(
-                &D2D_RECT_F { left: 0.0, top: 0.0, right: width_f, bottom: height_f },
-                radius,
-                panel_border,
-            );
-            renderer.fill_rounded_rectangle(
-                &D2D_RECT_F { left: 1.0, top: 1.0, right: width_f - 1.0, bottom: height_f - 1.0 },
-                (radius - 2.0).max(2.0),
-                panel_bg,
-            );
-        }
-
-        if draw_divider {
-            let left = 1.0;
-            let right = (width_f - 1.0).max(left + 1.0);
-            let y = COMPACT_HEIGHT as f32 + DIVIDER_TOP_SPACING as f32;
-            renderer.draw_line(left, y, right, y, panel_border, 1.0);
-        }
-
-        renderer.end_draw();
-        if needs_end_paint { unsafe { EndPaint(hwnd, &paint); } }
+    let Some(graphics) = gdiplus.create_graphics(hdc as isize) else {
+        unsafe { EndPaint(hwnd, &paint); }
         return;
+    };
+
+    let panel_bg = GdiplusContext::gdi_color_to_argb(state.palette.panel_bg);
+    let panel_border = GdiplusContext::gdi_color_to_argb(state.palette.panel_border);
+
+    // Fill entire background
+    gdiplus.fill_rect(graphics, 0, 0, w, h, panel_bg);
+
+    if !state.dwm_rounded_enabled && PANEL_RADIUS > 0 {
+        // Draw border (outer rounded rect filled with border color)
+        gdiplus.fill_rounded_rect_on_graphics(
+            graphics, 0, 0, w, h, PANEL_RADIUS, panel_border,
+        );
+        // Draw inner rect (slightly smaller, filled with bg color)
+        gdiplus.fill_rounded_rect_on_graphics(
+            graphics, 2, 2, w - 4, h - 4,
+            (PANEL_RADIUS - 2).max(1), panel_bg,
+        );
     }
+
+    if state.results_visible {
+        let y = COMPACT_HEIGHT + DIVIDER_TOP_SPACING;
+        GdiplusContext::draw_line(graphics, 2, y, w - 2, y, panel_border, 1.0);
+    }
+
+    GdiplusContext::delete_graphics(graphics);
+    unsafe { EndPaint(hwnd, &paint); }
 }
 
 pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
-    if dis.itemID == u32::MAX {
-        return;
-    }
-
-    let Some(state) = state_for(hwnd) else {
-        return;
-    };
+    if dis.itemID == u32::MAX { return; }
+    let Some(state) = state_for(hwnd) else { return; };
+    let Some(ref gdiplus) = state.gdiplus else { return; };
 
     let item_index = dis.itemID as i32;
     let row = state
@@ -461,84 +441,67 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
     let palette = state.palette;
     let selected_visible = !status_row
         && !section_row
-        && if state.hover_index >= 0 {
-            hovered
-        } else {
-            selected_flag
-        };
+        && if state.hover_index >= 0 { hovered } else { selected_flag };
     let has_meta = !row.path.trim().is_empty();
     let icon_container_size = state.icon_container_size;
-    let _dwm_rounded = state.dwm_rounded_enabled;
 
-    let gdi_bg_rect = RECT {
-        left: dis.rcItem.left,
-        top: dis.rcItem.top,
-        right: dis.rcItem.right,
-        bottom: dis.rcItem.bottom,
-    };
+    let Some(graphics) = gdiplus.create_graphics(dis.hDC as isize) else { return; };
+    GdiplusContext::set_smoothing_mode(graphics, SMOOTHING_MODE_HIGH_QUALITY);
 
-    unsafe {
-        FillRect(dis.hDC, &gdi_bg_rect, state.results_brush as _);
-    }
+    // Fill row background
+    let bg_argb = GdiplusContext::gdi_color_to_argb(palette.results_bg);
+    gdiplus.fill_rect(
+        graphics,
+        dis.rcItem.left, dis.rcItem.top,
+        dis.rcItem.right - dis.rcItem.left,
+        dis.rcItem.bottom - dis.rcItem.top,
+        bg_argb,
+    );
 
     // --- Section row ---
     if section_row {
         let section_title = row.title.trim();
-        let section_title = if section_title.is_empty() {
-            "Section"
-        } else {
-            section_title
-        };
+        let section_title = if section_title.is_empty() { "Section" } else { section_title };
         let sect_wide = to_wide_no_nul(section_title);
         let sect_left = dis.rcItem.left + ROW_INSET_X;
         let sect_top = dis.rcItem.top + ((ROW_HEIGHT - HEADER_ROW_LABEL_HEIGHT).max(0) / 2);
         let sect_right = dis.rcItem.right - ROW_INSET_X;
 
-        let mut sect_rect = RECT {
-            left: sect_left, top: sect_top,
-            right: sect_right, bottom: sect_top + HEADER_ROW_LABEL_HEIGHT,
-        };
-        unsafe {
-            let old = SelectObject(dis.hDC, state.header_font as _);
-            SetBkMode(dis.hDC, TRANSPARENT as i32);
-            SetTextColor(dis.hDC, palette.text_section);
-            DrawTextW(dis.hDC, sect_wide.as_ptr(), sect_wide.len() as i32, &mut sect_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            SelectObject(dis.hDC, old);
-        }
+        // Draw section title text
+        unsafe { SelectObject(dis.hDC, state.header_font as _); }
+        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+            let label_h = HEADER_ROW_LABEL_HEIGHT as f32;
+            let text_rect = GpRectF {
+                x: sect_left as f32, y: sect_top as f32,
+                width: (sect_right - sect_left) as f32, height: label_h,
+            };
+            gdiplus.draw_string(
+                graphics, &sect_wide, gp_font, &text_rect,
+                GdiplusContext::gdi_color_to_argb(palette.text_section),
+            );
 
-        // Draw separator line
-        let sect_width = unsafe {
-            let mut text_size: SIZE = std::mem::zeroed();
-            let old_font = SelectObject(dis.hDC, state.header_font as _);
-            let _ = GetTextExtentPoint32W(dis.hDC, sect_wide.as_ptr(), sect_wide.len() as i32, &mut text_size);
-            SelectObject(dis.hDC, old_font);
-            text_size.cx
-        };
-        if sect_width > 0 {
-            let line_left = (sect_left + sect_width + HEADER_ROW_LINE_GAP).min(sect_right);
-            if line_left < sect_right {
-                let line_rect = RECT {
-                    left: line_left,
-                    top: sect_top + HEADER_ROW_LABEL_HEIGHT / 2,
-                    right: sect_right,
-                    bottom: sect_top + HEADER_ROW_LABEL_HEIGHT / 2 + HEADER_ROW_LINE_HEIGHT,
-                };
-                unsafe {
-                    FillRect(dis.hDC, &line_rect, state.row_separator_brush as _);
+            // Measure text for separator line position
+            let measured = gdiplus.measure_string(graphics, &sect_wide, gp_font, &text_rect);
+            if let Some(bounds) = measured {
+                let sect_width = bounds.width as i32;
+                if sect_width > 0 {
+                    let line_left = (sect_left + sect_width + HEADER_ROW_LINE_GAP).min(sect_right);
+                    if line_left < sect_right {
+                        let line_y = sect_top + HEADER_ROW_LABEL_HEIGHT / 2;
+                        let line_color = GdiplusContext::gdi_color_to_argb(palette.text_section);
+                        GdiplusContext::draw_line(
+                            graphics, line_left, line_y, sect_right, line_y, line_color, 1.0,
+                        );
+                    }
                 }
             }
+            GdiplusContext::delete_font(gp_font);
         }
+        GdiplusContext::delete_graphics(graphics);
         return;
     }
 
-    // --- Selection highlight (GDI-only pre-blended fill) ---
-    // GDI+ antialiased rounded rect was removed because mixing GDI+ and GDI
-    // on the same HDC for a WS_EX_LAYERED child window causes each GDI+ →
-    // GDI flush to be immediately visible (DWM does not redirect/batch GDI
-    // updates for child windows of layered parents), creating a screen-tear
-    // effect during hover transitions.  A GDI-only FillRect with a pre-blended
-    // color avoids the GDI+ rendering pipeline entirely.
+    // --- Selection highlight ---
     if !status_row && (selected_visible || hovered) {
         let sel_x = dis.rcItem.left + 3;
         let sel_y = dis.rcItem.top + ROW_VERTICAL_INSET + 1 + offset_y;
@@ -549,19 +512,8 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
             let is_dark = (palette.results_bg & 0xFF) < 128;
             let tint = if is_dark { 0xFFFFFF } else { 0x000000 };
             let highlight_color = blend_color(palette.results_bg, tint, 0.14);
-            let sel_rect = RECT {
-                left: sel_x,
-                top: sel_y,
-                right: sel_x + sel_w,
-                bottom: sel_y + sel_h,
-            };
-            unsafe {
-                let brush = CreateSolidBrush(highlight_color);
-                if !brush.is_null() {
-                    FillRect(dis.hDC, &sel_rect, brush as _);
-                    DeleteObject(brush as _);
-                }
-            }
+            let gp_color = GdiplusContext::gdi_color_to_argb(highlight_color);
+            gdiplus.fill_rounded_rect_on_graphics(graphics, sel_x, sel_y, sel_w, sel_h, 4, gp_color);
         }
     }
 
@@ -579,23 +531,17 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
             let text_top = dis.rcItem.top + ((ROW_HEIGHT - total_height).max(0) / 2) + offset_y;
             let icon_top = text_top + ((total_height as f32 - icon_container_size as f32) / 2.0) as i32;
             let icon_offset = ((icon_container_size as f32 - icon_draw_size as f32) / 2.0) as i32;
-            unsafe {
-                DrawIconEx(
-                    dis.hDC,
-                    dis.rcItem.left + ROW_INSET_X + icon_offset,
-                    icon_top + icon_offset,
-                    icon_handle as _,
-                    icon_draw_size,
-                    icon_draw_size,
-                    0,
-                    std::ptr::null_mut(),
-                    DI_NORMAL,
-                );
-            }
+            GdiplusContext::draw_icon(
+                graphics,
+                icon_handle as isize,
+                dis.rcItem.left + ROW_INSET_X + icon_offset,
+                icon_top + icon_offset,
+                icon_draw_size,
+            );
         }
     }
 
-    // --- GDI Text ---
+    // --- Text ---
     let text_left = if status_row {
         dis.rcItem.left + ROW_INSET_X
     } else {
@@ -608,54 +554,59 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
         ROW_TITLE_BLOCK_HEIGHT
     };
     let text_top = dis.rcItem.top + ((ROW_HEIGHT - total_height).max(0) / 2) + offset_y;
+    let text_w = (text_right - text_left).max(0) as f32;
 
     if status_row {
-        let mut title_rect = RECT {
-            left: text_left, top: text_top,
-            right: text_right, bottom: text_top + ROW_TITLE_BLOCK_HEIGHT,
-        };
-        let wide = to_wide(&row.title);
-        unsafe {
-            let old = SelectObject(dis.hDC, state.status_font as _);
-            SetBkMode(dis.hDC, TRANSPARENT as i32);
-            SetTextColor(dis.hDC, palette.text_secondary);
-            DrawTextW(dis.hDC, wide.as_ptr(), -1, &mut title_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            SelectObject(dis.hDC, old);
+        let text = to_wide_no_nul(&row.title);
+        unsafe { SelectObject(dis.hDC, state.status_font as _); }
+        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+            let text_rect = GpRectF {
+                x: text_left as f32, y: text_top as f32,
+                width: text_w, height: ROW_TITLE_BLOCK_HEIGHT as f32,
+            };
+            gdiplus.draw_string(
+                graphics, &text, gp_font, &text_rect,
+                GdiplusContext::gdi_color_to_argb(palette.text_secondary),
+            );
+            GdiplusContext::delete_font(gp_font);
         }
     } else {
-        let mut title_rect = RECT {
-            left: text_left, top: text_top,
-            right: text_right, bottom: text_top + ROW_TITLE_BLOCK_HEIGHT,
-        };
-        let wide = to_wide(&row.title);
-        unsafe {
-            let old = SelectObject(dis.hDC, state.title_font as _);
-            SetBkMode(dis.hDC, TRANSPARENT as i32);
-            SetTextColor(dis.hDC, palette.text_primary);
-            DrawTextW(dis.hDC, wide.as_ptr(), -1, &mut title_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            SelectObject(dis.hDC, old);
+        // Title
+        let title_text = to_wide_no_nul(&row.title);
+        unsafe { SelectObject(dis.hDC, state.title_font as _); }
+        if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+            let text_rect = GpRectF {
+                x: text_left as f32, y: text_top as f32,
+                width: text_w, height: ROW_TITLE_BLOCK_HEIGHT as f32,
+            };
+            gdiplus.draw_string(
+                graphics, &title_text, gp_font, &text_rect,
+                GdiplusContext::gdi_color_to_argb(palette.text_primary),
+            );
+            GdiplusContext::delete_font(gp_font);
+        }
+
+        // Path meta
+        if has_meta {
+            let path_text = to_wide_no_nul(&row.path);
+            unsafe { SelectObject(dis.hDC, state.meta_font as _); }
+            if let Some(gp_font) = GdiplusContext::create_font_from_hdc(dis.hDC as isize) {
+                let path_rect = GpRectF {
+                    x: text_left as f32,
+                    y: (text_top + ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP) as f32,
+                    width: text_w,
+                    height: ROW_META_BLOCK_HEIGHT as f32,
+                };
+                gdiplus.draw_string(
+                    graphics, &path_text, gp_font, &path_rect,
+                    GdiplusContext::gdi_color_to_argb(palette.text_secondary),
+                );
+                GdiplusContext::delete_font(gp_font);
+            }
         }
     }
 
-    if has_meta && !status_row {
-        let mut path_rect = RECT {
-            left: text_left,
-            top: text_top + ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP,
-            right: text_right,
-            bottom: text_top + ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP + ROW_META_BLOCK_HEIGHT,
-        };
-        let wide = to_wide(&row.path);
-        unsafe {
-            let old = SelectObject(dis.hDC, state.meta_font as _);
-            SetBkMode(dis.hDC, TRANSPARENT as i32);
-            SetTextColor(dis.hDC, palette.text_secondary);
-            DrawTextW(dis.hDC, wide.as_ptr(), -1, &mut path_rect,
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-            SelectObject(dis.hDC, old);
-        }
-    }
+    GdiplusContext::delete_graphics(graphics);
 }
 
 pub(crate) fn row_is_selectable(state: &OverlayShellState, index: usize) -> bool {

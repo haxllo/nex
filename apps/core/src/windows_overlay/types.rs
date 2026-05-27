@@ -40,7 +40,7 @@ pub(crate) const ROW_ICON_SIZE: i32 = 34;
 pub(crate) const ROW_ICON_DRAW_SIZE: i32 = 32;
 pub(crate) const ROW_ICON_GAP: i32 = 10;
 pub(crate) const ROW_VERTICAL_INSET: i32 = 2;
-pub(crate) const ROW_ACTIVE_RADIUS: i32 = 10;
+pub(crate) const ROW_ACTIVE_RADIUS: i32 = 8;
 pub(crate) const ROW_TITLE_BLOCK_HEIGHT: i32 = 21;
 pub(crate) const ROW_META_BLOCK_HEIGHT: i32 = 16;
 pub(crate) const ROW_TEXT_LINE_GAP: i32 = 3;
@@ -154,9 +154,12 @@ pub(crate) const ICON_FONT_FAMILY_FALLBACK: &str = "Segoe MDL2 Assets";
 pub(crate) const COMMAND_PREFIX_FONT_FAMILY: &str = "Segoe Fluent Icons";
 pub(crate) const INPUT_TEXT_SHIFT_X: i32 = 10;
 pub(crate) const INPUT_TEXT_SHIFT_Y: i32 = 0;
+pub(crate) const INPUT_TEXT_SEARCH_PAD: i32 = 26;
 pub(crate) const INPUT_TEXT_LINE_HEIGHT_FALLBACK: i32 = 20;
 pub(crate) const INPUT_TEXT_LEFT_INSET: i32 = 19;
 pub(crate) const INPUT_TEXT_RIGHT_INSET: i32 = 10;
+pub(crate) const SEARCH_ICON_TEXT: &str = "\u{E721}";
+pub(crate) const SEARCH_ICON_LEFT: i32 = 12;
 pub(crate) const COMMAND_PREFIX_TEXT: &str = "\u{E76C}";
 pub(crate) const COMMAND_PREFIX_RESERVED_WIDTH: i32 = 34;
 pub(crate) const COMMAND_PREFIX_GAP: i32 = 12;
@@ -177,8 +180,18 @@ pub(crate) const HELP_TIP_WIDTH: i32 = 132;
 pub(crate) const HELP_TIP_HEIGHT: i32 = 26;
 pub(crate) const HELP_TIP_RADIUS: i32 = 10;
 pub(crate) const HELP_TIP_TEXT_PAD_X: i32 = 8;
-pub(crate) const DEFAULT_FONT_FAMILY: &str = "Segoe UI Variable Text";
-pub(crate) const GEIST_FONT_FAMILY: &str = "Geist";
+pub(crate) const PRIMARY_FONT_FAMILY: &str = "Segoe UI";
+pub(crate) const FALLBACK_FONT_CHAIN: &[&str] = &[
+    "Segoe UI Variable Display",
+    "Segoe UI Variable",
+    "Segoe UI",
+    "Inter",
+    "SF Pro Display",
+    "Cascadia Mono",
+    "Consolas",
+    "Courier New",
+    "Lucida Console",
+];
 pub(crate) const HOTKEY_HELP_TEXT_FALLBACK: &str = "Click to change hotkey";
 pub(crate) const HELP_ICON_TEXT: &str = "\u{E946}";
 pub(crate) const NO_RESULTS_STATUS_TEXT: &str = "No results";

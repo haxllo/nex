@@ -681,42 +681,6 @@ fn measure_text_width(hdc: HDC, text: &str) -> i32 {
     }
 }
 
-fn icon_glyph_for_kind(kind: &str) -> &'static str {
-    if kind.eq_ignore_ascii_case("app") {
-        "A"
-    } else if kind.eq_ignore_ascii_case("action") {
-        ">"
-    } else if kind.eq_ignore_ascii_case("clipboard") {
-        "C"
-    } else if kind.eq_ignore_ascii_case("folder") {
-        "D"
-    } else {
-        "F"
-    }
-}
-
-fn icon_glyph_for_row(row: &OverlayRow) -> &'static str {
-    if !row.kind.eq_ignore_ascii_case("action") {
-        return icon_glyph_for_kind(&row.kind);
-    }
-    let lower = row.title.to_ascii_lowercase();
-    if lower.contains("web") || lower.contains("search") {
-        "W"
-    } else if lower.contains("clipboard") {
-        "C"
-    } else if lower.contains("config") || lower.contains("setting") {
-        "G"
-    } else if lower.contains("diagnostic") || lower.contains("bundle") {
-        "D"
-    } else if lower.contains("log") {
-        "L"
-    } else if lower.contains("rebuild") || lower.contains("index") {
-        "R"
-    } else {
-        ">"
-    }
-}
-
 // ==================== PAINT HELPERS (recovered) ====================
 
 pub(crate) fn paint_help_tip(hwnd: HWND, state: &OverlayShellState) {

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
 use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::Graphics::Gdi::{CreatePen, CreateSolidBrush, PS_SOLID};
+
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
 use windows_sys::Win32::UI::WindowsAndMessaging::GWLP_USERDATA;
 
@@ -28,54 +28,12 @@ pub(crate) struct IconLoadResult {
 
 // ==================== GDI OBJECT CACHE ====================
 
-/// Holds cached GDI brushes and pens indexed by their BGR color value.
-/// Created on demand during painting and bulk-destroyed during cleanup.
-pub(crate) struct GdiObjectCache {
-    pub(crate) brushes: HashMap<u32, isize>,
-    pub(crate) pens: HashMap<u32, isize>,
-}
+/// Placeholder; GDI object caching was removed with the GDI+ migration.
+pub(crate) struct GdiObjectCache;
 
 impl GdiObjectCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            brushes: HashMap::new(),
-            pens: HashMap::new(),
-        }
-    }
-
-    pub(crate) fn brush(&mut self, color: u32) -> isize {
-        let entry = self
-            .brushes
-            .entry(color)
-            .or_insert_with(|| unsafe { CreateSolidBrush(color) as isize });
-        *entry
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn pen(&mut self, color: u32) -> isize {
-        let entry = self
-            .pens
-            .entry(color)
-            .or_insert_with(|| unsafe { CreatePen(PS_SOLID, 1, color) as isize });
-        *entry
-    }
-
-    pub(crate) fn clear(&mut self) {
-        for (_, h) in self.brushes.drain() {
-            if h != 0 {
-                unsafe {
-                    windows_sys::Win32::Graphics::Gdi::DeleteObject(h as _);
-                }
-            }
-        }
-        for (_, h) in self.pens.drain() {
-            if h != 0 {
-                unsafe {
-                    windows_sys::Win32::Graphics::Gdi::DeleteObject(h as _);
-                }
-            }
-        }
-    }
+    pub(crate) fn new() -> Self { Self }
+    pub(crate) fn clear(&mut self) {}
 }
 
 use crate::windows_overlay::types::{

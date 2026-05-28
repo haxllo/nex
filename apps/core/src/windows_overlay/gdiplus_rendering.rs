@@ -49,15 +49,9 @@ extern "system" {
 
     // Rect fill / draw
     fn GdipFillRectangleI(graphics: isize, brush: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
-    fn GdipDrawRectangleI(graphics: isize, pen: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
-
     // Font
     fn GdipCreateFontFromDC(hdc: isize, font: *mut isize) -> i32;
     fn GdipDeleteFont(font: isize) -> i32;
-    fn GdipCreateFont(
-        familyName: *const u16, emSize: f32, style: i32, unit: i32,
-        font: *mut isize,
-    ) -> i32;
 
     // String format
     fn GdipCreateStringFormat(formatAttributes: i32, language: u16, format: *mut isize) -> i32;
@@ -95,12 +89,9 @@ pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
 const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
 const FILL_MODE_ALTERNATE: i32 = 0;
 const UNIT_PIXEL: i32 = 2;
-const FONT_STYLE_REGULAR: i32 = 0;
-
 // StringAlignment
 const STRING_ALIGNMENT_NEAR: i32 = 0;
 const STRING_ALIGNMENT_CENTER: i32 = 1;
-const STRING_ALIGNMENT_FAR: i32 = 2;
 
 // StringTrimming
 const STRING_TRIMMING_ELLIPSIS_CHARACTER: i32 = 3;
@@ -195,76 +186,6 @@ impl GdiplusContext {
         }
     }
 
-    // --- Rounded rect (with own graphics create/delete) ---
-
-    pub(crate) fn fill_rounded_rect(
-        &self, hdc: isize,
-        x: i32, y: i32, w: i32, h: i32,
-        radius: i32, color: u32,
-    ) {
-        if w <= 0 || h <= 0 { return; }
-        let r = radius.max(0).min(w.min(h) / 2);
-        let d = r * 2;
-
-        let saved = unsafe {
-            windows_sys::Win32::Graphics::Gdi::SaveDC(hdc as _)
-        };
-        if saved == 0 { return; }
-
-        let mut graphics = 0isize;
-        if unsafe { GdipCreateFromHDC(hdc, &mut graphics) } != GDI_PLUS_OK {
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
-            return;
-        }
-        unsafe { GdipSetSmoothingMode(graphics, SMOOTHING_MODE_ANTI_ALIAS); }
-
-        let mut brush = 0isize;
-        if unsafe { GdipCreateSolidFill(color, &mut brush) } != GDI_PLUS_OK {
-            unsafe { GdipDeleteGraphics(graphics); }
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
-            return;
-        }
-
-        if r == 0 {
-            unsafe {
-                GdipFillRectangleI(graphics, brush, x, y, w, h);
-                GdipDeleteBrush(brush);
-                GdipDeleteGraphics(graphics);
-                windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved);
-            }
-            return;
-        }
-
-        let mut path = 0isize;
-        if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
-            unsafe { GdipDeleteBrush(brush); GdipDeleteGraphics(graphics); }
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
-            return;
-        }
-
-        unsafe {
-            GdipAddPathArcI(path, x, y, d, d, 180.0, 90.0);
-            GdipAddPathLineI(path, x + r, y, x + w - r, y);
-            GdipAddPathArcI(path, x + w - d, y, d, d, 270.0, 90.0);
-            GdipAddPathLineI(path, x + w, y + r, x + w, y + h - r);
-            GdipAddPathArcI(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
-            GdipAddPathLineI(path, x + w - r, y + h, x + r, y + h);
-            GdipAddPathArcI(path, x, y + h - d, d, d, 90.0, 90.0);
-            GdipAddPathLineI(path, x, y + h - r, x, y + r);
-        }
-
-        unsafe {
-            GdipFillPath(graphics, brush, path);
-        }
-
-        unsafe {
-            GdipDeletePath(path);
-            GdipDeleteBrush(brush);
-            GdipDeleteGraphics(graphics);
-            windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved);
-        }
-    }
-
     // --- Rounded rect on existing graphics ---
 
     pub(crate) fn fill_rounded_rect_on_graphics(
@@ -308,45 +229,6 @@ impl GdiplusContext {
 
         unsafe { GdipDeletePath(path); }
         Self::delete_brush(brush);
-    }
-
-    pub(crate) fn draw_rounded_rect_border_on_graphics(
-        &self, graphics: isize, x: i32, y: i32, w: i32, h: i32,
-        radius: i32, color: u32, pen_width: f32,
-    ) {
-        if w <= 0 || h <= 0 { return; }
-        let r = radius.max(0).min(w.min(h) / 2);
-        let d = r * 2;
-
-        let Some(pen) = Self::create_pen(color, pen_width) else { return; };
-
-        if r == 0 {
-            unsafe { GdipDrawRectangleI(graphics, pen, x, y, w, h); }
-            Self::delete_pen(pen);
-            return;
-        }
-
-        let mut path = 0isize;
-        if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
-            Self::delete_pen(pen);
-            return;
-        }
-
-        unsafe {
-            GdipAddPathArcI(path, x, y, d, d, 180.0, 90.0);
-            GdipAddPathLineI(path, x + r, y, x + w - r, y);
-            GdipAddPathArcI(path, x + w - d, y, d, d, 270.0, 90.0);
-            GdipAddPathLineI(path, x + w, y + r, x + w, y + h - r);
-            GdipAddPathArcI(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
-            GdipAddPathLineI(path, x + w - r, y + h, x + r, y + h);
-            GdipAddPathArcI(path, x, y + h - d, d, d, 90.0, 90.0);
-            GdipAddPathLineI(path, x, y + h - r, x, y + r);
-        }
-
-        unsafe { GdipDrawPath(graphics, pen, path); }
-
-        unsafe { GdipDeletePath(path); }
-        Self::delete_pen(pen);
     }
 
     pub(crate) fn draw_rounded_rect_border_on_graphics_f(

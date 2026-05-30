@@ -105,7 +105,6 @@ impl WebSearchProvider {
 pub struct Config {
     pub version: u32,
     pub max_results: u16,
-    pub index_db_path: PathBuf,
     pub config_path: PathBuf,
     pub discovery_roots: Vec<PathBuf>,
     pub discovery_exclude_roots: Vec<PathBuf>,
@@ -142,7 +141,6 @@ impl Default for Config {
         Self {
             version: CURRENT_CONFIG_VERSION,
             max_results: 20,
-            index_db_path: app_dir.join("index.sqlite3"),
             config_path,
             discovery_roots: default_discovery_roots(),
             discovery_exclude_roots: default_discovery_exclude_roots(),
@@ -300,13 +298,6 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                 let source_version = cfg.version;
                 cfg.config_path = resolved_path.clone();
 
-                if cfg.index_db_path.as_os_str().is_empty() {
-                    cfg.index_db_path = resolved_path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join("index.sqlite3");
-                }
-
                 let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
                 should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
                 validate(&cfg).map_err(ConfigError::Validation)?;
@@ -332,13 +323,6 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
     let mut cfg: Config = parse_text(&raw)?;
     let source_version = cfg.version;
     cfg.config_path = resolved_path.clone();
-
-    if cfg.index_db_path.as_os_str().is_empty() {
-        cfg.index_db_path = resolved_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("index.sqlite3");
-    }
 
     let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
     should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
@@ -390,7 +374,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // How to use this file:\n");
     text.push_str("  // - Edit values and save.\n");
     text.push_str("  // - Most settings apply automatically within about 1 second.\n");
-    text.push_str("  // - Restart required after changing hotkey or index_db_path.\n");
+    text.push_str("  // - Restart required after changing hotkey.\n");
     text.push_str("  // - Keep strings in double quotes.\n");
     text.push_str(
         "  // - Use double backslashes for Windows paths (C:\\\\Users\\\\Admin\\\\...).\n",
@@ -401,7 +385,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // Quick setup:\n");
     text.push_str("  // 1) Keep exactly ONE `hotkey` line uncommented.\n");
     text.push_str("  // 2) Save file.\n");
-    text.push_str("  // 3) Restart only if you changed hotkey/index_db_path.\n");
+    text.push_str("  // 3) Restart only if you changed hotkey.\n");
     text.push_str("  //\n");
     text.push_str("  // Safer Windows-friendly hotkeys (uncomment one if you prefer):\n");
 
@@ -586,7 +570,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  \"active_memory_target_mb\": ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
     text.push_str(",\n");
-    text.push_str("  // Maximum indexed file/folder items retained in database discovery pass\n");
+    text.push_str("  // Maximum indexed file/folder items retained during discovery pass\n");
     text.push_str("  \"index_max_items_total\": ");
     text.push_str(&cfg.index_max_items_total.to_string());
     text.push_str(",\n");
@@ -617,7 +601,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# How to use this file:\n");
     text.push_str("# - Edit values and save.\n");
     text.push_str("# - Most settings apply automatically within about 1 second.\n");
-    text.push_str("# - Restart required after changing hotkey or index_db_path.\n");
+    text.push_str("# - Restart required after changing hotkey.\n");
     text.push_str("# - Strings must be in quotes (example: hotkey = \"Ctrl+Space\").\n");
     text.push_str("# - Use double backslashes for Windows paths (C:\\\\Users\\\\Admin\\\\...).\n");
     text.push_str("# - true/false and numbers are not quoted.\n");
@@ -626,7 +610,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# Quick setup:\n");
     text.push_str("# 1) Keep exactly ONE hotkey value.\n");
     text.push_str("# 2) Save file.\n");
-    text.push_str("# 3) Restart only if you changed hotkey/index_db_path.\n");
+    text.push_str("# 3) Restart only if you changed hotkey.\n");
     text.push_str("#\n");
     text.push_str("# Safer Windows-friendly hotkeys you can use:\n");
     for option in &cfg.hotkey_recommended {
@@ -809,14 +793,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
 pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.max_results < 5 || cfg.max_results > 100 {
         return Err("max_results out of range".into());
-    }
-
-    if cfg.index_db_path.as_os_str().is_empty() {
-        return Err("index_db_path is required".into());
-    }
-
-    if cfg.config_path.as_os_str().is_empty() {
-        return Err("config_path is required".into());
     }
 
     if cfg.hotkey.trim().is_empty() {
@@ -1029,12 +1005,6 @@ fn windows_user_profile_root() -> Option<PathBuf> {
 fn default_for_path(path: &Path) -> Config {
     let mut cfg = Config::default();
     cfg.config_path = path.to_path_buf();
-    if cfg.index_db_path == Config::default().index_db_path {
-        cfg.index_db_path = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("index.sqlite3");
-    }
     cfg
 }
 
@@ -1289,11 +1259,6 @@ fn rewrite_managed_paths_to_current_app_dir(cfg: &mut Config) -> bool {
     }
 
     let mut changed = false;
-
-    if let Some(rebased) = rebase_managed_path(&cfg.index_db_path, &legacy_dir, &current_dir) {
-        cfg.index_db_path = rebased;
-        changed = true;
-    }
 
     for plugin_path in &mut cfg.plugin_paths {
         if let Some(rebased) = rebase_managed_path(plugin_path, &legacy_dir, &current_dir) {

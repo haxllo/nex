@@ -19,6 +19,8 @@ pub(crate) mod layout;
 #[cfg(target_os = "windows")]
 pub(crate) mod painting;
 #[cfg(target_os = "windows")]
+pub(crate) mod skia_renderer;
+#[cfg(target_os = "windows")]
 pub(crate) mod state;
 #[cfg(target_os = "windows")]
 pub(crate) mod tray;

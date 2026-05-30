@@ -4,8 +4,7 @@ use nex_core::transport::{handle_json, handle_request, ErrorCode, TransportRespo
 
 fn service_with_seed_item() -> CoreService {
     let config = nex_core::config::Config::default();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
     service
         .upsert_item(&nex_core::model::SearchItem::new(
             "seed",

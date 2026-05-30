@@ -15,7 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use std::time::Instant;
 
-use crate::windows_overlay::animation::blend_color;
+use crate::windows_overlay::animation::{blend_color, ease_out};
 use crate::windows_overlay::gdiplus_rendering::{GdiplusContext, GpRectF, SMOOTHING_MODE_ANTI_ALIAS};
 use crate::windows_overlay::layout::{
     apply_edit_text_rect, compute_input_text_rect, input_line_height_for_edit, visible_row_capacity,
@@ -355,12 +355,17 @@ pub(crate) fn hide_input_caret(edit_hwnd: HWND) {
     }
 }
 
-fn results_content_progress(state: &OverlayShellState) -> f32 {
+fn content_fade_progress(state: &OverlayShellState) -> f32 {
     let Some(start) = state.results_content_anim_start else {
         return 1.0;
     };
-    let elapsed_ms = start.elapsed().as_millis() as f32;
-    (elapsed_ms / RESULTS_CONTENT_FADE_MS as f32).clamp(0.0, 1.0)
+    let elapsed_ms = start.elapsed().as_millis() as f64;
+    let linear = (elapsed_ms / RESULTS_CONTENT_FADE_MS as f64).clamp(0.0, 1.0);
+    ease_out(linear) as f32
+}
+
+pub(crate) fn content_fade_offset_y(state: &OverlayShellState) -> i32 {
+    ((1.0 - content_fade_progress(state)) * RESULTS_CONTENT_SLIDE_PX as f32).round() as i32
 }
 
 pub(crate) fn draw_panel_background(hwnd: HWND) {
@@ -390,11 +395,9 @@ pub(crate) fn draw_panel_background(hwnd: HWND) {
     gdiplus.fill_rect(graphics, 0, 0, w, h, panel_bg);
 
     if !state.dwm_rounded_enabled && PANEL_RADIUS > 0 {
-        // Draw border (outer rounded rect filled with border color)
         gdiplus.fill_rounded_rect_on_graphics(
             graphics, 0, 0, w, h, PANEL_RADIUS, panel_border,
         );
-        // Draw inner rect (slightly smaller, filled with bg color)
         gdiplus.fill_rounded_rect_on_graphics(
             graphics, 2, 2, w - 4, h - 4,
             (PANEL_RADIUS - 2).max(1), panel_bg,
@@ -429,8 +432,7 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
             icon_path: String::new(),
         });
 
-    let content_progress = results_content_progress(state);
-    let offset_y = ((1.0 - content_progress) * 4.0).round() as i32;
+    let offset_y = content_fade_offset_y(state);
     let status_row = matches!(row.role, OverlayRowRole::Status);
     let section_row = matches!(row.role, OverlayRowRole::Header);
     let selected_flag = (dis.itemState & ODS_SELECTED as u32) != 0;

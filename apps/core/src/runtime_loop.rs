@@ -62,8 +62,12 @@ pub(crate) fn run_windows_runtime(
     mut runtime_config: Config,
     service: CoreService,
 ) -> Result<(), RuntimeError> {
+    let service = Arc::new(Mutex::new(service));
     let mut background_index_refresh = {
-        let initial_cached_items = service.cached_items_len();
+        let initial_cached_items = {
+            let guard = service.lock().unwrap();
+            guard.cached_items_len()
+        };
         log_info(&format!(
             "[nex] startup cached_items={} (async indexing scheduled)",
             initial_cached_items
@@ -75,12 +79,11 @@ pub(crate) fn run_windows_runtime(
             initial_cached_items
         ));
         start_background_index_refresh(
-            &runtime_config,
+            service.clone(),
             initial_cached_items == 0,
             startup_started_at,
         )
     };
-    let service = Arc::new(Mutex::new(service));
 
     let mut plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
@@ -185,7 +188,7 @@ pub(crate) fn run_windows_runtime(
         .run_message_loop_with_events(|event| {
             maybe_apply_runtime_config_reload(
                 &overlay,
-                &*service.lock().unwrap(),
+                &service,
                 &mut runtime_config,
                 &mut plugin_registry,
                 &mut search_session,
@@ -195,7 +198,7 @@ pub(crate) fn run_windows_runtime(
                 &mut background_index_refresh,
             );
             maybe_apply_background_index_refresh(
-                &*service.lock().unwrap(),
+                &service,
                 &mut background_index_refresh,
                 &runtime_config,
             );
@@ -243,7 +246,7 @@ pub(crate) fn run_windows_runtime(
                             search_session.clear();
                             search_worker.clear_session();
                             maybe_apply_background_index_refresh(
-                                &*service.lock().unwrap(),
+                                &service,
                                 &mut background_index_refresh,
                                 &runtime_config,
                             );

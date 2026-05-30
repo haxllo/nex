@@ -80,9 +80,8 @@ fn rebuild_index_uses_registered_providers() {
     std::fs::write(&file_path, b"file").unwrap();
 
     let config = nex_core::config::Config::default();
-    let db = nex_core::index_store::open_memory().unwrap();
 
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_providers(vec![
             Box::new(AppProvider::from_apps(vec![
@@ -131,8 +130,7 @@ fn runtime_providers_use_configured_roots() {
     // Ensure this test root is not filtered by default exclude roots (which may include %TEMP%).
     config.discovery_exclude_roots = vec![];
 
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_runtime_providers();
 
@@ -163,8 +161,7 @@ fn runtime_providers_respect_show_files_and_folders_toggles() {
     config.show_files = false;
     config.show_folders = false;
 
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_runtime_providers();
 
@@ -191,8 +188,7 @@ fn runtime_providers_prune_existing_file_entries_when_disabled() {
     config.show_files = false;
     config.show_folders = false;
 
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_runtime_providers();
 
@@ -344,8 +340,7 @@ fn file_system_provider_excludes_explicit_system_roots() {
 fn runtime_providers_keep_start_menu_apps_when_file_like_paths_are_excluded() {
     let mut config = nex_core::config::Config::default();
     config.everything_search_enabled = false;
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_runtime_providers();
 
@@ -375,8 +370,7 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     cfg_a.show_files = true;
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(cfg_a.clone(), db)
+    let service = CoreService::with_connection(cfg_a.clone())
         .unwrap()
         .with_runtime_providers();
 

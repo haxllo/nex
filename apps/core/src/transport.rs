@@ -10,7 +10,6 @@ pub enum ErrorCode {
     InvalidRequest,
     ItemNotFound,
     Launch,
-    Store,
     Config,
     Provider,
 }
@@ -63,10 +62,6 @@ fn map_service_error(error: ServiceError) -> ErrorResponse {
         },
         ServiceError::Launch(message) => ErrorResponse {
             code: ErrorCode::Launch,
-            message: message.to_string(),
-        },
-        ServiceError::Store(message) => ErrorResponse {
-            code: ErrorCode::Store,
             message: message.to_string(),
         },
         ServiceError::Config(message) => ErrorResponse {

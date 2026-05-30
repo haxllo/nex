@@ -123,7 +123,8 @@ pub(crate) fn layout_children(hwnd: HWND, state: &mut OverlayShellState) {
     } else if no_results_inline {
         input_top + ((INPUT_HEIGHT - STATUS_HEIGHT).max(0) / 2)
     } else {
-        COMPACT_HEIGHT - PANEL_MARGIN_BOTTOM - STATUS_HEIGHT
+        let help_icon_bottom = input_top + ((INPUT_HEIGHT - HELP_ICON_SIZE).max(0) / 2) + HELP_ICON_SIZE;
+        (COMPACT_HEIGHT - PANEL_MARGIN_BOTTOM - STATUS_HEIGHT).max(help_icon_bottom)
     };
     let status_height = STATUS_HEIGHT;
 
@@ -299,7 +300,7 @@ pub(crate) fn apply_edit_text_rect(
     }
 }
 
-fn update_status_alignment(state: &mut OverlayShellState, centered: bool) {
+pub(crate) fn update_status_alignment(state: &mut OverlayShellState, centered: bool) {
     if state.status_hwnd.is_null() || state.status_center_aligned == centered {
         return;
     }

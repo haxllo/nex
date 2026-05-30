@@ -28,10 +28,6 @@ fn accepts_default_config() {
     assert_eq!(cfg.index_max_items_per_query_seed, 5_000);
     assert!(!cfg.game_mode_enabled);
     assert!(cfg.everything_search_enabled);
-    assert!(
-        cfg.index_db_path.to_string_lossy().contains("nex")
-            || cfg.index_db_path.to_string_lossy().contains("Nex")
-    );
     assert!(!cfg.show_files);
     assert!(!cfg.show_folders);
     assert!(cfg.uninstall_actions_enabled);
@@ -42,23 +38,7 @@ fn accepts_default_config() {
     assert!(nex_core::config::validate(&cfg).is_ok());
 }
 
-#[test]
-fn opens_index_store_from_config_path() {
-    let mut cfg = nex_core::config::Config::default();
-    cfg.index_db_path = std::env::temp_dir()
-        .join("swiftfind")
-        .join("cfg-open.sqlite3");
 
-    let db = nex_core::index_store::open_from_config(&cfg).unwrap();
-    let item = nex_core::model::SearchItem::new("cfg-1", "app", "Terminal", "C:\\Terminal.exe");
-    nex_core::index_store::upsert_item(&db, &item).unwrap();
-
-    let got = nex_core::index_store::get_item(&db, "cfg-1").unwrap();
-    assert!(got.is_some());
-
-    drop(db);
-    std::fs::remove_file(&cfg.index_db_path).unwrap();
-}
 
 #[test]
 fn loads_default_when_config_file_missing() {
@@ -135,7 +115,6 @@ fn loads_partial_config_with_migration_safe_defaults() {
     assert_eq!(loaded.hotkey, "Ctrl+Space");
     assert!(!loaded.launch_at_startup);
     assert_eq!(loaded.config_path, config_path);
-    assert!(!loaded.index_db_path.as_os_str().is_empty());
     assert!(!loaded.hotkey_help.trim().is_empty());
     assert!(!loaded.hotkey_recommended.is_empty());
 

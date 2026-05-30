@@ -439,29 +439,69 @@ fn word_boundary_and_acronym_bonus(title: &str, normalized_query: &str) -> i64 {
         return 0;
     }
 
-    let words = normalized_word_tokens(title);
-    if words.is_empty() {
-        return 0;
+    let mut first_word_prefix = false;
+    let mut any_other_prefix = false;
+    let mut acronym = String::with_capacity(32);
+    let mut current = String::with_capacity(64);
+    let mut word_count = 0_u32;
+    let mut previous_was_lower = false;
+
+    for ch in title.chars() {
+        if !ch.is_alphanumeric() {
+            if !current.is_empty() {
+                word_count += 1;
+                if word_count == 1 && current.starts_with(normalized_query) {
+                    first_word_prefix = true;
+                } else if word_count > 1 && !any_other_prefix
+                    && current.starts_with(normalized_query)
+                {
+                    any_other_prefix = true;
+                }
+                current.clear();
+            }
+            previous_was_lower = false;
+            continue;
+        }
+
+        let is_upper = ch.is_uppercase();
+        if !current.is_empty() && is_upper && previous_was_lower {
+            word_count += 1;
+            if word_count == 1 && current.starts_with(normalized_query) {
+                first_word_prefix = true;
+            } else if word_count > 1 && !any_other_prefix
+                && current.starts_with(normalized_query)
+            {
+                any_other_prefix = true;
+            }
+            current.clear();
+        }
+
+        if current.is_empty() {
+            acronym.extend(ch.to_lowercase());
+        }
+        for lower in ch.to_lowercase() {
+            current.push(lower);
+        }
+        previous_was_lower = ch.is_lowercase();
     }
 
-    let mut bonus = 0_i64;
-    if words
-        .first()
-        .is_some_and(|word| word.starts_with(normalized_query))
-    {
-        bonus += WORD_PREFIX_PRIMARY_BOOST;
-    } else if words
-        .iter()
-        .skip(1)
-        .any(|word| word.starts_with(normalized_query))
-    {
-        bonus += WORD_PREFIX_SECONDARY_BOOST;
+    if !current.is_empty() {
+        word_count += 1;
+        if word_count == 1 && !first_word_prefix && current.starts_with(normalized_query) {
+            first_word_prefix = true;
+        } else if word_count > 1 && !any_other_prefix && current.starts_with(normalized_query) {
+            any_other_prefix = true;
+        }
     }
 
-    let acronym: String = words
-        .iter()
-        .filter_map(|word| word.chars().next())
-        .collect();
+    let mut bonus = if first_word_prefix {
+        WORD_PREFIX_PRIMARY_BOOST
+    } else if any_other_prefix {
+        WORD_PREFIX_SECONDARY_BOOST
+    } else {
+        0
+    };
+
     if normalized_query.len() >= 2 {
         if acronym == normalized_query {
             bonus += ACRONYM_EXACT_BOOST;
@@ -471,38 +511,6 @@ fn word_boundary_and_acronym_bonus(title: &str, normalized_query: &str) -> i64 {
     }
 
     bonus.clamp(0, MAX_LEXICAL_SIGNAL_BOOST)
-}
-
-fn normalized_word_tokens(title: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut previous_was_lower = false;
-
-    for ch in title.chars() {
-        if !ch.is_alphanumeric() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            previous_was_lower = false;
-            continue;
-        }
-
-        let is_upper = ch.is_uppercase();
-        if !current.is_empty() && is_upper && previous_was_lower {
-            words.push(std::mem::take(&mut current));
-        }
-
-        for lower in ch.to_lowercase() {
-            current.push(lower);
-        }
-        previous_was_lower = ch.is_lowercase();
-    }
-
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    words
 }
 
 fn app_intent_bonus(item: &SearchItem, app_intent_query: bool, normalized_query_len: usize) -> i64 {

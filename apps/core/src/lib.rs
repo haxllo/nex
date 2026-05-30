@@ -9,7 +9,6 @@ pub mod discovery;
 pub mod everything;
 pub mod hotkey;
 pub mod hotkey_runtime;
-pub mod index_store;
 pub mod logging;
 pub mod model;
 pub mod overlay_state;

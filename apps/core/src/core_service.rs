@@ -1,5 +1,3 @@
-use rusqlite::{params, Connection};
-
 use crate::action_executor::{launch_path, LaunchError};
 use crate::config::{validate, Config, SearchMode};
 use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse};
@@ -8,7 +6,6 @@ use crate::discovery::{
 };
 #[cfg(target_os = "windows")]
 use crate::everything::EverythingSearchProvider;
-use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
 use std::collections::{HashMap, HashSet};
@@ -24,7 +21,6 @@ const STALE_PRUNE_BATCH_SIZE: usize = 512;
 #[derive(Debug)]
 pub enum ServiceError {
     Config(String),
-    Store(StoreError),
     Provider(ProviderError),
     Launch(LaunchError),
     InvalidRequest(String),
@@ -35,7 +31,6 @@ impl std::fmt::Display for ServiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Config(error) => write!(f, "config error: {error}"),
-            Self::Store(error) => write!(f, "store error: {error}"),
             Self::Provider(error) => write!(f, "provider error: {error}"),
             Self::Launch(error) => write!(f, "launch error: {error}"),
             Self::InvalidRequest(error) => write!(f, "invalid request: {error}"),
@@ -45,12 +40,6 @@ impl std::fmt::Display for ServiceError {
 }
 
 impl std::error::Error for ServiceError {}
-
-impl From<StoreError> for ServiceError {
-    fn from(value: StoreError) -> Self {
-        Self::Store(value)
-    }
-}
 
 impl From<LaunchError> for ServiceError {
     fn from(value: LaunchError) -> Self {
@@ -69,12 +58,21 @@ pub enum LaunchTarget<'a> {
     Path(&'a str),
 }
 
+#[derive(Debug, Clone)]
+struct QueryMemoryEntry {
+    selected_count: u32,
+    last_selected_epoch_secs: i64,
+}
+
 pub struct CoreService {
     config: RwLock<Config>,
-    db: Connection,
+    index: RwLock<HashMap<String, SearchItem>>,
     providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
+    query_memory: RwLock<HashMap<(String, String, String), QueryMemoryEntry>>,
+    provider_stamps: RwLock<HashMap<String, String>>,
+    provider_last_scan: RwLock<HashMap<String, i64>>,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     everything_covered_files: AtomicBool,
@@ -102,28 +100,27 @@ pub struct IndexRefreshReport {
 impl CoreService {
     pub fn new(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
-        let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache(config, db)
+        Ok(Self::with_empty(config))
     }
 
-    pub fn with_connection(config: Config, db: Connection) -> Result<Self, ServiceError> {
-        validate(&config).map_err(ServiceError::Config)?;
-        Self::with_loaded_cache(config, db)
+    pub fn with_connection(config: Config) -> Result<Self, ServiceError> {
+        Self::new(config)
     }
 
-    fn with_loaded_cache(config: Config, db: Connection) -> Result<Self, ServiceError> {
-        let cached = index_store::list_items(&db)?;
-        let cached_apps = collect_app_items(&cached);
-        Ok(Self {
+    fn with_empty(config: Config) -> Self {
+        Self {
             config: RwLock::new(config),
-            db,
+            index: RwLock::new(HashMap::new()),
             providers: RwLock::new(Vec::new()),
-            cached_items: RwLock::new(cached),
-            cached_app_items: RwLock::new(cached_apps),
+            cached_items: RwLock::new(Vec::new()),
+            cached_app_items: RwLock::new(Vec::new()),
+            query_memory: RwLock::new(HashMap::new()),
+            provider_stamps: RwLock::new(HashMap::new()),
+            provider_last_scan: RwLock::new(HashMap::new()),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             everything_covered_files: AtomicBool::new(false),
-        })
+        }
     }
 
     pub fn with_providers(self, providers: Vec<Box<dyn DiscoveryProvider>>) -> Self {
@@ -195,7 +192,6 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
     let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
     providers.push(Box::new(StartMenuAppDiscoveryProvider::default()));
 
-    // Register Everything SDK provider when enabled.
     #[cfg(target_os = "windows")]
     if config.everything_search_enabled {
         providers.push(Box::new(EverythingSearchProvider::new(
@@ -204,13 +200,7 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
             config.show_files,
             config.show_folders,
         )));
-        // Filesystem provider is still added below as fallback.
-        // When Everything actually covers files (DLL loaded, results returned)
-        // the runtime skip guard in rebuild_index_internal avoids the walkdir.
     }
-    // Register filesystem provider for roots-based file/folder discovery.
-    // When Everything is active and has covered the namespace, this provider
-    // is skipped at runtime via the everything_covered_files flag.
     providers.push(Box::new(
         FileSystemDiscoveryProvider::with_options(
             config.discovery_roots.clone(),
@@ -277,7 +267,7 @@ impl CoreService {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
+            let query_boosts = self.query_personalization_boosts(query, filter.mode);
             return Ok(crate::search::search_with_filter_with_boosts(
                 &guard,
                 query,
@@ -287,28 +277,38 @@ impl CoreService {
             ));
         }
 
-        let mut seed_items = {
+        let query_boosts = self.query_personalization_boosts(query, filter.mode);
+
+        if should_use_index_seed(filter, query) {
             let guard = match self.cached_items.read() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard.clone()
-        };
-
-        if should_use_db_query_seed(filter, query) {
-            let db_seed_limit = (config_snapshot.index_max_items_per_query_seed as usize).max(250);
-            let db_candidates = self.db_query_candidates(query, filter.mode, db_seed_limit)?;
-            merge_seed_candidates(&mut seed_items, db_candidates);
+            let seed_limit = (config_snapshot.index_max_items_per_query_seed as usize).max(250);
+            let extra_candidates = self.index_query_candidates(query, filter.mode, seed_limit);
+            let mut seed_items = guard.clone();
+            drop(guard);
+            merge_seed_candidates(&mut seed_items, extra_candidates);
+            Ok(crate::search::search_with_filter_with_boosts(
+                &seed_items,
+                query,
+                effective_limit,
+                filter,
+                Some(&query_boosts),
+            ))
+        } else {
+            let guard = match self.cached_items.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            Ok(crate::search::search_with_filter_with_boosts(
+                &guard,
+                query,
+                effective_limit,
+                filter,
+                Some(&query_boosts),
+            ))
         }
-
-        let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
-        Ok(crate::search::search_with_filter_with_boosts(
-            &seed_items,
-            query,
-            effective_limit,
-            filter,
-            Some(&query_boosts),
-        ))
     }
 
     pub fn cached_items_snapshot(&self) -> Vec<SearchItem> {
@@ -324,7 +324,7 @@ impl CoreService {
     }
 
     pub fn reload_cache_from_store(&self) -> Result<usize, ServiceError> {
-        self.refresh_cache_from_store()?;
+        self.refresh_cache_from_index();
         Ok(self.cached_len())
     }
 
@@ -341,7 +341,10 @@ impl CoreService {
         match target {
             LaunchTarget::Path(path) => launch_path(path).map_err(ServiceError::from),
             LaunchTarget::Id(id) => {
-                let item = index_store::get_item(&self.db, id)?
+                let item = self
+                    .index_read()
+                    .get(id)
+                    .cloned()
                     .ok_or_else(|| ServiceError::ItemNotFound(id.to_string()))?;
                 match launch_path(&item.path) {
                     Ok(()) => {
@@ -352,7 +355,7 @@ impl CoreService {
                         Ok(())
                     }
                     Err(error) if should_prune_after_launch_error(&item, &error) => {
-                        index_store::delete_item(&self.db, &item.id)?;
+                        self.index_write().remove(&item.id);
                         self.remove_cached_item_by_id(&item.id);
                         Err(ServiceError::from(error))
                     }
@@ -375,13 +378,22 @@ impl CoreService {
         if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
             return Ok(());
         }
-        index_store::record_query_selection(
-            &self.db,
-            &query_norm,
-            search_mode_key(mode),
-            item_id,
-            now_epoch_secs(),
-        )?;
+        let key = (
+            query_norm,
+            search_mode_key(mode).to_string(),
+            item_id.to_string(),
+        );
+        let now = now_epoch_secs();
+        let mut guard = match self.query_memory.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = guard.entry(key).or_insert(QueryMemoryEntry {
+            selected_count: 0,
+            last_selected_epoch_secs: now,
+        });
+        entry.selected_count = entry.selected_count.saturating_add(1).min(1000);
+        entry.last_selected_epoch_secs = now;
         Ok(())
     }
 
@@ -409,7 +421,7 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         if providers_guard.is_empty() {
-            self.refresh_cache_from_store()?;
+            self.refresh_cache_from_index();
             return Ok(IndexRefreshReport {
                 indexed_total: self.cached_len(),
                 discovered_total: 0,
@@ -419,20 +431,16 @@ impl CoreService {
             });
         }
 
-        let mut existing_items = index_store::list_items(&self.db)?;
-        let mut existing_by_id: HashMap<String, SearchItem> = existing_items
-            .drain(..)
-            .map(|item| (item.id.clone(), item))
-            .collect();
+        let mut existing_by_id: HashMap<String, SearchItem> = {
+            let guard = self.index_read();
+            guard.clone()
+        };
 
         let mut discovered_total = 0_usize;
         let mut upserted_total = 0_usize;
         let mut removed_total = 0_usize;
         let mut provider_reports = Vec::with_capacity(providers_guard.len());
         let now_epoch_secs = now_epoch_secs();
-        // When Everything SDK returns results, it covers the full file/folder
-        // namespace (Everything's index is real-time). Skip the filesystem
-        // provider to avoid unnecessary COM / walkdir work.
         let mut everything_covered_files = false;
 
         for provider in providers_guard.iter() {
@@ -444,8 +452,7 @@ impl CoreService {
                 None
             };
             if incremental_mode
-                && should_skip_provider_discovery(
-                    &self.db,
+                && self.should_skip_provider_discovery(
                     &provider_name,
                     provider_stamp.as_deref(),
                     now_epoch_secs,
@@ -459,13 +466,10 @@ impl CoreService {
                     skipped: true,
                     elapsed_ms: started.elapsed().as_millis(),
                 });
-                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
+                self.log_provider_freshness_status(&provider_name, now_epoch_secs, true)?;
                 continue;
             }
 
-            // Optimisation: if Everything already covered the file/folder
-            // namespace, skip the filesystem walk to avoid duplicate work.
-            // Everything's index is real-time, so it's strictly more complete.
             if provider_name == "filesystem" && everything_covered_files {
                 let elapsed_ms = started.elapsed().as_millis();
                 provider_reports.push(ProviderRefreshReport {
@@ -477,13 +481,16 @@ impl CoreService {
                     elapsed_ms,
                 });
                 if incremental_mode {
-                    persist_provider_discovery_state(
-                        &self.db,
+                    self.persist_provider_discovery_state(
                         &provider_name,
                         provider_stamp.as_deref(),
                         now_epoch_secs,
                     )?;
-                    log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
+                    self.log_provider_freshness_status(
+                        &provider_name,
+                        now_epoch_secs,
+                        true,
+                    )?;
                 }
                 crate::logging::info(&format!(
                     "[nex] provider_skipped_by_everything_guard provider={provider_name}"
@@ -525,9 +532,6 @@ impl CoreService {
 
                 discovered_ids.insert(item.id.clone());
 
-                // When Everything covers the file/folder namespace, skip SQLite
-                // persistence for file/folder items. They are served at query
-                // time via live_everything_search() — no need to persist them.
                 let is_file_or_folder = item.kind.eq_ignore_ascii_case("file")
                     || item.kind.eq_ignore_ascii_case("folder");
                 let skip_persist = everything_covered_files && is_file_or_folder;
@@ -542,15 +546,12 @@ impl CoreService {
                     .map(|previous| previous != &item)
                     .unwrap_or(true);
                 if changed {
-                    index_store::upsert_item(&self.db, &item)?;
                     upserted += 1;
                     upserted_total += 1;
                 }
                 existing_by_id.insert(item.id.clone(), item);
             }
 
-            // Kind-based ownership is safe for current runtime provider composition:
-            // start-menu apps own kind=app, filesystem owns kind=file/folder.
             let removable_ids: Vec<String> = existing_by_id
                 .values()
                 .filter(|item| provider_manages_kind(provider.provider_name(), &item.kind))
@@ -559,7 +560,6 @@ impl CoreService {
                 .collect();
 
             for id in &removable_ids {
-                index_store::delete_item(&self.db, id)?;
                 existing_by_id.remove(id);
             }
 
@@ -574,17 +574,25 @@ impl CoreService {
             });
 
             if incremental_mode {
-                persist_provider_discovery_state(
-                    &self.db,
+                self.persist_provider_discovery_state(
                     &provider_name,
                     provider_stamp.as_deref(),
                     now_epoch_secs,
                 )?;
-                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, false)?;
+                self.log_provider_freshness_status(&provider_name, now_epoch_secs, false)?;
             }
         }
 
-        self.refresh_cache_from_store()?;
+        // Swap the rebuilt index in
+        {
+            let mut guard = match self.index.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard = existing_by_id;
+        }
+
+        self.refresh_cache_from_index();
         let indexed_total = self.cached_len();
         Ok(IndexRefreshReport {
             indexed_total,
@@ -601,7 +609,13 @@ impl CoreService {
     }
 
     pub fn upsert_item(&self, item: &SearchItem) -> Result<(), ServiceError> {
-        index_store::upsert_item(&self.db, item)?;
+        {
+            let mut guard = match self.index.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.insert(item.id.clone(), item.clone());
+        }
         self.upsert_cached_item(item.clone());
         Ok(())
     }
@@ -645,129 +659,95 @@ impl CoreService {
         }
     }
 
-    fn db_query_candidates(
+    fn index_read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, SearchItem>> {
+        match self.index.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn index_write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, HashMap<String, SearchItem>> {
+        match self.index.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn index_query_candidates(
         &self,
         query: &str,
         mode: SearchMode,
         limit: usize,
-    ) -> Result<Vec<SearchItem>, ServiceError> {
+    ) -> Vec<SearchItem> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
-            return Ok(Vec::new());
+            return Vec::new();
         }
 
-        let sql = match mode {
-            SearchMode::Files => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
-                   AND kind IN ('file', 'folder')
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::Apps => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
-                   AND kind = 'app'
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::All => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::Actions | SearchMode::Clipboard => unreachable!(),
-        };
+        let query_norm = crate::model::normalize_for_search(trimmed);
+        let guard = self.index_read();
 
-        let pattern = format!("%{trimmed}%");
-        let mut stmt = self
-            .db
-            .prepare(sql)
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-        let mut rows = stmt
-            .query(params![pattern, limit as i64])
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?
-        {
-            let id: String = row
-                .get(0)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let kind: String = row
-                .get(1)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let title: String = row
-                .get(2)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let path: String = row
-                .get(3)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let subtitle: String = row
-                .get(4)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let use_count: u32 = row
-                .get(5)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let last_accessed_epoch_secs: i64 = row
-                .get(6)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            out.push(SearchItem::from_owned_with_subtitle(
-                id,
-                kind,
-                title,
-                path,
-                subtitle,
-                use_count,
-                last_accessed_epoch_secs,
-            ));
-        }
-        Ok(out)
+        let mut candidates: Vec<&SearchItem> = guard
+            .values()
+            .filter(|item| {
+                matches_mode_for_seed(item, mode)
+                    && item.normalized_search_text().contains(&query_norm)
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then_with(|| b.last_accessed_epoch_secs.cmp(&a.last_accessed_epoch_secs))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        candidates.truncate(limit);
+        candidates.into_iter().cloned().collect()
     }
 
-    fn query_personalization_boosts(
-        &self,
-        query: &str,
-        mode: SearchMode,
-    ) -> Result<HashMap<String, i64>, ServiceError> {
+    fn query_personalization_boosts(&self, query: &str, mode: SearchMode) -> HashMap<String, i64> {
         let query_norm = crate::model::normalize_for_search(query);
         if query_norm.is_empty() || matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
-            return Ok(HashMap::new());
+            return HashMap::new();
         }
 
-        let rows =
-            index_store::list_query_selections(&self.db, &query_norm, search_mode_key(mode), 64)?;
+        let mode_key = search_mode_key(mode);
         let now = now_epoch_secs();
-        let mut boosts = HashMap::with_capacity(rows.len());
-        for (item_id, selected_count, last_selected_epoch_secs) in rows {
-            let usage_boost = (selected_count.min(12) as i64) * 280;
-            let recency_boost = query_memory_recency_boost(last_selected_epoch_secs, now);
+        let guard = match self.query_memory.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let mut boosts = HashMap::new();
+        for ((q, m, item_id), entry) in guard.iter() {
+            if q != &query_norm || m != mode_key {
+                continue;
+            }
+            let usage_boost = (entry.selected_count.min(12) as i64) * 280;
+            let recency_boost = query_memory_recency_boost(entry.last_selected_epoch_secs, now);
             let total = (usage_boost + recency_boost).clamp(0, 5_000);
             if total > 0 {
-                boosts.insert(item_id, total);
+                boosts.insert(item_id.clone(), total);
             }
         }
-        Ok(boosts)
+        boosts
     }
 
-    fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
+    fn refresh_cache_from_index(&self) {
         let config_snapshot = self.config_snapshot();
-        let latest_full = index_store::list_items(&self.db)?;
-        // Only filter legacy file/folder items from the DB when Everything
-        // actually covered the file namespace during an index rebuild.  The
-        // config flag alone is not sufficient — the SDK DLL may not be
-        // available, in which case the filesystem provider handles files.
+        let guard = self.index_read();
+        let latest_full: Vec<SearchItem> = guard.values().cloned().collect();
+        drop(guard);
+
         let latest_full = if config_snapshot.everything_search_enabled
             && self.everything_covered_files.load(Ordering::SeqCst)
         {
@@ -822,7 +802,6 @@ impl CoreService {
                 *guard = latest_apps;
             }
         }
-        Ok(())
     }
 
     fn upsert_cached_item(&self, item: SearchItem) {
@@ -878,7 +857,10 @@ impl CoreService {
         updated.use_count = updated.use_count.saturating_add(1);
         updated.last_accessed_epoch_secs = now.max(updated.last_accessed_epoch_secs);
 
-        index_store::upsert_item(&self.db, &updated)?;
+        {
+            let mut guard = self.index_write();
+            guard.insert(item.id.clone(), updated.clone());
+        }
         self.upsert_cached_item(updated);
         Ok(())
     }
@@ -914,8 +896,11 @@ impl CoreService {
             return Ok(());
         }
 
-        for stale_id in &stale_ids {
-            index_store::delete_item(&self.db, stale_id)?;
+        {
+            let mut guard = self.index_write();
+            for stale_id in &stale_ids {
+                guard.remove(stale_id);
+            }
         }
 
         match self.cached_items.write() {
@@ -980,6 +965,113 @@ impl CoreService {
         }
         *cursor = (start + take) % len;
         out
+    }
+
+    fn should_skip_provider_discovery(
+        &self,
+        provider_name: &str,
+        stamp: Option<&str>,
+        now_epoch_secs: i64,
+    ) -> Result<bool, ServiceError> {
+        let Some(stamp) = stamp else {
+            return Ok(false);
+        };
+
+        let previous_stamp = match self.provider_stamps.read() {
+            Ok(guard) => guard.get(provider_name).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(provider_name).cloned(),
+        };
+        if previous_stamp.as_deref() != Some(stamp) {
+            return Ok(false);
+        }
+
+        let last_scan_epoch = match self.provider_last_scan.read() {
+            Ok(guard) => guard.get(provider_name).copied().unwrap_or(0),
+            Err(poisoned) => poisoned.into_inner().get(provider_name).copied().unwrap_or(0),
+        };
+        if last_scan_epoch <= 0 {
+            return Ok(false);
+        }
+
+        Ok(now_epoch_secs.saturating_sub(last_scan_epoch) < PROVIDER_RECONCILE_INTERVAL_SECS)
+    }
+
+    fn persist_provider_discovery_state(
+        &self,
+        provider_name: &str,
+        stamp: Option<&str>,
+        now_epoch_secs: i64,
+    ) -> Result<(), ServiceError> {
+        if let Some(stamp) = stamp {
+            match self.provider_stamps.write() {
+                Ok(mut guard) => {
+                    guard.insert(provider_name.to_string(), stamp.to_string());
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().insert(provider_name.to_string(), stamp.to_string());
+                }
+            }
+        }
+
+        match self.provider_last_scan.write() {
+            Ok(mut guard) => {
+                guard.insert(provider_name.to_string(), now_epoch_secs);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(provider_name.to_string(), now_epoch_secs);
+            }
+        }
+        Ok(())
+    }
+
+    fn load_provider_freshness_status(
+        &self,
+        provider_name: &str,
+        now_epoch_secs: i64,
+    ) -> ProviderFreshnessStatus {
+        let last_scan_epoch = match self.provider_last_scan.read() {
+            Ok(guard) => guard.get(provider_name).copied().unwrap_or(0),
+            Err(poisoned) => poisoned.into_inner().get(provider_name).copied().unwrap_or(0),
+        };
+        let has_stamp = match self.provider_stamps.read() {
+            Ok(guard) => guard
+                .get(provider_name)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .get(provider_name)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false),
+        };
+
+        ProviderFreshnessStatus {
+            last_scan_age_secs: if last_scan_epoch > 0 {
+                now_epoch_secs.saturating_sub(last_scan_epoch).max(0)
+            } else {
+                -1
+            },
+            reconcile_interval_secs: PROVIDER_RECONCILE_INTERVAL_SECS,
+            has_stamp,
+        }
+    }
+
+    fn log_provider_freshness_status(
+        &self,
+        provider_name: &str,
+        now_epoch_secs: i64,
+        skipped: bool,
+    ) -> Result<(), ServiceError> {
+        let freshness = self.load_provider_freshness_status(provider_name, now_epoch_secs);
+        crate::logging::info(&format!(
+            "[nex] provider_freshness name={} skipped={} last_scan_age_secs={} reconcile_interval_secs={} has_stamp={}",
+            provider_name,
+            skipped,
+            freshness.last_scan_age_secs,
+            freshness.reconcile_interval_secs,
+            freshness.has_stamp
+        ));
+        Ok(())
     }
 }
 
@@ -1158,8 +1250,20 @@ fn should_use_app_cache(filter: &SearchFilter) -> bool {
     filter.mode == SearchMode::Apps
 }
 
-fn should_use_db_query_seed(filter: &SearchFilter, query: &str) -> bool {
+fn should_use_index_seed(filter: &SearchFilter, query: &str) -> bool {
     !query.trim().is_empty() && matches!(filter.mode, SearchMode::All | SearchMode::Files)
+}
+
+fn matches_mode_for_seed(item: &SearchItem, mode: SearchMode) -> bool {
+    match mode {
+        SearchMode::All => true,
+        SearchMode::Apps => item.kind.eq_ignore_ascii_case("app"),
+        SearchMode::Files => {
+            item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder")
+        }
+        SearchMode::Actions => item.kind.eq_ignore_ascii_case("action"),
+        SearchMode::Clipboard => item.kind.eq_ignore_ascii_case("clipboard"),
+    }
 }
 
 fn search_mode_key(mode: SearchMode) -> &'static str {
@@ -1252,7 +1356,6 @@ fn should_prune_after_launch_error(item: &SearchItem, error: &LaunchError) -> bo
         LaunchError::LaunchFailed {
             code: Some(code), ..
         } => {
-            // ShellExecute missing-file/path errors: remove stale entries immediately.
             (*code == 2 || *code == 3)
                 && is_filesystem_target
                 && (item.kind.eq_ignore_ascii_case("app")
@@ -1261,100 +1364,6 @@ fn should_prune_after_launch_error(item: &SearchItem, error: &LaunchError) -> bo
         }
         LaunchError::LaunchFailed { .. } | LaunchError::EmptyPath => false,
     }
-}
-
-fn should_skip_provider_discovery(
-    db: &Connection,
-    provider_name: &str,
-    stamp: Option<&str>,
-    now_epoch_secs: i64,
-) -> Result<bool, ServiceError> {
-    let Some(stamp) = stamp else {
-        return Ok(false);
-    };
-
-    let stamp_key = provider_stamp_meta_key(provider_name);
-    let previous_stamp = index_store::get_meta(db, &stamp_key)?;
-    if previous_stamp.as_deref() != Some(stamp) {
-        return Ok(false);
-    }
-
-    let last_scan_key = provider_last_scan_meta_key(provider_name);
-    let last_scan_epoch = index_store::get_meta(db, &last_scan_key)?
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    if last_scan_epoch <= 0 {
-        return Ok(false);
-    }
-
-    Ok(now_epoch_secs.saturating_sub(last_scan_epoch) < PROVIDER_RECONCILE_INTERVAL_SECS)
-}
-
-fn persist_provider_discovery_state(
-    db: &Connection,
-    provider_name: &str,
-    stamp: Option<&str>,
-    now_epoch_secs: i64,
-) -> Result<(), ServiceError> {
-    if let Some(stamp) = stamp {
-        let stamp_key = provider_stamp_meta_key(provider_name);
-        index_store::set_meta(db, &stamp_key, stamp)?;
-    }
-
-    let last_scan_key = provider_last_scan_meta_key(provider_name);
-    index_store::set_meta(db, &last_scan_key, &now_epoch_secs.to_string())?;
-    Ok(())
-}
-
-fn provider_stamp_meta_key(provider_name: &str) -> String {
-    format!("provider_stamp:{provider_name}")
-}
-
-fn provider_last_scan_meta_key(provider_name: &str) -> String {
-    format!("provider_last_scan_epoch:{provider_name}")
-}
-
-fn load_provider_freshness_status(
-    db: &Connection,
-    provider_name: &str,
-    now_epoch_secs: i64,
-) -> Result<ProviderFreshnessStatus, ServiceError> {
-    let last_scan_key = provider_last_scan_meta_key(provider_name);
-    let last_scan_epoch = index_store::get_meta(db, &last_scan_key)?
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    let stamp_key = provider_stamp_meta_key(provider_name);
-    let has_stamp = index_store::get_meta(db, &stamp_key)?
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-
-    Ok(ProviderFreshnessStatus {
-        last_scan_age_secs: if last_scan_epoch > 0 {
-            now_epoch_secs.saturating_sub(last_scan_epoch).max(0)
-        } else {
-            -1
-        },
-        reconcile_interval_secs: PROVIDER_RECONCILE_INTERVAL_SECS,
-        has_stamp,
-    })
-}
-
-fn log_provider_freshness_status(
-    db: &Connection,
-    provider_name: &str,
-    now_epoch_secs: i64,
-    skipped: bool,
-) -> Result<(), ServiceError> {
-    let freshness = load_provider_freshness_status(db, provider_name, now_epoch_secs)?;
-    crate::logging::info(&format!(
-        "[nex] provider_freshness name={} skipped={} last_scan_age_secs={} reconcile_interval_secs={} has_stamp={}",
-        provider_name,
-        skipped,
-        freshness.last_scan_age_secs,
-        freshness.reconcile_interval_secs,
-        freshness.has_stamp
-    ));
-    Ok(())
 }
 
 fn now_epoch_secs() -> i64 {
@@ -1371,7 +1380,6 @@ mod tests {
         effective_file_folder_cache_cap, CoreService,
     };
     use crate::config::{Config, SearchMode};
-    use crate::index_store::open_memory;
     use crate::model::SearchItem;
     use crate::search::SearchFilter;
     use std::path::PathBuf;
@@ -1388,7 +1396,7 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app path should exist");
         std::fs::write(&file_path, b"ok").expect("file path should exist");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -1430,7 +1438,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nex-app-cache-kind-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should exist");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -1465,7 +1473,7 @@ mod tests {
     fn uncapped_search_respects_requested_limit_above_config_max() {
         let mut cfg = Config::default();
         cfg.max_results = 5;
-        let service = CoreService::with_connection(cfg, open_memory().unwrap())
+        let service = CoreService::with_connection(cfg)
             .expect("service should initialize");
 
         let mut temp_paths = Vec::new();

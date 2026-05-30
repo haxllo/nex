@@ -75,3 +75,9 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 - No clippy, no formatter enforced in CI
 - Most platform gating: `#[cfg(target_os = "windows")]` on Windows-specific modules/functions
 - Legacy name "SwiftFind" still appears in some env var/constant names — don't rename unless explicitly asked
+
+## Skills 
+
+- Rust
+- rust-engineer
+- create-readme

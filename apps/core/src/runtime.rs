@@ -228,11 +228,10 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
     }
     log_info(&format!(
-        "[nex] startup mode={} hotkey={} config_path={} index_db_path={}",
+        "[nex] startup mode={} hotkey={} config_path={}",
         runtime_mode(),
         runtime_config.hotkey,
         runtime_config.config_path.display(),
-        runtime_config.index_db_path.display(),
     ));
 
     let service = CoreService::new(runtime_config.clone())?.with_runtime_providers();
@@ -316,7 +315,6 @@ mod tests {
     use crate::action_registry::{ACTION_DIAGNOSTICS_BUNDLE_ID, ACTION_WEB_SEARCH_PREFIX};
     use crate::config::{Config, SearchMode};
     use crate::core_service::CoreService;
-    use crate::index_store::open_memory;
     use crate::model::SearchItem;
     use crate::plugin_sdk::PluginRegistry;
     use crate::query_dsl::ParsedQuery;
@@ -332,7 +330,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nex-overlay-search-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -364,7 +362,7 @@ mod tests {
         let launch_path = std::env::temp_dir().join(format!("nex-launch-flow-{unique}.tmp"));
         std::fs::write(&launch_path, b"ok").expect("temp launch file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -389,7 +387,7 @@ mod tests {
     #[test]
     fn overlay_launch_selection_reports_error_for_missing_path() {
         let missing_path = std::env::temp_dir().join("nex-does-not-exist-launch-flow.exe");
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         let item = SearchItem::new(
             "missing",
@@ -417,7 +415,7 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_rejects_out_of_range_index() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         let results = vec![SearchItem::new("item-1", "app", "One", "C:\\One.exe")];
 
@@ -431,7 +429,7 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_rejects_empty_results() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
 
         let cfg = Config::default();
@@ -708,7 +706,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nex-overlay-cache-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -829,7 +827,7 @@ mod tests {
 
     #[test]
     fn command_mode_returns_action_results() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
@@ -843,7 +841,7 @@ mod tests {
 
     #[test]
     fn command_mode_includes_web_search_action() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
@@ -866,7 +864,7 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -908,7 +906,7 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let service = CoreService::with_connection(Config::default())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(

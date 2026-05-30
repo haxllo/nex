@@ -5,8 +5,7 @@ use nex_core::transport::TransportResponse;
 
 fn seed_service() -> CoreService {
     let config = nex_core::config::Config::default();
-    let db = nex_core::index_store::open_memory().expect("in-memory db should open");
-    let service = CoreService::with_connection(config, db).expect("service should initialize");
+    let service = CoreService::with_connection(config).expect("service should initialize");
     service
         .upsert_item(&nex_core::model::SearchItem::new(
             "seed",

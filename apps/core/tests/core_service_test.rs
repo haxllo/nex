@@ -23,8 +23,7 @@ fn kill_notepad() {
 #[test]
 fn service_search_returns_ranked_results() {
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -71,8 +70,7 @@ fn service_launch_by_id_uses_indexed_path() {
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -100,8 +98,7 @@ fn service_launch_by_id_records_usage_signals() {
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -128,8 +125,7 @@ fn service_launch_by_id_records_usage_signals() {
 #[test]
 fn service_launch_by_missing_id_returns_typed_error() {
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     let result = service.launch(LaunchTarget::Id("missing"));
 
@@ -142,8 +138,7 @@ fn service_launch_by_missing_id_returns_typed_error() {
 #[test]
 fn service_rebuild_index_reports_item_count() {
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -177,8 +172,7 @@ fn service_search_prunes_stale_items() {
     std::fs::write(&present_path, b"ok").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -216,8 +210,7 @@ fn service_launch_missing_path_prunes_item() {
     let missing_path = std::env::temp_dir().join(format!("nex-launch-missing-{unique}.tmp"));
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -291,8 +284,7 @@ fn incremental_rebuild_prunes_missing_provider_items() {
     ]));
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_providers(vec![Box::new(MutableProvider::new(
             "filesystem",
@@ -366,8 +358,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
     )]));
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_providers(vec![Box::new(MutableProvider::new(
             "filesystem",
@@ -412,8 +403,7 @@ fn service_search_order_is_deterministic_for_mixed_ties() {
     std::fs::write(&file_path, b"file").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&SearchItem::new(
@@ -465,8 +455,7 @@ fn query_personalization_boosts_selected_item_for_same_query() {
     std::fs::write(&path_b, b"b").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&SearchItem::new(
@@ -543,8 +532,7 @@ fn incremental_rebuild_skips_unchanged_provider_with_stamp() {
     std::fs::write(&stable_path, b"a").unwrap();
 
     let config = test_config();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db)
+    let service = CoreService::with_connection(config)
         .unwrap()
         .with_providers(vec![Box::new(StampedProvider::new(
             "filesystem",

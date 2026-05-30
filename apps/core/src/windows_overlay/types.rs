@@ -106,10 +106,12 @@ pub(crate) const TIMER_ICON_CACHE_IDLE: usize = 0xBEF4;
 pub(crate) const TIMER_RESULTS_CONTENT_FADE: usize = 0xBEF5;
 pub(crate) const TIMER_COMMAND_BADGE_FADE: usize = 0xBEF6;
 
+
 pub(crate) const OVERLAY_ANIM_MS: u32 = 150;
 pub(crate) const OVERLAY_ALPHA_OPAQUE: u8 = 255;
-pub(crate) const RESULTS_ANIM_MS: u32 = 110;
-pub(crate) const RESULTS_CONTENT_FADE_MS: u32 = 120;
+pub(crate) const RESULTS_ANIM_MS: u32 = 160;
+pub(crate) const RESULTS_CONTENT_FADE_MS: u32 = 200;
+pub(crate) const RESULTS_CONTENT_SLIDE_PX: i32 = 10;
 pub(crate) const ANIM_FRAME_MS: u64 = 8;
 pub(crate) const WHEEL_LINES_PER_NOTCH: i32 = 3;
 pub(crate) const MAX_PENDING_WHEEL_DELTA: i32 = 120 * 8;

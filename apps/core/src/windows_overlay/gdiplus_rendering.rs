@@ -88,9 +88,11 @@ extern "system" {
     fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: *mut isize) -> i32;
     fn GdipDeletePen(pen: isize) -> i32;
     fn GdipDrawLineI(graphics: isize, pen: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> i32;
+    fn GdipSetPenLineCap197819(pen: isize, startCap: i32, endCap: i32, dashCap: i32) -> i32;
 }
 
 const GDI_PLUS_OK: i32 = 0;
+const LINE_CAP_ROUND: i32 = 2;
 pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
 const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
 const FILL_MODE_ALTERNATE: i32 = 0;
@@ -472,10 +474,25 @@ impl GdiplusContext {
         }
     }
 
+    pub(crate) fn draw_line_round_cap(graphics: isize, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, width: f32) {
+        if let Some(pen) = Self::create_pen(color, width) {
+            unsafe { GdipSetPenLineCap197819(pen, LINE_CAP_ROUND, LINE_CAP_ROUND, 0); }
+            unsafe { GdipDrawLineI(graphics, pen, x1, y1, x2, y2); }
+            Self::delete_pen(pen);
+        }
+    }
+
     // --- Color conversion ---
 
     pub(crate) fn gdi_color_to_argb(color: u32) -> u32 {
         0xFF000000
+            | ((color & 0x0000FF) << 16)
+            | (color & 0x00FF00)
+            | ((color & 0xFF0000) >> 16)
+    }
+
+    pub(crate) fn gdi_color_to_argb_alpha(color: u32, alpha: u8) -> u32 {
+        (alpha as u32) << 24
             | ((color & 0x0000FF) << 16)
             | (color & 0x00FF00)
             | ((color & 0xFF0000) >> 16)

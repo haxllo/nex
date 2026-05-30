@@ -17,13 +17,17 @@ pub(crate) fn apply_window_state(hwnd: HWND, x: i32, y: i32, width: i32, height:
     }
 }
 
-pub(crate) fn hide_overlay_immediate(hwnd: HWND) {
+pub(crate) fn cancel_window_animation(hwnd: HWND) {
     if let Some(state) = state_for(hwnd) {
         state.window_anim = None;
         unsafe {
             KillTimer(hwnd, TIMER_WINDOW_ANIM);
         }
     }
+}
+
+pub(crate) fn hide_overlay_immediate(hwnd: HWND) {
+    cancel_window_animation(hwnd);
     apply_window_state(hwnd, 0, 0, 0, 0, 0);
     unsafe {
         ShowWindow(hwnd, SW_HIDE);

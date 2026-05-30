@@ -4,6 +4,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
+use crate::windows_overlay::skia_renderer::SkiaRenderer;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::{CreatePen, CreateSolidBrush, PS_SOLID};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
@@ -202,6 +203,7 @@ pub(crate) struct OverlayShellState {
 
     pub(crate) window_anim: Option<WindowAnimation>,
     pub(crate) rows: Vec<OverlayRow>,
+
     pub(crate) icon_cache: HashMap<String, isize>,
     pub(crate) icon_cache_lru: VecDeque<String>,
     pub(crate) icon_cache_metrics: IconCacheMetrics,
@@ -225,6 +227,9 @@ pub(crate) struct OverlayShellState {
 
     // GDI+ for antialiased selection highlight
     pub(crate) gdiplus: Option<GdiplusContext>,
+
+    // tiny-skia renderer for panel background, rounded corners, and glow
+    pub(crate) skia: Option<SkiaRenderer>,
 }
 
 impl Default for OverlayShellState {
@@ -318,6 +323,7 @@ impl Default for OverlayShellState {
             icon_draw_size: 32,
             icon_container_size: 34,
             gdiplus: None,
+            skia: None,
         }
     }
 }

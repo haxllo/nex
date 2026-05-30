@@ -26,8 +26,7 @@ fn handles_search_command_and_serializes_response() {
     std::fs::write(&item_path, b"ok").unwrap();
 
     let config = nex_core::config::Config::default();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     service
         .upsert_item(&nex_core::model::SearchItem::new(
@@ -70,8 +69,7 @@ fn handles_launch_command_by_path() {
     std::fs::write(&launch_path, b"ok").unwrap();
 
     let config = nex_core::config::Config::default();
-    let db = nex_core::index_store::open_memory().unwrap();
-    let service = CoreService::with_connection(config, db).unwrap();
+    let service = CoreService::with_connection(config).unwrap();
 
     let response = service
         .handle_command(CoreRequest::Launch(LaunchRequest {

@@ -9,7 +9,6 @@ use crate::runtime::log_info;
 use crate::runtime::log_warn;
 use crate::runtime_overlay_rows::{
     set_idle_overlay_state, PendingUninstallConfirmation, STATUS_ROW_TYPE_TO_SEARCH,
-    STATUS_TEXT_INDEX_READY,
 };
 use crate::runtime_search_session::OverlaySearchSession;
 #[cfg(target_os = "windows")]
@@ -45,7 +44,7 @@ pub(crate) struct BackgroundIndexRefresh {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn start_background_index_refresh(
-    config: &Config,
+    service: Arc<Mutex<CoreService>>,
     initial_cache_empty: bool,
     startup_started_at: Instant,
 ) -> BackgroundIndexRefresh {
@@ -53,12 +52,12 @@ pub(crate) fn start_background_index_refresh(
     let result = Arc::new(Mutex::new(None));
     let completed_worker = completed.clone();
     let result_worker = result.clone();
-    let worker_config = config.clone();
     std::thread::spawn(move || {
-        let outcome = CoreService::new(worker_config)
-            .map(|service| service.with_runtime_providers())
-            .and_then(|service| service.rebuild_index_incremental_with_report())
-            .map_err(|error| format!("background indexing failed: {error}"));
+        let outcome = match service.lock() {
+            Ok(guard) => guard.rebuild_index_incremental_with_report(),
+            Err(poisoned) => poisoned.into_inner().rebuild_index_incremental_with_report(),
+        }
+        .map_err(|error| format!("background indexing failed: {error}"));
         let mut slot = match result_worker.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -83,7 +82,7 @@ pub(crate) fn start_background_index_refresh(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_apply_background_index_refresh(
-    service: &CoreService,
+    service: &Arc<Mutex<CoreService>>,
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
@@ -116,31 +115,22 @@ pub(crate) fn maybe_apply_background_index_refresh(
                 report.upserted_total,
                 report.removed_total
             ));
-            match service.reload_cache_from_store() {
-                Ok(cached_items) => {
-                    log_info(&format!(
-                        "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
-                        startup_elapsed_ms,
-                        cached_items,
-                        state.initial_cache_empty
-                    ));
-                    for provider in &report.providers {
-                        log_info(&format!(
-                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
-                            provider.provider,
-                            provider.discovered,
-                            provider.upserted,
-                            provider.removed,
-                            provider.skipped,
-                            provider.elapsed_ms
-                        ));
-                    }
-                }
-                Err(error) => {
-                    log_warn(&format!(
-                        "[nex] background indexing cache refresh failed: {error}"
-                    ));
-                }
+            log_info(&format!(
+                "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
+                startup_elapsed_ms,
+                report.indexed_total,
+                state.initial_cache_empty
+            ));
+            for provider in &report.providers {
+                log_info(&format!(
+                    "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                    provider.provider,
+                    provider.discovered,
+                    provider.upserted,
+                    provider.removed,
+                    provider.skipped,
+                    provider.elapsed_ms
+                ));
             }
             if state.initial_cache_empty {
                 state.ready_notice_pending = true;
@@ -190,9 +180,9 @@ pub(crate) fn queued_discovery_reindex_is_due(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_start_queued_discovery_reindex(
-    service: &CoreService,
+    service: &Arc<Mutex<CoreService>>,
     state: &mut BackgroundIndexRefresh,
-    runtime_config: &Config,
+    _runtime_config: &Config,
 ) {
     if !queued_discovery_reindex_is_due(
         state.cache_applied,
@@ -213,9 +203,12 @@ pub(crate) fn maybe_start_queued_discovery_reindex(
     log_info(&format!(
         "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
         startup_started_at.elapsed().as_millis(),
-        service.cached_items_len()
+        {
+            let guard = service.lock().unwrap();
+            guard.cached_items_len()
+        }
     ));
-    *state = start_background_index_refresh(runtime_config, false, startup_started_at);
+    *state = start_background_index_refresh(service.clone(), false, startup_started_at);
 }
 
 #[cfg(target_os = "windows")]
@@ -232,7 +225,6 @@ pub(crate) fn maybe_show_background_index_ready_notice(
 
     set_idle_overlay_state(overlay);
     overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
-    overlay.set_status_text(STATUS_TEXT_INDEX_READY);
     state.ready_notice_pending = false;
 }
 
@@ -244,7 +236,7 @@ pub(crate) fn config_file_modified_time(path: &std::path::Path) -> Option<System
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_apply_runtime_config_reload(
     overlay: &NativeOverlayShell,
-    service: &CoreService,
+    service: &Arc<Mutex<CoreService>>,
     runtime_config: &mut Config,
     plugin_registry: &mut PluginRegistry,
     search_session: &mut OverlaySearchSession,
@@ -268,7 +260,6 @@ pub(crate) fn maybe_apply_runtime_config_reload(
         Ok(next_config) => {
             let previous = runtime_config.clone();
             let hotkey_changed = next_config.hotkey != previous.hotkey;
-            let index_db_path_changed = next_config.index_db_path != previous.index_db_path;
             let discovery_config_changed = next_config.discovery_roots != previous.discovery_roots
                 || next_config.discovery_exclude_roots != previous.discovery_exclude_roots
                 || next_config.show_files != previous.show_files
@@ -299,18 +290,18 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                     previous.hotkey, runtime_config.hotkey
                 ));
             }
-            if index_db_path_changed {
-                log_warn("[nex] config index_db_path changed; restart required to apply");
-            }
             if discovery_config_changed {
-                if let Err(error) = service.reconfigure_runtime_providers(runtime_config) {
+                if let Err(error) = {
+                    let guard = service.lock().unwrap();
+                    guard.reconfigure_runtime_providers(runtime_config)
+                } {
                     log_warn(&format!(
                         "[nex] provider reconfigure failed after config reload: {error}"
                     ));
                 } else {
                     if background_index_refresh.cache_applied {
                         *background_index_refresh = start_background_index_refresh(
-                            runtime_config,
+                            service.clone(),
                             false,
                             background_index_refresh.startup_started_at,
                         );
@@ -352,8 +343,6 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 } else {
                     overlay.set_status_text("Discovery settings updated; reindexing...");
                 }
-            } else if index_db_path_changed {
-                overlay.set_status_text("Restart required to apply index path changes");
             } else if hotkey_changed {
                 overlay.set_status_text("Restart required to apply hotkey changes");
             } else {

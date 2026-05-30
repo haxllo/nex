@@ -655,9 +655,8 @@ pub(crate) fn write_diagnostics_bundle(
 
     let running_state = runtime_state_summary();
     let summary = format!(
-        "nex diagnostics bundle\ngenerated_epoch_secs={stamp}\nruntime_state={running_state}\nconfig_path={}\nindex_db_path={}\nlogs_dir={}\n",
+        "nex diagnostics bundle\ngenerated_epoch_secs={stamp}\nruntime_state={running_state}\nconfig_path={}\nlogs_dir={}\n",
         cfg.config_path.display(),
-        cfg.index_db_path.display(),
         crate::logging::logs_dir().display()
     );
     std::fs::write(bundle_dir.join("summary.txt"), summary)?;

@@ -11,7 +11,7 @@ use crate::runtime_diagnostics::{
     percentile_u128, QUERY_PROFILE_LOG_THRESHOLD_MS, SHORT_QUERY_APP_BIAS_MAX_LEN,
 };
 use crate::search::{search_with_filter, SearchFilter};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 pub(crate) const INDEXED_PREFIX_CACHE_MIN_QUERY_LEN: usize = 1;
@@ -236,8 +236,9 @@ pub(crate) fn search_overlay_results_with_session(
             everything_limit as u32,
         ) {
             let pre_len = merged.len();
+            let mut seen_ids: HashSet<String> = merged.iter().map(|e| e.id.clone()).collect();
             for item in everything_items {
-                if !merged.iter().any(|e| e.id == item.id) {
+                if seen_ids.insert(item.id.clone()) {
                     merged.push(item);
                 }
             }

@@ -32,8 +32,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
 
 use crate::windows_overlay::animation::{
-    apply_window_state, blend_color, complete_window_animation_if_running, hide_overlay_immediate,
-    results_content_animation_tick, start_window_animation, window_animation_tick,
+    apply_window_state, blend_color, cancel_window_animation,
+    complete_window_animation_if_running, hide_overlay_immediate, results_content_animation_tick,
+    start_window_animation, window_animation_tick,
 };
 use crate::windows_overlay::icon_cache::{
     cancel_icon_cache_idle_cleanup, clear_icon_cache, configure_runtime_performance_tuning,
@@ -144,6 +145,15 @@ impl NativeOverlayShell {
 
     pub fn show_and_focus(&self) {
         cancel_icon_cache_idle_cleanup(self.hwnd);
+        let running_anim = state_for(self.hwnd)
+            .and_then(|s| s.window_anim.as_ref())
+            .is_some();
+        if running_anim {
+            cancel_window_animation(self.hwnd);
+            unsafe {
+                SetLayeredWindowAttributes(self.hwnd, 0, OVERLAY_ALPHA_OPAQUE, LWA_ALPHA);
+            }
+        }
         self.center_window();
         self.ensure_compact_state();
         self.animate_show();
@@ -165,12 +175,12 @@ impl NativeOverlayShell {
     }
 
     pub fn hide(&self) {
-        hide_overlay_immediate(self.hwnd);
+        self.animate_hide();
         schedule_icon_cache_idle_cleanup(self.hwnd);
     }
 
     pub fn hide_now(&self) {
-        hide_overlay_immediate(self.hwnd);
+        self.animate_hide();
         schedule_icon_cache_idle_cleanup(self.hwnd);
     }
 
@@ -429,6 +439,7 @@ impl NativeOverlayShell {
                 }
                 if state.results_visible && !state.rows.is_empty() {
                     self.collapse_results();
+                    layout_children(self.hwnd, state);
                     return;
                 }
 
@@ -448,6 +459,7 @@ impl NativeOverlayShell {
                         SetWindowTextW(state.status_hwnd, wide.as_ptr());
                     }
                 }
+                layout_children(self.hwnd, state);
                 return;
             }
 
@@ -689,7 +701,6 @@ impl NativeOverlayShell {
             state.suppress_next_hover_sync = false;
             state.results_content_anim_start = None;
             unsafe {
-                ShowWindow(state.list_hwnd, SW_HIDE);
                 ShowWindow(state.footer_hint_hwnd, SW_HIDE);
                 ShowWindow(state.mode_strip_hwnd, SW_HIDE);
                 ShowWindow(state.everything_hwnd, SW_HIDE);
@@ -818,6 +829,42 @@ impl NativeOverlayShell {
             false,
         );
     }
+
+    fn animate_hide(&self) {
+        if !self.is_visible() {
+            return;
+        }
+
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(self.hwnd, &mut rect);
+        }
+        let current_left = rect.left;
+        let current_top = rect.top;
+        let current_width = rect.right - rect.left;
+        let current_height = rect.bottom - rect.top;
+
+        let end_width = ((current_width as f32) * 0.96_f32) as i32;
+        let end_height = ((current_height as f32) * 0.96_f32) as i32;
+        let end_left = current_left + (current_width - end_width) / 2;
+        let end_top = current_top + (current_height - end_height) / 2;
+
+        start_window_animation(
+            self.hwnd,
+            current_left,
+            current_top,
+            current_width,
+            current_height,
+            end_left,
+            end_top,
+            end_width,
+            end_height,
+            OVERLAY_ALPHA_OPAQUE,
+            0,
+            OVERLAY_ANIM_MS,
+            true,
+        );
+    }
 }
 
 extern "system" fn overlay_wnd_proc(
@@ -859,6 +906,15 @@ extern "system" fn overlay_wnd_proc(
                     crate::logging::error("[nex] GDI+ initialization failed, overlay disabled");
                     unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
                     return 0;
+                }
+
+                // Initialize tiny-skia renderer for panel backgrounds
+                state.skia = crate::windows_overlay::skia_renderer::SkiaRenderer::new(
+                    WINDOW_WIDTH as u32,
+                    COMPACT_HEIGHT as u32,
+                );
+                if state.skia.is_none() {
+                    crate::logging::warn("[nex] Skia renderer init failed, panel may not draw");
                 }
 
                 state.panel_brush = unsafe { CreateSolidBrush(state.palette.panel_bg) } as isize;

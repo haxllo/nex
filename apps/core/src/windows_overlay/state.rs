@@ -43,6 +43,7 @@ impl GdiObjectCache {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn brush(&mut self, color: u32) -> isize {
         let entry = self
             .brushes
@@ -231,9 +232,11 @@ pub(crate) struct OverlayShellState {
     pub(crate) gdiplus: Option<GdiplusContext>,
 
     // 32-bit DIB for per-pixel alpha rendering (Mica backdrop)
+    #[allow(dead_code)]
     pub(crate) dib: Option<DibSurface>,
 
     /// Current per-window alpha (0-255) used with UpdateLayeredWindow.
+    #[allow(dead_code)]
     pub(crate) window_alpha: u8,
 }
 

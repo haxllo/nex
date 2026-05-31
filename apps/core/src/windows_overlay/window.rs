@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AddFontResourceExW, BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, GetDC,
+    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC,
     GetTextFaceW, InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
     UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE,
-    OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 

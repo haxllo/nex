@@ -40,12 +40,14 @@ pub(crate) const ROW_ICON_SIZE: i32 = 34;
 pub(crate) const ROW_ICON_DRAW_SIZE: i32 = 32;
 pub(crate) const ROW_ICON_GAP: i32 = 10;
 pub(crate) const ROW_VERTICAL_INSET: i32 = 2;
+#[allow(dead_code)]
 pub(crate) const ROW_ACTIVE_RADIUS: i32 = 8;
 pub(crate) const ROW_TITLE_BLOCK_HEIGHT: i32 = 21;
 pub(crate) const ROW_META_BLOCK_HEIGHT: i32 = 16;
 pub(crate) const ROW_TEXT_LINE_GAP: i32 = 3;
 pub(crate) const HEADER_ROW_LABEL_HEIGHT: i32 = 14;
 pub(crate) const HEADER_ROW_LINE_GAP: i32 = 10;
+#[allow(dead_code)]
 pub(crate) const HEADER_ROW_LINE_HEIGHT: i32 = 1;
 pub(crate) const FOOTER_HINT_HEIGHT: i32 = 26;
 pub(crate) const FOOTER_SEPARATOR_HEIGHT: i32 = 1;
@@ -216,10 +218,11 @@ pub(crate) struct DibSurface {
     pub(crate) height: i32,
 }
 
+#[allow(dead_code)]
 impl DibSurface {
     pub(crate) fn new(width: i32, height: i32) -> Option<Self> {
         use windows_sys::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+            CreateCompatibleDC, CreateDIBSection, DeleteObject, GetDC, ReleaseDC,
             SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         };
 
@@ -305,7 +308,7 @@ impl DibSurface {
         if self.width == width && self.height == height {
             return true;
         }
-        let mut new_dib = DibSurface::new(width, height);
+        let new_dib = DibSurface::new(width, height);
         match new_dib {
             Some(d) => {
                 self.destroy();
@@ -328,6 +331,7 @@ impl Drop for DibSurface {
 // ==================== MICA / DWM CONSTANTS ====================
 
 /// Alpha for panel background fill when Mica is enabled (0x90 = 144/255).
+#[allow(dead_code)]
 pub(crate) const MICA_PANEL_ALPHA: u8 = 0x90;
 
 // ==================== ENUMS & STRUCTS ====================

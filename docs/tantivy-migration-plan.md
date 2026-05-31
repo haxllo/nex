@@ -7,7 +7,7 @@
 
 | Aspect | Current (SQLite LIKE) | Tantivy |
 |---|---|---|
-| Query speed (indexed) | 50–3500ms (LIKE `%term%`) | <5ms (inverted index + BM25) |
+| Query speed (indexed) | 50–3500ms (LIKE `%term%`) + Everything IPC (50ms timeout) | <5ms (inverted index + BM25) |
 | Startup time | N/A (in-memory cache) | <10ms (mmap directory) |
 | Prefix queries | `LIKE 'term%'` (ok) | Native prefix + automaton |
 | Fuzzy/subsequence | In-memory scoring only | Levenshtein automaton |
@@ -28,6 +28,8 @@ Estimated ~25 new direct + transitive deps. Build time impact: ~2–3 minutes on
 
 ## 2. Architecture Overview
 
+Everything SDK is **removed entirely** on this branch. Tantivy replaces it as the sole file/folder search backend. Discovery still walks the filesystem to populate the index; Tantivy serves all lookups.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      SearchWorker thread                         │
@@ -37,29 +39,24 @@ Estimated ~25 new direct + transitive deps. Build time impact: ~2–3 minutes on
 │       ▼                                                         │
 │  ParsedQuery (query_dsl.rs)                                     │
 │       │                                                         │
-│       ├──► [1] Everything SDK  (live_everything_search)         │
-│       │        │  File/folder results only                      │
-│       │        │  Windows-only, 50ms timeout                    │
-│       │        │  Dedup by id                                   │
-│       │        │                                                 │
-│       ├──► [2] Tantivy Index  ◄────── NEW (PRIMARY)            │
+│       ├──► [1] Tantivy Index  ◄────── PRIMARY                  │
 │       │        │  Title, path, subtitle FTS                     │
 │       │        │  Kind/extension filters (fast fields)          │
 │       │        │  Returns BM25-scored SearchItem[]              │
 │       │        │  <5ms typical                                  │
 │       │        │                                                 │
-│       ├──► [3] SQLite FTS5  ◄────── NEW (FALLBACK)             │
+│       ├──► [2] SQLite FTS5  ◄────── FALLBACK                   │
 │       │        │  Same schema as Tantivy                        │
 │       │        │  Used when Tantivy index absent/corrupt        │
 │       │        │  Also for write-path (index maintenance)       │
 │       │        │                                                 │
-│       ├──► [4] In-memory Cache  (existing: SearchItem[])        │
+│       ├──► [3] In-memory Cache  (existing: SearchItem[])        │
 │       │        │  For apps, actions, clipboard (small sets)     │
 │       │        │  search_with_filter_with_boosts()              │
 │       │        │                                                 │
-│       ├──► [5] Plugin Providers  (existing)                     │
+│       ├──► [4] Plugin Providers  (existing)                     │
 │       │        │                                                 │
-│       └──► [6] Final Re-rank  (existing: search_with_filter)   │
+│       └──► [5] Final Re-rank  (existing: search_with_filter)   │
 │                  Merge + dedup + boost                          │
 │                  Apply Top-hit confidence guard                  │
 │                                                                  │
@@ -71,17 +68,15 @@ Estimated ~25 new direct + transitive deps. Build time impact: ~2–3 minutes on
 ```
 ┌─ Query arrives ─────────────────────────────────────────────┐
 │                                                              │
-│  if everything_available AND is_file_mode:                   │
-│      use Everything SDK (existing path, unchanged)           │
-│                                                              │
-│  elif tantivy_available AND index_current:                   │
-│      use Tantivy for seed items (replaces db_query_candidates)│
+│  if tantivy_available AND index_current:                     │
+│      use Tantivy for seed items (replaces db_query_candidates│
+│      + Everything SDK entirely)                              │
 │                                                              │
 │  elif fts5_available:                                        │
 │      use SQLite FTS5 for seed items                          │
 │                                                              │
 │  else:                                                       │
-│      use in-memory cache only (existing fallback)            │
+│      use in-memory cache only (existing degenerate fallback)  │
 │                                                              │
 │  then:                                                       │
 │      in-memory re-scoring, dedup, boost, re-rank (existing)  │
@@ -89,17 +84,33 @@ Estimated ~25 new direct + transitive deps. Build time impact: ~2–3 minutes on
 └──────────────────────────────────────────────────────────────┘
 ```
 
+### Removed: Everything SDK
+
+| Removed item | Reason |
+|---|---|
+| `everything.rs` (994 lines) | Tantivy handles file/folder search natively, cross-platform |
+| `EverythingSearchProvider` | File discovery feeds the Tantivy index instead |
+| `live_everything_search()` | No need for real-time external IPC — Tantivy index is always current |
+| `Everything64.dll` loading | No more `libloading`, no more `Everything_SetMatchPath`/`Everything_SetMax` |
+| `--probe-everything` CLI flag | Replaced by `--probe-index` to verify Tantivy/FTS5 health |
+| `everything_search_enabled` config | Removed (Tantivy is always the indexed backend) |
+| `libloading` dependency | Removed from Cargo.toml (no longer needed) |
+
+The `everything.rs` file is deleted. The `everything_search_enabled` config key is removed. The `libloading` crate is dropped. No more IPC to `Everything.exe`, no more 50ms timeout dance, no more platform gating for file search.
+
 ## 3. Dependency Changes
 
 ```toml
-# apps/core/Cargo.toml — NEW dependencies
+# apps/core/Cargo.toml — CHANGED dependencies
 [dependencies]
 tantivy = { version = "0.26.1", default-features = false }   # NEW
-# rusqlite: add "vtab" feature for FTS5 virtual table support
-rusqlite = { version = "0.37.0", features = ["bundled", "vtab"] }  # MODIFIED
+rusqlite = { version = "0.37.0", features = ["bundled", "vtab"] }  # MODIFIED (+vtab)
+# libloading is REMOVED (was used for Everything SDK)
 ```
 
 `vtab` feature exposes `conn.create_virtual_table(...)` in rusqlite, needed for `CREATE VIRTUAL TABLE ... USING fts5(...)`.
+
+`libloading` (0.8.6) is removed — no longer needed since Everything SDK is gone.
 
 ## 4. New Module: `tantivy_search.rs`
 
@@ -515,7 +526,13 @@ The existing `IndexedPrefixCache` in `runtime_search_session.rs` caches seed ite
 
 ## 10. Config Changes
 
-### 10.1 New Config Keys (`config.rs`)
+### 10.1 Removed Config Keys
+
+| Key | Reason |
+|---|---|
+| `everything_search_enabled` (bool, default `true`) | Everything SDK removed entirely |
+
+### 10.2 New Config Keys (`config.rs`)
 
 ```rust
 // In Config struct:
@@ -537,10 +554,12 @@ pub search_backend: String,  // default: "tantivy"
 search_backend = "tantivy"
 ```
 
-### 10.2 Migration
+### 10.3 Migration
 
 Config version bump: `CURRENT_CONFIG_VERSION = 13` → `14`
-Migration: Add `search_backend = "tantivy"` if missing.
+Migration:
+1. Remove `everything_search_enabled` key if present
+2. Add `search_backend = "tantivy"` if missing
 
 ## 11. Build & CI Impact
 
@@ -589,10 +608,11 @@ Tantivy 0.26.1 requires MSRV 1.86. Current project uses `edition = "2021"` and t
 
 ### 12.3 Existing Tests
 
-All 134 existing tests must still pass. Key test files to verify:
+All 134 existing tests must still pass (minus removed Everything tests). Key test files to verify:
 - `tests/perf/query_latency_test.rs` (perf gate: warm_query p95 under 15ms)
-- `tests/windows_runtime_smoke_test.rs` (CI-only smoke)
+- `tests/windows_runtime_smoke_test.rs` (CI-only smoke) — may need updates if it depended on Everything
 - All unit tests in `runtime.rs`, `search.rs`, `config.rs`, etc.
+- Tests referencing `everything.rs`, `EverythingSearchProvider`, or `live_everything_search` are deleted along with the module
 
 ## 13. Migration Steps (Implementation Order)
 
@@ -604,49 +624,61 @@ All 134 existing tests must still pass. Key test files to verify:
 4. **Add `SearchBackend` enum** to `config.rs` + config key and migration
 5. **Verify build**: `cargo build --bin nex` — zero warnings, successful compilation
 
-### Phase 2: Integration (1-2 sessions)
+### Phase 2: Everything Removal (1 session)
 
-6. **Add index fields to `CoreService`**: tantivy_index, fts5_index, search_backend
-7. **Replace `db_query_candidates()`**: Route through `search_indexed_candidates()` with fallback chain
-8. **Add index sync**: `on_discovery_complete()` — bulk reindex after discovery refresh
-9. **Wire incremental updates**: `upsert_item()` → also update Tantivy/FTS5
-10. **BM25 ↔ existing scoring bridge**: Map BM25 score to text-match score range
+6. **Delete `everything.rs`**: Remove the 994-line module entirely
+7. **Remove `libloading` dependency**: No longer needed
+8. **Remove `everything_search_enabled` from config**: Bump config version to 14, migrate existing configs
+9. **Remove `EverytingSearchProvider` from `runtime_providers_from_config()`**: File discovery handled by `FileSystemDiscoveryProvider` alone
+10. **Remove `live_everything_search()` call from `runtime_search_session.rs`**: The indexed search pipeline replaces it entirely
+11. **Remove `--probe-everything` CLI flag**: Replace with `--probe-index` for Tantivy/FTS5 health
+12. **Remove `probe_everything_sdk()` and `check_everything_installed()`**: Dead code
+13. **Remove `NEX_WINDOWS_RUNTIME_SMOKE` env var references**: Everything was the only Windows-specific search path
+14. **Clean up `runtime_search_session.rs`**: Remove Everything dedup logic (dedup by id against Everything results)
+15. **Verify build**: `cargo build --bin nex` — zero warnings without everything.rs
 
-### Phase 3: Polish & Testing (1 session)
+### Phase 3: Tantivy + FTS5 Integration (1-2 sessions)
 
-11. **Write unit tests** for both search backends
-12. **Write performance tests**: Compare Tantivy vs FTS5 vs baseline LIKE
-13. **Tune Tantivy**: Merge policy, segment size, commit frequency
-14. **Add `--probe-search-backend` CLI**: Verify index health at runtime
-15. **Verify all 134 existing tests pass**: `cargo test -p nex`
-16. **Verify perf gate**: `cargo test -p nex-cli --test perf_query_latency_test`
-17. **Zero warnings**: `cargo build --bin nex` must emit zero warnings
+16. **Add index fields to `CoreService`**: tantivy_index, fts5_index, search_backend
+17. **Replace `db_query_candidates()`**: Route through `search_indexed_candidates()` with fallback chain
+18. **Add index sync**: `on_discovery_complete()` — bulk reindex after discovery refresh
+19. **Wire incremental updates**: `upsert_item()` → also update Tantivy/FTS5
+20. **BM25 ↔ existing scoring bridge**: Map BM25 score to text-match score range
 
-### Phase 4: Everything Deintegration (optional, after stable)
+### Phase 4: Polish & Testing (1 session)
 
-18. **Make Everything SDK secondary**: Tantivy serves all file/folder queries, Everything only for real-time changes
-19. **Remove `live_everything_search()` from search pipeline**: Or keep as optional performance boost
-20. **Benchmark comparison**: Everything vs Tantivy for file search latency
+21. **Write unit tests** for both search backends
+22. **Write performance tests**: Compare Tantivy vs FTS5 vs baseline LIKE
+23. **Tune Tantivy**: Merge policy, segment size, commit frequency
+24. **Add `--probe-index` CLI**: Verify index health at runtime
+25. **Verify all 134 existing tests pass**: `cargo test -p nex`
+26. **Verify perf gate**: `cargo test -p nex-cli --test perf_query_latency_test`
+27. **Zero warnings**: `cargo build --bin nex` must emit zero warnings
+
+
 
 ## 14. Risks & Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Tantivy adds too many deps | High | Build time, binary size | `default-features = false`, evaluate exact dep count at build |
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|---|
+| Tantivy adds too many deps | High | Build time, binary size | `default-features = false`, evaluate exact dep count at build; offsets removing `libloading` |
 | Tantivy index corruption on crash | Low | Index rebuild (full discovery) | Crash-safe MMapDirectory; detect on open → auto-rebuild |
 | FTS5 performance worse than LIKE for short queries | Low | Query latency | Tantivy is primary; FTS5 is emergency fallback only |
 | Tantivy MSRV > CI toolchain | Low | CI failure | Use `stable` toolchain (matches) |
 | BM25 scoring doesn't mix well with existing scoring | Medium | Weird re-ranking | Add `pre_score` to SearchItem, clamp to our scale, existing bonuses still apply |
 | Index sync overhead on discovery | Medium | Discovery takes longer | Batch commit every 1000 items, commit outside writer lock |
 | Tantivy doesn't ship with Windows SIMD | Low | Suboptimal perf | SSE2 is universal on x64 Windows; no issue |
+| Filesystem discovery is slower than Everything IPC | Medium | Index freshness gap | Discovery is async/background; Tantivy searches are <5ms once indexed |
 
 ## 15. Rollout Plan
 
-1. Everything SDK stays as the file-search primary during development
+1. Everything SDK is **deleted upfront** — Tantivy is the only indexed search backend from the start of this branch
 2. New `search_backend` config key defaults to `"tantivy"` but gracefully falls back through FTS5 → in-memory only
 3. Users who don't want the extra deps can set `search_backend = "fts5"` or `"off"`
 4. Tantivy index is lazily built: first discovery refresh populates it; users see gradual quality improvement
-5. After stabilization, consider moving Tantivy to primary position and Everything to optional file-source only (not search)
+5. File discovery (`FileSystemDiscoveryProvider`) is no longer gated behind `everything_search_enabled` — it always runs to feed the Tantivy index
 
 ## 16. Key Files Reference
 
@@ -660,5 +692,9 @@ All 134 existing tests must still pass. Key test files to verify:
 | `apps/core/src/runtime_search_session.rs` | ~400 | MODIFY | Route indexed search through new backends |
 | `apps/core/src/search.rs` | 759 | MODIFY | Accept pre_score from backends |
 | `apps/core/src/config.rs` | 1311 | MODIFY | search_backend config key + migration |
-| `apps/core/src/everything.rs` | 994 | NO CHANGE | Everything stays as file-search source |
-| `apps/core/src/lib.rs` | ~50 | MODIFY | Add pub mod for new modules |
+| `apps/core/src/everything.rs` | 994 | DELETED | No longer needed — Tantivy replaces Everything SDK entirely |
+| `apps/core/src/lib.rs` | ~50 | MODIFY | Remove `mod everything`, add `mod tantivy_search`, `mod fts5_search` |
+| `apps/core/src/runtime_search_session.rs` | ~400 | MODIFY | Remove `live_everything_search()` call and dedup logic |
+| `apps/core/src/core_service.rs` | ~300 | MODIFY | Remove `EverythingSearchProvider` from provider list, add Tantivy/FTS5 init |
+| `apps/core/src/discovery.rs` | 1498 | MODIFY | Remove `EverythingSearchProvider` struct and its references |
+| `.gitignore` | ~50 | MODIFY | Remove `Everything64.dll` entry (file deleted, dep removed) |

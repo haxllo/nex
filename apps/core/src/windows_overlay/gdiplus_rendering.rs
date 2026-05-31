@@ -10,6 +10,7 @@ struct GdiplusStartupInput {
     SuppressExternalCodecs: i32,
 }
 
+#[allow(dead_code)]
 #[repr(C)]
 pub(crate) struct GpRectF {
     pub(crate) x: f32,
@@ -18,6 +19,7 @@ pub(crate) struct GpRectF {
     pub(crate) height: f32,
 }
 
+#[allow(dead_code)]
 #[link(name = "gdiplus")]
 extern "system" {
     fn GdiplusStartup(
@@ -118,11 +120,13 @@ pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
 const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
 pub(crate) const FILL_MODE_ALTERNATE: i32 = 0;
 const UNIT_PIXEL: i32 = 2;
+#[allow(dead_code)]
 const FONT_STYLE_REGULAR: i32 = 0;
 
 // StringAlignment
 const STRING_ALIGNMENT_NEAR: i32 = 0;
 const STRING_ALIGNMENT_CENTER: i32 = 1;
+#[allow(dead_code)]
 const STRING_ALIGNMENT_FAR: i32 = 2;
 
 // StringTrimming
@@ -220,6 +224,7 @@ impl GdiplusContext {
 
     // --- Rounded rect (with own graphics create/delete) ---
 
+    #[allow(dead_code)]
     pub(crate) fn fill_rounded_rect(
         &self, hdc: isize,
         x: i32, y: i32, w: i32, h: i32,
@@ -333,6 +338,7 @@ impl GdiplusContext {
         Self::delete_brush(brush);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn draw_rounded_rect_border_on_graphics(
         &self, graphics: isize, x: i32, y: i32, w: i32, h: i32,
         radius: i32, color: u32, pen_width: f32,
@@ -512,6 +518,7 @@ impl GdiplusContext {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn gif_frame_count(image: isize) -> u32 {
     let mut count = 0u32;
     unsafe {
@@ -520,6 +527,7 @@ pub(crate) fn gif_frame_count(image: isize) -> u32 {
     count
 }
 
+#[allow(dead_code)]
 pub(crate) fn select_gif_frame(image: isize, frame: u32) {
     unsafe {
         GdipImageSelectActiveFrame(image, &FRAME_DIMENSION_TIME, frame);

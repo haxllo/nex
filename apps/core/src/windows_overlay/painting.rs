@@ -427,6 +427,7 @@ pub(crate) fn draw_panel_background(hwnd: HWND) {
 /// Render the panel background into the 32-bit DIB and present via UpdateLayeredWindow.
 /// The DIB is created/re-created if needed (size mismatch).
 /// The pixel alpha is pre-multiplied for UpdateLayeredWindow (AC_SRC_ALPHA).
+#[allow(dead_code)]
 pub(crate) fn render_and_update_layered(hwnd: HWND) {
     // Phase 1: ensure DIB exists (mutable state access)
     let mut client: RECT = unsafe { std::mem::zeroed() };
@@ -799,6 +800,7 @@ fn measure_text_width(hdc: HDC, text: &str) -> i32 {
     }
 }
 
+#[allow(dead_code)]
 fn icon_glyph_for_kind(kind: &str) -> &'static str {
     if kind.eq_ignore_ascii_case("app") {
         "A"
@@ -813,6 +815,7 @@ fn icon_glyph_for_kind(kind: &str) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn icon_glyph_for_row(row: &OverlayRow) -> &'static str {
     if !row.kind.eq_ignore_ascii_case("action") {
         return icon_glyph_for_kind(&row.kind);

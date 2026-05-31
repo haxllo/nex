@@ -8,3 +8,4 @@ devsync.policy.toml
 target/
 artifacts
 nul
+Everything64.dll

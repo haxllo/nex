@@ -82,18 +82,41 @@ extern "system" {
     // Icons
     fn GdipCreateBitmapFromHICON(hicon: isize, bitmap: *mut isize) -> i32;
     fn GdipDrawImageI(graphics: isize, image: isize, x: i32, y: i32) -> i32;
+    fn GdipDrawImageRectI(graphics: isize, image: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
+    fn GdipLoadImageFromStream(stream: isize, image: *mut isize) -> i32;
     fn GdipDisposeImage(image: isize) -> i32;
 
     // Pens and lines
     fn GdipCreatePen1(color: u32, width: f32, unit: i32, pen: *mut isize) -> i32;
     fn GdipDeletePen(pen: isize) -> i32;
     fn GdipDrawLineI(graphics: isize, pen: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> i32;
+
+    // Multi-frame image (GIF)
+    fn GdipImageGetFrameCount(image: isize, dimensionID: *const Guid, count: *mut u32) -> i32;
+    fn GdipImageSelectActiveFrame(image: isize, dimensionID: *const Guid, frameIndex: u32) -> i32;
+    fn GdipFree(ptr: *mut std::ffi::c_void) -> ();
+    fn GdipGetImageDimension(image: isize, width: *mut f32, height: *mut f32) -> i32;
 }
 
-const GDI_PLUS_OK: i32 = 0;
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+const FRAME_DIMENSION_TIME: Guid = Guid {
+    data1: 0x6aedbd6d,
+    data2: 0x3fb5,
+    data3: 0x418a,
+    data4: [0x83, 0xa6, 0x1f, 0x45, 0x22, 0x9f, 0x7e, 0x8d],
+};
+
+pub(crate) const GDI_PLUS_OK: i32 = 0;
 pub(crate) const SMOOTHING_MODE_ANTI_ALIAS: i32 = 4;
 const TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT: i32 = 5;
-const FILL_MODE_ALTERNATE: i32 = 0;
+pub(crate) const FILL_MODE_ALTERNATE: i32 = 0;
 const UNIT_PIXEL: i32 = 2;
 const FONT_STYLE_REGULAR: i32 = 0;
 
@@ -450,6 +473,13 @@ impl GdiplusContext {
         }
     }
 
+    /// Draw a GDI+ Image directly (from GdipLoadImageFromStream, etc.)
+    pub(crate) fn draw_image(graphics: isize, image: isize, x: i32, y: i32, w: i32, h: i32) {
+        unsafe {
+            GdipDrawImageRectI(graphics, image, x, y, w, h);
+        }
+    }
+
     // --- Pen and line ---
 
     pub(crate) fn create_pen(color: u32, width: f32) -> Option<isize> {
@@ -479,6 +509,20 @@ impl GdiplusContext {
             | ((color & 0x0000FF) << 16)
             | (color & 0x00FF00)
             | ((color & 0xFF0000) >> 16)
+    }
+}
+
+pub(crate) fn gif_frame_count(image: isize) -> u32 {
+    let mut count = 0u32;
+    unsafe {
+        GdipImageGetFrameCount(image, &FRAME_DIMENSION_TIME, &mut count);
+    }
+    count
+}
+
+pub(crate) fn select_gif_frame(image: isize, frame: u32) {
+    unsafe {
+        GdipImageSelectActiveFrame(image, &FRAME_DIMENSION_TIME, frame);
     }
 }
 

@@ -661,6 +661,11 @@ impl CoreService {
         if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
             return Ok(Vec::new());
         }
+        if self.everything_covered_files.load(Ordering::SeqCst)
+            && matches!(mode, SearchMode::Files | SearchMode::All)
+        {
+            return Ok(Vec::new());
+        }
 
         let sql = match mode {
             SearchMode::Files => {
@@ -776,34 +781,41 @@ impl CoreService {
             latest_full
         };
         let latest_apps = collect_app_items(&latest_full);
-        let compact_started = std::time::Instant::now();
-        let summary = cache_compaction_summary(&latest_full, &config_snapshot);
-        let latest = compact_cached_items(&latest_full, &config_snapshot);
-        let compact_elapsed_ms = compact_started.elapsed().as_millis();
-        if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
-            if compact_elapsed_ms > 100 {
-                crate::logging::info(&format!(
-                    "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
-                    summary.input_total,
-                    summary.retained_total,
-                    summary.dropped_total,
-                    compact_elapsed_ms,
-                ));
-            } else {
-                crate::logging::info(&format!(
-                    "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
-                    summary.input_total,
-                    summary.retained_total,
-                    summary.dropped_total,
-                    summary.retained_apps,
-                    summary.retained_file_folders,
-                    summary.retained_other,
-                    summary.effective_file_seed_cap,
-                    summary.broad_root_mode,
-                    summary.active_memory_target_mb
-                ));
+        let latest = if config_snapshot.everything_search_enabled
+            && self.everything_covered_files.load(Ordering::SeqCst)
+        {
+            latest_full
+        } else {
+            let compact_started = std::time::Instant::now();
+            let summary = cache_compaction_summary(&latest_full, &config_snapshot);
+            let compacted = compact_cached_items(&latest_full, &config_snapshot);
+            let compact_elapsed_ms = compact_started.elapsed().as_millis();
+            if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
+                if compact_elapsed_ms > 100 {
+                    crate::logging::info(&format!(
+                        "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
+                        summary.input_total,
+                        summary.retained_total,
+                        summary.dropped_total,
+                        compact_elapsed_ms,
+                    ));
+                } else {
+                    crate::logging::info(&format!(
+                        "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
+                        summary.input_total,
+                        summary.retained_total,
+                        summary.dropped_total,
+                        summary.retained_apps,
+                        summary.retained_file_folders,
+                        summary.retained_other,
+                        summary.effective_file_seed_cap,
+                        summary.broad_root_mode,
+                        summary.active_memory_target_mb
+                    ));
+                }
             }
-        }
+            compacted
+        };
         match self.cached_items.write() {
             Ok(mut guard) => {
                 *guard = latest;

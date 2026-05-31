@@ -9,8 +9,11 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_SELECTED};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetCursorPos, GetWindowRect, GetWindowTextLengthW, HideCaret, KillTimer,
-    SendMessageW, SetTimer, LB_GETCOUNT, LB_GETITEMRECT, LB_GETTOPINDEX, LB_SETTOPINDEX,
-    WM_SETREDRAW,
+    SendMessageW, SetTimer, UpdateLayeredWindow, ULW_ALPHA, LB_GETCOUNT, LB_GETITEMRECT,
+    LB_GETTOPINDEX, LB_SETTOPINDEX, WM_SETREDRAW,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION,
 };
 
 use std::time::Instant;
@@ -22,6 +25,7 @@ use crate::windows_overlay::layout::{
 };
 use crate::windows_overlay::state::{state_for, OverlayShellState};
 use crate::windows_overlay::types::*;
+
 pub(crate) fn paint_edit_placeholder(edit_hwnd: HWND, state: &OverlayShellState) {
     let text_len = unsafe { GetWindowTextLengthW(edit_hwnd) };
     if text_len > 0 {
@@ -124,27 +128,39 @@ pub(crate) fn paint_edit_search_icon(edit_hwnd: HWND, state: &OverlayShellState)
         return;
     }
 
-    unsafe {
-        SetBkMode(hdc, TRANSPARENT as i32);
-        SetTextColor(hdc, state.palette.text_hint);
-        let old = SelectObject(hdc, state.search_icon_font as _);
-        let mut icon_rect = RECT {
-            left: SEARCH_ICON_LEFT,
-            top: text_rect.top,
-            right: text_rect.left,
-            bottom: text_rect.bottom,
-        };
-        let search_wide = to_wide(SEARCH_ICON_TEXT);
-        DrawTextW(
-            hdc,
-            search_wide.as_ptr(),
-            -1,
-            &mut icon_rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-        );
-        SelectObject(hdc, old);
-        ReleaseDC(edit_hwnd, hdc);
+    if let Some(image) = crate::windows_overlay::custom_icons::search_icon() {
+        let icon_size = state.icon_draw_size;
+        let icon_top = text_rect.top + (text_rect.bottom - text_rect.top - icon_size) / 2;
+        if let Some(ref gdiplus) = state.gdiplus {
+            let graphics = gdiplus.create_graphics(hdc as isize);
+            if let Some(g) = graphics {
+                GdiplusContext::draw_image(g, image, SEARCH_ICON_LEFT, icon_top, icon_size, icon_size);
+                GdiplusContext::delete_graphics(g);
+            }
+        }
+    } else {
+        unsafe {
+            SetBkMode(hdc, TRANSPARENT as i32);
+            SetTextColor(hdc, state.palette.text_hint);
+            let old = SelectObject(hdc, state.search_icon_font as _);
+            let mut icon_rect = RECT {
+                left: SEARCH_ICON_LEFT,
+                top: text_rect.top,
+                right: text_rect.left,
+                bottom: text_rect.bottom,
+            };
+            let search_wide = to_wide(SEARCH_ICON_TEXT);
+            DrawTextW(
+                hdc,
+                search_wide.as_ptr(),
+                -1,
+                &mut icon_rect,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+            );
+            SelectObject(hdc, old);
+        }
     }
+    unsafe { ReleaseDC(edit_hwnd, hdc); }
 }
 
 pub(crate) fn paint_edit_command_prefix(edit_hwnd: HWND, state: &OverlayShellState) {
@@ -390,11 +406,9 @@ pub(crate) fn draw_panel_background(hwnd: HWND) {
     gdiplus.fill_rect(graphics, 0, 0, w, h, panel_bg);
 
     if !state.dwm_rounded_enabled && PANEL_RADIUS > 0 {
-        // Draw border (outer rounded rect filled with border color)
         gdiplus.fill_rounded_rect_on_graphics(
             graphics, 0, 0, w, h, PANEL_RADIUS, panel_border,
         );
-        // Draw inner rect (slightly smaller, filled with bg color)
         gdiplus.fill_rounded_rect_on_graphics(
             graphics, 2, 2, w - 4, h - 4,
             (PANEL_RADIUS - 2).max(1), panel_bg,
@@ -410,10 +424,94 @@ pub(crate) fn draw_panel_background(hwnd: HWND) {
     unsafe { EndPaint(hwnd, &paint); }
 }
 
+/// Render the panel background into the 32-bit DIB and present via UpdateLayeredWindow.
+/// The DIB is created/re-created if needed (size mismatch).
+/// The pixel alpha is pre-multiplied for UpdateLayeredWindow (AC_SRC_ALPHA).
+pub(crate) fn render_and_update_layered(hwnd: HWND) {
+    // Phase 1: ensure DIB exists (mutable state access)
+    let mut client: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(hwnd, &mut client) };
+    let w = (client.right - client.left).max(0);
+    let h = (client.bottom - client.top).max(0);
+    if w <= 0 || h <= 0 { return; }
+
+    {
+        let state = state_for(hwnd);
+        if state.is_none() { return; }
+        let state = state.unwrap();
+        let needs_new = match state.dib.as_ref() {
+            Some(dib) => dib.width != w || dib.height != h,
+            None => true,
+        };
+        if needs_new {
+            if let Some(new_dib) = DibSurface::new(w, h) {
+                if let Some(ref mut old) = state.dib {
+                    old.destroy();
+                }
+                state.dib = Some(new_dib);
+            } else {
+                return;
+            }
+        }
+    }
+    // state borrow dropped
+
+    // Phase 2: render panel into DIB (immutable state + DIB)
+    let state = state_for(hwnd);
+    if state.is_none() { return; }
+    let state = state.unwrap();
+
+    let Some(ref gdiplus) = state.gdiplus else { return };
+    let dib = match state.dib.as_ref() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let Some(graphics) = gdiplus.create_graphics(dib.hdc) else { return };
+
+    let panel_bg_argb = GdiplusContext::gdi_color_to_argb(state.palette.panel_bg);
+    let panel_border_argb = GdiplusContext::gdi_color_to_argb(state.palette.panel_border);
+
+    let mica_bg = (panel_bg_argb & 0x00FFFFFF) | ((MICA_PANEL_ALPHA as u32) << 24);
+    let mica_border = (panel_border_argb & 0x00FFFFFF) | ((MICA_PANEL_ALPHA as u32) << 24);
+
+    gdiplus.fill_rect(graphics, 0, 0, w, h, mica_bg);
+
+    if !state.dwm_rounded_enabled && PANEL_RADIUS > 0 {
+        gdiplus.fill_rounded_rect_on_graphics(graphics, 0, 0, w, h, PANEL_RADIUS, mica_border);
+        gdiplus.fill_rounded_rect_on_graphics(graphics, 2, 2, w - 4, h - 4, (PANEL_RADIUS - 2).max(1), mica_bg);
+    }
+
+    if state.results_visible {
+        let y = COMPACT_HEIGHT + DIVIDER_TOP_SPACING;
+        GdiplusContext::draw_line(graphics, 2, y, w - 2, y, mica_border, 1.0);
+    }
+
+    GdiplusContext::delete_graphics(graphics);
+    dib.premultiply_alpha();
+    // state borrow still alive
+
+    // Phase 3: present via UpdateLayeredWindow (immutable state + DIB)
+    let mut window_rect: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(hwnd, &mut window_rect) };
+
+    let dst_pt = POINT { x: window_rect.left, y: window_rect.top };
+    let size = SIZE { cx: w, cy: h };
+    let src_pt = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: state.window_alpha,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    unsafe {
+        UpdateLayeredWindow(hwnd, std::ptr::null_mut(), &dst_pt, &size, dib.hdc as _, &src_pt, 0, &blend, ULW_ALPHA);
+    }
+}
+
 pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
     if dis.itemID == u32::MAX { return; }
     let Some(state) = state_for(hwnd) else { return; };
-    let Some(ref gdiplus) = state.gdiplus else { return; };
 
     let item_index = dis.itemID as i32;
     let row = state
@@ -428,6 +526,9 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
             path: String::new(),
             icon_path: String::new(),
         });
+
+    let Some(ref gdiplus) = state.gdiplus else { return;
+    };
 
     let content_progress = results_content_progress(state);
     let offset_y = ((1.0 - content_progress) * 4.0).round() as i32;
@@ -514,25 +615,42 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
 
     // --- Icon ---
     if !status_row {
-        let icon_key = crate::windows_overlay::icon_cache::icon_cache_key(&row);
-        let icon_handle = state.icon_cache.get(&icon_key).copied().unwrap_or(0);
-        if icon_handle != 0 {
-            let icon_draw_size = state.icon_draw_size;
-            let total_height = if has_meta {
-                ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP + ROW_META_BLOCK_HEIGHT
-            } else {
-                ROW_TITLE_BLOCK_HEIGHT
-            };
-            let text_top = dis.rcItem.top + ((ROW_HEIGHT - total_height).max(0) / 2) + offset_y;
-            let icon_top = text_top + ((total_height as f32 - icon_container_size as f32) / 2.0) as i32;
-            let icon_offset = ((icon_container_size as f32 - icon_draw_size as f32) / 2.0) as i32;
-            GdiplusContext::draw_icon(
-                graphics,
-                icon_handle as isize,
+        let icon_draw_size = state.icon_draw_size;
+        let total_height = if has_meta {
+            ROW_TITLE_BLOCK_HEIGHT + ROW_TEXT_LINE_GAP + ROW_META_BLOCK_HEIGHT
+        } else {
+            ROW_TITLE_BLOCK_HEIGHT
+        };
+        let text_top = dis.rcItem.top + ((ROW_HEIGHT - total_height).max(0) / 2) + offset_y;
+        let icon_top = text_top + ((total_height as f32 - icon_container_size as f32) / 2.0) as i32;
+        let icon_offset = ((icon_container_size as f32 - icon_draw_size as f32) / 2.0) as i32;
+
+        // Try custom icon first (GDI+ Image handle)
+        let custom_icon = if row.kind.eq_ignore_ascii_case("action") {
+            crate::windows_overlay::custom_icons::custom_icon_for_action(&row.title)
+        } else {
+            crate::windows_overlay::custom_icons::custom_icon_for_kind(&row.kind)
+        };
+        if let Some(img) = custom_icon {
+            GdiplusContext::draw_image(
+                graphics, img,
                 dis.rcItem.left + ROW_INSET_X + icon_offset,
                 icon_top + icon_offset,
-                icon_draw_size,
+                icon_draw_size, icon_draw_size,
             );
+        } else {
+            // Fall back to HICON from icon cache
+            let icon_key = crate::windows_overlay::icon_cache::icon_cache_key(&row);
+            let icon_handle = state.icon_cache.get(&icon_key).copied().unwrap_or(0);
+            if icon_handle != 0 {
+                GdiplusContext::draw_icon(
+                    graphics,
+                    icon_handle as isize,
+                    dis.rcItem.left + ROW_INSET_X + icon_offset,
+                    icon_top + icon_offset,
+                    icon_draw_size,
+                );
+            }
         }
     }
 
@@ -598,7 +716,7 @@ pub(crate) fn draw_list_row(hwnd: HWND, dis: &mut DRAWITEMSTRUCT) {
 
 pub(crate) fn row_is_selectable(state: &OverlayShellState, index: usize) -> bool {
     state.rows.get(index).is_some_and(|row| {
-        matches!(row.role, OverlayRowRole::Item | OverlayRowRole::TopHit) && row.result_index >= 0
+        matches!(row.role, OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator) && row.result_index >= 0
     })
 }
 

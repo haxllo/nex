@@ -52,7 +52,7 @@ use crate::search_worker::SearchWorker;
 #[cfg(target_os = "windows")]
 use crate::windows_overlay::types::NEX_WM_SEARCH_RESULTS_READY;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{signal_existing_instance_show, NativeOverlayShell, OverlayEvent};
+use crate::windows_overlay::{signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole};
 #[cfg(target_os = "windows")]
 use std::time::Instant;
 
@@ -205,6 +205,22 @@ pub(crate) fn run_windows_runtime(
                     log_info("[nex] hotkey_event received");
                     let overlay_visible = overlay.is_visible();
                     overlay_state.set_visible(overlay_visible);
+                    if overlay.query_text().trim().starts_with('=') {
+                        let query = overlay.query_text();
+                        if let Some(expr) = query.trim().strip_prefix('=') {
+                            let expr = expr.trim();
+                            if let Ok(value) = crate::calculator::evaluate(expr) {
+                                let display = format_result(value);
+                                let status_text = if copy_to_clipboard(&display) {
+                                    format!("Copied: {display}")
+                                } else {
+                                    format!("= {display}")
+                                };
+                                overlay.set_status_text(&status_text);
+                            }
+                        }
+                        return;
+                    }
                     if !overlay_visible && should_suppress_hotkey_for_game_mode(&runtime_config) {
                         log_info(
                             "[nex] hotkey ignored because game mode is active for the foreground app",
@@ -572,11 +588,49 @@ fn apply_query_change(
         current_results.clear();
         *selected_index = 0;
         last_query.clear();
-        *last_sent_generation = 0;
+        *last_sent_generation = last_sent_generation.wrapping_add(1);
         *pending_uninstall_confirmation = None;
         set_idle_overlay_state(overlay);
         return;
     }
+
+    // Calculator mode: evaluate expression inline, no search worker dispatch
+    if let Some(expr) = trimmed.strip_prefix('=') {
+        let expr = expr.trim();
+        if !expr.is_empty() {
+            *last_query = trimmed.to_string();
+            *last_sent_generation = last_sent_generation.wrapping_add(1);
+            current_results.clear();
+            *selected_index = 0;
+            match crate::calculator::evaluate(expr) {
+                Ok(value) => {
+                    let display = format_result(value);
+                    let row = OverlayRow {
+                        role: OverlayRowRole::Calculator,
+                        result_index: 0,
+                        kind: "calculator".into(),
+                        title: format!("= {expr}"),
+                        path: display,
+                        icon_path: String::new(),
+                    };
+                    overlay.set_results(&[row], 0);
+                }
+                Err(error) => {
+                    let row = OverlayRow {
+                        role: OverlayRowRole::Status,
+                        result_index: -1,
+                        kind: String::new(),
+                        title: format!("{error}"),
+                        path: String::new(),
+                        icon_path: String::new(),
+                    };
+                    overlay.set_results(&[row], 0);
+                }
+            }
+        }
+        return;
+    }
+
     if trimmed == last_query {
         return;
     }
@@ -642,4 +696,61 @@ fn apply_search_results(
         let rows = overlay_rows(current_results, command_mode);
         overlay.set_results(&rows, *selected_index);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn format_result(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.is_infinite() {
+        if value.is_sign_positive() { "∞".into() } else { "-∞".into() }
+    } else if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else if value.abs() > 1e10 || value.abs() < 1e-4 {
+        format!("{:.6e}", value)
+    } else {
+        let s = format!("{:.10}", value);
+        let trimmed = s.trim_end_matches('0');
+        if trimmed.ends_with('.') {
+            format!("{}.0", &trimmed[..trimmed.len() - 1])
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn copy_to_clipboard(text: &str) -> bool {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let len_bytes = (wide.len() * 2) as u32;
+    unsafe {
+        let hglob = windows_sys::Win32::System::Memory::GlobalAlloc(
+            windows_sys::Win32::System::Memory::GMEM_MOVEABLE,
+            (len_bytes + 2) as usize,
+        );
+        if hglob.is_null() { return false; }
+        let lock = windows_sys::Win32::System::Memory::GlobalLock(hglob);
+        if lock.is_null() {
+            windows_sys::Win32::Foundation::GlobalFree(hglob);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lock as *mut u16, wide.len());
+        windows_sys::Win32::System::Memory::GlobalUnlock(hglob);
+        let opened = windows_sys::Win32::System::DataExchange::OpenClipboard(std::ptr::null_mut());
+        if opened == 0 {
+            windows_sys::Win32::Foundation::GlobalFree(hglob);
+            return false;
+        }
+        windows_sys::Win32::System::DataExchange::EmptyClipboard();
+        let result = windows_sys::Win32::System::DataExchange::SetClipboardData(
+            13, // CF_UNICODETEXT
+            hglob,
+        );
+        windows_sys::Win32::System::DataExchange::CloseClipboard();
+        if result.is_null() {
+            windows_sys::Win32::Foundation::GlobalFree(hglob);
+            return false;
+        }
+    }
+    true
 }

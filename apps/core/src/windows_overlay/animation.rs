@@ -3,12 +3,14 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    KillTimer, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, HWND_TOPMOST,
-    LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE,
+    KillTimer, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, HWND_TOPMOST,
+    SWP_NOACTIVATE, SW_HIDE, SetLayeredWindowAttributes, LWA_ALPHA,
 };
 
-use crate::windows_overlay::state::{OverlayShellState, WindowAnimation};
-use crate::windows_overlay::types::{ANIM_FRAME_MS, RESULTS_CONTENT_FADE_MS, TIMER_WINDOW_ANIM};
+use crate::windows_overlay::state::{state_for, OverlayShellState, WindowAnimation};
+use crate::windows_overlay::types::{
+    ANIM_FRAME_MS, HELP_ICON_TEXT, RESULTS_CONTENT_FADE_MS, TIMER_WINDOW_ANIM, to_wide,
+};
 
 pub(crate) fn apply_window_state(hwnd: HWND, x: i32, y: i32, width: i32, height: i32, alpha: u8) {
     unsafe {
@@ -20,8 +22,10 @@ pub(crate) fn apply_window_state(hwnd: HWND, x: i32, y: i32, width: i32, height:
 pub(crate) fn hide_overlay_immediate(hwnd: HWND) {
     if let Some(state) = state_for(hwnd) {
         state.window_anim = None;
+        state.loading = false;
         unsafe {
             KillTimer(hwnd, TIMER_WINDOW_ANIM);
+            SetWindowTextW(state.help_hwnd, to_wide(HELP_ICON_TEXT).as_ptr());
         }
     }
     apply_window_state(hwnd, 0, 0, 0, 0, 0);
@@ -69,10 +73,14 @@ pub(crate) fn start_window_animation(
 
 pub(crate) fn window_animation_tick(hwnd: HWND, state: &OverlayShellState) -> bool {
     let Some(ref anim) = state.window_anim else {
+        crate::logging::info("[nex] anim_tick: no anim");
         return false;
     };
 
     let elapsed = Instant::now().duration_since(anim.start).as_millis() as u64;
+    if elapsed < 5 {
+        return true; // keep waiting, avoid spamming log
+    }
     if elapsed >= anim.duration_ms as u64 {
         apply_window_state(
             hwnd,
@@ -101,7 +109,13 @@ pub(crate) fn window_animation_tick(hwnd: HWND, state: &OverlayShellState) -> bo
     let h = lerp_i32(anim.from_height, anim.to_height, eased);
     let alpha = lerp_i32(anim.from_alpha as i32, anim.to_alpha as i32, eased) as u8;
 
+    if alpha > 0 && alpha < 255 && (alpha % 64 == 0) {
+        crate::logging::info(&format!("[nex] anim_tick: alpha={}, elapsed={}ms", alpha, elapsed));
+    }
     apply_window_state(hwnd, x, y, w, h, alpha);
+    unsafe {
+        InvalidateRect(hwnd, std::ptr::null(), 1);
+    }
     true
 }
 
@@ -166,10 +180,6 @@ pub(crate) fn blend_color(bg: u32, fg: u32, opacity: f32) -> u32 {
     let b = (bg_b as f32 * (1.0 - alpha) + fg_b as f32 * alpha) as u32;
     (b << 16) | (g << 8) | r
 }
-
-// Forward declaration for state_for used above - state_for is defined in window.rs
-// We need to use the one from the window module
-use crate::windows_overlay::state::state_for;
 
 #[cfg(test)]
 mod tests {

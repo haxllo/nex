@@ -390,6 +390,11 @@ fn icon_handle_for_row(state: &mut OverlayShellState, row: &OverlayRow) -> Optio
     }
     state.icon_cache_metrics.misses = state.icon_cache_metrics.misses.saturating_add(1);
 
+    if row.kind.eq_ignore_ascii_case("action") {
+        insert_icon_cache_entry(state, key, 0);
+        return None;
+    }
+
     if should_queue_specific_icon_load(row) {
         if state.pending_icon_loads.insert(key.clone()) {
             if let Some(ref sender) = state.icon_load_sender {
@@ -414,14 +419,42 @@ fn icon_handle_for_row(state: &mut OverlayShellState, row: &OverlayRow) -> Optio
     None
 }
 
+fn action_icon_category(title: &str) -> &str {
+    let lower = title.to_ascii_lowercase();
+    if lower.contains("web") || lower.contains("search") {
+        "web"
+    } else if lower.contains("config") || lower.contains("setting") || lower.contains("prefer") {
+        "settings"
+    } else if lower.contains("restart") || lower.contains("quit") {
+        "restart"
+    } else if lower.contains("rebuild") || lower.contains("index") || lower.contains("refresh")
+        || lower.contains("sync")
+    {
+        "sync"
+    } else if lower.contains("diagnostic") || lower.contains("bundle") || lower.contains("support")
+    {
+        "diagnostics"
+    } else if lower.contains("log") {
+        "logs"
+    } else if lower.contains("uninstall") || lower.contains("remove") {
+        "uninstall"
+    } else if lower.contains("clipboard") {
+        "clipboard"
+    } else {
+        "generic"
+    }
+}
+
 pub(crate) fn icon_cache_key(row: &OverlayRow) -> String {
     let kind = row.kind.to_ascii_lowercase();
     let source = row.icon_path.trim().to_ascii_lowercase();
-    if source.is_empty() {
-        format!("kind:{kind}")
-    } else {
-        format!("kind:{kind}|{source}")
+    if !source.is_empty() {
+        return format!("kind:{kind}|{source}");
     }
+    if kind == "action" {
+        return format!("kind:action:{}", action_icon_category(&row.title));
+    }
+    format!("kind:{kind}")
 }
 
 fn should_queue_specific_icon_load(row: &OverlayRow) -> bool {

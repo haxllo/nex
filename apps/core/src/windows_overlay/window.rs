@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetTextFaceW,
-    InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE, OUT_DEFAULT_PRECIS,
-    TRANSPARENT,
+    AddFontResourceExW, BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, GetDC,
+    GetTextFaceW, InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+    UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -22,7 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWLP_WNDPROC, HWND_TOPMOST, IDC_ARROW, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
     LBS_OWNERDRAWFIXED, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETTOPINDEX, LB_RESETCONTENT,
     LB_SETCURSEL, LB_SETTOPINDEX, LWA_ALPHA, MSG, PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE,
     WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_HOTKEY,
     WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
     WM_PAINT, WM_RBUTTONUP, WM_SETFONT, WM_SETREDRAW, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CHILD,
@@ -45,7 +45,7 @@ use crate::windows_overlay::input::sync_help_hover_with_cursor;
 use crate::windows_overlay::layout::{
     apply_edit_text_rect, apply_rounded_corners_hwnd, cleanup_state_resources,
     initial_visible_row_count, layout_children, row_index_for_result_index, row_result_index,
-    target_top_index_for_selection, try_enable_dwm_rounded_corners,
+    target_top_index_for_selection, try_enable_dwm_rounded_corners, try_enable_mica,
 };
 use crate::windows_overlay::painting::{
     command_badge_animation_tick, draw_list_row, draw_panel_background, handle_wheel_input,
@@ -67,6 +67,45 @@ const LBN_DBLCLK: u32 = 0x0005;
 // Helper to fetch mut state (forwarded from state module for convenience)
 fn state_for(hwnd: HWND) -> Option<&'static mut OverlayShellState> {
     crate::windows_overlay::state::state_for(hwnd)
+}
+
+fn start_loading_spinner(hwnd: HWND, state: &mut OverlayShellState) {
+    if state.loading {
+        return;
+    }
+    state.loading = true;
+    state.loading_frame = 0;
+    state.loading_tick_skip = 0;
+
+    unsafe {
+        // Switch to status_font (Segoe UI) which has ◐◓◑◒ glyphs at correct metrics
+        if state.status_font != 0 {
+            SendMessageW(state.help_hwnd, WM_SETFONT, state.status_font as usize, 1);
+        }
+        SetWindowTextW(state.help_hwnd, to_wide(LOADING_SPINNER_CHARS[0]).as_ptr());
+        UpdateWindow(state.help_hwnd);
+        SetTimer(hwnd, TIMER_WINDOW_ANIM, ANIM_FRAME_MS as u32, None);
+    }
+}
+
+fn stop_loading_spinner(hwnd: HWND, state: &mut OverlayShellState) {
+    if !state.loading {
+        return;
+    }
+    state.loading = false;
+    state.loading_frame = 0;
+    state.loading_tick_skip = 0;
+    unsafe {
+        // Restore help icon font (Segoe Fluent Icons) for the gear icon
+        if state.help_icon_font != 0 {
+            SendMessageW(state.help_hwnd, WM_SETFONT, state.help_icon_font as usize, 1);
+        }
+        SetWindowTextW(state.help_hwnd, to_wide(HELP_ICON_TEXT).as_ptr());
+        // Only kill the shared anim timer if no window animation is running.
+        if state.window_anim.is_none() {
+            KillTimer(hwnd, TIMER_WINDOW_ANIM);
+        }
+    }
 }
 
 impl NativeOverlayShell {
@@ -165,7 +204,7 @@ impl NativeOverlayShell {
     }
 
     pub fn hide(&self) {
-        hide_overlay_immediate(self.hwnd);
+        self.animate_hide();
         schedule_icon_cache_idle_cleanup(self.hwnd);
     }
 
@@ -399,6 +438,7 @@ impl NativeOverlayShell {
 
     pub fn set_results(&self, rows: &[OverlayRow], selected_index: usize) {
         if let Some(state) = state_for(self.hwnd) {
+            stop_loading_spinner(self.hwnd, state);
             if state
                 .window_anim
                 .as_ref()
@@ -406,6 +446,7 @@ impl NativeOverlayShell {
                 .unwrap_or(false)
             {
                 complete_window_animation_if_running(self.hwnd, state);
+                state.window_anim = None;
             }
             state.active_query = self
                 .query_text()
@@ -674,6 +715,9 @@ impl NativeOverlayShell {
     }
 
     fn hide_immediate(&self) {
+        if let Some(state) = state_for(self.hwnd) {
+            stop_loading_spinner(self.hwnd, state);
+        }
         unsafe {
             SetLayeredWindowAttributes(self.hwnd, 0, OVERLAY_ALPHA_OPAQUE, LWA_ALPHA);
             ShowWindow(self.hwnd, SW_HIDE);
@@ -771,6 +815,12 @@ impl NativeOverlayShell {
 
     fn animate_show(&self) {
         if self.is_visible() {
+            if let Some(state) = state_for(self.hwnd) {
+                if state.window_anim.as_ref().map(|a| a.hide_on_complete).unwrap_or(false) {
+                    complete_window_animation_if_running(self.hwnd, state);
+                    state.window_anim = None;
+                }
+            }
             unsafe {
                 ShowWindow(self.hwnd, SW_SHOW);
             }
@@ -786,36 +836,59 @@ impl NativeOverlayShell {
         let final_width = rect.right - rect.left;
         let final_height = rect.bottom - rect.top;
 
+        // Show the window first, then set alpha to 0, then animate in.
+        // ShowWindow on WS_EX_LAYERED can reset the alpha, so we must
+        // apply alpha=0 *after* the window is visible.
         let start_width = ((final_width as f32) * 0.96_f32) as i32;
         let start_height = ((final_height as f32) * 0.96_f32) as i32;
         let start_left = final_left + (final_width - start_width) / 2;
         let start_top = final_top + (final_height - start_height) / 2;
 
-        apply_window_state(
-            self.hwnd,
-            start_left,
-            start_top,
-            start_width,
-            start_height,
-            0,
-        );
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOW);
+            SetWindowPos(self.hwnd, HWND_TOPMOST, start_left, start_top, start_width, start_height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SetLayeredWindowAttributes(self.hwnd, 0, 0, LWA_ALPHA);
         }
+        // Start animation (same position+size, only alpha changes from 0→255)
         start_window_animation(
             self.hwnd,
             start_left,
             start_top,
             start_width,
             start_height,
-            final_left,
-            final_top,
-            final_width,
-            final_height,
+            start_left,
+            start_top,
+            start_width,
+            start_height,
             0,
             OVERLAY_ALPHA_OPAQUE,
             OVERLAY_ANIM_MS,
             false,
+        );
+    }
+
+    fn animate_hide(&self) {
+        if !self.is_visible() {
+            return;
+        }
+        crate::logging::info("[nex] animate_hide: starting hide animation");
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(self.hwnd, &mut rect);
+        }
+        start_window_animation(
+            self.hwnd,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            OVERLAY_ALPHA_OPAQUE,
+            0,
+            OVERLAY_ANIM_MS,
+            true,
         );
     }
 }
@@ -852,6 +925,8 @@ extern "system" fn overlay_wnd_proc(
                 state.theme = detect_system_theme();
                 state.palette = palette_for_theme(state.theme);
                 state.dwm_rounded_enabled = try_enable_dwm_rounded_corners(hwnd);
+                let is_dark = state.theme == OverlayTheme::Dark;
+                state.mica_enabled = try_enable_mica(hwnd, is_dark);
 
                 // Initialize GDI+ for all rendering (hard requirement)
                 state.gdiplus = crate::windows_overlay::gdiplus_rendering::GdiplusContext::new();
@@ -1245,6 +1320,12 @@ extern "system" fn overlay_wnd_proc(
                             InvalidateRect(state.edit_hwnd, std::ptr::null(), 1);
                         }
                     }
+                    let text_len = unsafe { GetWindowTextLengthW(state.edit_hwnd) };
+                    if text_len > 0 {
+                        start_loading_spinner(hwnd, state);
+                    } else {
+                        stop_loading_spinner(hwnd, state);
+                    }
                 }
                 unsafe {
                     PostMessageW(hwnd, NEX_WM_QUERY_CHANGED, 0, 0);
@@ -1416,8 +1497,23 @@ extern "system" fn overlay_wnd_proc(
         WM_TIMER => {
             if wparam == TIMER_WINDOW_ANIM {
                 if let Some(state) = state_for(hwnd) {
-                    let running = window_animation_tick(hwnd, state);
-                    if !running {
+                    let anim_running = window_animation_tick(hwnd, state);
+                    if state.loading {
+                        state.loading_tick_skip += 1;
+                        if state.loading_tick_skip >= 12 {
+                            state.loading_tick_skip = 0;
+                            state.loading_frame = state.loading_frame.wrapping_add(1);
+                            let idx = (state.loading_frame as usize) % LOADING_SPINNER_CHARS.len();
+                            unsafe {
+                                SetWindowTextW(
+                                    state.help_hwnd,
+                                    to_wide(LOADING_SPINNER_CHARS[idx]).as_ptr(),
+                                );
+                                UpdateWindow(state.help_hwnd);
+                            }
+                        }
+                    }
+                    if !anim_running && !state.loading {
                         unsafe {
                             KillTimer(hwnd, TIMER_WINDOW_ANIM);
                         }
@@ -1545,6 +1641,8 @@ extern "system" fn overlay_wnd_proc(
             if !state_ptr.is_null() {
                 unsafe {
                     cleanup_state_resources(&mut *state_ptr);
+                    // Clean up static custom icon handles (shared across all instances)
+                    crate::windows_overlay::custom_icons::destroy_all();
                     let _ = Box::from_raw(state_ptr);
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }

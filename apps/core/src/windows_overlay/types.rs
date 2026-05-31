@@ -106,6 +106,8 @@ pub(crate) const TIMER_ICON_CACHE_IDLE: usize = 0xBEF4;
 pub(crate) const TIMER_RESULTS_CONTENT_FADE: usize = 0xBEF5;
 pub(crate) const TIMER_COMMAND_BADGE_FADE: usize = 0xBEF6;
 
+pub(crate) const LOADING_SPINNER_CHARS: &[&str] = &["\u{28FE}", "\u{28FD}", "\u{28FB}", "\u{28BF}", "\u{287F}", "\u{28DF}", "\u{28EF}", "\u{28F7}"];
+
 pub(crate) const OVERLAY_ANIM_MS: u32 = 150;
 pub(crate) const OVERLAY_ALPHA_OPAQUE: u8 = 255;
 pub(crate) const RESULTS_ANIM_MS: u32 = 110;
@@ -159,7 +161,7 @@ pub(crate) const INPUT_TEXT_LINE_HEIGHT_FALLBACK: i32 = 20;
 pub(crate) const INPUT_TEXT_LEFT_INSET: i32 = 19;
 pub(crate) const INPUT_TEXT_RIGHT_INSET: i32 = 10;
 pub(crate) const SEARCH_ICON_TEXT: &str = "\u{E721}";
-pub(crate) const SEARCH_ICON_LEFT: i32 = 12;
+pub(crate) const SEARCH_ICON_LEFT: i32 = 9;
 pub(crate) const COMMAND_PREFIX_TEXT: &str = "\u{E76C}";
 pub(crate) const COMMAND_PREFIX_RESERVED_WIDTH: i32 = 34;
 pub(crate) const COMMAND_PREFIX_GAP: i32 = 12;
@@ -201,12 +203,148 @@ pub(crate) const FOOTER_HINT_TEXT: &str =
     "Enter Open  \u{2022}  \u{2191}\u{2193} Move  \u{2022}  Esc Close";
 pub(crate) const MODE_STRIP_DEFAULT_TEXT: &str = "All   Apps   Files   Actions   Clipboard";
 
+// ==================== DIB SURFACE (32-bit with per-pixel alpha) ====================
+
+/// A 32-bit DIB section with per-pixel alpha, for use with UpdateLayeredWindow.
+/// Stores the source HDC with the DIB selected into it.
+#[derive(Debug)]
+pub(crate) struct DibSurface {
+    pub(crate) hbmp: isize,
+    pub(crate) hdc: isize,
+    pub(crate) pixels: isize,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+impl DibSurface {
+    pub(crate) fn new(width: i32, height: i32) -> Option<Self> {
+        use windows_sys::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        unsafe {
+            let screen_dc = GetDC(std::ptr::null_mut());
+            if screen_dc.is_null() {
+                return None;
+            }
+            let mut bmi: BITMAPINFO = std::mem::zeroed();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            let mut pixels: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hbmp = CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut pixels, std::ptr::null_mut(), 0);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+
+            if hbmp.is_null() {
+                return None;
+            }
+
+            let mem_dc = CreateCompatibleDC(std::ptr::null_mut());
+            if mem_dc.is_null() {
+                DeleteObject(hbmp as _);
+                return None;
+            }
+
+            SelectObject(mem_dc, hbmp as _);
+
+            Some(DibSurface {
+                hbmp: hbmp as isize,
+                hdc: mem_dc as isize,
+                pixels: pixels as isize,
+                width,
+                height,
+            })
+        }
+    }
+
+    pub(crate) fn destroy(&mut self) {
+        unsafe {
+            windows_sys::Win32::Graphics::Gdi::DeleteDC(self.hdc as _);
+            windows_sys::Win32::Graphics::Gdi::DeleteObject(self.hbmp as _);
+        }
+        self.hdc = 0;
+        self.hbmp = 0;
+        self.pixels = 0;
+        self.width = 0;
+        self.height = 0;
+    }
+
+    /// Pre-multiply alpha for all pixels (required by UpdateLayeredWindow with AC_SRC_ALPHA).
+    pub(crate) fn premultiply_alpha(&self) {
+        if self.pixels == 0 || self.width <= 0 || self.height <= 0 {
+            return;
+        }
+        let count = (self.width as u32 * self.height as u32) as usize;
+        let pixels = self.pixels as *mut u32;
+        for i in 0..count {
+            let pixel = unsafe { *pixels.add(i) };
+            let a = (pixel >> 24) & 0xFF;
+            if a == 0 {
+                unsafe { *pixels.add(i) = 0; }
+            } else if a < 255 {
+                let r = ((pixel >> 16) & 0xFF) * a / 255;
+                let g = ((pixel >> 8) & 0xFF) * a / 255;
+                let b = (pixel & 0xFF) * a / 255;
+                unsafe { *pixels.add(i) = (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32; }
+            }
+        }
+    }
+
+    pub(crate) fn resize(&mut self, width: i32, height: i32) -> bool {
+        if width <= 0 || height <= 0 {
+            return false;
+        }
+        if self.width == width && self.height == height {
+            return true;
+        }
+        let mut new_dib = DibSurface::new(width, height);
+        match new_dib {
+            Some(d) => {
+                self.destroy();
+                *self = d;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Drop for DibSurface {
+    fn drop(&mut self) {
+        if self.hdc != 0 {
+            self.destroy();
+        }
+    }
+}
+
+// ==================== MICA / DWM CONSTANTS ====================
+
+/// Alpha for panel background fill when Mica is enabled (0x90 = 144/255).
+pub(crate) const MICA_PANEL_ALPHA: u8 = 0x90;
+
 // ==================== ENUMS & STRUCTS ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayTheme {
     Dark,
     Light,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayRowRole {
+    Item,
+    Header,
+    TopHit,
+    Status,
+    Calculator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,14 +468,6 @@ pub enum OverlayEvent {
     ExternalShow,
     ExternalQuit,
     SearchResultsReady,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayRowRole {
-    Item,
-    Header,
-    TopHit,
-    Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

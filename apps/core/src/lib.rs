@@ -4,6 +4,8 @@ pub(crate) mod calculator;
 pub mod clipboard_history;
 pub mod config;
 pub mod contract;
+pub(crate) mod fts5_search;
+pub(crate) mod tantivy_search;
 pub mod core_service;
 pub mod discovery;
 #[cfg(target_os = "windows")]

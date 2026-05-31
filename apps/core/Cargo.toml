@@ -18,7 +18,8 @@ name = "nex"
 path = "src/main.rs"
 
 [dependencies]
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled", "vtab"] }
+tantivy = { version = "0.26.1", default-features = false, features = ["mmap"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 json5 = "0.4.1"
@@ -49,6 +50,9 @@ windows-sys = { version = "0.59.0", features = [
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+tempfile = "3.12.0"
 
 [build-dependencies]
 winres = "0.1"

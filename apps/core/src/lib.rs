@@ -1,5 +1,6 @@
 pub mod action_executor;
 pub mod action_registry;
+pub(crate) mod calculator;
 pub mod clipboard_history;
 pub mod config;
 pub mod contract;

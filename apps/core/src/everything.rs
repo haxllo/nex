@@ -9,7 +9,9 @@
 
 #![cfg(target_os = "windows")]
 
+use std::sync::mpsc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use std::path::PathBuf;
 
@@ -56,9 +58,10 @@ const EVERYTHING_ERROR_INVALIDCALL: u32 = 7;
 // Everything SDK function type aliases (__stdcall = `extern "system"`)
 // ---------------------------------------------------------------------------
 
+type EverythingSetMatchPath = unsafe extern "system" fn(i32);
 type EverythingSetSearchW = unsafe extern "system" fn(*const u16);
 type EverythingSetRequestFlags = unsafe extern "system" fn(u32);
-type EverythingSetMaxResults = unsafe extern "system" fn(u32);
+type EverythingSetMax = unsafe extern "system" fn(u32);
 type EverythingSetSort = unsafe extern "system" fn(u32);
 type EverythingQueryW = unsafe extern "system" fn(i32) -> i32;
 type EverythingGetNumResults = unsafe extern "system" fn() -> u32;
@@ -67,6 +70,65 @@ type EverythingGetResultPathW = unsafe extern "system" fn(u32) -> *const u16;
 type EverythingGetResultAttributes = unsafe extern "system" fn(u32) -> u32;
 type EverythingGetLastError = unsafe extern "system" fn() -> u32;
 type EverythingReset = unsafe extern "system" fn();
+
+/// Cached Everything SDK function pointers, resolved once from the loaded DLL.
+struct EverythingFunctions {
+    set_match_path: EverythingSetMatchPath,
+    set_search: EverythingSetSearchW,
+    set_request_flags: EverythingSetRequestFlags,
+    set_max_results: EverythingSetMax,
+    set_sort: EverythingSetSort,
+    query_fn: EverythingQueryW,
+    get_num_results: EverythingGetNumResults,
+    get_result_file_name: EverythingGetResultFileNameW,
+    get_result_path: EverythingGetResultPathW,
+    get_result_attributes: EverythingGetResultAttributes,
+    get_last_error: EverythingGetLastError,
+    reset_fn: EverythingReset,
+}
+
+impl EverythingFunctions {
+    unsafe fn resolve(lib: &Library) -> Result<Self, String> {
+        Ok(Self {
+            set_match_path: *lib.get(b"Everything_SetMatchPath")
+                .map_err(|e| format!("{e}"))?,
+            set_search: *lib.get(b"Everything_SetSearchW")
+                .map_err(|e| format!("{e}"))?,
+            set_request_flags: *lib.get(b"Everything_SetRequestFlags")
+                .map_err(|e| format!("{e}"))?,
+            set_max_results: *lib.get(b"Everything_SetMax")
+                .map_err(|e| format!("{e}"))?,
+            set_sort: *lib.get(b"Everything_SetSort")
+                .map_err(|e| format!("{e}"))?,
+            query_fn: *lib.get(b"Everything_QueryW")
+                .map_err(|e| format!("{e}"))?,
+            get_num_results: *lib.get(b"Everything_GetNumResults")
+                .map_err(|e| format!("{e}"))?,
+            get_result_file_name: *lib.get(b"Everything_GetResultFileNameW")
+                .map_err(|e| format!("{e}"))?,
+            get_result_path: *lib.get(b"Everything_GetResultPathW")
+                .map_err(|e| format!("{e}"))?,
+            get_result_attributes: *lib.get(b"Everything_GetResultAttributes")
+                .map_err(|e| format!("{e}"))?,
+            get_last_error: *lib.get(b"Everything_GetLastError")
+                .map_err(|e| format!("{e}"))?,
+            reset_fn: *lib.get(b"Everything_Reset")
+                .map_err(|e| format!("{e}"))?,
+        })
+    }
+}
+
+fn everything_functions_cached() -> Result<&'static EverythingFunctions, String> {
+    static FUNCS: OnceLock<Result<EverythingFunctions, String>> = OnceLock::new();
+    match FUNCS.get_or_init(|| {
+        let lib = load_everything_dll_cached()
+            .ok_or_else(|| "Everything DLL not loaded".to_string())?;
+        unsafe { EverythingFunctions::resolve(lib) }
+    }) {
+        Ok(funcs) => Ok(funcs),
+        Err(e) => Err(e.clone()),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EverythingSearchProvider
@@ -135,10 +197,12 @@ impl EverythingSearchProvider {
         // -------------------------------------------------------------------
         let set_search: Symbol<EverythingSetSearchW> =
             resolve_symbol(lib, b"Everything_SetSearchW")?;
+        let set_match_path: Symbol<EverythingSetMatchPath> =
+            resolve_symbol(lib, b"Everything_SetMatchPath")?;
         let set_request_flags: Symbol<EverythingSetRequestFlags> =
             resolve_symbol(lib, b"Everything_SetRequestFlags")?;
-        let set_max_results: Symbol<EverythingSetMaxResults> =
-            resolve_symbol(lib, b"Everything_SetMaxResults")?;
+        let set_max_results: Symbol<EverythingSetMax> =
+            resolve_symbol(lib, b"Everything_SetMax")?;
         let set_sort: Symbol<EverythingSetSort> = resolve_symbol(lib, b"Everything_SetSort")?;
         let query_fn: Symbol<EverythingQueryW> = resolve_symbol(lib, b"Everything_QueryW")?;
         let get_num_results: Symbol<EverythingGetNumResults> =
@@ -166,10 +230,11 @@ impl EverythingSearchProvider {
         );
         set_max_results(SDK_RESULT_CAP);
         set_sort(EVERYTHING_SORT_DATE_MODIFIED_DESCENDING);
+        set_match_path(1); // match against full path for bare quoted path filters
 
         // Push root-path filtering into the Everything query so the SDK
-        // returns far fewer results than the full 200K namespace.
-        // e.g.  parent:"C:\Users\Admin" | parent:"D:\Projects"
+        // returns far fewer results than the full 200K cap.
+        // e.g.  "C:\Users\Admin" | "D:\Projects"
         let search_str = build_root_filter_query(&self.search_roots);
         let search_wide = to_wide_everything(&search_str);
         set_search(search_wide.as_ptr());
@@ -604,9 +669,9 @@ pub fn live_everything_search(
         return None;
     }
 
-    let lib = match load_everything_dll_cached() {
-        Some(lib) => lib,
-        None => return None,
+    let funcs = match everything_functions_cached() {
+        Ok(funcs) => funcs,
+        Err(_) => return None,
     };
 
     let excluded: Vec<String> = exclude_roots
@@ -621,31 +686,51 @@ pub fn live_everything_search(
         })
         .collect();
 
-    let result = unsafe {
-        try_live_query(
-            &lib,
-            trimmed,
-            roots,
-            &excluded,
-            show_files,
-            show_folders,
-            max_results,
-        )
-    };
+    // Run Everything query on a background thread with a timeout to avoid
+    // freezing the UI thread if Everything's IPC is slow or hangs.
+    let (tx, rx) = mpsc::channel();
+    let query_owned = trimmed.to_string();
+    let roots_owned: Vec<PathBuf> = roots.to_vec();
+    let excluded_owned = excluded.clone();
 
-    match result {
-        Ok(items) => Some(items),
-        Err(msg) => {
+    // funcs is `&'static EverythingFunctions` — safe to pass to a thread
+    std::thread::spawn(move || {
+        let result = unsafe {
+            try_live_query(
+                funcs,
+                &query_owned,
+                &roots_owned,
+                &excluded_owned,
+                show_files,
+                show_folders,
+                max_results,
+            )
+        };
+        let _ = tx.send(result);
+    });
+
+    // Try non-blocking first — Everything usually responds in <1ms once IPC is warm.
+    if let Ok(Ok(items)) = rx.try_recv() {
+        return Some(items);
+    }
+    // Give a short window for cold-start IPC or slow queries.
+    match rx.recv_timeout(Duration::from_millis(50)) {
+        Ok(Ok(items)) => Some(items),
+        Ok(Err(msg)) => {
             crate::logging::warn(&format!("[nex] everything_live_query {msg}"));
+            None
+        }
+        Err(_) => {
+            crate::logging::warn("[nex] everything_live_query timed out after 500ms");
             None
         }
     }
 }
 
 /// Internal: execute an Everything SDK query with the given search text and
-/// filters, resolving all function pointers from the loaded library.
+/// filters, using the cached function pointers from `everything_functions_cached()`.
 unsafe fn try_live_query(
-    lib: &Library,
+    funcs: &EverythingFunctions,
     query: &str,
     roots: &[PathBuf],
     excluded: &[String],
@@ -653,27 +738,8 @@ unsafe fn try_live_query(
     show_folders: bool,
     max_results: u32,
 ) -> Result<Vec<SearchItem>, String> {
-    let set_search: Symbol<EverythingSetSearchW> = resolve_symbol(lib, b"Everything_SetSearchW")?;
-    let set_request_flags: Symbol<EverythingSetRequestFlags> =
-        resolve_symbol(lib, b"Everything_SetRequestFlags")?;
-    let set_max_results: Symbol<EverythingSetMaxResults> =
-        resolve_symbol(lib, b"Everything_SetMaxResults")?;
-    let set_sort: Symbol<EverythingSetSort> = resolve_symbol(lib, b"Everything_SetSort")?;
-    let query_fn: Symbol<EverythingQueryW> = resolve_symbol(lib, b"Everything_QueryW")?;
-    let get_num_results: Symbol<EverythingGetNumResults> =
-        resolve_symbol(lib, b"Everything_GetNumResults")?;
-    let get_result_file_name: Symbol<EverythingGetResultFileNameW> =
-        resolve_symbol(lib, b"Everything_GetResultFileNameW")?;
-    let get_result_path: Symbol<EverythingGetResultPathW> =
-        resolve_symbol(lib, b"Everything_GetResultPathW")?;
-    let get_result_attributes: Symbol<EverythingGetResultAttributes> =
-        resolve_symbol(lib, b"Everything_GetResultAttributes")?;
-    let get_last_error: Symbol<EverythingGetLastError> =
-        resolve_symbol(lib, b"Everything_GetLastError")?;
-    let reset_fn: Symbol<EverythingReset> = resolve_symbol(lib, b"Everything_Reset")?;
-
     // Build combined query: user_text + root filter
-    // e.g.  needle parent:"C:\Users\Admin" | parent:"D:\Projects"
+    // e.g.  needle "C:\Users\Admin" | "D:\Projects"
     let root_filter = build_root_filter_query(roots);
     let search_str = if root_filter.is_empty() {
         query.to_string()
@@ -682,7 +748,7 @@ unsafe fn try_live_query(
     };
     let search_wide = to_wide_everything(&search_str);
 
-    set_request_flags(
+    (funcs.set_request_flags)(
         EVERYTHING_REQUEST_FILE_NAME
             | EVERYTHING_REQUEST_PATH
             | EVERYTHING_REQUEST_DATE_MODIFIED
@@ -690,20 +756,21 @@ unsafe fn try_live_query(
             | EVERYTHING_REQUEST_ATTRIBUTES
             | EVERYTHING_REQUEST_DATE_CREATED,
     );
-    set_max_results(max_results);
-    set_sort(EVERYTHING_SORT_DATE_MODIFIED_DESCENDING);
-    set_search(search_wide.as_ptr());
+    (funcs.set_max_results)(max_results);
+    (funcs.set_sort)(EVERYTHING_SORT_DATE_MODIFIED_DESCENDING);
+    (funcs.set_match_path)(1); // match against full path for bare quoted path filters
+    (funcs.set_search)(search_wide.as_ptr());
 
-    if query_fn(1) == 0 {
-        let code = get_last_error();
+    if (funcs.query_fn)(1) == 0 {
+        let code = (funcs.get_last_error)();
         let msg = everything_error_label(code);
-        reset_fn();
+        (funcs.reset_fn)();
         return Err(format!("Everything_QueryW failed: {msg} (code={code})"));
     }
 
-    let total_results = get_num_results();
+    let total_results = (funcs.get_num_results)();
     if total_results == 0 {
-        reset_fn();
+        (funcs.reset_fn)();
         return Ok(Vec::new());
     }
 
@@ -721,8 +788,8 @@ unsafe fn try_live_query(
     let mut items: Vec<SearchItem> = Vec::new();
 
     for i in 0..limit {
-        let name_ptr = get_result_file_name(i);
-        let path_ptr = get_result_path(i);
+        let name_ptr = (funcs.get_result_file_name)(i);
+        let path_ptr = (funcs.get_result_path)(i);
         if name_ptr.is_null() || path_ptr.is_null() {
             continue;
         }
@@ -750,7 +817,7 @@ unsafe fn try_live_query(
             continue;
         }
 
-        let attrs = get_result_attributes(i);
+        let attrs = (funcs.get_result_attributes)(i);
         let is_directory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
         if is_directory && !show_folders {
@@ -765,7 +832,7 @@ unsafe fn try_live_query(
         items.push(SearchItem::new(&id, kind, &name, &full_path));
     }
 
-    reset_fn();
+    (funcs.reset_fn)();
     Ok(items)
 }
 
@@ -794,11 +861,15 @@ fn everything_error_label(code: u32) -> &'static str {
 }
 
 /// Build an Everything search query that restricts results to the given
-/// root directories using the `parent:` filter. Returns an empty string
+/// root directories using recursive path matching. Returns an empty string
 /// (unrestricted query) when no roots are configured, which causes
 /// Everything to return its full index.
 ///
-/// Example:  parent:"C:\Users\Admin" | parent:"D:\Projects"
+/// Uses bare quoted paths instead of `parent:` because `parent:` is
+/// non-recursive — it only returns immediate children. Bare paths match
+/// files at any depth under the root.
+///
+/// Example:  "C:\Users\Admin" | "D:\Projects"
 fn build_root_filter_query(roots: &[PathBuf]) -> String {
     if roots.is_empty() {
         return String::new();
@@ -812,7 +883,7 @@ fn build_root_filter_query(roots: &[PathBuf]) -> String {
         }
         // Escape any embedded quotes in the path
         let escaped = normalized.trim().replace('"', "\"\"");
-        parts.push(format!("parent:\"{escaped}\""));
+        parts.push(format!("\"{escaped}\""));
     }
     if parts.is_empty() {
         return String::new();

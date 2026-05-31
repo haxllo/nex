@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, GetDC, GetTextExtentPoint32W, GetTextMetricsW,
@@ -507,6 +508,33 @@ pub(crate) fn try_enable_dwm_rounded_corners(hwnd: HWND) -> bool {
     } else {
         false
     }
+}
+
+// ==================== MICA BACKDROP ====================
+
+pub(crate) fn try_enable_mica(hwnd: HWND, is_dark: bool) -> bool {
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &DWMSBT_MAINWINDOW as *const _ as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if hr < 0 {
+        return false;
+    }
+    let dark_mode: i32 = if is_dark { 1 } else { 0 };
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &dark_mode as *const _ as *const c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    crate::logging::info("[nex] mica enabled");
+    true
 }
 
 // ==================== LAYOUT HELPERS (recovered) ====================

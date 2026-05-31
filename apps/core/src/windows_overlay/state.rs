@@ -79,7 +79,7 @@ impl GdiObjectCache {
 }
 
 use crate::windows_overlay::types::{
-    OverlayPalette, OverlayRow, OverlayTheme, MODE_STRIP_DEFAULT_TEXT, PALETTE_DARK,
+    DibSurface, OverlayPalette, OverlayRow, OverlayTheme, MODE_STRIP_DEFAULT_TEXT, PALETTE_DARK,
 };
 
 // ==================== WINDOW ANIMATION ====================
@@ -185,6 +185,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) help_tip_visible: bool,
     pub(crate) results_visible: bool,
     pub(crate) dwm_rounded_enabled: bool,
+    pub(crate) mica_enabled: bool,
     pub(crate) help_config_path: String,
     pub(crate) active_query: String,
     pub(crate) command_mode_input: bool,
@@ -201,6 +202,9 @@ pub(crate) struct OverlayShellState {
     pub(crate) results_content_anim_start: Option<Instant>,
 
     pub(crate) window_anim: Option<WindowAnimation>,
+    pub(crate) loading: bool,
+    pub(crate) loading_frame: u32,
+    pub(crate) loading_tick_skip: u32,
     pub(crate) rows: Vec<OverlayRow>,
     pub(crate) icon_cache: HashMap<String, isize>,
     pub(crate) icon_cache_lru: VecDeque<String>,
@@ -212,19 +216,25 @@ pub(crate) struct OverlayShellState {
     pub(crate) tray_icon_handle: isize,
     pub(crate) gdi_cache: GdiObjectCache,
 
+    // DPI-aware sizing
+    pub(crate) dpi: u32,
+    pub(crate) icon_draw_size: i32,
+    pub(crate) icon_container_size: i32,
+
     // Async icon loader state
     pub(crate) icon_load_sender: Option<mpsc::Sender<IconLoadRequest>>,
     pub(crate) icon_load_receiver: Option<mpsc::Receiver<IconLoadResult>>,
     pub(crate) icon_load_thread: Option<JoinHandle<()>>,
     pub(crate) pending_icon_loads: HashSet<String>,
 
-    // DPI-aware sizing
-    pub(crate) dpi: u32,
-    pub(crate) icon_draw_size: i32,
-    pub(crate) icon_container_size: i32,
-
     // GDI+ for antialiased selection highlight
     pub(crate) gdiplus: Option<GdiplusContext>,
+
+    // 32-bit DIB for per-pixel alpha rendering (Mica backdrop)
+    pub(crate) dib: Option<DibSurface>,
+
+    /// Current per-window alpha (0-255) used with UpdateLayeredWindow.
+    pub(crate) window_alpha: u8,
 }
 
 impl Default for OverlayShellState {
@@ -286,6 +296,7 @@ impl Default for OverlayShellState {
             help_tip_visible: false,
             results_visible: false,
             dwm_rounded_enabled: false,
+            mica_enabled: false,
             help_config_path: String::new(),
             active_query: String::new(),
             command_mode_input: false,
@@ -300,6 +311,9 @@ impl Default for OverlayShellState {
             suppress_next_hover_sync: false,
             results_content_anim_start: None,
             window_anim: None,
+            loading: false,
+            loading_frame: 0,
+            loading_tick_skip: 0,
             rows: Vec::new(),
             icon_cache: HashMap::new(),
             icon_cache_lru: VecDeque::new(),
@@ -318,6 +332,8 @@ impl Default for OverlayShellState {
             icon_draw_size: 32,
             icon_container_size: 34,
             gdiplus: None,
+            dib: None,
+            window_alpha: 255,
         }
     }
 }

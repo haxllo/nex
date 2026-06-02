@@ -15,7 +15,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 14;
+pub const CURRENT_CONFIG_VERSION: u32 = 15;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -43,8 +43,8 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "index_max_items_total",
     "index_max_items_per_root",
     "index_max_items_per_query_seed",
-    "everything_search_enabled",
     "search_backend",
+    "file_discovery_backend",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -88,6 +88,91 @@ impl SearchBackend {
             "fts5" => Some(Self::Fts5),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryBackend {
+    #[default]
+    Auto,
+    Everything,
+    Walkdir,
+}
+
+impl DiscoveryBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "auto" => Some(Self::Auto),
+            "everything" | "everything64" | "everything32" => Some(Self::Everything),
+            "walkdir" | "walk" => Some(Self::Walkdir),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Everything => "everything",
+            Self::Walkdir => "walkdir",
+        }
+    }
+}
+
+#[cfg(test)]
+mod discovery_backend_tests {
+    use super::*;
+
+    #[test]
+    fn parse_known_values() {
+        assert_eq!(DiscoveryBackend::parse("auto"), Some(DiscoveryBackend::Auto));
+        assert_eq!(
+            DiscoveryBackend::parse("everything"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("EVERYTHING"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("walkdir"),
+            Some(DiscoveryBackend::Walkdir)
+        );
+    }
+
+    #[test]
+    fn parse_accepts_dll_aliases() {
+        assert_eq!(
+            DiscoveryBackend::parse("everything64"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("everything32"),
+            Some(DiscoveryBackend::Everything)
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown() {
+        assert_eq!(DiscoveryBackend::parse(""), None);
+        assert_eq!(DiscoveryBackend::parse("foo"), None);
+    }
+
+    #[test]
+    fn as_str_round_trip() {
+        for v in [
+            DiscoveryBackend::Auto,
+            DiscoveryBackend::Everything,
+            DiscoveryBackend::Walkdir,
+        ] {
+            assert_eq!(DiscoveryBackend::parse(v.as_str()), Some(v));
+        }
+    }
+
+    #[test]
+    fn default_is_auto() {
+        assert_eq!(DiscoveryBackend::default(), DiscoveryBackend::Auto);
     }
 }
 
@@ -143,8 +228,8 @@ pub struct Config {
     pub clipboard_enabled: bool,
     pub clipboard_retention_minutes: u32,
     pub clipboard_exclude_sensitive_patterns: Vec<String>,
-    pub everything_search_enabled: bool,
     pub search_backend: SearchBackend,
+    pub file_discovery_backend: DiscoveryBackend,
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
@@ -198,8 +283,8 @@ impl Default for Config {
                 "apikey".to_string(),
                 "api_key".to_string(),
             ],
-            everything_search_enabled: true,
             search_backend: SearchBackend::Tantivy,
+            file_discovery_backend: DiscoveryBackend::Auto,
             plugins_enabled: true,
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
@@ -558,18 +643,11 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     }
     text.push_str("  ],\n\n");
 
-    text.push_str("  // Use voidtools Everything SDK for instant file/folder search.\n");
-    text.push_str("  // Requires Everything (voidtools.com) to be installed.\n");
-    text.push_str("  \"everything_search_enabled\": ");
-    text.push_str(if cfg.everything_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
     text.push_str("  // Search backend for full-text indexed file/folder search.\n");
     text.push_str("  // Options: \"tantivy\" (default) | \"fts5\"\n");
-    text.push_str("  // Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n");
+    text.push_str(
+        "  // Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n",
+    );
     text.push_str("  // FTS5 uses SQLite's built-in FTS5 engine with porter stemming.\n");
     text.push_str("  \"search_backend\": ");
     text.push_str(&json_string(match cfg.search_backend {
@@ -776,16 +854,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&clipboard_patterns_section);
     text.push_str("\n\n");
 
-    text.push_str("# Use voidtools Everything SDK for instant file/folder search.\n");
-    text.push_str("# Requires Everything (voidtools.com) to be installed.\n");
-    text.push_str("everything_search_enabled = ");
-    text.push_str(if cfg.everything_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push('\n');
-
     text.push_str("# Search backend for full-text indexed file/folder search.\n");
     text.push_str("# Options: \"tantivy\" (default) | \"fts5\"\n");
     text.push_str("# Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n");
@@ -795,6 +863,16 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         SearchBackend::Tantivy => "tantivy",
         SearchBackend::Fts5 => "fts5",
     }));
+    text.push_str("\n\n");
+
+    text.push_str("# File/folder discovery backend for filesystem enumeration.\n");
+    text.push_str("# Options: \"auto\" (default) | \"everything\" | \"walkdir\"\n");
+    text.push_str("# - auto: try Everything SDK (Everything64.dll / Everything32.dll);\n");
+    text.push_str("#   fall back to walkdir + ReadDirectoryChangesW if Everything is not running.\n");
+    text.push_str("# - everything: require Everything (fails back to walkdir with a warning).\n");
+    text.push_str("# - walkdir: always use the built-in walkdir + ReadDirectoryChangesW pipeline.\n");
+    text.push_str("file_discovery_backend = ");
+    text.push_str(&json_string(cfg.file_discovery_backend.as_str()));
     text.push_str("\n\n");
 
     text.push_str("# Plugin SDK settings\n");
@@ -1150,13 +1228,13 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
-    if source_version < 12 && !raw_has_key(raw, "everything_search_enabled") {
-        cfg.everything_search_enabled = Config::default().everything_search_enabled;
+    if source_version < 14 && !raw_has_key(raw, "search_backend") {
+        cfg.search_backend = Config::default().search_backend;
         changed = true;
     }
 
-    if source_version < 14 && !raw_has_key(raw, "search_backend") {
-        cfg.search_backend = Config::default().search_backend;
+    if source_version < 15 && !raw_has_key(raw, "file_discovery_backend") {
+        cfg.file_discovery_backend = Config::default().file_discovery_backend;
         changed = true;
     }
 

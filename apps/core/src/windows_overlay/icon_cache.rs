@@ -427,7 +427,9 @@ fn action_icon_category(title: &str) -> &str {
         "settings"
     } else if lower.contains("restart") || lower.contains("quit") {
         "restart"
-    } else if lower.contains("rebuild") || lower.contains("index") || lower.contains("refresh")
+    } else if lower.contains("rebuild")
+        || lower.contains("index")
+        || lower.contains("refresh")
         || lower.contains("sync")
     {
         "sync"

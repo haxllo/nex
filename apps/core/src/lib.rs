@@ -4,12 +4,13 @@ pub(crate) mod calculator;
 pub mod clipboard_history;
 pub mod config;
 pub mod contract;
-pub(crate) mod fts5_search;
-pub(crate) mod tantivy_search;
 pub mod core_service;
 pub mod discovery;
 #[cfg(target_os = "windows")]
-pub mod everything;
+pub(crate) mod everything_bridge;
+#[cfg(target_os = "windows")]
+pub(crate) mod file_watcher;
+pub(crate) mod fts5_search;
 pub mod hotkey;
 pub mod hotkey_runtime;
 pub mod index_store;
@@ -34,6 +35,7 @@ pub mod search;
 pub(crate) mod search_worker;
 pub mod settings;
 pub mod startup;
+pub(crate) mod tantivy_search;
 pub mod transport;
 pub mod uninstall_registry;
 pub mod updater;

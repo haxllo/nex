@@ -3,15 +3,21 @@ use std::sync::{LazyLock, Mutex};
 
 // ==================== EMBEDDED PNG DATA ====================
 
-const SEARCH_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-search-54.png");
-const FOLDER_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-archive-folder-72.png");
-const FILE_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-file-72.png");
-const CINEMA_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-cinema-72.png");
-const IMAGE_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-image-file-72.png");
-const INTERNET_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-internet-72.png");
-const SETTINGS_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-settings-72.png");
-const SYNC_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-synchronize-72.png");
-const RESTART_PNG: &[u8] = include_bytes!("../../../assets/icons/icons8-restart-72.png");
+const SEARCH_PNG: &[u8] = include_bytes!("../../../assets/icons/search-48.png");
+const FOLDER_PNG: &[u8] = include_bytes!("../../../assets/icons/folder-64.png");
+const FILE_PNG: &[u8] = include_bytes!("../../../assets/icons/file-64.png");
+const IMAGE_PNG: &[u8] = include_bytes!("../../../assets/icons/image-64.png");
+const VIDEO_PNG: &[u8] = include_bytes!("../../../assets/icons/video-64.png");
+const MUSIC_PNG: &[u8] = include_bytes!("../../../assets/icons/music-64.png");
+const DOCUMENT_PNG: &[u8] = include_bytes!("../../../assets/icons/document-64.png");
+const CODE_PNG: &[u8] = include_bytes!("../../../assets/icons/code-64.png");
+const ARCHIVE_PNG: &[u8] = include_bytes!("../../../assets/icons/archive-folder-64.png");
+const PDF_PNG: &[u8] = include_bytes!("../../../assets/icons/pdf-64.png");
+const INTERNET_PNG: &[u8] = include_bytes!("../../../assets/icons/internet-64.png");
+const SETTINGS_PNG: &[u8] = include_bytes!("../../../assets/icons/settings-64.png");
+const SYNC_PNG: &[u8] = include_bytes!("../../../assets/icons/settings-64.png");
+const RESTART_PNG: &[u8] = include_bytes!("../../../assets/icons/info-64.png");
+const CLIPBOARD_PNG: &[u8] = include_bytes!("../../../assets/icons/clipboard-64.png");
 
 // ==================== FFI ====================
 
@@ -44,7 +50,9 @@ fn png_to_gdiplus_image(png_data: &[u8]) -> Option<isize> {
         if status == 0 && image != 0 {
             Some(image)
         } else {
-            if image != 0 { GdipDisposeImage(image); }
+            if image != 0 {
+                GdipDisposeImage(image);
+            }
             None
         }
     }
@@ -55,12 +63,46 @@ fn png_to_gdiplus_image(png_data: &[u8]) -> Option<isize> {
 type ImageCache = HashMap<String, isize>;
 static CACHE: LazyLock<Mutex<ImageCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) fn classify_kind(path: &str) -> &'static str {
+    let raw_ext = match path.rfind('.') {
+        Some(pos) => &path[pos + 1..],
+        None => return "file",
+    };
+    let ext = raw_ext.to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tiff" | "tif"
+        | "heic" | "heif" | "avif" => "image",
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" | "mpg" | "mpeg" | "flv" | "3gp"
+        | "rm" | "vob" => "video",
+        "mp3" | "wav" | "flac" | "m4a" | "ogg" | "wma" | "aac" | "opus" | "aiff" | "alac" => {
+            "music"
+        }
+        "pdf" => "pdf",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" | "tbz2" | "cab"
+        | "iso" | "dmg" | "lzh" | "arj" => "archive",
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf"
+        | "csv" | "tsv" => "document",
+        "rs" | "py" | "js" | "ts" | "html" | "css" | "json" | "toml" | "yaml" | "yml" | "xml"
+        | "sh" | "bat" | "ps1" | "c" | "cpp" | "h" | "hpp" | "go" | "java" | "kt" | "swift"
+        | "rb" | "php" | "pl" | "lua" | "r" | "dart" | "scala" | "sql" | "graphql" | "proto"
+        | "tex" | "md" | "rst" | "cmake" | "makefile" | "dockerfile" | "tf" | "conf" | "ini"
+        | "cfg" => "code",
+        _ => "file",
+    }
+}
+
 fn kind_png_data(kind: &str) -> Option<&'static [u8]> {
     match kind {
         "folder" => Some(FOLDER_PNG),
         "file" => Some(FILE_PNG),
-        "video" | "cinema" => Some(CINEMA_PNG),
-        "image" | "photo" => Some(IMAGE_PNG),
+        "image" => Some(IMAGE_PNG),
+        "video" => Some(VIDEO_PNG),
+        "music" => Some(MUSIC_PNG),
+        "document" => Some(DOCUMENT_PNG),
+        "code" => Some(CODE_PNG),
+        "archive" => Some(ARCHIVE_PNG),
+        "pdf" => Some(PDF_PNG),
+        "clipboard" => Some(CLIPBOARD_PNG),
         "search" => Some(SEARCH_PNG),
         _ => None,
     }
@@ -68,13 +110,17 @@ fn kind_png_data(kind: &str) -> Option<&'static [u8]> {
 
 fn action_png_data(title: &str) -> Option<&'static [u8]> {
     let lower = title.to_ascii_lowercase();
-    if lower.contains("web") || lower.contains("search") {
+    if lower.contains("clipboard") {
+        Some(CLIPBOARD_PNG)
+    } else if lower.contains("web") || lower.contains("search") {
         Some(INTERNET_PNG)
     } else if lower.contains("config") || lower.contains("setting") || lower.contains("prefer") {
         Some(SETTINGS_PNG)
     } else if lower.contains("restart") || lower.contains("quit") {
         Some(RESTART_PNG)
-    } else if lower.contains("rebuild") || lower.contains("index") || lower.contains("refresh")
+    } else if lower.contains("rebuild")
+        || lower.contains("index")
+        || lower.contains("refresh")
         || lower.contains("sync")
     {
         Some(SYNC_PNG)
@@ -90,7 +136,11 @@ fn load_and_cache(key: &str, data: &[u8]) -> Option<isize> {
     }
     let handle = png_to_gdiplus_image(data).unwrap_or(0);
     cache.insert(key.into(), handle);
-    if handle == 0 { None } else { Some(handle) }
+    if handle == 0 {
+        None
+    } else {
+        Some(handle)
+    }
 }
 
 pub(crate) fn custom_icon_for_kind(kind: &str) -> Option<isize> {
@@ -107,7 +157,9 @@ pub(crate) fn custom_icon_for_action(title: &str) -> Option<isize> {
         "action:settings"
     } else if lower.contains("restart") || lower.contains("quit") {
         "action:restart"
-    } else if lower.contains("rebuild") || lower.contains("index") || lower.contains("refresh")
+    } else if lower.contains("rebuild")
+        || lower.contains("index")
+        || lower.contains("refresh")
         || lower.contains("sync")
     {
         "action:sync"
@@ -126,7 +178,9 @@ pub(crate) fn destroy_all() {
     let mut cache = CACHE.lock().unwrap();
     for (_, &handle) in cache.iter() {
         if handle != 0 {
-            unsafe { GdipDisposeImage(handle); }
+            unsafe {
+                GdipDisposeImage(handle);
+            }
         }
     }
     cache.clear();

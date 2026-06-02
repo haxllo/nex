@@ -14,7 +14,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::windows_overlay::layout::{apply_edit_text_rect, visible_row_capacity};
 use crate::windows_overlay::painting::{
     help_hint_text, invalidate_list_row, paint_edit_command_prefix, paint_edit_placeholder,
-    paint_edit_search_icon, paint_footer_hint, paint_help_tip, row_is_selectable, set_uninstall_quick_mode,
+    paint_edit_search_icon, paint_footer_hint, paint_help_tip, row_is_selectable,
+    set_uninstall_quick_mode,
 };
 use crate::windows_overlay::state::{state_for, OverlayShellState};
 use crate::windows_overlay::types::*;
@@ -182,11 +183,15 @@ pub(crate) extern "system" fn control_subclass_proc(
                     let mut rc_prev: RECT = std::mem::zeroed();
                     let mut rc_next: RECT = std::mem::zeroed();
                     let ok_prev = SendMessageW(
-                        list, LB_GETITEMRECT, previous_hover.max(0) as usize,
+                        list,
+                        LB_GETITEMRECT,
+                        previous_hover.max(0) as usize,
                         &mut rc_prev as *mut _ as isize,
                     );
                     let ok_next = SendMessageW(
-                        list, LB_GETITEMRECT, next_hover.max(0) as usize,
+                        list,
+                        LB_GETITEMRECT,
+                        next_hover.max(0) as usize,
                         &mut rc_next as *mut _ as isize,
                     );
                     if ok_prev != 0 && ok_next != 0 {

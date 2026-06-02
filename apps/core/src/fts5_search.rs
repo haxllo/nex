@@ -12,8 +12,8 @@ pub(crate) struct Fts5Index {
 
 impl Fts5Index {
     pub fn open(db_path: &Path) -> Result<Self, String> {
-        let conn = Connection::open(db_path)
-            .map_err(|e| format!("failed to open FTS5 database: {e}"))?;
+        let conn =
+            Connection::open(db_path).map_err(|e| format!("failed to open FTS5 database: {e}"))?;
 
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS item_fts5 USING fts5(
@@ -44,7 +44,7 @@ impl Fts5Index {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, path, subtitle, kind
+                "SELECT id, title, path, subtitle, kind, bm25(item_fts5, 0.0, 1.0, 1.0, 1.0)
                  FROM item_fts5
                  WHERE item_fts5 MATCH ?1
                  ORDER BY rank
@@ -54,7 +54,12 @@ impl Fts5Index {
 
         let results = stmt
             .query_map(params![fts5_query, limit as i64], |row| {
-                Ok(SearchItem::from_owned_with_subtitle(
+                let bm25: f64 = row.get(5)?;
+                // FTS5 bm25 returns negative values (closer to 0 = better).
+                // Invert so 0.0 is worst, higher is better. Max typical BM25 ~5.0.
+                let normalized = (-bm25).max(0.0);
+                let pre_score = ((normalized / 5.0) * 5000.0).round() as i64;
+                let mut item = SearchItem::from_owned_with_subtitle(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(1)?,
@@ -62,7 +67,9 @@ impl Fts5Index {
                     row.get::<_, String>(3)?,
                     0,
                     0,
-                ))
+                );
+                item.pre_score = Some(pre_score);
+                Ok(item)
             })
             .map_err(|e| format!("FTS5 query error: {e}"))?;
 
@@ -106,11 +113,27 @@ impl Fts5Index {
 
     pub fn delete_item(&self, item_id: &str) -> Result<(), String> {
         self.conn
-            .execute(
-                "DELETE FROM item_fts5 WHERE id = ?1",
-                params![item_id],
-            )
+            .execute("DELETE FROM item_fts5 WHERE id = ?1", params![item_id])
             .map_err(|e| format!("FTS5 delete error: {e}"))?;
+        Ok(())
+    }
+
+    pub fn upsert_item(&self, item: &SearchItem) -> Result<(), String> {
+        self.delete_item(&item.id)?;
+        self.conn
+            .execute(
+                "INSERT INTO item_fts5 (id, title, path, subtitle, kind, extension)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    item.id,
+                    item.title,
+                    item.path,
+                    item.subtitle,
+                    item.kind,
+                    extract_extension(&item.path),
+                ],
+            )
+            .map_err(|e| format!("FTS5 insert error: {e}"))?;
         Ok(())
     }
 
@@ -146,7 +169,10 @@ fn escape_fts5_term(term: &str) -> String {
 }
 
 fn extract_extension(path: &str) -> &str {
-    let filename = path.rsplit(std::path::MAIN_SEPARATOR).next().unwrap_or(path);
+    let filename = path
+        .rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .unwrap_or(path);
     match filename.rfind('.') {
         Some(pos) => &filename[pos + 1..],
         None => "",

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
 use crate::action_executor::{launch_path, LaunchError};
 use crate::config::{validate, Config, SearchMode};
@@ -6,20 +6,20 @@ use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse}
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
-#[cfg(target_os = "windows")]
-use crate::everything::EverythingSearchProvider;
+use crate::fts5_search::Fts5Index;
 use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
+use crate::tantivy_search::TantivyIndex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
-const STALE_PRUNE_BATCH_SIZE: usize = 512;
+const STALE_PRUNE_BATCH_SIZE: usize = 64;
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -27,6 +27,7 @@ pub enum ServiceError {
     Store(StoreError),
     Provider(ProviderError),
     Launch(LaunchError),
+    SearchIndex(String),
     InvalidRequest(String),
     ItemNotFound(String),
 }
@@ -38,6 +39,7 @@ impl std::fmt::Display for ServiceError {
             Self::Store(error) => write!(f, "store error: {error}"),
             Self::Provider(error) => write!(f, "provider error: {error}"),
             Self::Launch(error) => write!(f, "launch error: {error}"),
+            Self::SearchIndex(error) => write!(f, "search index error: {error}"),
             Self::InvalidRequest(error) => write!(f, "invalid request: {error}"),
             Self::ItemNotFound(id) => write!(f, "item not found: {id}"),
         }
@@ -75,9 +77,11 @@ pub struct CoreService {
     providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
+    tantivy_index: Mutex<Option<TantivyIndex>>,
+    fts5_index: Mutex<Option<Fts5Index>>,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
-    everything_covered_files: AtomicBool,
+    pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,15 +118,65 @@ impl CoreService {
     fn with_loaded_cache(config: Config, db: Connection) -> Result<Self, ServiceError> {
         let cached = index_store::list_items(&db)?;
         let cached_apps = collect_app_items(&cached);
+
+        let index_dir = config.index_db_path.parent().unwrap_or(Path::new("."));
+        let tantivy_path = index_dir.join("index.tantivy");
+
+        let tantivy_index = match open_tantivy_index(&tantivy_path) {
+            Some(idx) => Some(idx),
+            None => {
+                // Schema mismatch or corrupt — delete dir and recreate
+                crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
+                let _ = std::fs::remove_dir_all(&tantivy_path);
+                match TantivyIndex::open(&tantivy_path) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        crate::logging::info(&format!(
+                            "[nex] Tantivy index init after reset: {e}, falling back to FTS5"
+                        ));
+                        None
+                    }
+                }
+            }
+        };
+
+        let fts5_index = if tantivy_index.is_none() {
+            match Fts5Index::open(&config.index_db_path) {
+                Ok(idx) => {
+                    let _ = idx.clear();
+                    Some(idx)
+                }
+                Err(e) => {
+                    crate::logging::info(&format!(
+                        "[nex] FTS5 index init: {e}, running without FTS index"
+                    ));
+                    None
+                }
+            }
+        } else {
+            match Fts5Index::open(&config.index_db_path) {
+                Ok(idx) => {
+                    let _ = idx.clear();
+                    Some(idx)
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("[nex] FTS5 fallback index init: {e}"));
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             config: RwLock::new(config),
             db,
             providers: RwLock::new(Vec::new()),
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
+            tantivy_index: Mutex::new(tantivy_index),
+            fts5_index: Mutex::new(fts5_index),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
-            everything_covered_files: AtomicBool::new(false),
+            progress: Mutex::new(None),
         })
     }
 
@@ -195,35 +249,14 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
     let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
     providers.push(Box::new(StartMenuAppDiscoveryProvider::default()));
 
-    // Register Everything SDK provider when enabled.
-    #[cfg(target_os = "windows")]
-    if config.everything_search_enabled {
-        providers.push(Box::new(EverythingSearchProvider::new(
-            config.discovery_roots.clone(),
-            &config.discovery_exclude_roots,
-            config.show_files,
-            config.show_folders,
-        )));
-        // Filesystem provider is still added below as fallback.
-        // When Everything actually covers files (DLL loaded, results returned)
-        // the runtime skip guard in rebuild_index_internal avoids the walkdir.
-    }
     // Register filesystem provider for roots-based file/folder discovery.
-    // When Everything is active and has covered the namespace, this provider
-    // is skipped at runtime via the everything_covered_files flag.
-    providers.push(Box::new(
-        FileSystemDiscoveryProvider::with_options(
-            config.discovery_roots.clone(),
-            5,
-            config.discovery_exclude_roots.clone(),
-            config.show_files,
-            config.show_folders,
-        )
-        .with_index_limits(
-            config.index_max_items_total as usize,
-            config.index_max_items_per_root as usize,
-        ),
+    let filesystem_provider = FileSystemDiscoveryProvider::from_config(config, 5);
+    crate::runtime::log_info(&format!(
+        "[nex] file_discovery_backend = {} (requested={})",
+        filesystem_provider.backend_label(),
+        config.file_discovery_backend.as_str(),
     ));
+    providers.push(Box::new(filesystem_provider));
     providers
 }
 
@@ -257,7 +290,6 @@ impl CoreService {
         filter: &SearchFilter,
         clamp_to_config_max: bool,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.prune_stale_items_if_due()?;
         let config_snapshot = self.config_snapshot();
 
         let effective_limit = if clamp_to_config_max {
@@ -287,6 +319,8 @@ impl CoreService {
             ));
         }
 
+        self.prune_stale_items_if_due()?;
+
         let mut seed_items = {
             let guard = match self.cached_items.read() {
                 Ok(guard) => guard,
@@ -296,9 +330,10 @@ impl CoreService {
         };
 
         if should_use_db_query_seed(filter, query) {
-            let db_seed_limit = (config_snapshot.index_max_items_per_query_seed as usize).max(250);
-            let db_candidates = self.db_query_candidates(query, filter.mode, db_seed_limit)?;
-            merge_seed_candidates(&mut seed_items, db_candidates);
+            let indexed_seed_limit =
+                (config_snapshot.index_max_items_per_query_seed as usize).max(250);
+            let candidates = self.search_indexed_candidates(query, indexed_seed_limit)?;
+            merge_seed_candidates(&mut seed_items, candidates);
         }
 
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
@@ -430,14 +465,25 @@ impl CoreService {
         let mut removed_total = 0_usize;
         let mut provider_reports = Vec::with_capacity(providers_guard.len());
         let now_epoch_secs = now_epoch_secs();
-        // When Everything SDK returns results, it covers the full file/folder
-        // namespace (Everything's index is real-time). Skip the filesystem
-        // provider to avoid unnecessary COM / walkdir work.
-        let mut everything_covered_files = false;
+
+        let progress_pct = match self.progress.lock() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        };
+        let mut cumulative_weight: u32 = 0;
+        let config_snapshot = self.config_snapshot();
 
         for provider in providers_guard.iter() {
             let started = Instant::now();
             let provider_name = provider.provider_name().to_string();
+            let is_filesystem = provider_name == "filesystem";
+            let provider_weight: u32 = if is_filesystem { 90 } else { 5 };
+            let discovery_weight: u32 = if is_filesystem {
+                provider_weight.saturating_mul(4) / 5
+            } else {
+                provider_weight
+            };
+            let write_weight = provider_weight.saturating_sub(discovery_weight);
             let provider_stamp = if incremental_mode {
                 provider.change_stamp()
             } else {
@@ -460,60 +506,55 @@ impl CoreService {
                     elapsed_ms: started.elapsed().as_millis(),
                 });
                 log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
-                continue;
-            }
-
-            // Optimisation: if Everything already covered the file/folder
-            // namespace, skip the filesystem walk to avoid duplicate work.
-            // Everything's index is real-time, so it's strictly more complete.
-            if provider_name == "filesystem" && everything_covered_files {
-                let elapsed_ms = started.elapsed().as_millis();
-                provider_reports.push(ProviderRefreshReport {
-                    provider: provider_name.clone(),
-                    discovered: 0,
-                    upserted: 0,
-                    removed: 0,
-                    skipped: true,
-                    elapsed_ms,
-                });
-                if incremental_mode {
-                    persist_provider_discovery_state(
-                        &self.db,
-                        &provider_name,
-                        provider_stamp.as_deref(),
-                        now_epoch_secs,
-                    )?;
-                    log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
+                cumulative_weight = cumulative_weight.saturating_add(provider_weight);
+                if let Some(ref pct) = progress_pct {
+                    pct.store(cumulative_weight.min(95), Ordering::Relaxed);
                 }
-                crate::logging::info(&format!(
-                    "[nex] provider_skipped_by_everything_guard provider={provider_name}"
-                ));
                 continue;
             }
 
-            let discovered = provider.discover()?;
-
-            if provider_name == "everything" {
-                if !discovered.is_empty() {
-                    everything_covered_files = true;
-                    self.everything_covered_files.store(true, Ordering::SeqCst);
-                    crate::logging::info(&format!(
-                        "[nex] everything_covered_files=true count={}",
-                        discovered.len()
-                    ));
-                } else {
-                    crate::logging::info(
-                        "[nex] everything_covered_files=false (no items from provider)",
+            if let Some(ref pct) = progress_pct {
+                pct.store(cumulative_weight.min(95), Ordering::Relaxed);
+            }
+            let discovery_cap = if is_filesystem {
+                (config_snapshot.index_max_items_total as usize).max(1)
+            } else {
+                1
+            };
+            let mut discovery_progress = |discovered_count: usize| {
+                if let Some(ref pct) = progress_pct {
+                    let phase_pct = if is_filesystem {
+                        (discovered_count.min(discovery_cap) as u32)
+                            .saturating_mul(discovery_weight)
+                            / discovery_cap as u32
+                    } else {
+                        discovery_weight
+                    };
+                    pct.store(
+                        cumulative_weight.saturating_add(phase_pct).min(95),
+                        Ordering::Relaxed,
                     );
                 }
+            };
+            let discovered = if progress_pct.is_some() {
+                provider.discover_with_progress(Some(&mut discovery_progress))?
+            } else {
+                provider.discover()?
+            };
+            if let Some(ref pct) = progress_pct {
+                pct.store(
+                    cumulative_weight.saturating_add(discovery_weight).min(95),
+                    Ordering::Relaxed,
+                );
             }
+
             let discovered_count = discovered.len();
             discovered_total += discovered_count;
 
             let mut upserted = 0_usize;
             let mut discovered_ids = HashSet::with_capacity(discovered_count);
 
-            for mut item in discovered {
+            for (item_idx, mut item) in discovered.into_iter().enumerate() {
                 if let Some(previous) = existing_by_id.get(&item.id) {
                     if item.use_count == 0 {
                         item.use_count = previous.use_count;
@@ -525,18 +566,6 @@ impl CoreService {
 
                 discovered_ids.insert(item.id.clone());
 
-                // When Everything covers the file/folder namespace, skip SQLite
-                // persistence for file/folder items. They are served at query
-                // time via live_everything_search() — no need to persist them.
-                let is_file_or_folder = item.kind.eq_ignore_ascii_case("file")
-                    || item.kind.eq_ignore_ascii_case("folder");
-                let skip_persist = everything_covered_files && is_file_or_folder;
-
-                if skip_persist {
-                    existing_by_id.insert(item.id.clone(), item);
-                    continue;
-                }
-
                 let changed = existing_by_id
                     .get(&item.id)
                     .map(|previous| previous != &item)
@@ -547,7 +576,18 @@ impl CoreService {
                     upserted_total += 1;
                 }
                 existing_by_id.insert(item.id.clone(), item);
+
+                if let Some(ref pct) = progress_pct {
+                    if discovered_count > 0 {
+                        let pct_val = cumulative_weight
+                            + discovery_weight
+                            + (write_weight * (item_idx as u32 + 1)) / discovered_count as u32;
+                        pct.store(pct_val.min(95), Ordering::Relaxed);
+                    }
+                }
             }
+
+            cumulative_weight += provider_weight;
 
             // Kind-based ownership is safe for current runtime provider composition:
             // start-menu apps own kind=app, filesystem owns kind=file/folder.
@@ -584,7 +624,16 @@ impl CoreService {
             }
         }
 
+        if let Some(ref pct) = progress_pct {
+            pct.store(95, Ordering::Relaxed);
+        }
         self.refresh_cache_from_store()?;
+        if progress_pct.is_none() {
+            self.sync_indexes_from_cache()?;
+        }
+        if let Some(ref pct) = progress_pct {
+            pct.store(100, Ordering::Relaxed);
+        }
         let indexed_total = self.cached_len();
         Ok(IndexRefreshReport {
             indexed_total,
@@ -603,6 +652,7 @@ impl CoreService {
     pub fn upsert_item(&self, item: &SearchItem) -> Result<(), ServiceError> {
         index_store::upsert_item(&self.db, item)?;
         self.upsert_cached_item(item.clone());
+        self.index_item_on_backends(item);
         Ok(())
     }
 
@@ -637,6 +687,25 @@ impl CoreService {
     }
 }
 
+fn open_tantivy_index(tantivy_path: &std::path::Path) -> Option<TantivyIndex> {
+    match TantivyIndex::open(tantivy_path) {
+        Ok(idx) => {
+            match idx.num_docs() {
+                Ok(n) if n > 0 => {
+                    // Valid index with documents — keep it
+                    Some(idx)
+                }
+                _ => {
+                    // Empty or corrupt — clear and rebuild on next sync
+                    let _ = idx.clear();
+                    Some(idx)
+                }
+            }
+        }
+        Err(_e) => None, // Schema mismatch or other error — caller will reset
+    }
+}
+
 impl CoreService {
     fn cached_len(&self) -> usize {
         match self.cached_items.read() {
@@ -645,100 +714,47 @@ impl CoreService {
         }
     }
 
-    fn db_query_candidates(
+    fn search_indexed_candidates(
         &self,
         query: &str,
-        mode: SearchMode,
         limit: usize,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-        if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
-            return Ok(Vec::new());
-        }
-        if self.everything_covered_files.load(Ordering::SeqCst)
-            && matches!(mode, SearchMode::Files | SearchMode::All)
-        {
+        if limit == 0 || query.trim().is_empty() {
             return Ok(Vec::new());
         }
 
-        let sql = match mode {
-            SearchMode::Files => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
-                   AND kind IN ('file', 'folder')
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::Apps => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE (title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE)
-                   AND kind = 'app'
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::All => {
-                "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs
-                 FROM item
-                 WHERE title LIKE ?1 COLLATE NOCASE OR path LIKE ?1 COLLATE NOCASE
-                 ORDER BY use_count DESC, last_accessed_epoch_secs DESC, id
-                 LIMIT ?2"
-            }
-            SearchMode::Actions | SearchMode::Clipboard => unreachable!(),
+        // Try Tantivy first
+        let tantivy_guard = match self.tantivy_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         };
-
-        let pattern = format!("%{trimmed}%");
-        let mut stmt = self
-            .db
-            .prepare(sql)
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-        let mut rows = stmt
-            .query(params![pattern, limit as i64])
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| ServiceError::Store(StoreError::Db(error)))?
-        {
-            let id: String = row
-                .get(0)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let kind: String = row
-                .get(1)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let title: String = row
-                .get(2)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let path: String = row
-                .get(3)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let subtitle: String = row
-                .get(4)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let use_count: u32 = row
-                .get(5)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            let last_accessed_epoch_secs: i64 = row
-                .get(6)
-                .map_err(|error| ServiceError::Store(StoreError::Db(error)))?;
-            out.push(SearchItem::from_owned_with_subtitle(
-                id,
-                kind,
-                title,
-                path,
-                subtitle,
-                use_count,
-                last_accessed_epoch_secs,
-            ));
+        if let Some(ref idx) = *tantivy_guard {
+            match idx.search(query, limit) {
+                Ok(results) => return Ok(results),
+                Err(e) => {
+                    crate::logging::info(&format!(
+                        "[nex] Tantivy search failed: {e}, falling back to FTS5"
+                    ));
+                }
+            }
         }
-        Ok(out)
+        drop(tantivy_guard);
+
+        // Fall back to FTS5
+        let fts5_guard = match self.fts5_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *fts5_guard {
+            match idx.search(query, limit) {
+                Ok(results) => return Ok(results),
+                Err(e) => {
+                    crate::logging::info(&format!("[nex] FTS5 search failed: {e}"));
+                }
+            }
+        }
+
+        Ok(Vec::new())
     }
 
     fn query_personalization_boosts(
@@ -769,23 +785,8 @@ impl CoreService {
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&self.db)?;
-        // Only filter legacy file/folder items from the DB when Everything
-        // actually covered the file namespace during an index rebuild.  The
-        // config flag alone is not sufficient — the SDK DLL may not be
-        // available, in which case the filesystem provider handles files.
-        let latest_full = if config_snapshot.everything_search_enabled
-            && self.everything_covered_files.load(Ordering::SeqCst)
-        {
-            filter_file_items(&latest_full)
-        } else {
-            latest_full
-        };
         let latest_apps = collect_app_items(&latest_full);
-        let latest = if config_snapshot.everything_search_enabled
-            && self.everything_covered_files.load(Ordering::SeqCst)
-        {
-            latest_full
-        } else {
+        let latest = {
             let compact_started = std::time::Instant::now();
             let summary = cache_compaction_summary(&latest_full, &config_snapshot);
             let compacted = compact_cached_items(&latest_full, &config_snapshot);
@@ -881,6 +882,61 @@ impl CoreService {
                 let mut guard = poisoned.into_inner();
                 guard.retain(|entry| entry.id != id);
             }
+        }
+    }
+
+    pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
+        let items = index_store::list_items(&self.db)?;
+        crate::logging::info(&format!(
+            "[nex] sync_indexes items={} tantivy_available={} fts5_available={}",
+            items.len(),
+            self.tantivy_index
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false),
+            self.fts5_index.lock().map(|g| g.is_some()).unwrap_or(false),
+        ));
+
+        let tantivy_guard = match self.tantivy_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *tantivy_guard {
+            if let Err(e) = idx.index_items(&items) {
+                crate::logging::info(&format!("[nex] Tantivy index sync error: {e}"));
+            }
+        }
+        drop(tantivy_guard);
+
+        let fts5_guard = match self.fts5_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *fts5_guard {
+            if let Err(e) = idx.index_items(&items) {
+                crate::logging::info(&format!("[nex] FTS5 index sync error: {e}"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn index_item_on_backends(&self, item: &SearchItem) {
+        let tantivy_guard = match self.tantivy_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *tantivy_guard {
+            let _ = idx.upsert_item(item);
+        }
+        drop(tantivy_guard);
+
+        let fts5_guard = match self.fts5_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *fts5_guard {
+            let _ = idx.upsert_item(item);
         }
     }
 
@@ -1011,6 +1067,7 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn filter_file_items(items: &[SearchItem]) -> Vec<SearchItem> {
     items
         .iter()
@@ -1122,9 +1179,17 @@ fn effective_file_folder_cache_cap(cfg: &Config) -> usize {
         return base_cap;
     }
 
-    let memory_scaled_cap =
-        ((cfg.active_memory_target_mb as usize).saturating_mul(8)).clamp(250, 1500);
-    base_cap.min(memory_scaled_cap)
+    // SearchItem is roughly 200–500 bytes on disk; size the seed cap to fit
+    // ~25% of the active memory target (leaving headroom for Tantivy/FTS5,
+    // the icon cache, and rank buffers). The previous formula used 8 items
+    // per MB, which silently capped a 72MB target to 576 items even when
+    // the user explicitly raised index_max_items_per_query_seed to 5000+.
+    let memory_target_bytes =
+        (cfg.active_memory_target_mb as usize).saturating_mul(1024 * 1024);
+    let budget_bytes = memory_target_bytes / 4;
+    let approx_items = budget_bytes / 400;
+    let memory_scaled_cap = approx_items.clamp(250, base_cap);
+    base_cap.min(memory_scaled_cap.max(250))
 }
 
 fn broad_root_discovery_enabled(cfg: &Config) -> bool {
@@ -1247,7 +1312,7 @@ fn provider_manages_kind(provider_name: &str, kind: &str) -> bool {
     let kind = kind.to_ascii_lowercase();
     match provider_name {
         "start-menu-apps" | "app" => kind == "app",
-        "filesystem" | "file" | "everything" => kind == "file" || kind == "folder",
+        "filesystem" | "file" => kind == "file" || kind == "folder",
         _ => false,
     }
 }
@@ -1527,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn broad_root_mode_reduces_file_folder_cache_cap() {
+    fn broad_root_mode_honors_explicit_seed_cap() {
         let mut cfg = Config::default();
         cfg.show_files = true;
         cfg.show_folders = true;
@@ -1535,7 +1600,39 @@ mod tests {
         cfg.index_max_items_per_query_seed = 5_000;
         cfg.active_memory_target_mb = 72;
 
-        assert_eq!(effective_file_folder_cache_cap(&cfg), 576);
+        // 72MB target with 5000 seed cap: the user explicitly raised the cap
+        // and 72MB can comfortably hold thousands of SearchItem rows, so the
+        // cap should track the user's setting rather than the old 8-items/MB
+        // heuristic (which silently clamped this exact configuration to 576).
+        assert_eq!(effective_file_folder_cache_cap(&cfg), 5_000);
+    }
+
+    #[test]
+    fn broad_root_mode_scales_down_for_tight_memory_target() {
+        let mut cfg = Config::default();
+        cfg.show_files = true;
+        cfg.show_folders = true;
+        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
+        cfg.index_max_items_per_query_seed = 50_000;
+        cfg.active_memory_target_mb = 20;
+
+        // 20MB / 4 = 5MB budget / 400 bytes per item ≈ 13,107, clamped to
+        // [250, 50_000], so the cap is the floor for the user-set seed cap.
+        let cap = effective_file_folder_cache_cap(&cfg);
+        assert!(cap >= 250, "cap should never drop below 250: {cap}");
+        assert!(cap <= 50_000, "cap should not exceed user setting: {cap}");
+    }
+
+    #[test]
+    fn broad_root_mode_never_drops_below_minimum_floor() {
+        let mut cfg = Config::default();
+        cfg.show_files = true;
+        cfg.show_folders = true;
+        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
+        cfg.index_max_items_per_query_seed = 250;
+        cfg.active_memory_target_mb = 20;
+
+        assert_eq!(effective_file_folder_cache_cap(&cfg), 250);
     }
 
     #[test]
@@ -1570,10 +1667,10 @@ mod tests {
 
         assert!(summary.broad_root_mode);
         assert_eq!(summary.retained_apps, 20);
-        assert_eq!(summary.effective_file_seed_cap, 576);
-        assert_eq!(summary.retained_file_folders, 576);
-        assert_eq!(summary.retained_total, 596);
-        assert_eq!(retained.len(), 596);
+        assert_eq!(summary.effective_file_seed_cap, 5_000);
+        assert_eq!(summary.retained_file_folders, 700);
+        assert_eq!(summary.retained_total, 720);
+        assert_eq!(retained.len(), 720);
         assert_eq!(
             retained
                 .iter()

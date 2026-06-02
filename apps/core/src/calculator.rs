@@ -176,7 +176,9 @@ fn parse_primary(chars: &[char], pos: &mut usize) -> Result<f64, CalcError> {
         let arg = parse_expr(chars, pos)?;
         skip_whitespace(chars, pos);
         if *pos >= chars.len() || chars[*pos] != ')' {
-            return Err(CalcError::Syntax(format!("missing ')' after function '{name}'")));
+            return Err(CalcError::Syntax(format!(
+                "missing ')' after function '{name}'"
+            )));
         }
         *pos += 1;
 
@@ -208,7 +210,13 @@ fn parse_primary(chars: &[char], pos: &mut usize) -> Result<f64, CalcError> {
                 }
             }
             "exp" => Ok(arg.exp()),
-            "sign" => Ok(if arg > 0.0 { 1.0 } else if arg < 0.0 { -1.0 } else { 0.0 }),
+            "sign" => Ok(if arg > 0.0 {
+                1.0
+            } else if arg < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }),
             _ => Err(CalcError::Syntax(format!("unknown function '{name}'"))),
         };
     }

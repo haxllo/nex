@@ -3,13 +3,13 @@ use std::time::Instant;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    KillTimer, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, HWND_TOPMOST,
-    SWP_NOACTIVATE, SW_HIDE, SetLayeredWindowAttributes, LWA_ALPHA,
+    KillTimer, SetLayeredWindowAttributes, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SW_HIDE,
 };
 
 use crate::windows_overlay::state::{state_for, OverlayShellState, WindowAnimation};
 use crate::windows_overlay::types::{
-    ANIM_FRAME_MS, HELP_ICON_TEXT, RESULTS_CONTENT_FADE_MS, TIMER_WINDOW_ANIM, to_wide,
+    to_wide, ANIM_FRAME_MS, HELP_ICON_TEXT, RESULTS_CONTENT_FADE_MS, TIMER_WINDOW_ANIM,
 };
 
 pub(crate) fn apply_window_state(hwnd: HWND, x: i32, y: i32, width: i32, height: i32, alpha: u8) {
@@ -110,7 +110,10 @@ pub(crate) fn window_animation_tick(hwnd: HWND, state: &OverlayShellState) -> bo
     let alpha = lerp_i32(anim.from_alpha as i32, anim.to_alpha as i32, eased) as u8;
 
     if alpha > 0 && alpha < 255 && (alpha % 64 == 0) {
-        crate::logging::info(&format!("[nex] anim_tick: alpha={}, elapsed={}ms", alpha, elapsed));
+        crate::logging::info(&format!(
+            "[nex] anim_tick: alpha={}, elapsed={}ms",
+            alpha, elapsed
+        ));
     }
     apply_window_state(hwnd, x, y, w, h, alpha);
     unsafe {

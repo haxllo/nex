@@ -43,21 +43,54 @@ extern "system" {
     fn GdipCreatePath(fillMode: i32, path: *mut isize) -> i32;
     fn GdipAddPathLineI(path: isize, x1: i32, y1: i32, x2: i32, y2: i32) -> i32;
     fn GdipAddPathLine(path: isize, x1: f32, y1: f32, x2: f32, y2: f32) -> i32;
-    fn GdipAddPathArcI(path: isize, x: i32, y: i32, width: i32, height: i32, startAngle: f32, sweepAngle: f32) -> i32;
-    fn GdipAddPathArc(path: isize, x: f32, y: f32, width: f32, height: f32, startAngle: f32, sweepAngle: f32) -> i32;
+    fn GdipAddPathArcI(
+        path: isize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        startAngle: f32,
+        sweepAngle: f32,
+    ) -> i32;
+    fn GdipAddPathArc(
+        path: isize,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        startAngle: f32,
+        sweepAngle: f32,
+    ) -> i32;
     fn GdipFillPath(graphics: isize, brush: isize, path: isize) -> i32;
     fn GdipDrawPath(graphics: isize, pen: isize, path: isize) -> i32;
     fn GdipDeletePath(path: isize) -> i32;
 
     // Rect fill / draw
-    fn GdipFillRectangleI(graphics: isize, brush: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
-    fn GdipDrawRectangleI(graphics: isize, pen: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
+    fn GdipFillRectangleI(
+        graphics: isize,
+        brush: isize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> i32;
+    fn GdipDrawRectangleI(
+        graphics: isize,
+        pen: isize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> i32;
 
     // Font
     fn GdipCreateFontFromDC(hdc: isize, font: *mut isize) -> i32;
     fn GdipDeleteFont(font: isize) -> i32;
     fn GdipCreateFont(
-        familyName: *const u16, emSize: f32, style: i32, unit: i32,
+        familyName: *const u16,
+        emSize: f32,
+        style: i32,
+        unit: i32,
         font: *mut isize,
     ) -> i32;
 
@@ -70,21 +103,37 @@ extern "system" {
 
     // Text
     fn GdipDrawString(
-        graphics: isize, string: *const u16, length: i32,
-        font: isize, layoutRect: *const GpRectF,
-        stringFormat: isize, brush: isize,
+        graphics: isize,
+        string: *const u16,
+        length: i32,
+        font: isize,
+        layoutRect: *const GpRectF,
+        stringFormat: isize,
+        brush: isize,
     ) -> i32;
     fn GdipMeasureString(
-        graphics: isize, string: *const u16, length: i32,
-        font: isize, layoutRect: *const GpRectF,
+        graphics: isize,
+        string: *const u16,
+        length: i32,
+        font: isize,
+        layoutRect: *const GpRectF,
         stringFormat: isize,
-        boundingBox: *mut GpRectF, codepointsFitted: *mut i32, linesFilled: *mut i32,
+        boundingBox: *mut GpRectF,
+        codepointsFitted: *mut i32,
+        linesFilled: *mut i32,
     ) -> i32;
 
     // Icons
     fn GdipCreateBitmapFromHICON(hicon: isize, bitmap: *mut isize) -> i32;
     fn GdipDrawImageI(graphics: isize, image: isize, x: i32, y: i32) -> i32;
-    fn GdipDrawImageRectI(graphics: isize, image: isize, x: i32, y: i32, width: i32, height: i32) -> i32;
+    fn GdipDrawImageRectI(
+        graphics: isize,
+        image: isize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> i32;
     fn GdipLoadImageFromStream(stream: isize, image: *mut isize) -> i32;
     fn GdipDisposeImage(image: isize) -> i32;
 
@@ -150,9 +199,7 @@ impl GdiplusContext {
             SuppressExternalCodecs: 0,
         };
         let mut token = 0usize;
-        let result = unsafe {
-            GdiplusStartup(&mut token, &input, std::ptr::null_mut())
-        };
+        let result = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
         if result != GDI_PLUS_OK {
             return None;
         }
@@ -174,7 +221,10 @@ impl GdiplusContext {
             }
         };
 
-        Some(Self { token, default_str_fmt: str_fmt })
+        Some(Self {
+            token,
+            default_str_fmt: str_fmt,
+        })
     }
 
     // --- Graphics lifecycle ---
@@ -182,7 +232,9 @@ impl GdiplusContext {
     pub(crate) fn create_graphics(&self, hdc: isize) -> Option<isize> {
         let mut graphics = 0isize;
         if unsafe { GdipCreateFromHDC(hdc, &mut graphics) } == GDI_PLUS_OK {
-            unsafe { GdipSetTextRenderingHint(graphics, TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT); }
+            unsafe {
+                GdipSetTextRenderingHint(graphics, TEXT_RENDERING_HINT_CLEARTYPE_GRID_FIT);
+            }
             Some(graphics)
         } else {
             None
@@ -190,11 +242,15 @@ impl GdiplusContext {
     }
 
     pub(crate) fn delete_graphics(graphics: isize) {
-        unsafe { GdipDeleteGraphics(graphics); }
+        unsafe {
+            GdipDeleteGraphics(graphics);
+        }
     }
 
     pub(crate) fn set_smoothing_mode(graphics: isize, mode: i32) {
-        unsafe { GdipSetSmoothingMode(graphics, mode); }
+        unsafe {
+            GdipSetSmoothingMode(graphics, mode);
+        }
     }
 
     // --- Brushes ---
@@ -209,15 +265,21 @@ impl GdiplusContext {
     }
 
     pub(crate) fn delete_brush(brush: isize) {
-        unsafe { GdipDeleteBrush(brush); }
+        unsafe {
+            GdipDeleteBrush(brush);
+        }
     }
 
     // --- Rect fill ---
 
     pub(crate) fn fill_rect(&self, graphics: isize, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        if w <= 0 || h <= 0 { return; }
+        if w <= 0 || h <= 0 {
+            return;
+        }
         if let Some(brush) = Self::create_solid_brush(color) {
-            unsafe { GdipFillRectangleI(graphics, brush, x, y, w, h); }
+            unsafe {
+                GdipFillRectangleI(graphics, brush, x, y, w, h);
+            }
             Self::delete_brush(brush);
         }
     }
@@ -226,30 +288,45 @@ impl GdiplusContext {
 
     #[allow(dead_code)]
     pub(crate) fn fill_rounded_rect(
-        &self, hdc: isize,
-        x: i32, y: i32, w: i32, h: i32,
-        radius: i32, color: u32,
+        &self,
+        hdc: isize,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: i32,
+        color: u32,
     ) {
-        if w <= 0 || h <= 0 { return; }
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let r = radius.max(0).min(w.min(h) / 2);
         let d = r * 2;
 
-        let saved = unsafe {
-            windows_sys::Win32::Graphics::Gdi::SaveDC(hdc as _)
-        };
-        if saved == 0 { return; }
+        let saved = unsafe { windows_sys::Win32::Graphics::Gdi::SaveDC(hdc as _) };
+        if saved == 0 {
+            return;
+        }
 
         let mut graphics = 0isize;
         if unsafe { GdipCreateFromHDC(hdc, &mut graphics) } != GDI_PLUS_OK {
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
+            unsafe {
+                windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved);
+            }
             return;
         }
-        unsafe { GdipSetSmoothingMode(graphics, SMOOTHING_MODE_ANTI_ALIAS); }
+        unsafe {
+            GdipSetSmoothingMode(graphics, SMOOTHING_MODE_ANTI_ALIAS);
+        }
 
         let mut brush = 0isize;
         if unsafe { GdipCreateSolidFill(color, &mut brush) } != GDI_PLUS_OK {
-            unsafe { GdipDeleteGraphics(graphics); }
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
+            unsafe {
+                GdipDeleteGraphics(graphics);
+            }
+            unsafe {
+                windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved);
+            }
             return;
         }
 
@@ -265,8 +342,13 @@ impl GdiplusContext {
 
         let mut path = 0isize;
         if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
-            unsafe { GdipDeleteBrush(brush); GdipDeleteGraphics(graphics); }
-            unsafe { windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved); }
+            unsafe {
+                GdipDeleteBrush(brush);
+                GdipDeleteGraphics(graphics);
+            }
+            unsafe {
+                windows_sys::Win32::Graphics::Gdi::RestoreDC(hdc as _, saved);
+            }
             return;
         }
 
@@ -296,10 +378,18 @@ impl GdiplusContext {
     // --- Rounded rect on existing graphics ---
 
     pub(crate) fn fill_rounded_rect_on_graphics(
-        &self, graphics: isize, x: i32, y: i32, w: i32, h: i32,
-        radius: i32, color: u32,
+        &self,
+        graphics: isize,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: i32,
+        color: u32,
     ) {
-        if w <= 0 || h <= 0 { return; }
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let r = radius.max(0).min(w.min(h) / 2);
         let d = r * 2;
 
@@ -307,13 +397,19 @@ impl GdiplusContext {
         // path-based rounded rect becomes self-intersecting, causing unfilled
         // gaps in the center with FILL_MODE_ALTERNATE. Fall back to plain fill.
         if d >= h || d >= w {
-            let Some(brush) = Self::create_solid_brush(color) else { return; };
-            unsafe { GdipFillRectangleI(graphics, brush, x, y, w, h); }
+            let Some(brush) = Self::create_solid_brush(color) else {
+                return;
+            };
+            unsafe {
+                GdipFillRectangleI(graphics, brush, x, y, w, h);
+            }
             Self::delete_brush(brush);
             return;
         }
 
-        let Some(brush) = Self::create_solid_brush(color) else { return; };
+        let Some(brush) = Self::create_solid_brush(color) else {
+            return;
+        };
 
         let mut path = 0isize;
         if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
@@ -332,25 +428,42 @@ impl GdiplusContext {
             GdipAddPathLineI(path, x, y + h - r, x, y + r);
         }
 
-        unsafe { GdipFillPath(graphics, brush, path); }
+        unsafe {
+            GdipFillPath(graphics, brush, path);
+        }
 
-        unsafe { GdipDeletePath(path); }
+        unsafe {
+            GdipDeletePath(path);
+        }
         Self::delete_brush(brush);
     }
 
     #[allow(dead_code)]
     pub(crate) fn draw_rounded_rect_border_on_graphics(
-        &self, graphics: isize, x: i32, y: i32, w: i32, h: i32,
-        radius: i32, color: u32, pen_width: f32,
+        &self,
+        graphics: isize,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        radius: i32,
+        color: u32,
+        pen_width: f32,
     ) {
-        if w <= 0 || h <= 0 { return; }
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let r = radius.max(0).min(w.min(h) / 2);
         let d = r * 2;
 
-        let Some(pen) = Self::create_pen(color, pen_width) else { return; };
+        let Some(pen) = Self::create_pen(color, pen_width) else {
+            return;
+        };
 
         if r == 0 {
-            unsafe { GdipDrawRectangleI(graphics, pen, x, y, w, h); }
+            unsafe {
+                GdipDrawRectangleI(graphics, pen, x, y, w, h);
+            }
             Self::delete_pen(pen);
             return;
         }
@@ -372,23 +485,35 @@ impl GdiplusContext {
             GdipAddPathLineI(path, x, y + h - r, x, y + r);
         }
 
-        unsafe { GdipDrawPath(graphics, pen, path); }
+        unsafe {
+            GdipDrawPath(graphics, pen, path);
+        }
 
-        unsafe { GdipDeletePath(path); }
+        unsafe {
+            GdipDeletePath(path);
+        }
         Self::delete_pen(pen);
     }
 
     pub(crate) fn draw_rounded_rect_border_on_graphics_f(
-        &self, graphics: isize, rect: &GpRectF,
-        radius: i32, color: u32, pen_width: f32,
+        &self,
+        graphics: isize,
+        rect: &GpRectF,
+        radius: i32,
+        color: u32,
+        pen_width: f32,
     ) {
         let w = rect.width;
         let h = rect.height;
-        if w <= 0.0 || h <= 0.0 { return; }
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
         let r = (radius as f32).max(0.0).min(w.min(h) / 2.0);
         let d = r * 2.0;
 
-        let Some(pen) = Self::create_pen(color, pen_width) else { return; };
+        let Some(pen) = Self::create_pen(color, pen_width) else {
+            return;
+        };
 
         let mut path = 0isize;
         if unsafe { GdipCreatePath(FILL_MODE_ALTERNATE, &mut path) } != GDI_PLUS_OK {
@@ -407,9 +532,13 @@ impl GdiplusContext {
             GdipAddPathLine(path, rect.x, rect.y + h - r, rect.x, rect.y + r);
         }
 
-        unsafe { GdipDrawPath(graphics, pen, path); }
+        unsafe {
+            GdipDrawPath(graphics, pen, path);
+        }
 
-        unsafe { GdipDeletePath(path); }
+        unsafe {
+            GdipDeletePath(path);
+        }
         Self::delete_pen(pen);
     }
 
@@ -425,22 +554,34 @@ impl GdiplusContext {
     }
 
     pub(crate) fn delete_font(font: isize) {
-        unsafe { GdipDeleteFont(font); }
+        unsafe {
+            GdipDeleteFont(font);
+        }
     }
 
     // --- Text ---
 
     pub(crate) fn draw_string(
-        &self, graphics: isize, text: &[u16],
-        font: isize, rect: &GpRectF, color: u32,
+        &self,
+        graphics: isize,
+        text: &[u16],
+        font: isize,
+        rect: &GpRectF,
+        color: u32,
     ) {
-        if text.is_empty() || self.default_str_fmt == 0 { return; }
+        if text.is_empty() || self.default_str_fmt == 0 {
+            return;
+        }
         if let Some(brush) = Self::create_solid_brush(color) {
             unsafe {
                 GdipDrawString(
-                    graphics, text.as_ptr(), text.len() as i32,
-                    font, rect as *const GpRectF,
-                    self.default_str_fmt, brush,
+                    graphics,
+                    text.as_ptr(),
+                    text.len() as i32,
+                    font,
+                    rect as *const GpRectF,
+                    self.default_str_fmt,
+                    brush,
                 );
             }
             Self::delete_brush(brush);
@@ -450,20 +591,39 @@ impl GdiplusContext {
     // --- Measure text ---
 
     pub(crate) fn measure_string(
-        &self, graphics: isize, text: &[u16],
-        font: isize, rect: &GpRectF,
+        &self,
+        graphics: isize,
+        text: &[u16],
+        font: isize,
+        rect: &GpRectF,
     ) -> Option<GpRectF> {
-        if text.is_empty() || self.default_str_fmt == 0 { return None; }
-        let mut bounds = GpRectF { x: 0.0, y: 0.0, width: 0.0, height: 0.0 };
+        if text.is_empty() || self.default_str_fmt == 0 {
+            return None;
+        }
+        let mut bounds = GpRectF {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
         let result = unsafe {
             GdipMeasureString(
-                graphics, text.as_ptr(), text.len() as i32,
-                font, rect as *const GpRectF,
+                graphics,
+                text.as_ptr(),
+                text.len() as i32,
+                font,
+                rect as *const GpRectF,
                 self.default_str_fmt,
-                &mut bounds, std::ptr::null_mut(), std::ptr::null_mut(),
+                &mut bounds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             )
         };
-        if result == GDI_PLUS_OK { Some(bounds) } else { None }
+        if result == GDI_PLUS_OK {
+            Some(bounds)
+        } else {
+            None
+        }
     }
 
     // --- Icons ---
@@ -498,12 +658,24 @@ impl GdiplusContext {
     }
 
     pub(crate) fn delete_pen(pen: isize) {
-        unsafe { GdipDeletePen(pen); }
+        unsafe {
+            GdipDeletePen(pen);
+        }
     }
 
-    pub(crate) fn draw_line(graphics: isize, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, width: f32) {
+    pub(crate) fn draw_line(
+        graphics: isize,
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: u32,
+        width: f32,
+    ) {
         if let Some(pen) = Self::create_pen(color, width) {
-            unsafe { GdipDrawLineI(graphics, pen, x1, y1, x2, y2); }
+            unsafe {
+                GdipDrawLineI(graphics, pen, x1, y1, x2, y2);
+            }
             Self::delete_pen(pen);
         }
     }
@@ -511,10 +683,7 @@ impl GdiplusContext {
     // --- Color conversion ---
 
     pub(crate) fn gdi_color_to_argb(color: u32) -> u32 {
-        0xFF000000
-            | ((color & 0x0000FF) << 16)
-            | (color & 0x00FF00)
-            | ((color & 0xFF0000) >> 16)
+        0xFF000000 | ((color & 0x0000FF) << 16) | (color & 0x00FF00) | ((color & 0xFF0000) >> 16)
     }
 }
 
@@ -537,8 +706,12 @@ pub(crate) fn select_gif_frame(image: isize, frame: u32) {
 impl Drop for GdiplusContext {
     fn drop(&mut self) {
         if self.default_str_fmt != 0 {
-            unsafe { GdipDeleteStringFormat(self.default_str_fmt); }
+            unsafe {
+                GdipDeleteStringFormat(self.default_str_fmt);
+            }
         }
-        unsafe { GdiplusShutdown(self.token); }
+        unsafe {
+            GdiplusShutdown(self.token);
+        }
     }
 }

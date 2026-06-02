@@ -73,12 +73,9 @@ pub(crate) const CONTROL_ID_HELP: usize = 1004;
 pub(crate) const CONTROL_ID_HELP_TIP: usize = 1005;
 pub(crate) const CONTROL_ID_FOOTER_HINT: usize = 1006;
 pub(crate) const CONTROL_ID_MODE_STRIP: usize = 1007;
-pub(crate) const CONTROL_ID_EVERYTHING: usize = 1008;
 pub(crate) const STATIC_NOTIFY_STYLE: u32 = 0x0100;
-pub(crate) const STATIC_LEFT_STYLE: u32 = 0x00000000;
 pub(crate) const STATIC_CENTER_STYLE: u32 = 0x00000001;
 pub(crate) const STATIC_RIGHT_STYLE: u32 = 0x00000002;
-pub(crate) const EVERYTHING_INDICATOR_TEXT: &str = "\u{26A1} Everything";
 pub(crate) const EX_NOACTIVATE_STYLE: u32 = 0x08000000;
 
 pub(crate) const NEX_WM_ESCAPE: u32 = WM_APP + 1;
@@ -108,7 +105,9 @@ pub(crate) const TIMER_ICON_CACHE_IDLE: usize = 0xBEF4;
 pub(crate) const TIMER_RESULTS_CONTENT_FADE: usize = 0xBEF5;
 pub(crate) const TIMER_COMMAND_BADGE_FADE: usize = 0xBEF6;
 
-pub(crate) const LOADING_SPINNER_CHARS: &[&str] = &["\u{28FE}", "\u{28FD}", "\u{28FB}", "\u{28BF}", "\u{287F}", "\u{28DF}", "\u{28EF}", "\u{28F7}"];
+pub(crate) const LOADING_SPINNER_CHARS: &[&str] = &[
+    "\u{28FE}", "\u{28FD}", "\u{28FB}", "\u{28BF}", "\u{287F}", "\u{28DF}", "\u{28EF}", "\u{28F7}",
+];
 
 pub(crate) const OVERLAY_ANIM_MS: u32 = 150;
 pub(crate) const OVERLAY_ALPHA_OPAQUE: u8 = 255;
@@ -222,8 +221,8 @@ pub(crate) struct DibSurface {
 impl DibSurface {
     pub(crate) fn new(width: i32, height: i32) -> Option<Self> {
         use windows_sys::Win32::Graphics::Gdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteObject, GetDC, ReleaseDC,
-            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+            CreateCompatibleDC, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, SelectObject,
+            BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         };
 
         if width <= 0 || height <= 0 {
@@ -243,7 +242,14 @@ impl DibSurface {
             bmi.bmiHeader.biCompression = BI_RGB;
 
             let mut pixels: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp = CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut pixels, std::ptr::null_mut(), 0);
+            let hbmp = CreateDIBSection(
+                screen_dc,
+                &bmi,
+                DIB_RGB_COLORS,
+                &mut pixels,
+                std::ptr::null_mut(),
+                0,
+            );
             ReleaseDC(std::ptr::null_mut(), screen_dc);
 
             if hbmp.is_null() {
@@ -291,12 +297,17 @@ impl DibSurface {
             let pixel = unsafe { *pixels.add(i) };
             let a = (pixel >> 24) & 0xFF;
             if a == 0 {
-                unsafe { *pixels.add(i) = 0; }
+                unsafe {
+                    *pixels.add(i) = 0;
+                }
             } else if a < 255 {
                 let r = ((pixel >> 16) & 0xFF) * a / 255;
                 let g = ((pixel >> 8) & 0xFF) * a / 255;
                 let b = (pixel & 0xFF) * a / 255;
-                unsafe { *pixels.add(i) = (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32; }
+                unsafe {
+                    *pixels.add(i) =
+                        (a as u32) << 24 | (r as u32) << 16 | (g as u32) << 8 | b as u32;
+                }
             }
         }
     }

@@ -15,6 +15,8 @@ pub(crate) mod icon_cache;
 #[cfg(target_os = "windows")]
 pub(crate) mod icon_loader;
 #[cfg(target_os = "windows")]
+pub(crate) mod indexing_progress;
+#[cfg(target_os = "windows")]
 pub(crate) mod input;
 #[cfg(target_os = "windows")]
 pub(crate) mod layout;

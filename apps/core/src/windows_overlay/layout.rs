@@ -2,8 +2,8 @@ use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, GetDC, GetTextExtentPoint32W, GetTextMetricsW,
@@ -14,7 +14,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW, MoveWindow, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
     AW_ACTIVATE, AW_BLEND, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW,
 };
-
 
 use crate::windows_overlay::icon_cache::{clear_icon_cache, log_memory_snapshot};
 use crate::windows_overlay::state::{state_for, OverlayShellState};
@@ -232,16 +231,6 @@ pub(crate) fn layout_children(hwnd: HWND, state: &mut OverlayShellState) {
         } else {
             ShowWindow(state.mode_strip_hwnd, SW_HIDE);
         }
-        if state.everything_active {
-            MoveWindow(
-                state.everything_hwnd,
-                PANEL_MARGIN_X + 2,
-                mode_strip_top,
-                120,
-                14,
-                1,
-            );
-        }
         position_help_tip_popup(state);
         apply_help_tip_rounded_corners(
             state.help_tip_hwnd,
@@ -346,7 +335,11 @@ pub(crate) fn compute_input_text_rect(
         0
     };
     let mut text_rect = RECT {
-        left: INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + prefix_left_pad + quick_badge_left_pad + search_left_pad,
+        left: INPUT_TEXT_LEFT_INSET
+            + INPUT_TEXT_SHIFT_X
+            + prefix_left_pad
+            + quick_badge_left_pad
+            + search_left_pad,
         top,
         right: width - INPUT_TEXT_RIGHT_INSET + INPUT_TEXT_SHIFT_X,
         bottom: top + line_height,
@@ -603,10 +596,14 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
     }
     // Clean up pre-created GDI+ font handles
     if state.help_icon_font != 0 {
-        unsafe { DeleteObject(state.help_icon_font as _); }
+        unsafe {
+            DeleteObject(state.help_icon_font as _);
+        }
     }
     if state.search_icon_font != 0 {
-        unsafe { DeleteObject(state.search_icon_font as _); }
+        unsafe {
+            DeleteObject(state.search_icon_font as _);
+        }
     }
     if state.footer_font != 0 {
         unsafe {
@@ -684,13 +681,34 @@ pub(crate) fn cleanup_state_resources(state: &mut OverlayShellState) {
         }
     }
     use crate::windows_overlay::gdiplus_rendering::GdiplusContext;
-    if state.gdiplus_title_font != 0 { GdiplusContext::delete_font(state.gdiplus_title_font); state.gdiplus_title_font = 0; }
-    if state.gdiplus_meta_font != 0 { GdiplusContext::delete_font(state.gdiplus_meta_font); state.gdiplus_meta_font = 0; }
-    if state.gdiplus_status_font != 0 { GdiplusContext::delete_font(state.gdiplus_status_font); state.gdiplus_status_font = 0; }
-    if state.gdiplus_header_font != 0 { GdiplusContext::delete_font(state.gdiplus_header_font); state.gdiplus_header_font = 0; }
-    if state.gdiplus_help_tip_font != 0 { GdiplusContext::delete_font(state.gdiplus_help_tip_font); state.gdiplus_help_tip_font = 0; }
-    if state.gdiplus_footer_font != 0 { GdiplusContext::delete_font(state.gdiplus_footer_font); state.gdiplus_footer_font = 0; }
-    if state.gdiplus_hint_font != 0 { GdiplusContext::delete_font(state.gdiplus_hint_font); state.gdiplus_hint_font = 0; }
+    if state.gdiplus_title_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_title_font);
+        state.gdiplus_title_font = 0;
+    }
+    if state.gdiplus_meta_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_meta_font);
+        state.gdiplus_meta_font = 0;
+    }
+    if state.gdiplus_status_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_status_font);
+        state.gdiplus_status_font = 0;
+    }
+    if state.gdiplus_header_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_header_font);
+        state.gdiplus_header_font = 0;
+    }
+    if state.gdiplus_help_tip_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_help_tip_font);
+        state.gdiplus_help_tip_font = 0;
+    }
+    if state.gdiplus_footer_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_footer_font);
+        state.gdiplus_footer_font = 0;
+    }
+    if state.gdiplus_hint_font != 0 {
+        GdiplusContext::delete_font(state.gdiplus_hint_font);
+        state.gdiplus_hint_font = 0;
+    }
 
     state.gdi_cache.clear();
     clear_icon_cache(state);
@@ -736,7 +754,10 @@ mod tests {
     #[test]
     fn compute_input_text_rect_basic_layout() {
         let rect = compute_input_text_rect(400, 36, 18, false, false);
-        assert_eq!(rect.left, INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + INPUT_TEXT_SEARCH_PAD);
+        assert_eq!(
+            rect.left,
+            INPUT_TEXT_LEFT_INSET + INPUT_TEXT_SHIFT_X + INPUT_TEXT_SEARCH_PAD
+        );
         assert_eq!(
             rect.right,
             400 - INPUT_TEXT_RIGHT_INSET + INPUT_TEXT_SHIFT_X
@@ -749,7 +770,10 @@ mod tests {
     fn compute_input_text_rect_command_mode_adds_prefix_pad() {
         let normal = compute_input_text_rect(400, 36, 18, false, false);
         let command = compute_input_text_rect(400, 36, 18, true, false);
-        assert_eq!(command.left, normal.left - INPUT_TEXT_SEARCH_PAD + COMMAND_PREFIX_INPUT_PAD);
+        assert_eq!(
+            command.left,
+            normal.left - INPUT_TEXT_SEARCH_PAD + COMMAND_PREFIX_INPUT_PAD
+        );
     }
 
     #[test]

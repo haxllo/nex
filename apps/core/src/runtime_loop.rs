@@ -1,11 +1,17 @@
 #[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 
 use crate::clipboard_history;
 #[cfg(target_os = "windows")]
 use crate::config::Config;
 #[cfg(target_os = "windows")]
+use crate::config::DiscoveryBackend;
+#[cfg(target_os = "windows")]
 use crate::core_service::CoreService;
+#[cfg(target_os = "windows")]
+use crate::everything_bridge::EverythingBridge;
 #[cfg(target_os = "windows")]
 use crate::hotkey_runtime::default_hotkey_registrar;
 #[cfg(target_os = "windows")]
@@ -26,8 +32,7 @@ use crate::runtime_hotkey::{should_suppress_hotkey_for_game_mode, toggle_game_mo
 #[cfg(target_os = "windows")]
 use crate::runtime_index::{
     config_file_modified_time, maybe_apply_background_index_refresh,
-    maybe_apply_runtime_config_reload, maybe_show_background_index_ready_notice,
-    should_show_indexing_status, start_background_index_refresh, BackgroundIndexRefresh,
+    maybe_apply_runtime_config_reload, start_background_index_refresh, BackgroundIndexRefresh,
     RuntimeConfigWatcher,
 };
 #[cfg(target_os = "windows")]
@@ -35,8 +40,8 @@ use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, next_selection_index, overlay_rows,
     reconcile_suppressed_uninstall_titles, set_idle_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, PendingUninstallConfirmation, ACTION_UNINSTALL_CANCEL_ID,
-    ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_INDEXING, STATUS_ROW_NO_COMMAND_RESULTS,
-    STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
+    ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS,
+    STATUS_ROW_TYPE_TO_SEARCH,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_process::{
@@ -52,7 +57,9 @@ use crate::search_worker::SearchWorker;
 #[cfg(target_os = "windows")]
 use crate::windows_overlay::types::NEX_WM_SEARCH_RESULTS_READY;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole};
+use crate::windows_overlay::{
+    signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
+};
 #[cfg(target_os = "windows")]
 use std::time::Instant;
 
@@ -62,25 +69,86 @@ pub(crate) fn run_windows_runtime(
     mut runtime_config: Config,
     service: CoreService,
 ) -> Result<(), RuntimeError> {
-    let mut background_index_refresh = {
-        let initial_cached_items = service.cached_items_len();
+    let service = Arc::new(Mutex::new(service));
+
+    let initial_cache_empty = {
+        let guard = service.lock().unwrap();
+        guard.cached_items_len() == 0
+    };
+
+    let mut background_index_refresh = if initial_cache_empty {
+    let use_progress_window = match runtime_config.file_discovery_backend {
+        DiscoveryBackend::Everything => false,
+        DiscoveryBackend::Walkdir => true,
+        DiscoveryBackend::Auto => !EverythingBridge::detect().is_some(),
+    };
+        if use_progress_window {
+            log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
+            let service_arc = service.clone();
+            let result =
+                crate::windows_overlay::indexing_progress::run_with_progress_window(move |pct| {
+                    let svc = service_arc.lock().unwrap();
+                    *svc.progress.lock().unwrap() = Some(pct);
+                    let report = svc.rebuild_index_incremental_with_report();
+                    *svc.progress.lock().unwrap() = None;
+                    report
+                });
+            match result {
+                Ok(report) => {
+                    log_info(&format!(
+                        "[nex] startup indexed_items={} discovered={} upserted={} removed={}",
+                        report.indexed_total,
+                        report.discovered_total,
+                        report.upserted_total,
+                        report.removed_total,
+                    ));
+                    for provider in &report.providers {
+                        log_info(&format!(
+                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                            provider.provider,
+                            provider.discovered,
+                            provider.upserted,
+                            provider.removed,
+                            provider.skipped,
+                            provider.elapsed_ms
+                        ));
+                    }
+                    BackgroundIndexRefresh {
+                        completed: Arc::new(AtomicBool::new(true)),
+                        result: Arc::new(Mutex::new(Some(Ok(report)))),
+                        cache_applied: true,
+                        indexes_synced: false,
+                        initial_cache_empty: true,
+                        pending_discovery_reindex: false,
+                        pending_discovery_reindex_due_at: None,
+                        pending_discovery_reindex_requests: 0,
+                        started_at: Instant::now(),
+                        startup_started_at,
+                    }
+                }
+                Err(e) => {
+                    log_warn(&format!("[nex] first-time indexing failed: {e}"));
+                    start_background_index_refresh(&runtime_config, true, startup_started_at)
+                }
+            }
+        } else {
+            log_info("[nex] startup cached_items=0 (first-time indexing, Everything backend — async, no progress window)");
+            log_info(&format!(
+                "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=true cached_items=0",
+                startup_started_at.elapsed().as_millis()
+            ));
+            start_background_index_refresh(&runtime_config, true, startup_started_at)
+        }
+    } else {
         log_info(&format!(
             "[nex] startup cached_items={} (async indexing scheduled)",
-            initial_cached_items
+            {
+                let guard = service.lock().unwrap();
+                guard.cached_items_len()
+            }
         ));
-        log_info(&format!(
-            "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty={} cached_items={}",
-            startup_started_at.elapsed().as_millis(),
-            initial_cached_items == 0,
-            initial_cached_items
-        ));
-        start_background_index_refresh(
-            &runtime_config,
-            initial_cached_items == 0,
-            startup_started_at,
-        )
+        start_background_index_refresh(&runtime_config, false, startup_started_at)
     };
-    let service = Arc::new(Mutex::new(service));
 
     let mut plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
@@ -194,12 +262,35 @@ pub(crate) fn run_windows_runtime(
                 &mut config_watcher,
                 &mut background_index_refresh,
             );
+            let was_indexing_complete = background_index_refresh
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire);
             maybe_apply_background_index_refresh(
                 &*service.lock().unwrap(),
                 &mut background_index_refresh,
                 &runtime_config,
             );
-            maybe_show_background_index_ready_notice(&overlay, &mut background_index_refresh);
+            if !was_indexing_complete
+                && background_index_refresh
+                    .completed
+                    .load(std::sync::atomic::Ordering::Acquire)
+                && !last_query.is_empty()
+            {
+                let pending_query = last_query.clone();
+                last_query.clear();
+                apply_query_change(
+                    pending_query,
+                    &overlay,
+                    &search_worker,
+                    &runtime_config,
+                    max_results,
+                    &mut pending_uninstall_confirmation,
+                    &mut current_results,
+                    &mut selected_index,
+                    &mut last_query,
+                    &mut last_sent_generation,
+                );
+            }
             match event {
                 OverlayEvent::Hotkey(_) => {
                     log_info("[nex] hotkey_event received");
@@ -240,10 +331,6 @@ pub(crate) fn run_windows_runtime(
                                 if let Some(issue) = hotkey_issue_status.as_deref() {
                                     overlay.set_status_text(issue);
                                 }
-                                maybe_show_background_index_ready_notice(
-                                    &overlay,
-                                    &mut background_index_refresh,
-                                );
                             }
                         }
                         HotkeyAction::Hide => {
@@ -278,10 +365,6 @@ pub(crate) fn run_windows_runtime(
                         if let Some(issue) = hotkey_issue_status.as_deref() {
                             overlay.set_status_text(issue);
                         }
-                        maybe_show_background_index_ready_notice(
-                            &overlay,
-                            &mut background_index_refresh,
-                        );
                     }
                 }
                 OverlayEvent::ExternalQuit => {
@@ -359,8 +442,6 @@ pub(crate) fn run_windows_runtime(
                         if overlay.query_text().trim().is_empty() {
                             set_idle_overlay_state(&overlay);
                             overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
-                        } else if should_show_indexing_status(&background_index_refresh) {
-                            set_status_row_overlay_state(&overlay, STATUS_ROW_INDEXING);
                         } else {
                             let parsed_query = ParsedQuery::parse(
                                 overlay.query_text().trim(),
@@ -680,18 +761,17 @@ fn apply_search_results(
     *selected_index = 0;
 
     if current_results.is_empty() {
-        if should_show_indexing_status(background_index_refresh) {
-            set_status_row_overlay_state(overlay, STATUS_ROW_INDEXING);
+        let indexing_in_progress = !background_index_refresh
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+        let message = if indexing_in_progress && !command_mode {
+            "Indexing, please wait..."
+        } else if command_mode {
+            STATUS_ROW_NO_COMMAND_RESULTS
         } else {
-            set_status_row_overlay_state(
-                overlay,
-                if command_mode {
-                    STATUS_ROW_NO_COMMAND_RESULTS
-                } else {
-                    STATUS_ROW_NO_RESULTS
-                },
-            );
-        }
+            STATUS_ROW_NO_RESULTS
+        };
+        set_status_row_overlay_state(overlay, message);
     } else {
         let rows = overlay_rows(current_results, command_mode);
         overlay.set_results(&rows, *selected_index);
@@ -703,7 +783,11 @@ fn format_result(value: f64) -> String {
     if value.is_nan() {
         "NaN".into()
     } else if value.is_infinite() {
-        if value.is_sign_positive() { "∞".into() } else { "-∞".into() }
+        if value.is_sign_positive() {
+            "∞".into()
+        } else {
+            "-∞".into()
+        }
     } else if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     } else if value.abs() > 1e10 || value.abs() < 1e-4 {
@@ -728,7 +812,9 @@ fn copy_to_clipboard(text: &str) -> bool {
             windows_sys::Win32::System::Memory::GMEM_MOVEABLE,
             (len_bytes + 2) as usize,
         );
-        if hglob.is_null() { return false; }
+        if hglob.is_null() {
+            return false;
+        }
         let lock = windows_sys::Win32::System::Memory::GlobalLock(hglob);
         if lock.is_null() {
             windows_sys::Win32::Foundation::GlobalFree(hglob);

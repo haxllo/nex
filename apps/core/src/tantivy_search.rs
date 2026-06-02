@@ -8,9 +8,7 @@ use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur};
 use tantivy::schema::*;
-use tantivy::{
-    doc, query::Query, Index, IndexReader, IndexWriter, TantivyDocument,
-};
+use tantivy::{doc, query::Query, Index, IndexReader, IndexWriter, TantivyDocument};
 
 use crate::model::SearchItem;
 
@@ -21,6 +19,8 @@ pub(crate) struct TantivyFields {
     pub subtitle: Field,
     pub kind: Field,
     pub extension: Field,
+    pub use_count: Field,
+    pub last_accessed_epoch_secs: Field,
 }
 
 pub(crate) struct TantivyIndex {
@@ -33,6 +33,9 @@ pub(crate) struct TantivyIndex {
 
 impl TantivyIndex {
     pub fn open(index_path: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(index_path)
+            .map_err(|e| format!("failed to create tantivy directory: {e}"))?;
+
         let mut schema_builder = Schema::builder();
 
         let id = schema_builder.add_text_field("id", STRING | STORED);
@@ -41,6 +44,9 @@ impl TantivyIndex {
         let subtitle = schema_builder.add_text_field("subtitle", TEXT);
         let kind = schema_builder.add_text_field("kind", STRING);
         let extension = schema_builder.add_text_field("extension", STRING);
+        let use_count = schema_builder.add_i64_field("use_count", STORED);
+        let last_accessed_epoch_secs =
+            schema_builder.add_i64_field("last_accessed_epoch_secs", STORED);
 
         let schema = schema_builder.build();
 
@@ -68,6 +74,8 @@ impl TantivyIndex {
                 subtitle,
                 kind,
                 extension,
+                use_count,
+                last_accessed_epoch_secs,
             },
             schema,
         })
@@ -93,7 +101,7 @@ impl TantivyIndex {
             .map_err(|e| format!("tantivy search error: {e}"))?;
 
         let mut results = Vec::with_capacity(top_docs.len());
-        for (_score, doc_address) in top_docs {
+        for (score, doc_address) in top_docs {
             let doc: TantivyDocument = searcher
                 .doc::<TantivyDocument>(doc_address)
                 .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
@@ -123,10 +131,30 @@ impl TantivyIndex {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let use_count = doc
+                .get_first(self.fields.use_count)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32;
+            let last_accessed = doc
+                .get_first(self.fields.last_accessed_epoch_secs)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
 
-            results.push(SearchItem::from_owned_with_subtitle(
-                id, kind, title, path_value, subtitle, 0, 0,
-            ));
+            // Map BM25 (~0..5) to 0..5000 range for pre_score
+            let pre_score = ((score / 5.0) * 5000.0).round() as i64;
+
+            results.push(
+                SearchItem::from_owned_with_subtitle(
+                    id,
+                    kind,
+                    title,
+                    path_value,
+                    subtitle,
+                    use_count,
+                    last_accessed,
+                )
+                .with_pre_score(pre_score),
+            );
         }
 
         Ok(results)
@@ -151,6 +179,8 @@ impl TantivyIndex {
                     self.fields.subtitle => item.subtitle.as_str(),
                     self.fields.kind => item.kind.as_str(),
                     self.fields.extension => extract_extension(&item.path),
+                    self.fields.use_count => item.use_count as i64,
+                    self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
                 ))
                 .map_err(|e| format!("tantivy add document error: {e}"))?;
         }
@@ -184,8 +214,35 @@ impl TantivyIndex {
             .lock()
             .map_err(|e| format!("tantivy writer lock error: {e}"))?;
 
+        writer.delete_term(tantivy::Term::from_field_text(self.fields.id, item_id));
         writer
-            .delete_term(tantivy::Term::from_field_text(self.fields.id, item_id));
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+
+        Ok(())
+    }
+
+    pub fn upsert_item(&self, item: &SearchItem) -> Result<(), String> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+
+        writer.delete_term(tantivy::Term::from_field_text(self.fields.id, &item.id));
+
+        writer
+            .add_document(doc!(
+                self.fields.id => item.id.as_str(),
+                self.fields.title => item.title.as_str(),
+                self.fields.path => item.path.as_str(),
+                self.fields.subtitle => item.subtitle.as_str(),
+                self.fields.kind => item.kind.as_str(),
+                self.fields.extension => extract_extension(&item.path),
+                self.fields.use_count => item.use_count as i64,
+                self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
+            ))
+            .map_err(|e| format!("tantivy add document error: {e}"))?;
+
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
@@ -207,7 +264,10 @@ fn build_prefix_query(
     query_text: &str,
     fields: &[Field],
 ) -> Result<Box<dyn Query>, String> {
-    let terms: Vec<&str> = query_text.split_whitespace().filter(|t| !t.is_empty()).collect();
+    let terms: Vec<&str> = query_text
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .collect();
     if terms.is_empty() {
         return Ok(Box::new(tantivy::query::AllQuery));
     }
@@ -234,16 +294,16 @@ fn build_prefix_query(
                 Box::new(FuzzyTermQuery::new_prefix(term, 0, false)),
             ));
         }
-        all_subqueries.push((
-            Occur::Must,
-            Box::new(BooleanQuery::new(word_subqueries)),
-        ));
+        all_subqueries.push((Occur::Must, Box::new(BooleanQuery::new(word_subqueries))));
     }
     Ok(Box::new(BooleanQuery::new(all_subqueries)))
 }
 
 fn extract_extension(path: &str) -> &str {
-    let filename = path.rsplit(std::path::MAIN_SEPARATOR).next().unwrap_or(path);
+    let filename = path
+        .rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .unwrap_or(path);
     match filename.rfind('.') {
         Some(pos) => &filename[pos + 1..],
         None => "",

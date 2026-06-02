@@ -196,7 +196,14 @@ fn score_item_fast(
     app_intent_query: bool,
     personalization_boost: i64,
 ) -> Option<TextScore> {
-    let text_score = score_text(item.normalized_title(), normalized_query)?;
+    let text_score = if let Some(pre_score) = item.pre_score {
+        TextScore {
+            score: pre_score,
+            kind: TextMatchKind::Substring,
+        }
+    } else {
+        score_text(item.normalized_title(), normalized_query)?
+    };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
     let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
     let source_bonus = source_bonus(item);
@@ -243,7 +250,12 @@ fn score_item(
         return None;
     }
 
-    let text_score = if normalized_query.is_empty() {
+    let text_score = if let Some(pre_score) = item.pre_score {
+        TextScore {
+            score: pre_score,
+            kind: TextMatchKind::Substring,
+        }
+    } else if normalized_query.is_empty() {
         TextScore {
             score: 0,
             kind: TextMatchKind::Substring,

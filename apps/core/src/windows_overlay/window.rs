@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC,
-    GetTextFaceW, InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE,
-    OUT_DEFAULT_PRECIS, TRANSPARENT,
+    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetTextFaceW,
+    InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow,
+    CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE, OUT_DEFAULT_PRECIS,
+    TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -98,7 +98,12 @@ fn stop_loading_spinner(hwnd: HWND, state: &mut OverlayShellState) {
     unsafe {
         // Restore help icon font (Segoe Fluent Icons) for the gear icon
         if state.help_icon_font != 0 {
-            SendMessageW(state.help_hwnd, WM_SETFONT, state.help_icon_font as usize, 1);
+            SendMessageW(
+                state.help_hwnd,
+                WM_SETFONT,
+                state.help_icon_font as usize,
+                1,
+            );
         }
         SetWindowTextW(state.help_hwnd, to_wide(HELP_ICON_TEXT).as_ptr());
         // Only kill the shared anim timer if no window animation is running.
@@ -344,24 +349,6 @@ impl NativeOverlayShell {
         if let Some(state) = state_for(self.hwnd) {
             state.hotkey_issue_active = active;
             let _ = update_tray_icon(self.hwnd, state);
-        }
-    }
-
-    pub fn set_everything_active(&self, active: bool) {
-        if let Some(state) = state_for(self.hwnd) {
-            state.everything_active = active;
-            if active {
-                let wide = to_wide(EVERYTHING_INDICATOR_TEXT);
-                unsafe {
-                    SetWindowTextW(state.everything_hwnd, wide.as_ptr());
-                    ShowWindow(state.everything_hwnd, SW_SHOW);
-                }
-            } else {
-                unsafe {
-                    ShowWindow(state.everything_hwnd, SW_HIDE);
-                }
-            }
-            layout_children(self.hwnd, state);
         }
     }
 
@@ -736,7 +723,6 @@ impl NativeOverlayShell {
                 ShowWindow(state.list_hwnd, SW_HIDE);
                 ShowWindow(state.footer_hint_hwnd, SW_HIDE);
                 ShowWindow(state.mode_strip_hwnd, SW_HIDE);
-                ShowWindow(state.everything_hwnd, SW_HIDE);
                 SendMessageW(state.list_hwnd, LB_SETTOPINDEX, 0, 0);
                 SendMessageW(state.list_hwnd, LB_RESETCONTENT, 0, 0);
                 KillTimer(self.hwnd, TIMER_RESULTS_CONTENT_FADE);
@@ -816,7 +802,12 @@ impl NativeOverlayShell {
     fn animate_show(&self) {
         if self.is_visible() {
             if let Some(state) = state_for(self.hwnd) {
-                if state.window_anim.as_ref().map(|a| a.hide_on_complete).unwrap_or(false) {
+                if state
+                    .window_anim
+                    .as_ref()
+                    .map(|a| a.hide_on_complete)
+                    .unwrap_or(false)
+                {
                     complete_window_animation_if_running(self.hwnd, state);
                     state.window_anim = None;
                 }
@@ -845,7 +836,15 @@ impl NativeOverlayShell {
         let start_top = final_top + (final_height - start_height) / 2;
 
         unsafe {
-            SetWindowPos(self.hwnd, HWND_TOPMOST, start_left, start_top, start_width, start_height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                start_left,
+                start_top,
+                start_width,
+                start_height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
             SetLayeredWindowAttributes(self.hwnd, 0, 0, LWA_ALPHA);
         }
         // Start animation (same position+size, only alpha changes from 0→255)
@@ -1001,7 +1000,8 @@ extern "system" fn overlay_wnd_proc(
                 // Pre-create GDI+ font handles from GDI fonts (avoids per-row
                 // GdipCreateFontFromDC + GdipDeleteFont in draw_list_row).
                 if state.gdiplus.is_some() {
-                    let temp_dc = unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut()) };
+                    let temp_dc =
+                        unsafe { windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut()) };
                     if !temp_dc.is_null() {
                         let pairs: [(isize, &mut isize); 7] = [
                             (state.title_font, &mut state.gdiplus_title_font),
@@ -1014,12 +1014,24 @@ extern "system" fn overlay_wnd_proc(
                         ];
                         for (gdi_font, gp_dest) in pairs {
                             if gdi_font != 0 {
-                                let old = unsafe { windows_sys::Win32::Graphics::Gdi::SelectObject(temp_dc, gdi_font as _) };
+                                let old = unsafe {
+                                    windows_sys::Win32::Graphics::Gdi::SelectObject(
+                                        temp_dc,
+                                        gdi_font as _,
+                                    )
+                                };
                                 *gp_dest = crate::windows_overlay::gdiplus_rendering::GdiplusContext::create_font_from_hdc(temp_dc as isize).unwrap_or(0);
-                                unsafe { windows_sys::Win32::Graphics::Gdi::SelectObject(temp_dc, old); }
+                                unsafe {
+                                    windows_sys::Win32::Graphics::Gdi::SelectObject(temp_dc, old);
+                                }
                             }
                         }
-                        unsafe { windows_sys::Win32::Graphics::Gdi::ReleaseDC(std::ptr::null_mut(), temp_dc); }
+                        unsafe {
+                            windows_sys::Win32::Graphics::Gdi::ReleaseDC(
+                                std::ptr::null_mut(),
+                                temp_dc,
+                            );
+                        }
                     }
                 }
 
@@ -1146,23 +1158,6 @@ extern "system" fn overlay_wnd_proc(
                         std::ptr::null_mut(),
                     )
                 };
-                state.everything_hwnd = unsafe {
-                    CreateWindowExW(
-                        0,
-                        to_wide(STATUS_CLASS).as_ptr(),
-                        to_wide("").as_ptr(),
-                        WS_CHILD | STATIC_LEFT_STYLE,
-                        0,
-                        0,
-                        0,
-                        0,
-                        hwnd,
-                        CONTROL_ID_EVERYTHING as HMENU,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                };
-
                 unsafe {
                     SendMessageW(state.edit_hwnd, WM_SETFONT, state.input_font as usize, 1);
                     SendMessageW(state.list_hwnd, WM_SETFONT, state.meta_font as usize, 1);
@@ -1187,12 +1182,6 @@ extern "system" fn overlay_wnd_proc(
                         state.mode_strip_hwnd,
                         WM_SETFONT,
                         state.hint_font as usize,
-                        1,
-                    );
-                    SendMessageW(
-                        state.everything_hwnd,
-                        WM_SETFONT,
-                        state.status_font as usize,
                         1,
                     );
                     SendMessageW(
@@ -1232,7 +1221,6 @@ extern "system" fn overlay_wnd_proc(
                     ShowWindow(state.help_tip_hwnd, SW_HIDE);
                     ShowWindow(state.footer_hint_hwnd, SW_HIDE);
                     ShowWindow(state.mode_strip_hwnd, SW_HIDE);
-                    ShowWindow(state.everything_hwnd, SW_HIDE);
                 }
 
                 state.results_visible = false;
@@ -1394,13 +1382,6 @@ extern "system" fn overlay_wnd_proc(
                 if target == state.mode_strip_hwnd {
                     unsafe {
                         SetTextColor(wparam as _, state.palette.text_mode_strip);
-                        SetBkMode(wparam as _, TRANSPARENT as i32);
-                    }
-                    return state.panel_brush;
-                }
-                if target == state.everything_hwnd {
-                    unsafe {
-                        SetTextColor(wparam as _, state.palette.text_hint_footer);
                         SetBkMode(wparam as _, TRANSPARENT as i32);
                     }
                     return state.panel_brush;
@@ -1727,8 +1708,20 @@ fn font_is_available(family_name: &str) -> bool {
     let wide = to_wide(family_name);
     let hfont = unsafe {
         CreateFontW(
-            0, 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, 0,
-            CLEARTYPE_QUALITY as u32, FF_DONTCARE as u32, wide.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            0,
+            CLEARTYPE_QUALITY as u32,
+            FF_DONTCARE as u32,
+            wide.as_ptr(),
         )
     };
     if hfont.is_null() {
@@ -1736,13 +1729,19 @@ fn font_is_available(family_name: &str) -> bool {
     }
     let hdc = unsafe { GetDC(std::ptr::null_mut()) };
     if hdc.is_null() {
-        unsafe { DeleteObject(hfont as _); }
+        unsafe {
+            DeleteObject(hfont as _);
+        }
         return false;
     }
     let old = unsafe { SelectObject(hdc, hfont as _) };
     let mut buf = [0u16; 256];
     let len = unsafe { GetTextFaceW(hdc, 256, buf.as_mut_ptr()) };
-    unsafe { SelectObject(hdc, old); ReleaseDC(std::ptr::null_mut(), hdc); DeleteObject(hfont as _); }
+    unsafe {
+        SelectObject(hdc, old);
+        ReleaseDC(std::ptr::null_mut(), hdc);
+        DeleteObject(hfont as _);
+    }
     if len == 0 {
         return false;
     }
@@ -1779,10 +1778,7 @@ fn register_private_fonts() -> bool {
             }
         }
 
-        let files = [
-    "Inter-Regular.ttf",
-    "Inter-Bold.ttf",
-        ];
+        let files = ["Inter-Regular.ttf", "Inter-Bold.ttf"];
 
         for base_dir in candidates {
             if !base_dir.is_dir() {

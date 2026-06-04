@@ -333,24 +333,58 @@ impl CoreService {
 
         self.prune_stale_items_if_due()?;
 
-        let mut seed_items = {
-            let guard = match self.cached_items.read() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.clone()
-        };
-
+        // Path 1: indexed search (Tantivy/FTS5) returns pre-ranked candidates
+        // directly. The index is only populated when background indexing has
+        // finished successfully. When the index is empty (e.g., Everything
+        // service was down during indexing) we fall back to scanning the
+        // in-memory cache, holding the read lock only for the duration of
+        // the ranking pass — no full Vec clone per keystroke.
         if should_use_db_query_seed(filter, query) {
             let indexed_seed_limit =
                 (config_snapshot.index_max_items_per_query_seed as usize).max(250);
             let candidates = self.search_indexed_candidates(query, indexed_seed_limit)?;
-            merge_seed_candidates(&mut seed_items, candidates);
+            if !candidates.is_empty() {
+                let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
+                let mut ranked = crate::search::search_with_filter_with_boosts(
+                    &candidates,
+                    query,
+                    effective_limit,
+                    filter,
+                    Some(&query_boosts),
+                );
+                if ranked.len() < effective_limit {
+                    // Augment with in-memory cache items the index missed.
+                    if let Ok(guard) = self.cached_items.read() {
+                        let cache_ranked = crate::search::search_with_filter_with_boosts(
+                            &guard,
+                            query,
+                            effective_limit.saturating_sub(ranked.len()),
+                            filter,
+                            Some(&query_boosts),
+                        );
+                        for item in cache_ranked {
+                            if !ranked.iter().any(|r| r.id == item.id) {
+                                ranked.push(item);
+                                if ranked.len() >= effective_limit {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(ranked);
+            }
         }
 
+        // Path 2: no index results — rank the in-memory cache directly,
+        // holding the read lock only while we score and select.
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
+        let guard = match self.cached_items.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         Ok(crate::search::search_with_filter_with_boosts(
-            &seed_items,
+            &guard,
             query,
             effective_limit,
             filter,
@@ -1357,18 +1391,6 @@ fn query_memory_recency_boost(last_selected_epoch_secs: i64, now_epoch_secs: i64
         220
     } else {
         0
-    }
-}
-
-fn merge_seed_candidates(seed_items: &mut Vec<SearchItem>, extra: Vec<SearchItem>) {
-    if extra.is_empty() {
-        return;
-    }
-    let mut seen: HashSet<String> = seed_items.iter().map(|item| item.id.clone()).collect();
-    for item in extra {
-        if seen.insert(item.id.clone()) {
-            seed_items.push(item);
-        }
     }
 }
 

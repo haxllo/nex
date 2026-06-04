@@ -42,4 +42,6 @@ pub mod transport;
 pub mod uninstall_registry;
 pub mod updater;
 #[cfg(target_os = "windows")]
+pub(crate) mod overlay;
+#[cfg(target_os = "windows")]
 pub mod windows_overlay;

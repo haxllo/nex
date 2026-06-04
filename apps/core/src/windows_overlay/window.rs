@@ -4,10 +4,9 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AddFontResourceExW, CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetTextFaceW,
-    InvalidateRect, ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow,
-    CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE, OUT_DEFAULT_PRECIS,
-    TRANSPARENT,
+    AddFontResourceExW, CreateSolidBrush, DeleteObject, GetDC, GetTextFaceW, InvalidateRect,
+    ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
+    DEFAULT_CHARSET, FF_DONTCARE, FR_PRIVATE, OPAQUE, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -1721,7 +1720,7 @@ fn resolve_font_family(font_env: Option<&str>, primary_loaded: bool) -> String {
 fn font_is_available(family_name: &str) -> bool {
     let wide = to_wide(family_name);
     let hfont = unsafe {
-        CreateFontW(
+        nex_create_font_w(
             0,
             0,
             0,
@@ -1841,7 +1840,7 @@ fn create_font_with_family_quality(
     quality: u32,
 ) -> isize {
     (unsafe {
-        CreateFontW(
+        nex_create_font_w(
             height,
             0,
             0,
@@ -1858,6 +1857,33 @@ fn create_font_with_family_quality(
             family_wide.as_ptr(),
         )
     }) as isize
+}
+
+/// Direct FFI binding to `gdi32!CreateFontW`.
+///
+/// The `windows-sys` `CreateFontW` import (both `0.59` and `0.61`, on both
+/// MinGW and MSVC) returns a value in the IAT's address range instead of a
+/// valid `HFONT`. Re-declaring it with an explicit `gdi32` linkage bypasses
+/// the broken import and gives a working handle.
+#[link(name = "gdi32")]
+extern "system" {
+    #[link_name = "CreateFontW"]
+    fn nex_create_font_w(
+        nheight: i32,
+        nwidth: i32,
+        nescapement: i32,
+        norientation: i32,
+        nweight: i32,
+        bitalic: u32,
+        bunderline: u32,
+        bstrikeout: u32,
+        icharset: u32,
+        ioutprecision: u32,
+        iclipprecision: u32,
+        iquality: u32,
+        ipitchandfamily: u32,
+        pszfacename: *const u16,
+    ) -> *mut c_void;
 }
 
 // ==================== INSTANCE HELPERS (recovered) ====================

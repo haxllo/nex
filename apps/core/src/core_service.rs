@@ -82,6 +82,8 @@ pub struct CoreService {
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
+    #[cfg(target_os = "windows")]
+    file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +179,8 @@ impl CoreService {
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             progress: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            file_watchers: Mutex::new(None),
         })
     }
 
@@ -196,6 +200,14 @@ impl CoreService {
         let providers = runtime_providers_from_config(cfg);
         self.replace_runtime_config(cfg.clone());
         self.replace_providers(providers);
+        // Discovery roots or excludes changed: stop the existing watchers
+        // so the next indexing pass can restart them on the new paths.
+        // They will be re-spawned by the runtime once the next reindex
+        // completes.
+        #[cfg(target_os = "windows")]
+        {
+            self.stop_file_watchers();
+        }
         Ok(())
     }
 
@@ -227,7 +239,7 @@ impl CoreService {
         self.runtime_providers()
     }
 
-    fn config_snapshot(&self) -> Config {
+    pub(crate) fn config_snapshot(&self) -> Config {
         match self.config.read() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
@@ -656,6 +668,70 @@ impl CoreService {
         Ok(())
     }
 
+    /// Delete an item by id from the SQLite store, the in-memory caches,
+    /// and the Tantivy/FTS5 search indexes. Idempotent: deleting a
+    /// missing id is not an error.
+    pub fn delete_item_by_id(&self, id: &str) -> Result<(), ServiceError> {
+        index_store::delete_item(&self.db, id)?;
+        self.remove_cached_item_by_id(id);
+        self.remove_item_from_backends(id);
+        Ok(())
+    }
+
+    /// Start the per-root `DirectoryWatcher` consumers that apply
+    /// filesystem changes to the live index. Idempotent: calling twice
+    /// is a no-op. No-op on non-Windows targets.
+    ///
+    /// `service_arc` is the same `Arc<Mutex<CoreService>>` that owns this
+    /// service; the consumer threads re-acquire it to apply changes.
+    #[cfg(target_os = "windows")]
+    pub fn start_file_watchers(
+        &self,
+        service_arc: &Arc<Mutex<CoreService>>,
+    ) -> Result<(), ServiceError> {
+        let mut slot = match self.file_watchers.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.is_some() {
+            return Ok(());
+        }
+
+        let config = self.config_snapshot();
+        let roots = config.discovery_roots.clone();
+        let excluded_roots = config.discovery_exclude_roots.clone();
+
+        if roots.is_empty() {
+            crate::runtime::log_info(
+                "[nex] directory_watcher: no discovery_roots configured; skipping start",
+            );
+            return Ok(());
+        }
+
+        let handle =
+            crate::file_watcher_consumer::FileWatcherHandle::start(roots, excluded_roots, Arc::clone(service_arc));
+        crate::runtime::log_info(&format!(
+            "[nex] directory_watcher: started on {} root(s)",
+            handle.active_roots()
+        ));
+        *slot = Some(handle);
+        Ok(())
+    }
+
+    /// Stop and join the per-root file watcher consumers. Safe to call
+    /// even if watchers were never started.
+    #[cfg(target_os = "windows")]
+    pub fn stop_file_watchers(&self) {
+        let mut slot = match self.file_watchers.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(handle) = slot.take() {
+            drop(handle); // RAII joins threads
+            crate::runtime::log_info("[nex] directory_watcher: stopped");
+        }
+    }
+
     pub fn handle_command(&self, request: CoreRequest) -> Result<CoreResponse, ServiceError> {
         match request {
             CoreRequest::Search(search) => {
@@ -937,6 +1013,25 @@ impl CoreService {
         };
         if let Some(ref idx) = *fts5_guard {
             let _ = idx.upsert_item(item);
+        }
+    }
+
+    fn remove_item_from_backends(&self, id: &str) {
+        let tantivy_guard = match self.tantivy_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *tantivy_guard {
+            let _ = idx.delete_item(id);
+        }
+        drop(tantivy_guard);
+
+        let fts5_guard = match self.fts5_index.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *fts5_guard {
+            let _ = idx.delete_item(id);
         }
     }
 

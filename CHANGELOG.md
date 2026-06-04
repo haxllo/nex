@@ -1,5 +1,9 @@
 # Changelog
 
+> **DEPRECATED ENTRIES BELOW**: The `[v2.1.0]`, `[6.4.0]`, and `[6.3]` entries are from a **previous project** (legacy SwiftFind/Nex 6.x line) before the codebase was restarted at v1.0.0 in May 2026. They are kept only for historical reference and should not be used to understand the current v1.x codebase.
+>
+> **Current series (active)**: v1.0.0 → v1.1.0 → v1.1.1 → v1.3.0 (in progress, not yet released)
+
 All notable changes to Nex are documented in this file.
 
 This changelog is intentionally backfilled from the most reliable sources in the repo: tagged milestones, release notes, and shipped commit history. Older tags can be expanded later if you want a full historical pass.
@@ -38,7 +42,9 @@ This changelog is intentionally backfilled from the most reliable sources in the
 - Window management is command-palette-only; configurable hotkey bindings coming in v1.2.
 - Plugin SDK is still in preview — no public extension store or WASM runtime yet.
 
-## [6.4.0] - 2026-03-31
+## [6.4.0] - 2026-03-31  *(LEGACY — pre-restart, do not reference)*
+
+> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
 
 ### Added
 - On-demand updater entry points inside Nex.
@@ -60,7 +66,9 @@ This changelog is intentionally backfilled from the most reliable sources in the
 - Startup diagnostics now expose lifecycle markers for overlay readiness, hotkey readiness, indexing start/completion, and cache application.
 - Broad-root indexing now tightens file/folder cache retention more aggressively to keep memory behavior predictable.
 
-## [6.3] - 2026-03-13
+## [6.3] - 2026-03-13  *(LEGACY — pre-restart, do not reference)*
+
+> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
 
 ### Added
 - Windows hybrid discovery improvements for apps, files, and folders.
@@ -95,7 +103,9 @@ This changelog is intentionally backfilled from the most reliable sources in the
 - Fixed shell app launching for `shell:` targets via Explorer.
 - Fixed multiple Windows overlay polish issues across footer spacing, alignment, and symbol rendering.
 
-## [v2.1.0] - 2026-03-02
+## [v2.1.0] - 2026-03-02  *(LEGACY — pre-restart, do not reference)*
+
+> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
 
 ### Added
 - `--status-json` runtime diagnostics command for machine-readable support and performance reporting.

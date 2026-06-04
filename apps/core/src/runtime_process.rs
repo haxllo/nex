@@ -1,6 +1,6 @@
 use crate::runtime::{log_info, RuntimeError};
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{is_instance_window_present, signal_existing_instance_quit};
+use crate::overlay::{is_instance_window_present, signal_existing_instance_quit};
 
 // ---------------------------------------------------------------------------
 // Runtime executable name constants

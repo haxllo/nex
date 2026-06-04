@@ -2,7 +2,7 @@ use crate::model::{self, SearchItem};
 use crate::runtime::log_warn;
 use crate::uninstall_registry;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
+use crate::overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
 
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
@@ -110,7 +110,7 @@ pub(crate) fn result_row(
 ) -> OverlayRow {
     OverlayRow {
         role,
-        result_index: result_index as i32,
+        result_index: Some(result_index),
         kind: item.kind.clone(),
         title: item.title.clone(),
         path: overlay_subtitle(item, command_mode),
@@ -122,9 +122,10 @@ pub(crate) fn result_row(
 fn header_row(label: &str) -> OverlayRow {
     OverlayRow {
         role: OverlayRowRole::Header,
-        // -1 signals "no backing result index"; header rows are not
-        // selectable and do not contribute to the result->row mapping.
-        result_index: -1,
+        // `None` signals "no backing result index"; header rows are
+        // not selectable and do not contribute to the
+        // result->row mapping.
+        result_index: None,
         kind: String::new(),
         title: label.to_string(),
         path: String::new(),
@@ -465,7 +466,7 @@ pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message
     overlay.clear_placeholder_hint();
     let rows = [OverlayRow {
         role: OverlayRowRole::Status,
-        result_index: -1,
+        result_index: None,
         kind: "status".to_string(),
         title: message.to_string(),
         path: String::new(),

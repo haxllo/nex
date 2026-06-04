@@ -38,20 +38,27 @@ pub(crate) mod theme;
 pub(crate) mod view;
 
 #[cfg(target_os = "windows")]
+pub(crate) mod indexing_progress;
+
+#[cfg(target_os = "windows")]
 pub use model::{OverlayEvent, OverlayRow, OverlayRowRole};
 
 #[cfg(target_os = "windows")]
 pub use shim::NativeOverlayShell;
 
-// Single-instance signalling helpers re-exported the same way the
-// legacy `windows_overlay` module exported them. Used by
-// `runtime_loop.rs` and `runtime_process.rs`.
 #[cfg(target_os = "windows")]
-pub(crate) use platform::is_instance_window_present;
+pub use platform::{
+    is_instance_window_present, signal_existing_instance_quit, signal_existing_instance_show,
+};
+
+/// Placeholder for the legacy `NEX_WM_SEARCH_RESULTS_READY` window
+/// message constant. The new Iced shell does not use Win32 messages
+/// for results delivery (the runtime polls `SearchWorker::try_recv`
+/// and calls [`NativeOverlayShell::set_results`] directly), so this
+/// is only kept so `runtime_loop.rs` can keep its `SearchWorker::new`
+/// call signature identical between the legacy and Iced paths.
 #[cfg(target_os = "windows")]
-pub(crate) use platform::signal_existing_instance_quit;
-#[cfg(target_os = "windows")]
-pub(crate) use platform::signal_existing_instance_show;
+pub const NEX_WM_SEARCH_RESULTS_READY: u32 = 0x8001;
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_instance_window_present() -> bool {

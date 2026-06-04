@@ -10,7 +10,7 @@ use crate::runtime::log_warn;
 use crate::runtime_overlay_rows::PendingUninstallConfirmation;
 use crate::runtime_search_session::OverlaySearchSession;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::NativeOverlayShell;
+use crate::overlay::NativeOverlayShell;
 
 #[cfg(target_os = "windows")]
 const QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS: u64 = 1200;

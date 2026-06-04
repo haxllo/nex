@@ -51,13 +51,13 @@ pub(crate) fn detect_system_theme() -> Theme {
     }
 }
 
-pub(crate) fn is_instance_window_present() -> bool {
+pub fn is_instance_window_present() -> bool {
     let class = to_wide(CLASS_NAME);
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     !hwnd.is_null()
 }
 
-pub(crate) fn signal_existing_instance_show() -> Result<bool, String> {
+pub fn signal_existing_instance_show() -> Result<bool, String> {
     let class = to_wide(CLASS_NAME);
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd.is_null() {
@@ -71,7 +71,7 @@ pub(crate) fn signal_existing_instance_show() -> Result<bool, String> {
     Ok(ok != 0)
 }
 
-pub(crate) fn signal_existing_instance_quit() -> Result<bool, String> {
+pub fn signal_existing_instance_quit() -> Result<bool, String> {
     let class = to_wide(CLASS_NAME);
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd.is_null() {

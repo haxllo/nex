@@ -3,10 +3,11 @@
 //! every public setter the runtime calls on `NativeOverlayShell`.
 //!
 //! `update()` is pure: it mutates the model and returns Iced `Task`s
-//! for side effects (search, launch, focus). The legacy
-//! `NativeOverlayShell::run_message_loop_with_events` callback fires
-//! when an "interesting" `Message` (Hotkey, Submit, Escape, …) is
-//! processed — see [`crate::overlay::shim`] for the translation.
+//! for side effects (search, launch, focus). The runtime worker
+//! thread's `on_event` callback fires when an "interesting"
+//! `Message` (Hotkey, Submit, Escape, …) is processed — see
+//! [`crate::overlay::shim`] for the translation from `Message` to
+//! `OverlayEvent`.
 
 use std::time::Instant;
 

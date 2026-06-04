@@ -3,8 +3,12 @@
 //! Internally the shim owns an `Arc<Mutex<Model>>` plus an
 //! `Arc<IconCache>`. All the public setters apply their change
 //! directly to the model under the mutex. The Iced event loop is
-//! driven by [`boot::run`], which the shim spawns from
-//! `run_message_loop_with_events`.
+//! driven by [`boot::run`], which the runtime calls on the **main
+//! thread** (winit 0.30 requires `EventLoop::new` on the main
+//! thread, so the Iced event loop must live there). The runtime's
+//! message pump (the callback that handles `OverlayEvent`s) runs on
+//! a **worker thread** and drains a `crossbeam_channel` that the
+//! Iced `State` and the hotkey listener both write to.
 //!
 //! This is the *only* public surface of the new `overlay` module.
 //! Runtime code outside `runtime_loop.rs` and friends should not need
@@ -15,13 +19,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::unbounded;
+use crossbeam_channel::Receiver;
 
-use crate::overlay::boot::Boot;
-use crate::overlay::hotkey::HotkeyListener;
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::{update, Message, Model, OverlayEvent, OverlayRow};
-use crate::overlay::platform;
 
 /// A safe-to-clone handle to the Iced overlay. Cheap to clone
 /// (`Arc` inside) so callers like `runtime_loop.rs` can hold one
@@ -35,30 +36,21 @@ struct Inner {
     model: Arc<Mutex<Model>>,
     icon_cache: Arc<IconCache>,
     is_running: Arc<AtomicBool>,
-    /// Hotkey string queued by `set_hotkey_hint` for the
-    /// `run_message_loop_with_events` call to start a
-    /// `HotkeyListener` on. We can't start the listener until the
-    /// event channel exists, and that channel is created inside
-    /// `run_message_loop_with_events`.
-    pending_hotkey: Arc<Mutex<Option<String>>>,
 }
 
 impl NativeOverlayShell {
     /// Construct the shell. Does not create the Iced window or start
-    /// the event loop; call [`run_message_loop_with_events`] to do
-    /// that.
+    /// the event loop; the runtime calls [`boot::run`] on the main
+    /// thread to do that, and [`run_message_pump`] on a worker thread
+    /// to drive the message-pump callback.
     pub fn create() -> Result<Self, String> {
-        let model = Arc::new(Mutex::new(Model {
-            theme: platform::detect_system_theme(),
-            ..Model::default()
-        }));
+        let model = Arc::new(Mutex::new(Model::default()));
         let icon_cache = Arc::new(IconCache::default());
         Ok(Self {
             inner: Arc::new(Inner {
                 model,
                 icon_cache,
                 is_running: Arc::new(AtomicBool::new(false)),
-                pending_hotkey: Arc::new(Mutex::new(None)),
             }),
         })
     }
@@ -68,6 +60,21 @@ impl NativeOverlayShell {
         if let Ok(mut model) = self.inner.model.lock() {
             update(&mut model, message);
         }
+    }
+
+    /// The shared model the Iced event loop reads from on every
+    /// `Message::SyncFromShim` tick (every 33ms). The runtime's
+    /// setters write to this on the worker thread.
+    pub fn shared_model(&self) -> Arc<Mutex<Model>> {
+        self.inner.model.clone()
+    }
+
+    /// Shared `is_running` flag. Set to `true` by the runtime before
+    /// calling [`boot::run`] and starting the worker; set to `false`
+    /// by [`boot::run`] when the Iced event loop exits; checked by
+    /// the worker's [`run_message_pump`] loop to know when to stop.
+    pub fn is_running(&self) -> Arc<AtomicBool> {
+        self.inner.is_running.clone()
     }
 
     pub fn is_visible(&self) -> bool {
@@ -131,9 +138,6 @@ impl NativeOverlayShell {
     }
 
     pub fn set_hotkey_hint(&self, hotkey: &str) {
-        if let Ok(mut pending) = self.inner.pending_hotkey.lock() {
-            *pending = Some(hotkey.to_string());
-        }
         self.apply(Message::SetHotkeyHint(hotkey.to_string()));
     }
 
@@ -205,81 +209,31 @@ impl NativeOverlayShell {
             .and_then(|m| if m.rows.is_empty() { None } else { Some(m.selected) })
     }
 
-    /// Start the Iced event loop. Blocks until the window is closed.
+    /// Drain `event_rx` and call `on_event` for each event. Loops
+    /// while `is_running` is `true`; [`boot::run`] flips it to
+    /// `false` when the Iced event loop exits.
     ///
-    /// `on_event` is invoked on the **calling thread** for every
-    /// legacy `OverlayEvent` produced by user input — not on the
-    /// Iced worker thread. This matches the legacy Win32 semantics
-    /// (the callback was driven by the `GetMessageW` loop on the
-    /// runtime thread) and lets callers borrow local state without
-    /// wrapping it in `Arc<Mutex<>>`.
-    ///
-    /// The Iced event loop runs on a dedicated worker thread and
-    /// posts events over a `crossbeam_channel`; the calling thread
-    /// drains the channel and calls `on_event` synchronously.
-    ///
-    /// Takes `&self` (not `self`) so callers can continue to use
-    /// the shell after the loop exits — matches the legacy
-    /// `windows_overlay::NativeOverlayShell::run_message_loop` which
-    /// also took `&self`.
-    pub fn run_message_loop_with_events<F>(&self, mut on_event: F) -> Result<(), String>
+    /// Designed to be called from a **worker thread** (so the Iced
+    /// event loop on the main thread is unblocked). `on_event` runs
+    /// on the calling thread for every `OverlayEvent` produced by
+    /// the Iced `State` (via `Message::RuntimeEvent`) and the
+    /// hotkey listener (`OverlayEvent::Hotkey`).
+    pub fn run_message_pump<F>(
+        &self,
+        event_rx: &Receiver<OverlayEvent>,
+        is_running: &Arc<AtomicBool>,
+        mut on_event: F,
+    ) -> Result<(), String>
     where
         F: FnMut(OverlayEvent),
     {
-        let inner = self.inner.clone();
-        inner.is_running.store(true, Ordering::SeqCst);
-
-        let (event_tx, event_rx) = unbounded::<OverlayEvent>();
-        let model_for_iced = inner.model.clone();
-        let is_running = inner.is_running.clone();
-
-        // Start the global hotkey listener on a dedicated OS thread.
-        // The listener forwards WM_HOTKEY events to the same channel
-        // the Iced event loop uses, so the runtime callback receives
-        // `OverlayEvent::Hotkey(id)` exactly like the legacy Win32
-        // message pump delivered it.
-        let hotkey_listener: Option<HotkeyListener> = match inner
-            .pending_hotkey
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-        {
-            Some(hotkey) => match HotkeyListener::start(&hotkey, event_tx.clone()) {
-                Ok(listener) => Some(listener),
-                Err(e) => {
-                    crate::runtime::log_warn(&format!(
-                        "[nex] hotkey listener start failed: {e}"
-                    ));
-                    None
-                }
-            },
-            None => None,
-        };
-
-        std::thread::Builder::new()
-            .name("nex-overlay-iced".into())
-            .spawn(move || {
-                let result = crate::overlay::boot::run(Boot {
-                    model: model_for_iced,
-                    event_tx,
-                });
-                is_running.store(false, Ordering::SeqCst);
-                if let Err(e) = result {
-                    crate::runtime::log_warn(&format!("[nex] overlay iced loop exited: {e}"));
-                }
-            })
-            .map_err(|e| format!("failed to spawn Iced thread: {e}"))?;
-
-        while inner.is_running.load(Ordering::SeqCst) {
+        while is_running.load(Ordering::SeqCst) {
             match event_rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(event) => on_event(event),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
-        // Keep the listener alive until the loop exits. Dropping
-        // here unregisters the hotkey and joins the listener thread.
-        drop(hotkey_listener);
         Ok(())
     }
 }

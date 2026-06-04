@@ -30,7 +30,7 @@ pub(crate) struct SearchResult {
 pub(crate) struct SearchWorker {
     request_tx: mpsc::Sender<SearchRequest>,
     clear_tx: mpsc::Sender<()>,
-    result_rx: mpsc::Receiver<SearchResult>,
+    result_rx: Mutex<mpsc::Receiver<SearchResult>>,
     next_gen: AtomicU64,
     thread: Option<JoinHandle<()>>,
 }
@@ -103,7 +103,7 @@ impl SearchWorker {
         Self {
             request_tx: req_tx,
             clear_tx,
-            result_rx: res_rx,
+            result_rx: Mutex::new(res_rx),
             next_gen: AtomicU64::new(1),
             thread: Some(thread),
         }
@@ -120,7 +120,7 @@ impl SearchWorker {
     }
 
     pub(crate) fn try_recv(&self) -> Option<SearchResult> {
-        self.result_rx.try_recv().ok()
+        self.result_rx.lock().ok()?.try_recv().ok()
     }
 
     pub(crate) fn clear_session(&self) {

@@ -78,6 +78,18 @@ impl NativeOverlayShell {
             .unwrap_or(false)
     }
 
+    /// Placeholder HWND accessor. The Iced shell does not own a
+    /// native `HWND` for the SearchWorker to post messages to —
+    /// the runtime polls [`SearchWorker::try_recv`] and calls
+    /// [`NativeOverlayShell::set_results`] directly. This method
+    /// exists only so the legacy `SearchWorker::new(_, _, _, hwnd,
+    /// msg)` call signature can stay identical between the legacy
+    /// and Iced paths. Returns `0` (a sentinel `HWND` that
+    /// `PostMessageW` will safely fail on).
+    pub fn hwnd(&self) -> isize {
+        0
+    }
+
     pub fn show_and_focus(&self) {
         self.apply(Message::Show);
     }
@@ -184,18 +196,24 @@ impl NativeOverlayShell {
 
     /// Start the Iced event loop. Blocks until the window is closed.
     ///
-    /// `on_event` is invoked on the **Iced thread** (not the caller
-    /// thread) for every legacy `OverlayEvent` produced by user
-    /// input. The caller is expected to marshal those events into
-    /// the runtime's main loop — historically that loop was driven
-    /// by `GetMessageW` and the callback was synchronous.
+    /// `on_event` is invoked on the **calling thread** for every
+    /// legacy `OverlayEvent` produced by user input — not on the
+    /// Iced worker thread. This matches the legacy Win32 semantics
+    /// (the callback was driven by the `GetMessageW` loop on the
+    /// runtime thread) and lets callers borrow local state without
+    /// wrapping it in `Arc<Mutex<>>`.
     ///
-    /// The Iced event loop runs on a worker thread; user-driven
-    /// `OverlayEvent`s are delivered to the calling thread over a
-    /// channel so the legacy callback semantics are preserved.
-    pub fn run_message_loop_with_events<F>(self, mut on_event: F) -> Result<(), String>
+    /// The Iced event loop runs on a dedicated worker thread and
+    /// posts events over a `crossbeam_channel`; the calling thread
+    /// drains the channel and calls `on_event` synchronously.
+    ///
+    /// Takes `&self` (not `self`) so callers can continue to use
+    /// the shell after the loop exits — matches the legacy
+    /// `windows_overlay::NativeOverlayShell::run_message_loop` which
+    /// also took `&self`.
+    pub fn run_message_loop_with_events<F>(&self, mut on_event: F) -> Result<(), String>
     where
-        F: FnMut(OverlayEvent) + Send + 'static,
+        F: FnMut(OverlayEvent),
     {
         let inner = self.inner.clone();
         inner.is_running.store(true, Ordering::SeqCst);

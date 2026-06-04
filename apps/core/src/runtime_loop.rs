@@ -55,9 +55,11 @@ use crate::runtime_search_session::{
 #[cfg(target_os = "windows")]
 use crate::search_worker::SearchWorker;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::types::NEX_WM_SEARCH_RESULTS_READY;
+use crate::overlay::indexing_progress::run_with_progress_window;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{
+use crate::overlay::NEX_WM_SEARCH_RESULTS_READY;
+#[cfg(target_os = "windows")]
+use crate::overlay::{
     signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
 };
 #[cfg(target_os = "windows")]
@@ -88,8 +90,7 @@ pub(crate) fn run_windows_runtime(
         if use_progress_window {
             log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
             let service_arc = service.clone();
-            let result =
-                crate::windows_overlay::indexing_progress::run_with_progress_window(move |pct| {
+            let result = run_with_progress_window(move |pct| {
                     let svc = service_arc.lock().unwrap();
                     *svc.progress.lock().unwrap() = Some(pct);
                     let report = svc.rebuild_index_incremental_with_report();
@@ -204,7 +205,7 @@ pub(crate) fn run_windows_runtime(
         service.clone(),
         runtime_config.clone(),
         Arc::new(plugin_registry.clone()),
-        overlay.hwnd as isize,
+        overlay.hwnd(),
         NEX_WM_SEARCH_RESULTS_READY,
     );
 
@@ -716,7 +717,7 @@ fn apply_query_change(
                     let display = format_result(value);
                     let row = OverlayRow {
                         role: OverlayRowRole::Calculator,
-                        result_index: 0,
+                        result_index: Some(0),
                         kind: "calculator".into(),
                         title: format!("= {expr}"),
                         path: display,
@@ -727,7 +728,7 @@ fn apply_query_change(
                 Err(error) => {
                     let row = OverlayRow {
                         role: OverlayRowRole::Status,
-                        result_index: -1,
+                        result_index: None,
                         kind: String::new(),
                         title: format!("{error}"),
                         path: String::new(),

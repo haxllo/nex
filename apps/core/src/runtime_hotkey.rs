@@ -13,7 +13,7 @@ pub(crate) struct ForegroundWindowSnapshot {
 }
 
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::NativeOverlayShell;
+use crate::overlay::NativeOverlayShell;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn toggle_game_mode_from_tray(

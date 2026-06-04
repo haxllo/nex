@@ -5,13 +5,21 @@
 //! `Element` to match the `&'a State` borrow, so the model must be
 //! a direct field of the state.
 //!
-//! The runtime thread (the `shim` and friends) cannot reach into
-//! the Iced state directly. Instead the shim holds an
-//! `Arc<Mutex<Model>>` that the Iced `apply` function mirrors into
-//! the state's owned model. A polling `Subscription` fires a
-//! `Message::SyncFromShim` at ~30 Hz so user input latency stays
-//! under one frame.
+//! The runtime thread (the worker spawned by `runtime_loop.rs`)
+//! cannot reach into the Iced state directly. Instead the shim
+//! holds an `Arc<Mutex<Model>>` that the Iced `apply` function
+//! mirrors into the state's owned model. A polling `Subscription`
+//! fires a `Message::SyncFromShim` at ~30 Hz so user input latency
+//! stays under one frame.
+//!
+//! This module's [`run`] function **must be called on the main
+//! thread**. winit 0.30 panics if `EventLoop::new` runs on a
+//! non-main thread; Iced 0.14's `iced::application().run()` calls
+//! `EventLoop::with_user_event().build()` internally with no way
+//! to inject a pre-configured `EventLoopBuilder` carrying
+//! `with_any_thread(true)`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,10 +29,18 @@ use iced::Element;
 use crate::overlay::model::{message_to_event, update, Message, Model, OverlayEvent};
 use crate::overlay::view::view as build_view;
 
-/// Bundle passed into the Iced boot function.
+/// Bundle passed into the Iced boot function. The runtime creates
+/// the shared `Arc<Mutex<Model>>` and the `event_tx` channel
+/// endpoint before calling [`run`], so the Iced event loop and the
+/// runtime worker thread share them.
 pub(crate) struct Boot {
     pub(crate) model: Arc<Mutex<Model>>,
     pub(crate) event_tx: Sender<OverlayEvent>,
+    /// Set to `true` by the runtime before starting the Iced event
+    /// loop. Set to `false` by [`run`] when the Iced event loop
+    /// exits (so the runtime worker thread knows to stop draining
+    /// the event channel).
+    pub(crate) is_running: Arc<AtomicBool>,
 }
 
 /// The Iced application state. Owns the [`Model`] directly so the
@@ -96,6 +112,7 @@ pub(crate) fn run(boot: Boot) -> Result<(), String> {
         .unwrap_or_default();
     let shared = boot.model.clone();
     let event_tx = boot.event_tx.clone();
+    let is_running = boot.is_running.clone();
 
     let window_settings = iced::window::Settings {
         size: iced::Size::new(640.0, 480.0),
@@ -114,7 +131,7 @@ pub(crate) fn run(boot: Boot) -> Result<(), String> {
         ..iced::Settings::default()
     };
 
-    iced::application(
+    let result = iced::application(
         move || State::boot(initial.clone(), shared.clone(), event_tx.clone()),
         State::apply,
         View,
@@ -124,6 +141,10 @@ pub(crate) fn run(boot: Boot) -> Result<(), String> {
     })
     .settings(settings)
     .window(window_settings)
-    .run()
-    .map_err(|e| format!("iced application failed: {e}"))
+    .run();
+
+    // Signal the worker thread to stop draining the event channel.
+    is_running.store(false, Ordering::SeqCst);
+
+    result.map_err(|e| format!("iced application failed: {e}"))
 }

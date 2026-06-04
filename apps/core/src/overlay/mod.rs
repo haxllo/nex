@@ -21,6 +21,8 @@
 //!                     runtime speaks.
 
 #[cfg(target_os = "windows")]
+pub(crate) mod boot;
+#[cfg(target_os = "windows")]
 pub(crate) mod geometry;
 #[cfg(target_os = "windows")]
 pub(crate) mod icons;

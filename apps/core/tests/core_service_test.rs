@@ -571,3 +571,35 @@ fn incremental_rebuild_skips_unchanged_provider_with_stamp() {
 
     std::fs::remove_file(stable_path).unwrap();
 }
+
+#[test]
+fn delete_item_by_id_removes_from_cache() {
+    let config = test_config();
+    let db = nex_core::index_store::open_memory().unwrap();
+    let service = CoreService::with_connection(config, db).unwrap();
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let p1 = std::env::temp_dir().join(format!("nex-delete-by-id-{unique}.tmp"));
+    std::fs::write(&p1, b"x").unwrap();
+
+    let item = SearchItem::new("id-del-1", "file", "doc.txt", p1.to_string_lossy().as_ref());
+    service.upsert_item(&item).unwrap();
+    assert_eq!(service.cached_items_len(), 1);
+
+    // Delete removes the item from the in-memory cache.
+    service.delete_item_by_id("id-del-1").unwrap();
+    assert_eq!(service.cached_items_len(), 0);
+
+    // Idempotent: deleting a missing id is not an error.
+    service.delete_item_by_id("id-del-1").unwrap();
+    service.delete_item_by_id("never-existed").unwrap();
+
+    // And the search snapshot no longer returns the deleted id.
+    let snapshot = service.cached_items_snapshot();
+    assert!(snapshot.iter().all(|item| item.id != "id-del-1"));
+
+    let _ = std::fs::remove_file(&p1);
+}

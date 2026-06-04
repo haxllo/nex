@@ -1,7 +1,8 @@
 # Tantivy Primary + SQLite FTS5 Fallback Migration Plan
 
-**Branch:** `experiment/tantivy-primary-fts5-fallback`
-**Status:** Phase 4 — Polish & Testing (In Progress)
+**Branch:** `experiment/tantivy-primary-fts5-fallback` (merged into v1.x)
+**Status:** ✅ **Phases 1–3 complete (shipped in v1.1–v1.3)**, Phase 4 polish items mostly done. Tantivy is the primary search backend; FTS5 is the fallback when the index is empty.
+**Last reviewed:** June 2026 (v1.3.0)
 
 ## 1. Why Tantivy?
 

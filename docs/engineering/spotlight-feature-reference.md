@@ -1,5 +1,9 @@
 # macOS Spotlight Feature Reference
 
+> **UNWANTED — DEPRECATED**: This document was a competitive-analysis reference for the early roadmap. It is not referenced by any current code, plan, or decision. The actionable comparison is in [`../plans/audit-and-roadmap.md` Section 3](../plans/audit-and-roadmap.md#3-competitive-landscape), which is kept up to date. This file is preserved for historical context only — do not update.
+>
+> The original v1.x roadmap (no Spotlight parity) is set in [`../plans/audit-and-roadmap.md`](../plans/audit-and-roadmap.md). If competitive analysis against Spotlight is needed in the future, add it to that single source of truth.
+
 This document captures a practical feature breakdown of Spotlight for parity planning.
 
 ## Major Features

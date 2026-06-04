@@ -1,5 +1,9 @@
 # Risk Register
 
+> **STALE — last meaningful update pre-restart (v6.x)**: This risk register reflects the v6.x-era threat model. Several risks listed (e.g., `R-001` file-watcher event loss, `R-002` UI framework overhead) are either resolved (file_watcher not wired; UI is native Win32, not framework-based) or no longer applicable. If a v1.x risk register is needed, create a new doc `docs/engineering/risk-register-v1.md` rather than updating this one.
+>
+> Current v1.3.0 known risks are scattered across [`../plans/audit-and-roadmap.md`](../plans/audit-and-roadmap.md) and the inline risk notes in [`../plans/everything-first-migration.md`](../plans/everything-first-migration.md).
+
 ## `R-001` Index Size Growth Hurts Latency
 
 - Impact: query slowdown, poor UX

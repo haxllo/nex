@@ -1,11 +1,12 @@
 # Nex — Full Codebase Audit & Improvement Roadmap
 
-> **Generated:** May 2026  
-> **Scope:** Full codebase review, competitive analysis, and prioritized improvement plan  
-> **Status:** AI features deferred (out of scope). P0 Everything SDK integration **complete**. Overlay and runtime refactors **complete**.  
-> **See also:**  
->   - [Overlay Refactor Plan](./overlay-refactor-plan.md) — detailed plan for splitting `windows_overlay.rs`  
->   - [Indexing Comparison](./indexing-comparison.md) — Everything SDK vs USN Journal vs walkdir  
+> **Generated:** May 2026
+> **Last reviewed:** June 2026 (v1.3.0)
+> **Scope:** Full codebase review, competitive analysis, and prioritized improvement plan
+> **Status:** AI features deferred (out of scope). P0 Everything SDK integration **complete** (v1.1.0+). Overlay and runtime refactors **complete** (pre-v1.2). Tray icon path, freeze-on-Everything-down, and Tantivy memory regressions all fixed in v1.2/v1.3.
+> **See also:**
+>   - [Overlay Refactor Plan](./overlay-refactor-plan.md) — `windows_overlay.rs` → 11 modules, **complete**
+>   - [Indexing Comparison](./indexing-comparison.md) — Everything SDK vs USN Journal vs walkdir, **decision made** (Everything SDK primary, walkdir fallback, USN rejected)
 >   - [Project Charter](../product/project-charter.md) — original product requirements
 
 ---
@@ -85,28 +86,31 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 
 | # | Task | Est. Effort | Impact | Status |
 |---|------|------------|--------|--------|
-| 1 | **Plugin SDK + distribution** — WASM-based plugin format, `nx install` command | 3-4 weeks | 🔴 Critical | ⏳ Planned |
-| ~~2~~ | ~~**AI integration** — Ollama + OpenAI options, "ask anything" query mode~~ | ~~2-3 weeks~~ | ~~🔴 Critical~~ | ❌ **Deferred** |
-| 3 | **Window management** — 6-8 tile layouts, monitor movement, sizing | 2-3 weeks | 🔴 Critical | ⏳ Planned |
-| 4 | **File indexing upgrade** — Everything SDK integration for instant search | 2-3 weeks | 🔴 Critical | ✅ **Complete** |
+| 1 | **Plugin SDK + distribution** — WASM-based plugin format, `nx install` command | 3-4 weeks | 🔴 Critical | ⏳ Planned (still pending — no public store yet) |
+| ~~2~~ | ~~**AI integration** — Ollama + OpenAI options, "ask anything" query mode~~ | ~~2-3 weeks~~ | ~~🔴 Critical~~ | ❌ **Deferred** (out of scope, privacy-first posture) |
+| 3 | **Window management** — 6-8 tile layouts, monitor movement, sizing | 2-3 weeks | 🔴 Critical | ⏳ Planned (no code yet; was claimed complete in v1.1.0 release notes but not shipped) |
+| 4 | **File indexing upgrade** — Everything SDK integration for instant search | 2-3 weeks | 🔴 Critical | ✅ **Complete** (v1.1.0; v1.3.0 added service-liveness probe + walkdir fallback) |
 
 ### P1 — Competitive Parity (v1.2)
 
 | # | Task | Est. Effort | Impact | Status |
 |---|------|------------|--------|--------|
-| 5 | **Calculator + unit converter** | 1 week | 🟡 High | ⏳ Planned |
+| 5 | **Calculator + unit converter** | 1 week | 🟡 High | ✅ **Complete** (custom shunting-yard in `apps/core/src/calculator.rs` — supports `+`, `-`, `*`, `/`, `%`, `^`, parens, `sqrt`, `abs`, `ln`, `round`, `floor`, `ceil`, `pi`, `e`. `meval` dependency rejected per risk note.) |
 | 6 | **Snippets/text expansion** | 1-2 weeks | 🟡 High | ⏳ Planned |
-| 7 | **Async runtime (tokio)** | 2-3 weeks | 🟡 High | ⏳ Planned |
-| 8 | **Refactor large files** — split `windows_overlay.rs` and `runtime.rs` | 1-2 weeks | 🟡 Medium | ✅ **Complete** |
+| 7 | **Async runtime (tokio)** | 2-3 weeks | 🟡 High | ❌ **Rejected** — sync `std::thread` is sufficient; tokio would add dependency weight without a current need. Re-evaluate if file_watcher or HTTP-based providers land. |
+| 8 | **Refactor large files** — split `windows_overlay.rs` and `runtime.rs` | 1-2 weeks | 🟡 Medium | ✅ **Complete** (11-module `windows_overlay/`, 9-module `runtime_*.rs`) |
 
-### P2 — Quality of Life (v1.3)
+### P2 — Quality of Life (v1.3+)
 
-| # | Task | Est. Effort | Impact |
-|---|------|------------|--------|
-| 9 | **Expand test coverage** to 30%+ and add E2E tests | Ongoing | 🟢 Medium |
-| 10 | **Update documentation** | 1 week | 🟢 Medium |
-| 11 | **Emoji picker, color picker, web search shortcuts** | 1-2 weeks | 🟢 Medium |
-| 12 | **Performance benchmarking suite** | 1 week | 🟢 Low |
+| # | Task | Est. Effort | Impact | Status |
+|---|------|------------|--------|--------|
+| 9 | **Expand test coverage** to 30%+ and add E2E tests | Ongoing | 🟢 Medium | ⏳ In progress (current ~25%, growing per release) |
+| 10 | **Update documentation** | 1 week | 🟢 Medium | ⏳ In progress (this file is part of that effort) |
+| 11 | **Emoji picker, color picker, web search shortcuts** | 1-2 weeks | 🟢 Medium | ⏳ Planned |
+| 12 | **Performance benchmarking suite** | 1 week | 🟢 Low | ⏳ Planned |
+| 13 | **Mica backdrop** (Windows 11) | 0.5 week | 🟢 Low | ✅ **Complete** (`layout.rs:512` calls `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)`) |
+| 14 | **DirectoryWatcher** (real-time file change events) | 1-2 weeks | 🟡 High | ⏳ Implemented but **not wired** — `apps/core/src/file_watcher.rs` exists with full implementation, gated `#[allow(dead_code)]`. Wiring deferred (feature, not bug fix). |
+| 15 | **GDI RAII wrappers** (`GdiBrush`, `GdiFont`, `GdiIcon`) | 0.5 week | 🟢 Low | ⏳ Deferred — manual `DeleteObject` cleanup is correct, RAII is nice-to-have |
 
 ---
 

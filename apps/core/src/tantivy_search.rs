@@ -60,7 +60,7 @@ impl TantivyIndex {
             .map_err(|e| format!("failed to create tantivy reader: {e}"))?;
 
         let writer = index
-            .writer(50_000_000)
+            .writer(16_000_000)
             .map_err(|e| format!("failed to create tantivy writer: {e}"))?;
 
         Ok(Self {
@@ -189,6 +189,12 @@ impl TantivyIndex {
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
 
+        // Reclaim disk + mmap RSS from the prior segments that
+        // `delete_all_documents` logically removed but the file
+        // handles stay resident until GC runs. Without this the
+        // index directory grows unboundedly on every reindex.
+        let _ = writer.garbage_collect_files().wait();
+
         Ok(())
     }
 
@@ -204,6 +210,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        let _ = writer.garbage_collect_files().wait();
 
         Ok(())
     }
@@ -218,6 +225,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        let _ = writer.garbage_collect_files().wait();
 
         Ok(())
     }

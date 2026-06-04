@@ -1008,7 +1008,7 @@ mod tests {
 [1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
 [2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
 [3] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
-[4] [INFO] [nex] stale_prune scanned=64 removed=3 cached_items_remaining=738
+[4] [INFO] [nex] stale_prune scanned=16 removed=3 cached_items_remaining=738
 [5] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
 [6] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
@@ -1063,7 +1063,7 @@ mod tests {
             .last_stale_prune_line
             .as_deref()
             .unwrap_or_default()
-            .contains("stale_prune scanned=64"));
+            .contains("stale_prune scanned=16"));
         assert!(snapshot
             .last_cache_compaction_line
             .as_deref()
@@ -1086,7 +1086,7 @@ mod tests {
 [1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
 [1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
 [1773000030] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
-[1773000031] [INFO] [nex] stale_prune scanned=64 removed=3 cached_items_remaining=738
+[1773000031] [INFO] [nex] stale_prune scanned=16 removed=3 cached_items_remaining=738
 [1773000032] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
 [1773000033] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";

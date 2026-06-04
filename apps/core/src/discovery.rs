@@ -305,7 +305,15 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
             crate::config::DiscoveryBackend::Walkdir => FileBackend::Walkdir,
             crate::config::DiscoveryBackend::Everything => {
                 match crate::everything_bridge::EverythingBridge::detect() {
-                    Some(bridge) => FileBackend::Everything(bridge),
+                    Some(bridge) if bridge.is_service_running() => {
+                        FileBackend::Everything(bridge)
+                    }
+                    Some(_) => {
+                        crate::runtime::log_warn(
+                            "[nex] file_discovery_backend=everything requested but Everything service is not running; falling back to walkdir (start Everything.exe to use the SDK backend)",
+                        );
+                        FileBackend::Walkdir
+                    }
                     None => {
                         crate::runtime::log_warn(
                             "[nex] file_discovery_backend=everything requested but Everything SDK was not detected; falling back to walkdir",
@@ -316,7 +324,15 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
             }
             crate::config::DiscoveryBackend::Auto => {
                 match crate::everything_bridge::EverythingBridge::detect() {
-                    Some(bridge) => FileBackend::Everything(bridge),
+                    Some(bridge) if bridge.is_service_running() => {
+                        FileBackend::Everything(bridge)
+                    }
+                    Some(_) => {
+                        crate::runtime::log_info(
+                            "[nex] Everything SDK present but service not running; using walkdir (start Everything.exe to use the SDK backend)",
+                        );
+                        FileBackend::Walkdir
+                    }
                     None => FileBackend::Walkdir,
                 }
             }
@@ -345,15 +361,40 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
 
         match &self.backend {
             #[cfg(target_os = "windows")]
-            FileBackend::Everything(bridge) => discover_filesystem_everything(
-                bridge,
-                &self.roots,
-                &self.excluded_roots,
-                self.show_files,
-                self.show_folders,
-                self.max_items_total,
-                self.max_items_per_root,
-            ),
+            FileBackend::Everything(bridge) => {
+                match discover_filesystem_everything(
+                    bridge,
+                    &self.roots,
+                    &self.excluded_roots,
+                    self.show_files,
+                    self.show_folders,
+                    self.max_items_total,
+                    self.max_items_per_root,
+                ) {
+                    Ok(items) => Ok(items),
+                    Err(e) => {
+                        // If the Everything IPC call failed mid-run, the
+                        // service most likely stopped or was never running.
+                        // Retry once with walkdir so the user still gets a
+                        // populated index instead of a silent failure that
+                        // leaves the launcher searching 80K items per
+                        // keystroke.
+                        crate::runtime::log_warn(&format!(
+                            "[nex] Everything discover failed ({e}); falling back to walkdir"
+                        ));
+                        discover_filesystem_walk(
+                            &self.roots,
+                            &self.excluded_roots,
+                            self.max_depth,
+                            self.show_files,
+                            self.show_folders,
+                            self.max_items_total,
+                            self.max_items_per_root,
+                            None,
+                        )
+                    }
+                }
+            }
             FileBackend::Walkdir => discover_filesystem_walk(
                 &self.roots,
                 &self.excluded_roots,
@@ -379,7 +420,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             #[cfg(target_os = "windows")]
             FileBackend::Everything(bridge) => {
                 let mut cb = on_item_discovered;
-                discover_filesystem_everything(
+                match discover_filesystem_everything(
                     bridge,
                     &self.roots,
                     &self.excluded_roots,
@@ -387,15 +428,31 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                     self.show_folders,
                     self.max_items_total,
                     self.max_items_per_root,
-                )
-                .map(|items| {
-                    if let Some(ref mut cb) = cb {
-                        for _ in 0..items.len() {
-                            cb(1);
+                ) {
+                    Ok(items) => {
+                        if let Some(ref mut cb) = cb {
+                            for _ in 0..items.len() {
+                                cb(1);
+                            }
                         }
+                        Ok(items)
                     }
-                    items
-                })
+                    Err(e) => {
+                        crate::runtime::log_warn(&format!(
+                            "[nex] Everything discover failed ({e}); falling back to walkdir"
+                        ));
+                        discover_filesystem_walk(
+                            &self.roots,
+                            &self.excluded_roots,
+                            self.max_depth,
+                            self.show_files,
+                            self.show_folders,
+                            self.max_items_total,
+                            self.max_items_per_root,
+                            cb,
+                        )
+                    }
+                }
             }
             FileBackend::Walkdir => discover_filesystem_walk(
                 &self.roots,

@@ -1,5 +1,4 @@
 #![cfg(target_os = "windows")]
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;

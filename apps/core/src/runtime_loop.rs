@@ -80,7 +80,10 @@ pub(crate) fn run_windows_runtime(
     let use_progress_window = match runtime_config.file_discovery_backend {
         DiscoveryBackend::Everything => false,
         DiscoveryBackend::Walkdir => true,
-        DiscoveryBackend::Auto => !EverythingBridge::detect().is_some(),
+        DiscoveryBackend::Auto => match EverythingBridge::detect() {
+            Some(bridge) if bridge.is_service_running() => false,
+            _ => true,
+        },
     };
         if use_progress_window {
             log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
@@ -251,25 +254,50 @@ pub(crate) fn run_windows_runtime(
 
     overlay
         .run_message_loop_with_events(|event| {
-            maybe_apply_runtime_config_reload(
-                &overlay,
-                &*service.lock().unwrap(),
-                &mut runtime_config,
-                &mut plugin_registry,
-                &mut search_session,
-                &mut pending_uninstall_confirmation,
-                &mut max_results,
-                &mut config_watcher,
-                &mut background_index_refresh,
-            );
+            // The message-pump callback must never block on the service
+            // lock. The service is shared with the background indexer
+            // thread and the per-root directory-watcher consumer threads,
+            // and any blocking wait here would prevent the message pump
+            // from delivering WM_HOTKEY and other input. We use `try_lock`
+            // and skip the tick if a worker is currently holding the
+            // service; the work is re-attempted on the next event.
             let was_indexing_complete = background_index_refresh
                 .completed
                 .load(std::sync::atomic::Ordering::Acquire);
-            maybe_apply_background_index_refresh(
-                &*service.lock().unwrap(),
-                &mut background_index_refresh,
-                &runtime_config,
-            );
+
+            if let Ok(svc) = service.try_lock() {
+                maybe_apply_runtime_config_reload(
+                    &overlay,
+                    &*svc,
+                    &mut runtime_config,
+                    &mut plugin_registry,
+                    &mut search_session,
+                    &mut pending_uninstall_confirmation,
+                    &mut max_results,
+                    &mut config_watcher,
+                    &mut background_index_refresh,
+                );
+                maybe_apply_background_index_refresh(
+                    &*svc,
+                    &mut background_index_refresh,
+                    &runtime_config,
+                );
+
+                // Start per-root file watchers the first time the index
+                // cache becomes usable. The handle is idempotent: it is a
+                // no-op if a watcher is already running.
+                if background_index_refresh.cache_applied {
+                    if let Err(error) = svc.start_file_watchers(&service) {
+                        log_warn(&format!("[nex] directory_watcher start failed: {error}"));
+                    }
+                }
+            } else {
+                // Service lock is held by a worker. The config reloader,
+                // index-refresh applicator, and watcher starter will
+                // retry on the next event; the cost of skipping a tick
+                // is bounded by the worker's per-item critical section.
+            }
+
             if !was_indexing_complete
                 && background_index_refresh
                     .completed

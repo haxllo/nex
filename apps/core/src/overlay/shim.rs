@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::unbounded;
 
 use crate::overlay::boot::Boot;
+use crate::overlay::hotkey::HotkeyListener;
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::{update, Message, Model, OverlayEvent, OverlayRow};
 use crate::overlay::platform;
@@ -34,6 +35,12 @@ struct Inner {
     model: Arc<Mutex<Model>>,
     icon_cache: Arc<IconCache>,
     is_running: Arc<AtomicBool>,
+    /// Hotkey string queued by `set_hotkey_hint` for the
+    /// `run_message_loop_with_events` call to start a
+    /// `HotkeyListener` on. We can't start the listener until the
+    /// event channel exists, and that channel is created inside
+    /// `run_message_loop_with_events`.
+    pending_hotkey: Arc<Mutex<Option<String>>>,
 }
 
 impl NativeOverlayShell {
@@ -51,6 +58,7 @@ impl NativeOverlayShell {
                 model,
                 icon_cache,
                 is_running: Arc::new(AtomicBool::new(false)),
+                pending_hotkey: Arc::new(Mutex::new(None)),
             }),
         })
     }
@@ -123,6 +131,9 @@ impl NativeOverlayShell {
     }
 
     pub fn set_hotkey_hint(&self, hotkey: &str) {
+        if let Ok(mut pending) = self.inner.pending_hotkey.lock() {
+            *pending = Some(hotkey.to_string());
+        }
         self.apply(Message::SetHotkeyHint(hotkey.to_string()));
     }
 
@@ -222,6 +233,29 @@ impl NativeOverlayShell {
         let model_for_iced = inner.model.clone();
         let is_running = inner.is_running.clone();
 
+        // Start the global hotkey listener on a dedicated OS thread.
+        // The listener forwards WM_HOTKEY events to the same channel
+        // the Iced event loop uses, so the runtime callback receives
+        // `OverlayEvent::Hotkey(id)` exactly like the legacy Win32
+        // message pump delivered it.
+        let hotkey_listener: Option<HotkeyListener> = match inner
+            .pending_hotkey
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        {
+            Some(hotkey) => match HotkeyListener::start(&hotkey, event_tx.clone()) {
+                Ok(listener) => Some(listener),
+                Err(e) => {
+                    crate::runtime::log_warn(&format!(
+                        "[nex] hotkey listener start failed: {e}"
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+
         std::thread::Builder::new()
             .name("nex-overlay-iced".into())
             .spawn(move || {
@@ -243,6 +277,9 @@ impl NativeOverlayShell {
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
+        // Keep the listener alive until the loop exits. Dropping
+        // here unregisters the hotkey and joins the listener thread.
+        drop(hotkey_listener);
         Ok(())
     }
 }

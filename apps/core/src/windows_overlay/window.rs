@@ -53,8 +53,8 @@ use crate::windows_overlay::painting::{
 };
 use crate::windows_overlay::state::OverlayShellState;
 use crate::windows_overlay::tray::{
-    add_tray_icon, load_tray_icon_handle, remove_tray_icon, show_tray_context_menu,
-    update_tray_icon,
+    add_tray_icon, ensure_tray_message_window, load_tray_icon_handle, remove_tray_icon,
+    show_tray_context_menu, update_tray_icon,
 };
 use crate::windows_overlay::types::*;
 
@@ -673,8 +673,22 @@ impl NativeOverlayShell {
         if state.tray_icon_added {
             return Ok(());
         }
+        ensure_tray_message_window(self.hwnd, state)?;
         state.tray_icon_handle = load_tray_icon_handle()?;
+        if state.tray_icon_handle == 0 {
+            return Err("load_tray_icon_handle returned 0".to_string());
+        }
+        eprintln!(
+            "[nex-tray] icon_loaded handle=0x{:x} message_hwnd=0x{:x} overlay_hwnd=0x{:x}",
+            state.tray_icon_handle as u64,
+            state.tray_message_hwnd as u64,
+            self.hwnd as u64
+        );
         add_tray_icon(self.hwnd, state)?;
+        eprintln!(
+            "[nex-tray] icon_added message_hwnd=0x{:x} tray_icon_added={}",
+            state.tray_message_hwnd as u64, state.tray_icon_added
+        );
         Ok(())
     }
 

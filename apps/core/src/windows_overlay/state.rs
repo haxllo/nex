@@ -213,6 +213,7 @@ pub(crate) struct OverlayShellState {
     pub(crate) hotkey_issue_active: bool,
     pub(crate) tray_icon_added: bool,
     pub(crate) tray_icon_handle: isize,
+    pub(crate) tray_message_hwnd: HWND,
     pub(crate) gdi_cache: GdiObjectCache,
 
     // DPI-aware sizing
@@ -322,6 +323,7 @@ impl Default for OverlayShellState {
             hotkey_issue_active: false,
             tray_icon_added: false,
             tray_icon_handle: 0,
+            tray_message_hwnd: std::ptr::null_mut(),
             gdi_cache: GdiObjectCache::new(),
             icon_load_sender: None,
             icon_load_receiver: None,

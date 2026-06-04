@@ -88,6 +88,30 @@ impl EverythingBridge {
         None
     }
 
+    /// Probe whether the Everything service (Everything.exe) is actually
+    /// running. The DLL is always loadable as long as it exists on disk, but
+    /// IPC calls into it succeed only when Everything.exe is alive.
+    ///
+    /// Heuristic: `Everything_GetMajorVersion()` returns 0 when the service
+    /// is not running (no IPC response) and a non-zero version when it is.
+    /// We also send a no-op `Everything_QueryW("")` and check whether the
+    /// SDK accepted it; some versions return 0 for both. The version probe
+    /// is the strongest signal on its own.
+    pub(crate) fn is_service_running(&self) -> bool {
+        let major = unsafe { (self.fns.get_major_version)() };
+        if major == 0 {
+            return false;
+        }
+        // Belt-and-braces: also try a no-op query. If both look healthy, the
+        // service is up. If only the query fails we still consider it down
+        // because the IPC channel is unreliable.
+        unsafe {
+            (self.fns.set_search_w)(to_wide("").as_ptr());
+            let ok = (self.fns.query_w)(0);
+            ok != 0
+        }
+    }
+
     pub(crate) fn discover(
         &self,
         roots: &[PathBuf],

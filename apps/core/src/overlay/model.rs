@@ -54,7 +54,11 @@ pub enum OverlayEvent {
 /// `NativeOverlayShell` setter touched lives here, so the shim
 /// (`crate::overlay::shim`) can update fields and post `Message`s
 /// without locking more than `Arc<Mutex<Model>>`.
-#[derive(Debug)]
+///
+/// `Clone` is required so the Iced `view` closure can take a
+/// snapshot of the model under the mutex without holding the guard
+/// for the lifetime of the returned `Element`.
+#[derive(Debug, Clone)]
 pub struct Model {
     pub query: String,
     pub status_text: String,
@@ -146,6 +150,10 @@ pub enum Message {
     ResultsFadeTick,
     ThemeDetected(Theme),
     Closed,
+
+    // Internal: the polling subscription fires this to refresh
+    // State.model from the shim's `Arc<Mutex<Model>>`.
+    SyncFromShim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +291,7 @@ pub fn update(model: &mut Model, message: Message) -> iced::Task<Message> {
             model.visible = false;
             Task::none()
         }
+        Message::SyncFromShim => Task::none(),
     }
 }
 

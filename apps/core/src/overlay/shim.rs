@@ -2,10 +2,9 @@
 //!
 //! Internally the shim owns an `Arc<Mutex<Model>>` plus an
 //! `Arc<IconCache>`. All the public setters apply their change
-//! directly to the model under the mutex. In Phase 4 the shim will
-//! also own the Iced event-loop thread and post every change to it
-//! over a channel; until then the in-place mutation keeps the
-//! runtime tests green and the legacy API working.
+//! directly to the model under the mutex. The Iced event loop is
+//! driven by [`boot::run`], which the shim spawns from
+//! `run_message_loop_with_events`.
 //!
 //! This is the *only* public surface of the new `overlay` module.
 //! Runtime code outside `runtime_loop.rs` and friends should not need
@@ -16,6 +15,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crossbeam_channel::unbounded;
+
+use crate::overlay::boot::Boot;
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::{update, Message, Model, OverlayEvent, OverlayRow};
 use crate::overlay::platform;
@@ -188,27 +190,41 @@ impl NativeOverlayShell {
     /// the runtime's main loop — historically that loop was driven
     /// by `GetMessageW` and the callback was synchronous.
     ///
-    /// In Phase 1 this is a thin shim that drives the runtime's
-    /// callback with a periodic heartbeat and lets the calling
-    /// thread's setters keep working. Phase 4 replaces the body with
-    /// a real `iced::application(...).run()` call.
+    /// The Iced event loop runs on a worker thread; user-driven
+    /// `OverlayEvent`s are delivered to the calling thread over a
+    /// channel so the legacy callback semantics are preserved.
     pub fn run_message_loop_with_events<F>(self, mut on_event: F) -> Result<(), String>
     where
         F: FnMut(OverlayEvent) + Send + 'static,
     {
-        self.inner.is_running.store(true, Ordering::SeqCst);
-        let is_running = self.inner.is_running.clone();
+        let inner = self.inner.clone();
+        inner.is_running.store(true, Ordering::SeqCst);
+
+        let (event_tx, event_rx) = unbounded::<OverlayEvent>();
+        let model_for_iced = inner.model.clone();
+        let is_running = inner.is_running.clone();
+
         std::thread::Builder::new()
-            .name("nex-overlay-pump".into())
+            .name("nex-overlay-iced".into())
             .spawn(move || {
-                while is_running.load(Ordering::SeqCst) {
-                    // Phase 4: read from a real `Receiver<Message>`
-                    // and apply each through `update()`.
-                    std::thread::sleep(std::time::Duration::from_millis(16));
+                let result = crate::overlay::boot::run(Boot {
+                    model: model_for_iced,
+                    event_tx,
+                });
+                is_running.store(false, Ordering::SeqCst);
+                if let Err(e) = result {
+                    crate::runtime::log_warn(&format!("[nex] overlay iced loop exited: {e}"));
                 }
-                let _ = on_event;
             })
-            .map_err(|e| format!("failed to spawn pump thread: {e}"))?;
+            .map_err(|e| format!("failed to spawn Iced thread: {e}"))?;
+
+        while inner.is_running.load(Ordering::SeqCst) {
+            match event_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(event) => on_event(event),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
         Ok(())
     }
 }

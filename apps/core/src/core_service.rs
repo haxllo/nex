@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
-const STALE_PRUNE_BATCH_SIZE: usize = 64;
+const STALE_PRUNE_BATCH_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum ServiceError {

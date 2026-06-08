@@ -43,6 +43,3 @@ pub mod uninstall_registry;
 pub mod updater;
 #[cfg(target_os = "windows")]
 pub(crate) mod overlay;
-
-// Legacy windows_overlay module removed — replaced by overlay/
-// (Iced 0.14 migration, Phases 1-4 complete)

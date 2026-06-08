@@ -35,6 +35,7 @@ struct HotkeyListenerInner {
     should_exit: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     id: i32,
+    thread_id: std::sync::OnceLock<u32>,
 }
 
 impl HotkeyListener {
@@ -68,9 +69,13 @@ impl HotkeyListener {
         let should_exit_clone = should_exit.clone();
         let event_tx_clone = event_tx.clone();
         let id_for_thread = id;
+        let thread_id: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let thread_id_for_thread = thread_id.clone();
         let thread = thread::Builder::new()
             .name("nex-hotkey-listener".into())
             .spawn(move || {
+                let id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+                let _ = thread_id_for_thread.set(id);
                 run_get_message_loop(should_exit_clone, event_tx_clone, id_for_thread);
             })
             .map_err(|e| format!("failed to spawn hotkey thread: {e}"))?;
@@ -80,6 +85,7 @@ impl HotkeyListener {
                 should_exit,
                 thread: Some(thread),
                 id,
+                thread_id,
             }),
         })
     }
@@ -87,6 +93,21 @@ impl HotkeyListener {
     /// Hotkey id this listener holds. `1` for the first/only hotkey.
     pub(crate) fn id(&self) -> i32 {
         self.inner.as_ref().map(|i| i.id).unwrap_or(-1)
+    }
+
+    /// OS thread id of the hotkey listener thread, or `None` if the
+    /// thread has not yet started. Spins for up to 100 ms before
+    /// giving up, so the caller can log the id immediately after
+    /// `start` returns.
+    pub(crate) fn thread_id(&self) -> Option<u32> {
+        let inner = self.inner.as_ref()?;
+        for _ in 0..100 {
+            if let Some(id) = inner.thread_id.get() {
+                return Some(*id);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        inner.thread_id.get().copied()
     }
 }
 

@@ -40,6 +40,9 @@ pub(crate) mod theme;
 pub(crate) mod view;
 
 #[cfg(target_os = "windows")]
+pub(crate) mod tray;
+
+#[cfg(target_os = "windows")]
 pub(crate) mod indexing_progress;
 
 #[cfg(target_os = "windows")]

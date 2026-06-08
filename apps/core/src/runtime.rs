@@ -137,7 +137,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             command: RuntimeCommand::Run,
-            background: false,
+            background: true,
         }
     }
 }

@@ -2112,6 +2112,7 @@ dependencies = [
  "lru 0.12.5",
  "once_cell",
  "palette",
+ "raw-window-handle",
  "resvg 0.47.0",
  "rusqlite",
  "serde",

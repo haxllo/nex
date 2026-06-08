@@ -254,7 +254,7 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             show_files: false,
             show_folders: false,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Ctrl+Shift+Space".to_string(),
             launch_at_startup: false,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."

@@ -44,6 +44,23 @@ pub(crate) const MAX_VISIBLE_ROWS: usize = 8;
 pub(crate) const FOOTER_HINT_TEXT: &str =
     "Enter Open  \u{2022}  \u{2191}\u{2193} Move  \u{2022}  Esc Close";
 
+// Footer keycap group constants (match legacy windows_overlay::types).
+pub(crate) const FOOTER_KEY_ENTER: &str = "\u{21B5}";
+pub(crate) const FOOTER_KEY_UP: &str = "\u{2191}";
+pub(crate) const FOOTER_KEY_DOWN: &str = "\u{2193}";
+pub(crate) const FOOTER_KEY_ESC: &str = "Esc";
+pub(crate) const FOOTER_LABEL_OPEN: &str = "Open";
+pub(crate) const FOOTER_LABEL_MOVE: &str = "Move";
+pub(crate) const FOOTER_LABEL_CLOSE: &str = "Close";
+pub(crate) const FOOTER_KEYCAP_GAP: f32 = 6.0;
+pub(crate) const FOOTER_GROUP_GAP: f32 = 18.0;
+pub(crate) const FOOTER_KEY_LABEL_GAP: f32 = 5.0;
+pub(crate) const FOOTER_SEPARATOR: &str = "\u{2022}";
+
+// Input-area icon pads.
+pub(crate) const SEARCH_ICON_LEFT_PAD: f32 = 14.0;
+pub(crate) const HELP_ICON_RIGHT_PAD: f32 = 12.0;
+
 pub(crate) const NO_RESULTS_STATUS_TEXT: &str = "No results";
 pub(crate) const INPUT_PLACEHOLDER_TEXT: &str = "Type to search";
 pub(crate) const COMMAND_INPUT_PLACEHOLDER_TEXT: &str =

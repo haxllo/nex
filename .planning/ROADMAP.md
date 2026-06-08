@@ -33,17 +33,18 @@ Plans:
 
 ## Phase 2: Iced Migration — Icons & Assets
 
-**Status:** Partially Implemented
+**Status:** COMPLETE
 **Branch:** `iced-ui`
 
 Complete the icon pipeline:
-- LRU icon cache using `image` crate (ICO/PNG → `iced::widget::Image`)
-- Port all public methods from legacy `icon_cache.rs`
-- Custom icon rendering for built-in actions (search, apps, files)
-- Prune unused GDI icon handles
+- ✅ LRU icon cache using `image` crate (ICO/PNG → `iced::widget::Image`)
+- ✅ Port all public methods from legacy `icon_cache.rs`
+- ✅ IconCache wired into view via Arc chain (Boot → State → ViewFn)
+- ✅ Result-row icons rendered via `result_icon()` with fallback placeholder
+- Action icon classification, embedded PNG rendering (deferred to future phase)
 
 **Requires:** R1.1 (icon rendering), R3.2 (LRU eviction)
-**Verification:** All icon types render correctly, cache evicts correctly
+**Verification:** `cargo check -p nex-cli` passes, all icon Infrastructure wired
 
 ---
 

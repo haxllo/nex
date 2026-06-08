@@ -25,9 +25,53 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 use iced::Element;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
 
+use crate::overlay::geometry::{
+    DIVIDER_HEIGHT, FOOTER_HINT_HEIGHT, FOOTER_SEPARATOR_HEIGHT, INPUT_HEIGHT, MAX_VISIBLE_ROWS,
+    PANEL_MARGIN_BOTTOM, ROW_HEIGHT, WINDOW_WIDTH,
+};
+use crate::overlay::icons::IconCache;
 use crate::overlay::model::{message_to_event, update, Message, Model, OverlayEvent};
 use crate::overlay::view::view as build_view;
+
+/// Build a one-shot task that asks the Iced runtime for the oldest
+/// window, then calls Win32 `ShowWindow` with `SW_SHOWNOACTIVATE`
+/// (visible) or `SW_HIDE` (hidden). We can't keep a stable
+/// `iced::window::Id` because Iced generates one internally and the
+/// public API doesn't expose it; `oldest()` always returns the main
+/// launcher window since we only ever open one.
+fn visibility_task(visible: bool) -> iced::Task<Message> {
+    iced::window::oldest().then(move |id_opt| match id_opt {
+        Some(id) => iced::window::run(id, move |handle| set_visible(handle, visible)).discard(),
+        None => iced::Task::none(),
+    })
+}
+
+fn set_visible(handle: &dyn iced::window::Window, visible: bool) {
+    let Ok(window_handle) = handle.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = window_handle.as_raw() else {
+        return;
+    };
+    let hwnd: HWND = win32.hwnd.get() as *mut core::ffi::c_void;
+    let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    unsafe {
+        ShowWindow(hwnd, cmd);
+    }
+}
+
+/// Total launcher height: input + divider + `MAX_VISIBLE_ROWS` rows
+/// + footer (separator + hint) + bottom margin. The single source of
+/// truth is [`crate::overlay::geometry`].
+fn panel_total_height() -> f32 {
+    let rows = (MAX_VISIBLE_ROWS as f32) * ROW_HEIGHT;
+    let footer = FOOTER_SEPARATOR_HEIGHT + FOOTER_HINT_HEIGHT;
+    INPUT_HEIGHT + DIVIDER_HEIGHT + rows + footer + PANEL_MARGIN_BOTTOM
+}
 
 /// Bundle passed into the Iced boot function. The runtime creates
 /// the shared `Arc<Mutex<Model>>` and the `event_tx` channel
@@ -35,6 +79,7 @@ use crate::overlay::view::view as build_view;
 /// runtime worker thread share them.
 pub(crate) struct Boot {
     pub(crate) model: Arc<Mutex<Model>>,
+    pub(crate) icon_cache: Arc<IconCache>,
     pub(crate) event_tx: Sender<OverlayEvent>,
     /// Set to `true` by the runtime before starting the Iced event
     /// loop. Set to `false` by [`run`] when the Iced event loop
@@ -49,20 +94,30 @@ pub(crate) struct Boot {
 pub(crate) struct State {
     pub(crate) model: Model,
     pub(crate) shared: Arc<Mutex<Model>>,
+    pub(crate) icon_cache: Arc<IconCache>,
     pub(crate) event_tx: Sender<OverlayEvent>,
+    /// Mirrors the last-synced value of `model.visible` so we can
+    /// fire a one-shot Win32 `ShowWindow` task when the runtime
+    /// toggles visibility (the polling subscription only knows the
+    /// transition by comparing last vs. current).
+    pub(crate) last_visible: bool,
 }
 
 impl State {
     pub(crate) fn boot(
         initial: Model,
         shared: Arc<Mutex<Model>>,
+        icon_cache: Arc<IconCache>,
         event_tx: Sender<OverlayEvent>,
     ) -> (Self, iced::Task<Message>) {
+        let last_visible = initial.visible;
         (
             Self {
                 model: initial,
                 shared,
+                icon_cache,
                 event_tx,
+                last_visible,
             },
             iced::Task::none(),
         )
@@ -72,6 +127,19 @@ impl State {
         if matches!(message, Message::SyncFromShim) {
             if let Ok(g) = self.shared.lock() {
                 self.model = g.clone();
+            }
+            // Detect the visibility edge and fire a one-shot Win32
+            // `ShowWindow` task. Iced 0.14 has no public show/hide
+            // window action, so we use `iced::window::run` to get the
+            // raw window handle and call `ShowWindow` ourselves.
+            let now_visible = self.model.visible;
+            if now_visible != self.last_visible {
+                self.last_visible = now_visible;
+                crate::logging::info(&format!(
+                    "[nex] visibility transition: {} -> {} (firing ShowWindow)",
+                    !now_visible, now_visible
+                ));
+                return visibility_task(now_visible);
             }
             return iced::Task::none();
         }
@@ -100,7 +168,7 @@ impl<'a> iced::application::ViewFn<'a, State, Message, iced::Theme, iced::Render
         &self,
         state: &'a State,
     ) -> Element<'a, Message, iced::Theme, iced::Renderer> {
-        build_view(&state.model)
+        build_view(&state.model, &state.icon_cache)
     }
 }
 
@@ -111,17 +179,18 @@ pub(crate) fn run(boot: Boot) -> Result<(), String> {
         .map(|m| m.clone())
         .unwrap_or_default();
     let shared = boot.model.clone();
+    let icon_cache = boot.icon_cache.clone();
     let event_tx = boot.event_tx.clone();
     let is_running = boot.is_running.clone();
 
     let window_settings = iced::window::Settings {
-        size: iced::Size::new(640.0, 480.0),
+        size: iced::Size::new(WINDOW_WIDTH, panel_total_height()),
         resizable: false,
         decorations: false,
         transparent: true,
         level: iced::window::Level::AlwaysOnTop,
         position: iced::window::Position::Centered,
-        visible: true,
+        visible: false,
         exit_on_close_request: true,
         ..iced::window::Settings::default()
     };
@@ -132,7 +201,7 @@ pub(crate) fn run(boot: Boot) -> Result<(), String> {
     };
 
     let result = iced::application(
-        move || State::boot(initial.clone(), shared.clone(), event_tx.clone()),
+        move || State::boot(initial.clone(), shared.clone(), icon_cache.clone(), event_tx.clone()),
         State::apply,
         View,
     )

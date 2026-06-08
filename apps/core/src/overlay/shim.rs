@@ -77,6 +77,12 @@ impl NativeOverlayShell {
         self.inner.is_running.clone()
     }
 
+    /// The shared icon cache used by the Iced view to render result-row
+    /// icons from file paths.
+    pub fn icon_cache(&self) -> Arc<IconCache> {
+        self.inner.icon_cache.clone()
+    }
+
     pub fn is_visible(&self) -> bool {
         self.inner
             .model

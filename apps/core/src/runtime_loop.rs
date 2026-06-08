@@ -71,6 +71,8 @@ use crate::overlay::NEX_WM_SEARCH_RESULTS_READY;
 use crate::overlay::{
     signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
 };
+#[cfg(target_os = "windows")]
+use crate::overlay::tray::TrayIcon;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
@@ -212,6 +214,44 @@ pub(crate) fn run_windows_runtime(
     // listener write to, and the runtime worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
+    // Create the system tray icon with context menu. The tray uses
+    // the same event channel so menu selections are delivered as
+    // OverlayEvent variants to the worker thread.
+    let tray_icon = TrayIcon::create(
+        event_tx.clone(),
+        runtime_config.config_path.to_string_lossy().as_ref(),
+    )
+    .map_err(|e| RuntimeError::Overlay(format!("tray icon: {e}")))?;
+    log_info("[nex] system tray icon created");
+
+    // Channels for updating tray state (game mode, hotkey issue)
+    // from the worker thread. A dedicated updater thread owns the
+    // tray_icon and applies state changes.
+    let (tray_gm_tx, tray_gm_rx) = crossbeam_channel::unbounded::<bool>();
+    let (tray_hi_tx, tray_hi_rx) = crossbeam_channel::unbounded::<bool>();
+    let _tray_updater = std::thread::Builder::new()
+        .name("nex-tray-updater".into())
+        .spawn(move || {
+            loop {
+                crossbeam_channel::select! {
+                    recv(tray_gm_rx) -> msg => {
+                        match msg {
+                            Ok(enabled) => tray_icon.set_game_mode(enabled),
+                            Err(_) => break,
+                        }
+                    }
+                    recv(tray_hi_rx) -> msg => {
+                        match msg {
+                            Ok(active) => tray_icon.set_hotkey_issue(active),
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            // tray_icon is dropped here, cleaning up the tray
+        })
+        .map_err(|e| RuntimeError::Overlay(format!("tray updater thread: {e}")))?;
+
     let search_worker = SearchWorker::new(
         service.clone(),
         runtime_config.clone(),
@@ -226,10 +266,15 @@ pub(crate) fn run_windows_runtime(
         match HotkeyListener::start(&runtime_config.hotkey, event_tx.clone()) {
             Ok(listener) => {
                 log_info(&format!(
-                    "[nex] hotkey registered native_id=1 hotkey={}",
-                    runtime_config.hotkey
+                    "[nex] hotkey registered native_id=1 hotkey={} listener_thread_id={}",
+                    runtime_config.hotkey,
+                    listener
+                        .thread_id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
                 ));
                 overlay.set_hotkey_issue_active(false);
+                let _ = tray_hi_tx.send(false);
                 (Some(listener), None)
             }
             Err(error) => {
@@ -248,6 +293,7 @@ pub(crate) fn run_windows_runtime(
                 ));
                 log_warn(&format!("[nex] {recovery_message}"));
                 overlay.set_hotkey_issue_active(true);
+                let _ = tray_hi_tx.send(true);
                 let status = hotkey_registration_status_text(&runtime_config.hotkey);
                 overlay.set_status_text(&status);
                 (None, Some(status))
@@ -273,12 +319,34 @@ pub(crate) fn run_windows_runtime(
     // to the `event_tx` channel.
     let shared_model = overlay.shared_model();
     let is_running = overlay.is_running();
+    let icon_cache = overlay.icon_cache();
     is_running.store(true, std::sync::atomic::Ordering::SeqCst);
     let boot = Boot {
         model: shared_model,
+        icon_cache,
         event_tx: event_tx.clone(),
         is_running: is_running.clone(),
     };
+
+    // Diagnostic: if `--test-show` was passed, post a synthetic
+    // `OverlayEvent::Hotkey(1)` 2 s after the Iced event loop is
+    // about to start. This exercises the full show/hide path without
+    // depending on a physical keyboard, so the build is verifiable
+    // in a CI / scripted environment.
+    let test_show = matches!(
+        std::env::var("NEX_TEST_SHOW").as_deref(),
+        Ok("1") | Ok("true")
+    );
+    if test_show {
+        let tx = event_tx.clone();
+        std::thread::Builder::new()
+            .name("nex-test-show".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let _ = tx.send(OverlayEvent::Hotkey(1));
+            })
+            .map_err(|e| RuntimeError::Overlay(format!("test-show thread: {e}")))?;
+    }
 
     // Bundle the runtime's mutable state into a struct that the
     // worker thread owns. The worker thread runs the message pump
@@ -303,6 +371,8 @@ pub(crate) fn run_windows_runtime(
         hotkey_issue_status,
         event_rx,
         is_running,
+        tray_gm_tx,
+        tray_hi_tx,
     };
 
     let worker_join = std::thread::Builder::new()
@@ -351,6 +421,8 @@ struct RuntimeWorker {
     hotkey_issue_status: Option<String>,
     event_rx: crossbeam_channel::Receiver<OverlayEvent>,
     is_running: Arc<AtomicBool>,
+    tray_gm_tx: crossbeam_channel::Sender<bool>,
+    tray_hi_tx: crossbeam_channel::Sender<bool>,
 }
 
 impl RuntimeWorker {
@@ -533,6 +605,7 @@ impl RuntimeWorker {
             }
             OverlayEvent::TrayToggleGameMode => {
                 toggle_game_mode_from_tray(&self.overlay, &mut self.runtime_config);
+                let _ = self.tray_gm_tx.send(self.runtime_config.game_mode_enabled);
             }
             OverlayEvent::TrayCheckForUpdates => {
                 match launch_stable_updater() {

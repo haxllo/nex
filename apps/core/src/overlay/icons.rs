@@ -19,7 +19,7 @@ use crate::overlay::model::OverlayRow;
 const DEFAULT_MAX_ENTRIES: usize = 96;
 const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 
-pub(crate) struct IconCache {
+pub struct IconCache {
     inner: Mutex<Inner>,
 }
 
@@ -112,6 +112,13 @@ impl IconCache {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Resolve a file path into an [`iced::widget::Image`] widget suitable
+    /// for the result row. Returns `None` when the path is empty or the
+    /// file cannot be decoded.
+    pub fn get_image(&self, path: &str) -> Option<iced::widget::Image> {
+        self.resolve(path).map(iced::widget::Image::new)
     }
 }
 

@@ -150,7 +150,9 @@ Plans:
 
 ## Phase 8: Performance — Search Quality
 
-**Branch:** TBD
+**Status:** Planned
+**Branch:** `iced-ui`
+**Plans:** 2 plans
 
 Search ranking improvements:
 - Tune fuzzy matching algorithm (prefix > substring > fuzzy)
@@ -160,6 +162,10 @@ Search ranking improvements:
 
 **Requires:** R3.3
 **Verification:** Manual search quality evaluation, automated ranking tests
+
+Plans:
+- [ ] 08-01-PLAN.md — App deduplication (collapse same-app variants to one result)
+- [ ] 08-02-PLAN.md — Typo tolerance audit & search quality test expansion
 
 ---
 

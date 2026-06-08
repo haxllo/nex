@@ -103,7 +103,9 @@ Delete legacy code and verify nothing breaks:
 
 ## Phase 6: Stability — Crash Resilience & Bug Fixes
 
+**Status:** Planned
 **Branch:** TBD (from `iced-ui` or `main` after merge)
+**Plans:** 3 plans
 
 Systematic hardening:
 - Add error recovery in search worker (catch Tantivy panics)
@@ -115,6 +117,11 @@ Systematic hardening:
 
 **Requires:** R2.1, R2.2, R2.3, R2.4
 **Verification:** Targeted tests for each recovery path, manual edge-case testing
+
+Plans:
+- [ ] 06-01-PLAN.md — Crash resilience: search worker, icon decode, hotkey thread recovery
+- [ ] 06-02-PLAN.md — Config error UX, multi-monitor positioning, DPI fixes
+- [ ] 06-03-PLAN.md — Hotkey conflict detection, atomic config save with backups
 
 ---
 

@@ -1,9 +1,9 @@
 # Nex — Project State
 
 **Last Updated:** 2026-06-08
-**Current Phase:** Complete through Phase 5 (Legacy Removal) **— Iced Migration DONE**
-**Active Branch:** `iced-ui`
+**Current Phase:** Phase 7 (Perf: Indexing & Memory) — **Planned, 3 plans ready**
 
+**Active Branch:** `iced-ui`
 ## Current Status
 
 The Iced 0.14 UI migration (Phases 1-5) is complete. The legacy `windows_overlay/` 
@@ -37,8 +37,8 @@ pipeline, view rendering, shim wire-up, and legacy cleanup are done.
 | 3 — View & Animation | COMPLETE |
 | 4 — Shim & Wire-Up | COMPLETE |
 | 5 — Legacy Removal | COMPLETE |
-| 6 — Stability | Not Started |
-| 7 — Perf: Indexing & Memory | Not Started |
+| 6 — Stability | COMPLETE |
+| 7 — Perf: Indexing & Memory | Planned |
 | 8 — Perf: Search Quality | Not Started |
 | 9 — UI Polish | Not Started |
 | 10 — Snippets | Not Started |
@@ -53,10 +53,11 @@ pipeline, view rendering, shim wire-up, and legacy cleanup are done.
 ## Next Actions
 
 1. ~~Complete Phase 1-5 — Iced migration~~ ✅
-2. Begin stability hardening (Phase 6)
-3. Performance optimization (Phases 7-8)
-4. UI polish (Phase 9)
-5. Snippets feature (Phase 10)
-6. Testing expansion (Phase 11)
+2. ~~Begin stability hardening (Phase 6)~~ ✅
+3. **Execute Phase 7 plans** — `/gsd-execute-phase 7`
+4. Performance optimization (Phase 8)
+5. UI polish (Phase 9)
+6. Snippets feature (Phase 10)
+7. Testing expansion (Phase 11)
 
-Run `/gsd-plan-phase 6` to plan Phase 6 (Stability).
+Run `/gsd-plan-phase 7` to plan Phase 7 (Perf: Indexing & Memory).

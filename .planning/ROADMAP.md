@@ -103,8 +103,8 @@ Delete legacy code and verify nothing breaks:
 
 ## Phase 6: Stability — Crash Resilience & Bug Fixes
 
-**Status:** Planned
-**Branch:** TBD (from `iced-ui` or `main` after merge)
+**Status:** COMPLETE
+**Branch:** `iced-ui`
 **Plans:** 3 plans
 
 Systematic hardening:
@@ -119,26 +119,32 @@ Systematic hardening:
 **Verification:** Targeted tests for each recovery path, manual edge-case testing
 
 Plans:
-- [ ] 06-01-PLAN.md — Crash resilience: search worker, icon decode, hotkey thread recovery
-- [ ] 06-02-PLAN.md — Config error UX, multi-monitor positioning, DPI fixes
-- [ ] 06-03-PLAN.md — Hotkey conflict detection, atomic config save with backups
+- [x] 06-01-PLAN.md — Crash resilience: search worker, icon decode, hotkey thread recovery
+- [x] 06-02-PLAN.md — Config error UX, multi-monitor positioning, DPI fixes
+- [x] 06-03-PLAN.md — Hotkey conflict detection, atomic config save with backups
 
 ---
 
 ## Phase 7: Performance — Indexing & Memory
 
-**Branch:** TBD
+**Status:** Planned
+**Branch:** `iced-ui`
+**Plans:** 3 plans
 
 Performance optimization:
-- Profile and optimize initial index build time
-- Profile and optimize incremental update latency
-- Memory profiling: identify and fix leaks/bloat
-- Icon cache tuning (size limits, eviction policy)
-- Tantivy index compaction strategy
-- Reduce idle CPU usage
+- Replace full index rebuilds with incremental Tantivy/FTS5 sync (R3.1)
+- Add index compaction: batched commits, LogMergePolicy, periodic FTS5 OPTIMIZE (R3.1, R3.2)
+- Memory profiling: periodic logging of working set + Tantivy arena (R3.2)
+- Config-driven icon cache sizing (active_memory_target_mb) (R3.2)
+- Indexing-path .unwrap() audit and cleanup (R3.2)
 
 **Requires:** R3.1, R3.2
-**Verification:** Perf gate (p95 under 15ms), memory under targets
+**Verification:** Perf gate (p95 under 15ms), memory under targets, incremental sync <500ms
+
+Plans:
+- [ ] 07-01-PLAN.md — Incremental search indexing (Tantivy + FTS5 delta sync)
+- [ ] 07-02-PLAN.md — Index compaction (batch commits, merge policy, FTS5 optimize)
+- [ ] 07-03-PLAN.md — Memory profiling & icon cache tuning
 
 ---
 

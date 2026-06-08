@@ -1,7 +1,7 @@
 # Nex — Project State
 
 **Last Updated:** 2026-06-08
-**Current Phase:** Phase 7 (Perf: Indexing & Memory) — **Planned, 3 plans ready**
+**Current Phase:** Phase 7 (Perf: Indexing & Memory) — **Planned, 3 plans ready** | Phase 8 (Perf: Search Quality) — **Planned, 2 plans ready**
 
 **Active Branch:** `iced-ui`
 ## Current Status
@@ -39,7 +39,7 @@ pipeline, view rendering, shim wire-up, and legacy cleanup are done.
 | 5 — Legacy Removal | COMPLETE |
 | 6 — Stability | COMPLETE |
 | 7 — Perf: Indexing & Memory | Planned |
-| 8 — Perf: Search Quality | Not Started |
+| 8 — Perf: Search Quality | Planned |
 | 9 — UI Polish | Not Started |
 | 10 — Snippets | Not Started |
 | 11 — Testing | Not Started |

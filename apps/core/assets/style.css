@@ -21,7 +21,6 @@
   --accent: #6ea8fe;
   --divider: rgba(255, 255, 255, 0.06);
   --kbd-bg: rgba(255, 255, 255, 0.08);
-  --shadow: 0 0 6px rgba(0, 0, 0, 0.10);
   --icon-bg: rgba(255, 255, 255, 0.06);
 }
 
@@ -37,7 +36,6 @@ html[data-theme="light"] {
   --accent: #2f6bff;
   --divider: rgba(0, 0, 0, 0.07);
   --kbd-bg: rgba(0, 0, 0, 0.06);
-  --shadow: 0 0 6px rgba(0, 0, 0, 0.08);
   --icon-bg: rgba(0, 0, 0, 0.05);
 }
 
@@ -64,7 +62,7 @@ body {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.10));
   overflow: hidden;
   backdrop-filter: saturate(140%);
 }

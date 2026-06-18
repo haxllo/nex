@@ -475,11 +475,13 @@ fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // Win32 glue: window chrome, positioning, focus
 // ─────────────────────────────────────────────────────────────────
 
-/// Apply DWM rounded corners + acrylic backdrop for the premium look.
+/// Apply DWM rounded corners + acrylic backdrop + native shadow.
 fn apply_window_chrome(window: &Window, hwnd: HWND, state: &Arc<Mutex<ShimState>>) {
     use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
     };
+    use windows_sys::Win32::UI::Controls::MARGINS;
     // DWMWCP_ROUND = 2
     let pref: i32 = 2;
     unsafe {
@@ -489,6 +491,18 @@ fn apply_window_chrome(window: &Window, hwnd: HWND, state: &Arc<Mutex<ShimState>
             &pref as *const i32 as *const c_void,
             std::mem::size_of::<i32>() as u32,
         );
+    }
+    // Enable native DWM drop shadow (negative margins = extend frame
+    // into entire client area, which adds the shadow even on layered
+    // windows).
+    let margins = MARGINS {
+        cxLeftWidth: -1,
+        cxRightWidth: -1,
+        cyTopHeight: -1,
+        cyBottomHeight: -1,
+    };
+    unsafe {
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
     // Acrylic blur behind the (transparent) WebView. Falls back to a

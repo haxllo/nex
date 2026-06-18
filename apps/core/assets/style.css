@@ -62,7 +62,6 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   clip-path: inset(0 round var(--radius));
-  filter: drop-shadow(0 0 5px rgba(0, 0, 0, 0.12));
   backdrop-filter: saturate(140%);
 }
 

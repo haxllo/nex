@@ -1,13 +1,23 @@
 #[cfg(target_os = "windows")]
+use std::cell::RefCell;
+#[cfg(target_os = "windows")]
+use std::rc::Rc;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
 
 use crate::clipboard_history;
 #[cfg(target_os = "windows")]
 use crate::config::Config;
 #[cfg(target_os = "windows")]
+use crate::config::DiscoveryBackend;
+#[cfg(target_os = "windows")]
 use crate::core_service::CoreService;
 #[cfg(target_os = "windows")]
-use crate::hotkey_runtime::default_hotkey_registrar;
+use crate::everything_bridge::EverythingBridge;
 #[cfg(target_os = "windows")]
 use crate::overlay_state::{HotkeyAction, OverlayState};
 #[cfg(target_os = "windows")]
@@ -26,22 +36,21 @@ use crate::runtime_hotkey::{should_suppress_hotkey_for_game_mode, toggle_game_mo
 #[cfg(target_os = "windows")]
 use crate::runtime_index::{
     config_file_modified_time, maybe_apply_background_index_refresh,
-    maybe_apply_runtime_config_reload, maybe_show_background_index_ready_notice,
-    should_show_indexing_status, start_background_index_refresh, BackgroundIndexRefresh,
+    maybe_apply_runtime_config_reload, start_background_index_refresh, BackgroundIndexRefresh,
     RuntimeConfigWatcher,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
-    filter_suppressed_uninstall_results, next_selection_index, overlay_rows,
+    filter_suppressed_uninstall_results, overlay_rows,
     reconcile_suppressed_uninstall_titles, set_idle_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, PendingUninstallConfirmation, ACTION_UNINSTALL_CANCEL_ID,
-    ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_INDEXING, STATUS_ROW_NO_COMMAND_RESULTS,
-    STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
+    ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS,
+    STATUS_ROW_TYPE_TO_SEARCH,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_process::{
     acquire_single_instance_guard, hotkey_registration_recovery_message,
-    hotkey_registration_status_text, launch_stable_updater, log_registration,
+    hotkey_registration_status_text, launch_stable_updater,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_search_session::{
@@ -49,40 +58,110 @@ use crate::runtime_search_session::{
 };
 #[cfg(target_os = "windows")]
 use crate::search_worker::SearchWorker;
+
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::types::NEX_WM_SEARCH_RESULTS_READY;
+use crate::overlay::host::Host;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole};
+use crate::overlay::hotkey::HotkeyListener;
 #[cfg(target_os = "windows")]
-use std::time::Instant;
+use crate::overlay::indexing_progress::run_with_progress_window;
+#[cfg(target_os = "windows")]
+use crate::overlay::{
+    signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
+};
+#[cfg(target_os = "windows")]
+use crate::overlay::tray::TrayIcon;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
-    mut runtime_config: Config,
+    runtime_config: Config,
     service: CoreService,
 ) -> Result<(), RuntimeError> {
-    let mut background_index_refresh = {
-        let initial_cached_items = service.cached_items_len();
-        log_info(&format!(
-            "[nex] startup cached_items={} (async indexing scheduled)",
-            initial_cached_items
-        ));
-        log_info(&format!(
-            "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty={} cached_items={}",
-            startup_started_at.elapsed().as_millis(),
-            initial_cached_items == 0,
-            initial_cached_items
-        ));
-        start_background_index_refresh(
-            &runtime_config,
-            initial_cached_items == 0,
-            startup_started_at,
-        )
-    };
     let service = Arc::new(Mutex::new(service));
 
-    let mut plugin_registry = PluginRegistry::load_from_config(&runtime_config);
+    let initial_cache_empty = {
+        let guard = service.lock().unwrap();
+        guard.cached_items_len() == 0
+    };
+
+    let background_index_refresh = if initial_cache_empty {
+        let use_progress_window = match runtime_config.file_discovery_backend {
+            DiscoveryBackend::Everything => false,
+            DiscoveryBackend::Walkdir => true,
+            DiscoveryBackend::Auto => match EverythingBridge::detect() {
+                Some(bridge) if bridge.is_service_running() => false,
+                _ => true,
+            },
+        };
+        if use_progress_window {
+            log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
+            let service_arc = service.clone();
+            let result = run_with_progress_window(move |pct| {
+                let svc = service_arc.lock().unwrap();
+                *svc.progress.lock().unwrap() = Some(pct);
+                let report = svc.rebuild_index_incremental_with_report();
+                *svc.progress.lock().unwrap() = None;
+                report
+            });
+            match result {
+                Ok(report) => {
+                    log_info(&format!(
+                        "[nex] startup indexed_items={} discovered={} upserted={} removed={}",
+                        report.indexed_total,
+                        report.discovered_total,
+                        report.upserted_total,
+                        report.removed_total,
+                    ));
+                    for provider in &report.providers {
+                        log_info(&format!(
+                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                            provider.provider,
+                            provider.discovered,
+                            provider.upserted,
+                            provider.removed,
+                            provider.skipped,
+                            provider.elapsed_ms
+                        ));
+                    }
+                    BackgroundIndexRefresh {
+                        completed: Arc::new(AtomicBool::new(true)),
+                        result: Arc::new(Mutex::new(Some(Ok(report)))),
+                        cache_applied: true,
+                        indexes_synced: false,
+                        initial_cache_empty: true,
+                        pending_discovery_reindex: false,
+                        pending_discovery_reindex_due_at: None,
+                        pending_discovery_reindex_requests: 0,
+                        started_at: Instant::now(),
+                        startup_started_at,
+                    }
+                }
+                Err(e) => {
+                    log_warn(&format!("[nex] first-time indexing failed: {e}"));
+                    start_background_index_refresh(&runtime_config, true, startup_started_at)
+                }
+            }
+        } else {
+            log_info("[nex] startup cached_items=0 (first-time indexing, Everything backend — async, no progress window)");
+            log_info(&format!(
+                "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=true cached_items=0",
+                startup_started_at.elapsed().as_millis()
+            ));
+            start_background_index_refresh(&runtime_config, true, startup_started_at)
+        }
+    } else {
+        log_info(&format!(
+            "[nex] startup cached_items={} (async indexing scheduled)",
+            {
+                let guard = service.lock().unwrap();
+                guard.cached_items_len()
+            }
+        ));
+        start_background_index_refresh(&runtime_config, false, startup_started_at)
+    };
+
+    let plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
         log_warn(&format!("[nex] plugin_warning {warning}"));
     }
@@ -114,13 +193,14 @@ pub(crate) fn run_windows_runtime(
         return Ok(());
     }
 
-    let mut overlay_state = OverlayState::default();
+    let overlay_state = OverlayState::default();
     let overlay = NativeOverlayShell::create().map_err(RuntimeError::Overlay)?;
     overlay.set_help_config_path(runtime_config.config_path.to_string_lossy().as_ref());
     overlay.set_hotkey_hint(&runtime_config.hotkey);
     overlay.set_performance_tuning(
         runtime_config.idle_cache_trim_ms,
         runtime_config.active_memory_target_mb,
+        runtime_config.ui_warm_release_ms,
     );
     overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
     log_info("[nex] native overlay shell initialized (hidden)");
@@ -129,37 +209,97 @@ pub(crate) fn run_windows_runtime(
         startup_started_at.elapsed().as_millis()
     ));
 
+    // Build the event channel that the WebView host's IPC handler
+    // (and the hotkey listener / tray) write to, and the runtime
+    // worker thread reads from.
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
+
+    // Create the system tray icon with context menu. The tray uses
+    // the same event channel so menu selections are delivered as
+    // OverlayEvent variants to the worker thread.
+    let tray_icon = TrayIcon::create(
+        event_tx.clone(),
+        runtime_config.config_path.to_string_lossy().as_ref(),
+    )
+    .map_err(|e| RuntimeError::Overlay(format!("tray icon: {e}")))?;
+    log_info("[nex] system tray icon created");
+
+    // Channels for updating tray state (game mode, hotkey issue)
+    // from the worker thread. A dedicated updater thread owns the
+    // tray_icon and applies state changes.
+    let (tray_gm_tx, tray_gm_rx) = crossbeam_channel::unbounded::<bool>();
+    let (tray_hi_tx, tray_hi_rx) = crossbeam_channel::unbounded::<bool>();
+    let _tray_updater = std::thread::Builder::new()
+        .name("nex-tray-updater".into())
+        .spawn(move || {
+            loop {
+                crossbeam_channel::select! {
+                    recv(tray_gm_rx) -> msg => {
+                        match msg {
+                            Ok(enabled) => tray_icon.set_game_mode(enabled),
+                            Err(_) => break,
+                        }
+                    }
+                    recv(tray_hi_rx) -> msg => {
+                        match msg {
+                            Ok(active) => tray_icon.set_hotkey_issue(active),
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            // tray_icon is dropped here, cleaning up the tray
+        })
+        .map_err(|e| RuntimeError::Overlay(format!("tray updater thread: {e}")))?;
+
     let search_worker = SearchWorker::new(
         service.clone(),
         runtime_config.clone(),
         Arc::new(plugin_registry.clone()),
-        overlay.hwnd as isize,
-        NEX_WM_SEARCH_RESULTS_READY,
+        event_tx.clone(),
     );
 
-    let mut registrar = default_hotkey_registrar();
-    let hotkey_issue_status = match registrar.register_hotkey(&runtime_config.hotkey) {
-        Ok(registration) => {
-            log_registration(&registration);
-            overlay.set_hotkey_issue_active(false);
-            None
-        }
-        Err(error) => {
-            let recovery_message = hotkey_registration_recovery_message(
-                &runtime_config.hotkey,
-                &runtime_config.config_path,
-            );
-            let suggested =
-                crate::settings::suggested_hotkey_presets(&runtime_config.hotkey, 3).join("|");
-            log_warn(&format!(
-                "[nex] hotkey_registration_issue hotkey={} suggestions={} error={:?}",
-                runtime_config.hotkey, suggested, error
-            ));
-            log_warn(&format!("[nex] {recovery_message}"));
-            overlay.set_hotkey_issue_active(true);
-            Some(hotkey_registration_status_text(&runtime_config.hotkey))
-        }
-    };
+    // Register the global hotkey on its own OS thread, sending
+    // `OverlayEvent::Hotkey(id)` to the shared event channel.
+    let hotkey_listener: Arc<Mutex<Option<HotkeyListener>>> = Arc::new(Mutex::new(None));
+    let hotkey_issue_status =
+        match HotkeyListener::start(&runtime_config.hotkey, event_tx.clone()) {
+            Ok(listener) => {
+                log_info(&format!(
+                    "[nex] hotkey registered native_id=1 hotkey={} listener_thread_id={}",
+                    runtime_config.hotkey,
+                    listener
+                        .thread_id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
+                overlay.set_hotkey_issue_active(false);
+                let _ = tray_hi_tx.send(false);
+                *hotkey_listener.lock().unwrap() = Some(listener);
+                None
+            }
+            Err(error) => {
+                let recovery_message = hotkey_registration_recovery_message(
+                    &runtime_config.hotkey,
+                    &runtime_config.config_path,
+                );
+                let suggested = crate::settings::suggested_hotkey_presets(
+                    &runtime_config.hotkey,
+                    3,
+                )
+                .join("|");
+                log_warn(&format!(
+                    "[nex] hotkey_registration_issue hotkey={} suggestions={} error={:?}",
+                    runtime_config.hotkey, suggested, error
+                ));
+                log_warn(&format!("[nex] {recovery_message}"));
+                overlay.set_hotkey_issue_active(true);
+                let _ = tray_hi_tx.send(true);
+                let status = hotkey_registration_status_text(&runtime_config.hotkey);
+                overlay.set_status_text(&status);
+                Some(status)
+            }
+        };
     log_info(&format!(
         "[nex] startup_phase phase=hotkey_ready elapsed_ms={} hotkey={}",
         startup_started_at.elapsed().as_millis(),
@@ -167,388 +307,613 @@ pub(crate) fn run_windows_runtime(
     ));
     log_info("[nex] event loop running (native overlay)");
 
-    let mut max_results = runtime_config.max_results as usize;
-    let mut config_watcher = RuntimeConfigWatcher {
+    let max_results = runtime_config.max_results as usize;
+    let config_watcher = RuntimeConfigWatcher {
         path: runtime_config.config_path.clone(),
         last_checked: Instant::now(),
         last_modified: config_file_modified_time(runtime_config.config_path.as_path()),
     };
-    let mut current_results: Vec<crate::model::SearchItem> = Vec::new();
-    let mut suppressed_uninstall_titles: Vec<String> = Vec::new();
-    let mut pending_uninstall_confirmation: Option<PendingUninstallConfirmation> = None;
-    let mut selected_index = 0_usize;
-    let mut last_query = String::new();
-    let mut last_sent_generation: u64 = 0;
-    let mut search_session = OverlaySearchSession::default();
 
-    overlay
-        .run_message_loop_with_events(|event| {
+    // Build the WebView host. The tao event loop runs on the main
+    // thread (it cannot be created off the main thread), reading from
+    // the shared state and writing events to the `event_tx` channel.
+    let shared_state = overlay.shared_state();
+    let proxy_slot = overlay.proxy_slot();
+    let is_running = overlay.is_running();
+    let icon_cache = overlay.icon_cache();
+    is_running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let host = Host {
+        state: shared_state,
+        proxy_slot,
+        icon_cache,
+        event_tx: event_tx.clone(),
+        is_running: is_running.clone(),
+    };
+
+    // Diagnostic: if `--test-show` was passed, post a synthetic
+    // `OverlayEvent::Hotkey(1)` 2 s after the WebView host event loop
+    // is about to start. This exercises the full show/hide path
+    // without depending on a physical keyboard, so the build is
+    // verifiable in a CI / scripted environment.
+    let test_show = matches!(
+        std::env::var("NEX_TEST_SHOW").as_deref(),
+        Ok("1") | Ok("true")
+    );
+    if test_show {
+        let tx = event_tx.clone();
+        std::thread::Builder::new()
+            .name("nex-test-show".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let _ = tx.send(OverlayEvent::Hotkey(1));
+            })
+            .map_err(|e| RuntimeError::Overlay(format!("test-show thread: {e}")))?;
+    }
+
+    // Bundle the runtime's mutable state into a struct that the
+    // worker thread owns. The worker thread runs the message pump
+    // loop and calls `on_event` for every event from the channel.
+    let worker = RuntimeWorker {
+        overlay: overlay.clone(),
+        service: service.clone(),
+        runtime_config,
+        background_index_refresh,
+        plugin_registry,
+        search_worker,
+        overlay_state,
+        max_results,
+        config_watcher,
+        current_results: Vec::new(),
+        suppressed_uninstall_titles: Vec::new(),
+        pending_uninstall_confirmation: None,
+        selected_index: 0,
+        last_query: String::new(),
+        last_sent_generation: 0,
+        search_session: OverlaySearchSession::default(),
+        hotkey_issue_status,
+        event_rx,
+        is_running,
+        tray_gm_tx,
+        tray_hi_tx,
+        hotkey_listener: hotkey_listener.clone(),
+        event_tx: event_tx.clone(),
+        hotkey_check_counter: 0,
+        last_memory_log: Instant::now(),
+    };
+
+    let worker_join = std::thread::Builder::new()
+        .name("nex-runtime".to_string())
+        .spawn(move || worker.run())
+        .map_err(|e| RuntimeError::Overlay(format!("failed to spawn runtime thread: {e}")))?;
+
+    // Run the WebView host event loop on the main thread (blocking).
+    // tao, like winit, panics if the EventLoop is created on a
+    // non-main thread. The host owns the tao window + wry WebView and
+    // drives show/hide/warm-release from `UiCommand`s posted by the
+    // shim. The runtime worker thread (above) drains `event_rx` and
+    // calls `on_event` for each `OverlayEvent`; the host flips
+    // `is_running` to `false` when its event loop exits.
+    let host_result = crate::overlay::host::run(host);
+
+    // Drop the hotkey listener (unregisters the global hotkey) and
+    // wait for the worker thread to finish its `run_message_pump`.
+    drop(hotkey_listener.lock().unwrap().take());
+    let _ = worker_join.join();
+
+    host_result.map_err(RuntimeError::Overlay)
+}
+
+/// All mutable state owned by the runtime worker thread. The
+/// `on_event` method is the body of the legacy Win32 message-pump
+/// callback, refactored from a closure into a method on a struct
+/// so it can be called from the worker thread.
+struct RuntimeWorker {
+    overlay: NativeOverlayShell,
+    service: Arc<Mutex<CoreService>>,
+    runtime_config: Config,
+    background_index_refresh: BackgroundIndexRefresh,
+    plugin_registry: PluginRegistry,
+    search_worker: SearchWorker,
+    overlay_state: OverlayState,
+    max_results: usize,
+    config_watcher: RuntimeConfigWatcher,
+    current_results: Vec<crate::model::SearchItem>,
+    suppressed_uninstall_titles: Vec<String>,
+    pending_uninstall_confirmation: Option<PendingUninstallConfirmation>,
+    selected_index: usize,
+    last_query: String,
+    last_sent_generation: u64,
+    search_session: OverlaySearchSession,
+    hotkey_issue_status: Option<String>,
+    event_rx: crossbeam_channel::Receiver<OverlayEvent>,
+    is_running: Arc<AtomicBool>,
+    tray_gm_tx: crossbeam_channel::Sender<bool>,
+    tray_hi_tx: crossbeam_channel::Sender<bool>,
+    hotkey_listener: Arc<Mutex<Option<HotkeyListener>>>,
+    event_tx: crossbeam_channel::Sender<OverlayEvent>,
+    hotkey_check_counter: u32,
+    last_memory_log: Instant,
+}
+
+impl RuntimeWorker {
+    fn run(self) {
+        // Share `self` with the closure via `Rc<RefCell<>>`. The
+        // worker thread is single-threaded, so `RefCell::borrow_mut`
+        // never panics from contention (only from aliasing, which
+        // the closure doesn't do).
+        let shared: Rc<RefCell<Self>> = Rc::new(RefCell::new(self));
+        let shared_for_closure = shared.clone();
+        let (overlay, event_rx, is_running) = {
+            let guard = shared.borrow();
+            (
+                guard.overlay.clone(),
+                guard.event_rx.clone(),
+                guard.is_running.clone(),
+            )
+        };
+        let _ = overlay.run_message_pump(&event_rx, &is_running, move |event| {
+            let _ = shared_for_closure.borrow_mut().on_event(event);
+        });
+    }
+
+    fn on_event(&mut self, event: OverlayEvent) {
+        // Periodic hotkey thread health check: if the listener thread
+        // has crashed, attempt to restart it.
+        self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
+
+        // Periodic memory logging every 30 seconds
+        if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
+            if let Ok(guard) = self.service.lock() {
+                guard.log_memory_stats();
+            }
+            self.last_memory_log = Instant::now();
+        }
+
+        if self.hotkey_check_counter % 32 == 0 {
+            let needs_restart = match self.hotkey_listener.lock() {
+                Ok(guard) => match guard.as_ref() {
+                    Some(listener) => !listener.is_alive(),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+            if needs_restart {
+                log_warn("[nex] hotkey listener thread died; attempting restart");
+                if let Ok(mut guard) = self.hotkey_listener.lock() {
+                    *guard = None;
+                    match HotkeyListener::start(&self.runtime_config.hotkey, self.event_tx.clone())
+                    {
+                        Ok(new_listener) => {
+                            log_info("[nex] hotkey listener restarted successfully");
+                            *guard = Some(new_listener);
+                        }
+                        Err(error) => {
+                            log_warn(&format!(
+                                "[nex] hotkey listener restart failed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // The message-pump callback must never block on the service
+        // lock. The service is shared with the background indexer
+        // thread and the per-root directory-watcher consumer threads,
+        // and any blocking wait here would prevent the message pump
+        // from delivering WM_HOTKEY and other input. We use `try_lock`
+        // and skip the tick if a worker is currently holding the
+        // service; the work is re-attempted on the next event.
+        let was_indexing_complete = self
+            .background_index_refresh
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        if let Ok(svc) = self.service.try_lock() {
             maybe_apply_runtime_config_reload(
-                &overlay,
-                &*service.lock().unwrap(),
-                &mut runtime_config,
-                &mut plugin_registry,
-                &mut search_session,
-                &mut pending_uninstall_confirmation,
-                &mut max_results,
-                &mut config_watcher,
-                &mut background_index_refresh,
+                &self.overlay,
+                &*svc,
+                &mut self.runtime_config,
+                &mut self.plugin_registry,
+                &mut self.search_session,
+                &mut self.pending_uninstall_confirmation,
+                &mut self.max_results,
+                &mut self.config_watcher,
+                &mut self.background_index_refresh,
             );
             maybe_apply_background_index_refresh(
-                &*service.lock().unwrap(),
-                &mut background_index_refresh,
-                &runtime_config,
+                &*svc,
+                &mut self.background_index_refresh,
+                &self.runtime_config,
             );
-            maybe_show_background_index_ready_notice(&overlay, &mut background_index_refresh);
-            match event {
-                OverlayEvent::Hotkey(_) => {
-                    log_info("[nex] hotkey_event received");
-                    let overlay_visible = overlay.is_visible();
-                    overlay_state.set_visible(overlay_visible);
-                    if overlay.query_text().trim().starts_with('=') {
-                        let query = overlay.query_text();
-                        if let Some(expr) = query.trim().strip_prefix('=') {
-                            let expr = expr.trim();
-                            if let Ok(value) = crate::calculator::evaluate(expr) {
-                                let display = format_result(value);
-                                let status_text = if copy_to_clipboard(&display) {
-                                    format!("Copied: {display}")
-                                } else {
-                                    format!("= {display}")
-                                };
-                                overlay.set_status_text(&status_text);
-                            }
+
+            // Start per-root file watchers the first time the index
+            // cache becomes usable. The handle is idempotent: it is a
+            // no-op if a watcher is already running.
+            if self.background_index_refresh.cache_applied {
+                if let Err(error) = svc.start_file_watchers(&self.service) {
+                    log_warn(&format!("[nex] directory_watcher start failed: {error}"));
+                }
+            }
+        } else {
+            // Service lock is held by a worker. The config reloader,
+            // index-refresh applicator, and watcher starter will
+            // retry on the next event; the cost of skipping a tick
+            // is bounded by the worker's per-item critical section.
+        }
+
+        if !was_indexing_complete
+            && self
+                .background_index_refresh
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire)
+            && !self.last_query.is_empty()
+        {
+            let pending_query = self.last_query.clone();
+            self.last_query.clear();
+            apply_query_change(
+                pending_query,
+                &self.overlay,
+                &self.search_worker,
+                &self.runtime_config,
+                self.max_results,
+                &mut self.pending_uninstall_confirmation,
+                &mut self.current_results,
+                &mut self.selected_index,
+                &mut self.last_query,
+                &mut self.last_sent_generation,
+            );
+        }
+        match event {
+            OverlayEvent::Hotkey(_) => {
+                log_info("[nex] hotkey_event received");
+                let overlay_visible = self.overlay.is_visible();
+                self.overlay_state.set_visible(overlay_visible);
+                if self.overlay.query_text().trim().starts_with('=') {
+                    let query = self.overlay.query_text();
+                    if let Some(expr) = query.trim().strip_prefix('=') {
+                        let expr = expr.trim();
+                        if let Ok(value) = crate::calculator::evaluate(expr) {
+                            let display = format_result(value);
+                            let status_text = if copy_to_clipboard(&display) {
+                                format!("Copied: {display}")
+                            } else {
+                                format!("= {display}")
+                            };
+                            self.overlay.set_status_text(&status_text);
                         }
-                        return;
                     }
-                    if !overlay_visible && should_suppress_hotkey_for_game_mode(&runtime_config) {
-                        log_info(
-                            "[nex] hotkey ignored because game mode is active for the foreground app",
+                    return;
+                }
+                if !overlay_visible
+                    && should_suppress_hotkey_for_game_mode(&self.runtime_config)
+                {
+                    log_info(
+                        "[nex] hotkey ignored because game mode is active for the foreground app",
+                    );
+                    return;
+                }
+                let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
+                match action {
+                    HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
+                        reconcile_suppressed_uninstall_titles(
+                            &mut self.suppressed_uninstall_titles,
                         );
-                        return;
-                    }
-                    let action = overlay_state.on_hotkey(overlay.has_focus());
-                    match action {
-                        HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
-                            reconcile_suppressed_uninstall_titles(&mut suppressed_uninstall_titles);
-                            overlay.show_and_focus();
-                            if runtime_config.clipboard_enabled {
-                                let _ = clipboard_history::maybe_capture_latest(&runtime_config);
-                            }
-                            if overlay.query_text().trim().is_empty() {
-                                set_idle_overlay_state(&overlay);
-                                if let Some(issue) = hotkey_issue_status.as_deref() {
-                                    overlay.set_status_text(issue);
-                                }
-                                maybe_show_background_index_ready_notice(
-                                    &overlay,
-                                    &mut background_index_refresh,
-                                );
+                        self.overlay.show_and_focus();
+                        if self.runtime_config.clipboard_enabled {
+                            let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
+                        }
+                        if self.overlay.query_text().trim().is_empty() {
+                            set_idle_overlay_state(&self.overlay);
+                            if let Some(issue) = self.hotkey_issue_status.as_deref() {
+                                self.overlay.set_status_text(issue);
                             }
                         }
-                        HotkeyAction::Hide => {
-                            overlay.hide();
-                            reset_overlay_session(
-                                &overlay,
-                                &mut current_results,
-                                &mut selected_index,
-                            );
-                            pending_uninstall_confirmation = None;
-                            last_query.clear();
-                            last_sent_generation = 0;
-                            search_session.clear();
-                            search_worker.clear_session();
-                            maybe_apply_background_index_refresh(
-                                &*service.lock().unwrap(),
-                                &mut background_index_refresh,
-                                &runtime_config,
-                            );
-                        }
                     }
-                }
-                OverlayEvent::ExternalShow => {
-                    overlay_state.set_visible(overlay.is_visible());
-                    reconcile_suppressed_uninstall_titles(&mut suppressed_uninstall_titles);
-                    overlay.show_and_focus();
-                    if runtime_config.clipboard_enabled {
-                        let _ = clipboard_history::maybe_capture_latest(&runtime_config);
-                    }
-                    if overlay.query_text().trim().is_empty() {
-                        set_idle_overlay_state(&overlay);
-                        if let Some(issue) = hotkey_issue_status.as_deref() {
-                            overlay.set_status_text(issue);
-                        }
-                        maybe_show_background_index_ready_notice(
-                            &overlay,
-                            &mut background_index_refresh,
-                        );
-                    }
-                }
-                OverlayEvent::ExternalQuit => {
-                    overlay.hide_now();
-                    last_query.clear();
-                    last_sent_generation = 0;
-                    search_session.clear();
-                    unsafe {
-                        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-                    }
-                }
-                OverlayEvent::TrayToggleGameMode => {
-                    toggle_game_mode_from_tray(&overlay, &mut runtime_config);
-                }
-                OverlayEvent::TrayCheckForUpdates => {
-                    match launch_stable_updater() {
-                        Ok(_) => overlay.set_status_text("Updater launched"),
-                        Err(error) => {
-                            log_warn(&format!("[nex] updater launch failed from tray: {error}"));
-                            overlay.set_status_text("Could not launch updater");
-                        }
-                    }
-                }
-                OverlayEvent::Escape => {
-                    if overlay_state.on_escape() {
-                        overlay.hide_now();
+                    HotkeyAction::Hide => {
+                        self.overlay.hide();
                         reset_overlay_session(
-                            &overlay,
-                            &mut current_results,
-                            &mut selected_index,
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
                         );
-                        pending_uninstall_confirmation = None;
-                        last_query.clear();
-                        last_sent_generation = 0;
-                        search_session.clear();
+                        self.pending_uninstall_confirmation = None;
+                        self.last_query.clear();
+                        self.last_sent_generation = 0;
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                        // Drain any in-flight results still sitting in the
+                        // channel so they don't overwrite the idle state on
+                        // the next show.
+                        while self.search_worker.try_recv().is_some() {}
+                        maybe_apply_background_index_refresh(
+                            &*self.service.lock().unwrap(),
+                            &mut self.background_index_refresh,
+                            &self.runtime_config,
+                        );
                     }
                 }
-                OverlayEvent::QueryChanged(query) => {
-                    apply_query_change(
-                        query,
-                        &overlay,
-                        &search_worker,
-                        &runtime_config,
-                        max_results,
-                        &mut pending_uninstall_confirmation,
-                        &mut current_results,
-                        &mut selected_index,
-                        &mut last_query,
-                        &mut last_sent_generation,
-                    );
+            }
+            OverlayEvent::ExternalShow => {
+                reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
+                self.overlay.show_and_focus();
+                self.overlay_state.set_visible(true);
+                if self.runtime_config.clipboard_enabled {
+                    let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                 }
-                OverlayEvent::SearchResultsReady => {
-                    apply_search_results(
-                        &search_worker,
-                        &overlay,
-                        &runtime_config,
-                        &background_index_refresh,
-                        &suppressed_uninstall_titles,
-                        &mut current_results,
-                        &mut selected_index,
-                        last_sent_generation,
-                    );
+                if self.overlay.query_text().trim().is_empty() {
+                    set_idle_overlay_state(&self.overlay);
+                    if let Some(issue) = self.hotkey_issue_status.as_deref() {
+                        self.overlay.set_status_text(issue);
+                    }
                 }
-                OverlayEvent::MoveSelection(direction) => {
-                    if current_results.is_empty() {
+            }
+            OverlayEvent::ExternalQuit => {
+                self.overlay.hide_now();
+                self.last_query.clear();
+                self.last_sent_generation = 0;
+                self.search_session.clear();
+                self.search_worker.clear_session();
+                while self.search_worker.try_recv().is_some() {}
+                self.overlay.quit_if_running();
+            }
+            OverlayEvent::TrayToggleGameMode => {
+                toggle_game_mode_from_tray(&self.overlay, &mut self.runtime_config);
+                let _ = self.tray_gm_tx.send(self.runtime_config.game_mode_enabled);
+            }
+            OverlayEvent::TrayCheckForUpdates => {
+                match launch_stable_updater() {
+                    Ok(_) => self.overlay.set_status_text("Updater launched"),
+                    Err(error) => {
+                        log_warn(&format!("[nex] updater launch failed from tray: {error}"));
+                        self.overlay.set_status_text("Could not launch updater");
+                    }
+                }
+            }
+            OverlayEvent::Escape => {
+                if self.overlay_state.on_escape() {
+                    self.overlay.hide();
+                    reset_overlay_session(
+                        &self.overlay,
+                        &mut self.current_results,
+                        &mut self.selected_index,
+                    );
+                    self.pending_uninstall_confirmation = None;
+                    self.last_query.clear();
+                    self.last_sent_generation = 0;
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                        while self.search_worker.try_recv().is_some() {}
+                    while self.search_worker.try_recv().is_some() {}
+                }
+            }
+            OverlayEvent::QueryChanged(query) => {
+                apply_query_change(
+                    query,
+                    &self.overlay,
+                    &self.search_worker,
+                    &self.runtime_config,
+                    self.max_results,
+                    &mut self.pending_uninstall_confirmation,
+                    &mut self.current_results,
+                    &mut self.selected_index,
+                    &mut self.last_query,
+                    &mut self.last_sent_generation,
+                );
+            }
+            OverlayEvent::SearchResultsReady => {
+                // Don't apply results from stale pre-hide searches
+                // that complete after the overlay is re-shown with
+                // an empty query.
+                if self.overlay.query_text().trim().is_empty() {
+                    let _ = self.search_worker.try_recv();
+                    return;
+                }
+                apply_search_results(
+                    &self.search_worker,
+                    &self.overlay,
+                    &self.runtime_config,
+                    &self.background_index_refresh,
+                    &self.suppressed_uninstall_titles,
+                    &mut self.current_results,
+                    &mut self.selected_index,
+                    self.last_sent_generation,
+                );
+            }
+            OverlayEvent::Submit => {
+                if self.current_results.is_empty() {
+                    if self.overlay.query_text().trim().is_empty() {
+                        set_idle_overlay_state(&self.overlay);
+                        self.overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
+                    } else {
+                        let parsed_query = ParsedQuery::parse(
+                            self.overlay.query_text().trim(),
+                            self.runtime_config.search_dsl_enabled,
+                        );
+                        set_status_row_overlay_state(
+                            &self.overlay,
+                            if parsed_query.command_mode {
+                                STATUS_ROW_NO_COMMAND_RESULTS
+                            } else {
+                                STATUS_ROW_NO_RESULTS
+                            },
+                        );
+                    }
+                    return;
+                }
+
+                if let Some(list_selection) = self.overlay.selected_index() {
+                    self.selected_index = list_selection.min(self.current_results.len() - 1);
+                }
+
+                let selected = &self.current_results[self.selected_index];
+                if self.pending_uninstall_confirmation.is_some() {
+                    let selected_id = selected.id.clone();
+                    if selected_id == ACTION_UNINSTALL_CONFIRM_ID {
+                        let Some(pending) = self.pending_uninstall_confirmation.take() else {
+                            return;
+                        };
+                        self.overlay.hide_now();
+                        self.overlay_state.on_escape();
+                        match execute_action_selection(
+                            &*self.service.lock().unwrap(),
+                            &self.runtime_config,
+                            &self.plugin_registry,
+                            &pending.uninstall_action,
+                        ) {
+                            Ok(()) => {
+                                track_uninstall_title_suppression(
+                                    &mut self.suppressed_uninstall_titles,
+                                    pending.uninstall_action.title.as_str(),
+                                );
+                                self.overlay.set_status_text("");
+                                reset_overlay_session(
+                                    &self.overlay,
+                                    &mut self.current_results,
+                                    &mut self.selected_index,
+                                );
+                                self.last_query.clear();
+                                self.last_sent_generation = 0;
+                                self.search_session.clear();
+                                self.search_worker.clear_session();
+                            }
+                            Err(error) => {
+                                if should_suppress_failed_uninstall(error.as_str()) {
+                                    track_uninstall_title_suppression(
+                                        &mut self.suppressed_uninstall_titles,
+                                        pending.uninstall_action.title.as_str(),
+                                    );
+                                    self.current_results = pending.previous_results;
+                                    filter_suppressed_uninstall_results(
+                                        &mut self.current_results,
+                                        &self.suppressed_uninstall_titles,
+                                    );
+                                    self.selected_index = pending
+                                        .previous_selected_index
+                                        .min(self.current_results.len().saturating_sub(1));
+                                    if self.current_results.is_empty() {
+                                        set_status_row_overlay_state(
+                                            &self.overlay,
+                                            if pending.previous_command_mode {
+                                                STATUS_ROW_NO_COMMAND_RESULTS
+                                            } else {
+                                                STATUS_ROW_NO_RESULTS
+                                            },
+                                        );
+                                    } else {
+                                        let rows = overlay_rows(
+                                            &self.current_results,
+                                            pending.previous_command_mode,
+                                        );
+                                        self.overlay.set_results(&rows, self.selected_index);
+                                    }
+                                    self.overlay.set_status_text(
+                                        "Uninstall entry is stale and was hidden",
+                                    );
+                                } else {
+                                    self.pending_uninstall_confirmation = Some(pending);
+                                    self.overlay.show_and_focus();
+                                    self.overlay
+                                        .set_status_text(&format!("Launch error: {error}"));
+                                }
+                            }
+                        }
                         return;
                     }
 
-                    selected_index =
-                        next_selection_index(selected_index, current_results.len(), direction);
-                    overlay.set_selected_index(selected_index);
-                }
-                OverlayEvent::Submit => {
-                    if current_results.is_empty() {
-                        if overlay.query_text().trim().is_empty() {
-                            set_idle_overlay_state(&overlay);
-                            overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
-                        } else if should_show_indexing_status(&background_index_refresh) {
-                            set_status_row_overlay_state(&overlay, STATUS_ROW_INDEXING);
-                        } else {
-                            let parsed_query = ParsedQuery::parse(
-                                overlay.query_text().trim(),
-                                runtime_config.search_dsl_enabled,
-                            );
+                    if selected_id == ACTION_UNINSTALL_CANCEL_ID {
+                        let Some(pending) = self.pending_uninstall_confirmation.take() else {
+                            return;
+                        };
+                        self.current_results = pending.previous_results;
+                        self.selected_index = pending
+                            .previous_selected_index
+                            .min(self.current_results.len().saturating_sub(1));
+                        if self.current_results.is_empty() {
                             set_status_row_overlay_state(
-                                &overlay,
-                                if parsed_query.command_mode {
+                                &self.overlay,
+                                if pending.previous_command_mode {
                                     STATUS_ROW_NO_COMMAND_RESULTS
                                 } else {
                                     STATUS_ROW_NO_RESULTS
                                 },
                             );
-                        }
-                        return;
-                    }
-
-                    if let Some(list_selection) = overlay.selected_index() {
-                        selected_index = list_selection.min(current_results.len() - 1);
-                    }
-
-                    let selected = &current_results[selected_index];
-                    if pending_uninstall_confirmation.is_some() {
-                        let selected_id = selected.id.clone();
-                        if selected_id == ACTION_UNINSTALL_CONFIRM_ID {
-                            let Some(pending) = pending_uninstall_confirmation.take() else {
-                                return;
-                            };
-                            overlay.hide_now();
-                            overlay_state.on_escape();
-                            match execute_action_selection(
-                                &*service.lock().unwrap(),
-                                &runtime_config,
-                                &plugin_registry,
-                                &pending.uninstall_action,
-                            ) {
-                                Ok(()) => {
-                                    track_uninstall_title_suppression(
-                                        &mut suppressed_uninstall_titles,
-                                        pending.uninstall_action.title.as_str(),
-                                    );
-                                    overlay.set_status_text("");
-                                    reset_overlay_session(
-                                        &overlay,
-                                        &mut current_results,
-                                        &mut selected_index,
-                                    );
-                                    last_query.clear();
-                                    last_sent_generation = 0;
-                                    search_session.clear();
-                            search_worker.clear_session();
-                                }
-                                Err(error) => {
-                                    if should_suppress_failed_uninstall(error.as_str()) {
-                                        track_uninstall_title_suppression(
-                                            &mut suppressed_uninstall_titles,
-                                            pending.uninstall_action.title.as_str(),
-                                        );
-                                        current_results = pending.previous_results;
-                                        filter_suppressed_uninstall_results(
-                                            &mut current_results,
-                                            &suppressed_uninstall_titles,
-                                        );
-                                        selected_index = pending
-                                            .previous_selected_index
-                                            .min(current_results.len().saturating_sub(1));
-                                        if current_results.is_empty() {
-                                            set_status_row_overlay_state(
-                                                &overlay,
-                                                if pending.previous_command_mode {
-                                                    STATUS_ROW_NO_COMMAND_RESULTS
-                                                } else {
-                                                    STATUS_ROW_NO_RESULTS
-                                                },
-                                            );
-                                        } else {
-                                            let rows = overlay_rows(
-                                                &current_results,
-                                                pending.previous_command_mode,
-                                            );
-                                            overlay.set_results(&rows, selected_index);
-                                        }
-                                        overlay.set_status_text(
-                                            "Uninstall entry is stale and was hidden",
-                                        );
-                                    } else {
-                                        pending_uninstall_confirmation = Some(pending);
-                                        overlay.show_and_focus();
-                                        overlay
-                                            .set_status_text(&format!("Launch error: {error}"));
-                                    }
-                                }
-                            }
-                            return;
-                        }
-
-                        if selected_id == ACTION_UNINSTALL_CANCEL_ID {
-                            let Some(pending) = pending_uninstall_confirmation.take() else {
-                                return;
-                            };
-                            current_results = pending.previous_results;
-                            selected_index = pending
-                                .previous_selected_index
-                                .min(current_results.len().saturating_sub(1));
-                            if current_results.is_empty() {
-                                set_status_row_overlay_state(
-                                    &overlay,
-                                    if pending.previous_command_mode {
-                                        STATUS_ROW_NO_COMMAND_RESULTS
-                                    } else {
-                                        STATUS_ROW_NO_RESULTS
-                                    },
-                                );
-                            } else {
-                                let rows =
-                                    overlay_rows(&current_results, pending.previous_command_mode);
-                                overlay.set_results(&rows, selected_index);
-                            }
-                            overlay.set_status_text("");
-                            return;
-                        }
-
-                        pending_uninstall_confirmation = None;
-                    }
-
-                    let selected_is_uninstall = selected
-                        .id
-                        .starts_with(crate::uninstall_registry::ACTION_UNINSTALL_PREFIX);
-
-                    if selected_is_uninstall {
-                        let parsed_query = ParsedQuery::parse(
-                            overlay.query_text().trim(),
-                            runtime_config.search_dsl_enabled,
-                        );
-                        pending_uninstall_confirmation = Some(PendingUninstallConfirmation {
-                            uninstall_action: selected.clone(),
-                            previous_results: current_results.clone(),
-                            previous_selected_index: selected_index,
-                            previous_command_mode: parsed_query.command_mode,
-                        });
-                        current_results = uninstall_confirmation_results(selected);
-                        selected_index = 0;
-                        let rows = overlay_rows(&current_results, true);
-                        overlay.set_results(&rows, selected_index);
-                        overlay.set_status_text("");
-                        return;
-                    }
-
-                    if selected.id == crate::action_registry::ACTION_TRIM_MEMORY_ID {
-                        search_session.clear();
-                        overlay.trim_runtime_memory();
-                        overlay.set_status_text("Memory caches trimmed");
-                        return;
-                    }
-
-                    match launch_overlay_selection(
-                        &*service.lock().unwrap(),
-                        &runtime_config,
-                        &plugin_registry,
-                        &current_results,
-                        selected_index,
-                        last_query.as_str(),
-                    ) {
-                        Ok(()) => {
-                            overlay.set_status_text("");
-                            overlay.hide_now();
-                            overlay_state.on_escape();
-                            reset_overlay_session(
-                                &overlay,
-                                &mut current_results,
-                                &mut selected_index,
+                        } else {
+                            let rows = overlay_rows(
+                                &self.current_results,
+                                pending.previous_command_mode,
                             );
-                            pending_uninstall_confirmation = None;
-                            last_query.clear();
-                            last_sent_generation = 0;
-                            search_session.clear();
-                            search_worker.clear_session();
+                            self.overlay.set_results(&rows, self.selected_index);
                         }
-                        Err(error) => {
-                            overlay.set_status_text(&format!("Launch error: {error}"));
-                        }
+                        self.overlay.set_status_text("");
+                        return;
+                    }
+
+                    self.pending_uninstall_confirmation = None;
+                }
+
+                let selected_is_uninstall = selected
+                    .id
+                    .starts_with(crate::uninstall_registry::ACTION_UNINSTALL_PREFIX);
+
+                if selected_is_uninstall {
+                    let parsed_query = ParsedQuery::parse(
+                        self.overlay.query_text().trim(),
+                        self.runtime_config.search_dsl_enabled,
+                    );
+                    self.pending_uninstall_confirmation = Some(PendingUninstallConfirmation {
+                        uninstall_action: selected.clone(),
+                        previous_results: self.current_results.clone(),
+                        previous_selected_index: self.selected_index,
+                        previous_command_mode: parsed_query.command_mode,
+                    });
+                    self.current_results = uninstall_confirmation_results(selected);
+                    self.selected_index = 0;
+                    let rows = overlay_rows(&self.current_results, true);
+                    self.overlay.set_results(&rows, self.selected_index);
+                    self.overlay.set_status_text("");
+                    return;
+                }
+
+                if selected.id == crate::action_registry::ACTION_TRIM_MEMORY_ID {
+                    self.search_session.clear();
+                    self.overlay.trim_runtime_memory();
+                    self.overlay.set_status_text("Memory caches trimmed");
+                    return;
+                }
+
+                match launch_overlay_selection(
+                    &*self.service.lock().unwrap(),
+                    &self.runtime_config,
+                    &self.plugin_registry,
+                    &self.current_results,
+                    self.selected_index,
+                    self.last_query.as_str(),
+                ) {
+                    Ok(()) => {
+                        self.overlay.set_status_text("");
+                        self.overlay.hide_now();
+                        self.overlay_state.on_escape();
+                        reset_overlay_session(
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
+                        );
+                        self.pending_uninstall_confirmation = None;
+                        self.last_query.clear();
+                        self.last_sent_generation = 0;
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                    }
+                    Err(error) => {
+                        self.overlay
+                            .set_status_text(&format!("Launch error: {error}"));
                     }
                 }
             }
-        })
-        .map_err(RuntimeError::Overlay)?;
-    registrar.unregister_all()?;
-    Ok(())
+            _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -607,7 +972,7 @@ fn apply_query_change(
                     let display = format_result(value);
                     let row = OverlayRow {
                         role: OverlayRowRole::Calculator,
-                        result_index: 0,
+                        result_index: Some(0),
                         kind: "calculator".into(),
                         title: format!("= {expr}"),
                         path: display,
@@ -618,7 +983,7 @@ fn apply_query_change(
                 Err(error) => {
                     let row = OverlayRow {
                         role: OverlayRowRole::Status,
-                        result_index: -1,
+                        result_index: None,
                         kind: String::new(),
                         title: format!("{error}"),
                         path: String::new(),
@@ -680,18 +1045,23 @@ fn apply_search_results(
     *selected_index = 0;
 
     if current_results.is_empty() {
-        if should_show_indexing_status(background_index_refresh) {
-            set_status_row_overlay_state(overlay, STATUS_ROW_INDEXING);
+        let indexing_in_progress = !background_index_refresh
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire);
+        // Only show "Indexing, please wait…" on first-time indexing
+        // (empty cache).  Async background refreshes on a populated
+        // index are invisible — the existing cache is queryable.
+        let message = if indexing_in_progress
+            && background_index_refresh.initial_cache_empty
+            && !command_mode
+        {
+            "Indexing, please wait..."
+        } else if command_mode {
+            STATUS_ROW_NO_COMMAND_RESULTS
         } else {
-            set_status_row_overlay_state(
-                overlay,
-                if command_mode {
-                    STATUS_ROW_NO_COMMAND_RESULTS
-                } else {
-                    STATUS_ROW_NO_RESULTS
-                },
-            );
-        }
+            STATUS_ROW_NO_RESULTS
+        };
+        set_status_row_overlay_state(overlay, message);
     } else {
         let rows = overlay_rows(current_results, command_mode);
         overlay.set_results(&rows, *selected_index);
@@ -703,7 +1073,11 @@ fn format_result(value: f64) -> String {
     if value.is_nan() {
         "NaN".into()
     } else if value.is_infinite() {
-        if value.is_sign_positive() { "∞".into() } else { "-∞".into() }
+        if value.is_sign_positive() {
+            "∞".into()
+        } else {
+            "-∞".into()
+        }
     } else if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     } else if value.abs() > 1e10 || value.abs() < 1e-4 {
@@ -728,7 +1102,9 @@ fn copy_to_clipboard(text: &str) -> bool {
             windows_sys::Win32::System::Memory::GMEM_MOVEABLE,
             (len_bytes + 2) as usize,
         );
-        if hglob.is_null() { return false; }
+        if hglob.is_null() {
+            return false;
+        }
         let lock = windows_sys::Win32::System::Memory::GlobalLock(hglob);
         if lock.is_null() {
             windows_sys::Win32::Foundation::GlobalFree(hglob);

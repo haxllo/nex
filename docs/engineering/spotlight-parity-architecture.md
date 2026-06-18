@@ -1,5 +1,9 @@
 # Spotlight-Parity Architecture (Windows Nex)
 
+> **UNWANTED — DEPRECATED**: This is a v6.x-era (pre-restart) architecture document. The active roadmap lives in [`../plans/audit-and-roadmap.md`](../plans/audit-and-roadmap.md), and the implementation decisions are in [`../plans/everything-first-migration.md`](../plans/everything-first-migration.md). The progress updates (2026-02-13, 02-14) are pre-restart and not relevant to the current v1.3.0 codebase. Do not update this file.
+>
+> If "Spotlight parity" planning is ever revived, it should go in the active audit-and-roadmap plan as a P0/P1 item, not in this file.
+
 ## Goal
 
 Deliver a Spotlight-like launcher quality bar while preserving Nex's runtime performance targets.

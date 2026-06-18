@@ -15,7 +15,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 13;
+pub const CURRENT_CONFIG_VERSION: u32 = 16;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -40,10 +40,12 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
+    "ui_warm_release_ms",
     "index_max_items_total",
     "index_max_items_per_root",
     "index_max_items_per_query_seed",
-    "everything_search_enabled",
+    "search_backend",
+    "file_discovery_backend",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -68,6 +70,110 @@ impl SearchMode {
             "clipboard" | "clip" => Some(Self::Clipboard),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchBackend {
+    #[default]
+    Tantivy,
+    Fts5,
+}
+
+impl SearchBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "tantivy" => Some(Self::Tantivy),
+            "fts5" => Some(Self::Fts5),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryBackend {
+    #[default]
+    Auto,
+    Everything,
+    Walkdir,
+}
+
+impl DiscoveryBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "auto" => Some(Self::Auto),
+            "everything" | "everything64" | "everything32" => Some(Self::Everything),
+            "walkdir" | "walk" => Some(Self::Walkdir),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Everything => "everything",
+            Self::Walkdir => "walkdir",
+        }
+    }
+}
+
+#[cfg(test)]
+mod discovery_backend_tests {
+    use super::*;
+
+    #[test]
+    fn parse_known_values() {
+        assert_eq!(DiscoveryBackend::parse("auto"), Some(DiscoveryBackend::Auto));
+        assert_eq!(
+            DiscoveryBackend::parse("everything"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("EVERYTHING"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("walkdir"),
+            Some(DiscoveryBackend::Walkdir)
+        );
+    }
+
+    #[test]
+    fn parse_accepts_dll_aliases() {
+        assert_eq!(
+            DiscoveryBackend::parse("everything64"),
+            Some(DiscoveryBackend::Everything)
+        );
+        assert_eq!(
+            DiscoveryBackend::parse("everything32"),
+            Some(DiscoveryBackend::Everything)
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown() {
+        assert_eq!(DiscoveryBackend::parse(""), None);
+        assert_eq!(DiscoveryBackend::parse("foo"), None);
+    }
+
+    #[test]
+    fn as_str_round_trip() {
+        for v in [
+            DiscoveryBackend::Auto,
+            DiscoveryBackend::Everything,
+            DiscoveryBackend::Walkdir,
+        ] {
+            assert_eq!(DiscoveryBackend::parse(v.as_str()), Some(v));
+        }
+    }
+
+    #[test]
+    fn default_is_auto() {
+        assert_eq!(DiscoveryBackend::default(), DiscoveryBackend::Auto);
     }
 }
 
@@ -123,13 +229,17 @@ pub struct Config {
     pub clipboard_enabled: bool,
     pub clipboard_retention_minutes: u32,
     pub clipboard_exclude_sensitive_patterns: Vec<String>,
-    pub everything_search_enabled: bool,
+    pub search_backend: SearchBackend,
+    pub file_discovery_backend: DiscoveryBackend,
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
     pub game_mode_enabled: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
+    /// How long (ms) the WebView stays resident after the overlay is
+    /// hidden before being torn down to free memory (warm-then-release).
+    pub ui_warm_release_ms: u32,
     pub index_max_items_total: u32,
     pub index_max_items_per_root: u32,
     pub index_max_items_per_query_seed: u32,
@@ -148,7 +258,7 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             show_files: false,
             show_folders: false,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Ctrl+Shift+Space".to_string(),
             launch_at_startup: false,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."
@@ -177,13 +287,15 @@ impl Default for Config {
                 "apikey".to_string(),
                 "api_key".to_string(),
             ],
-            everything_search_enabled: true,
+            search_backend: SearchBackend::Tantivy,
+            file_discovery_backend: DiscoveryBackend::Auto,
             plugins_enabled: true,
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
             game_mode_enabled: false,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
+            ui_warm_release_ms: 5_000,
             index_max_items_total: 120_000,
             index_max_items_per_root: 40_000,
             index_max_items_per_query_seed: 5_000,
@@ -296,7 +408,9 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                 .find(|candidate| candidate.exists())
             {
                 let raw = std::fs::read_to_string(&legacy_path)?;
-                let mut cfg: Config = parse_text(&raw)?;
+                let mut cfg: Config = parse_text(&raw).map_err(|e| {
+                    ConfigError::Parse(format!("Error in {}: {e}", legacy_path.display()))
+                })?;
                 let source_version = cfg.version;
                 cfg.config_path = resolved_path.clone();
 
@@ -329,7 +443,9 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     let raw = std::fs::read_to_string(&resolved_path)?;
-    let mut cfg: Config = parse_text(&raw)?;
+    let mut cfg: Config = parse_text(&raw).map_err(|e| {
+        ConfigError::Parse(format!("Error in {}: {e}", resolved_path.display()))
+    })?;
     let source_version = cfg.version;
     cfg.config_path = resolved_path.clone();
 
@@ -360,13 +476,43 @@ pub fn save_to_path(cfg: &Config, path: &Path) -> Result<(), ConfigError> {
         std::fs::create_dir_all(parent)?;
     }
 
+    if path.exists() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Some(parent) = path.parent() {
+            let backup_path = parent.join(format!("config.backup-{}.toml", stamp));
+            let _ = std::fs::copy(path, &backup_path);
+        }
+    }
+
     let encoded = if is_toml_path(path) {
         toml::to_string_pretty(cfg)
             .map_err(|error| ConfigError::Parse(format!("toml encode error: {error}")))?
     } else {
         serde_json::to_string_pretty(cfg)?
     };
-    write_atomic(path, &encoded)
+    write_atomic(path, &encoded)?;
+
+    if let Some(parent) = path.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            let mut backups: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("config.backup-")
+                })
+                .collect();
+            backups.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+            for entry in backups.iter().take(backups.len().saturating_sub(5)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError> {
@@ -536,14 +682,17 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     }
     text.push_str("  ],\n\n");
 
-    text.push_str("  // Use voidtools Everything SDK for instant file/folder search.\n");
-    text.push_str("  // Requires Everything (voidtools.com) to be installed.\n");
-    text.push_str("  \"everything_search_enabled\": ");
-    text.push_str(if cfg.everything_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
+    text.push_str("  // Search backend for full-text indexed file/folder search.\n");
+    text.push_str("  // Options: \"tantivy\" (default) | \"fts5\"\n");
+    text.push_str(
+        "  // Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n",
+    );
+    text.push_str("  // FTS5 uses SQLite's built-in FTS5 engine with porter stemming.\n");
+    text.push_str("  \"search_backend\": ");
+    text.push_str(&json_string(match cfg.search_backend {
+        SearchBackend::Tantivy => "tantivy",
+        SearchBackend::Fts5 => "fts5",
+    }));
     text.push_str(",\n\n");
 
     text.push_str("  // Plugin SDK settings\n");
@@ -585,6 +734,10 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
     text.push_str("  // active memory target in MB (valid range: 20..512)\n");
     text.push_str("  \"active_memory_target_mb\": ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
+    text.push_str(",\n");
+    text.push_str("  // how long (ms) the WebView stays resident after hide before teardown (valid range: 500..600000)\n");
+    text.push_str("  \"ui_warm_release_ms\": ");
+    text.push_str(&cfg.ui_warm_release_ms.to_string());
     text.push_str(",\n");
     text.push_str("  // Maximum indexed file/folder items retained in database discovery pass\n");
     text.push_str("  \"index_max_items_total\": ");
@@ -744,14 +897,25 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&clipboard_patterns_section);
     text.push_str("\n\n");
 
-    text.push_str("# Use voidtools Everything SDK for instant file/folder search.\n");
-    text.push_str("# Requires Everything (voidtools.com) to be installed.\n");
-    text.push_str("everything_search_enabled = ");
-    text.push_str(if cfg.everything_search_enabled {
-        "true"
-    } else {
-        "false"
-    });
+    text.push_str("# Search backend for full-text indexed file/folder search.\n");
+    text.push_str("# Options: \"tantivy\" (default) | \"fts5\"\n");
+    text.push_str("# Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n");
+    text.push_str("# FTS5 uses SQLite's built-in FTS5 engine with porter stemming.\n");
+    text.push_str("search_backend = ");
+    text.push_str(&json_string(match cfg.search_backend {
+        SearchBackend::Tantivy => "tantivy",
+        SearchBackend::Fts5 => "fts5",
+    }));
+    text.push_str("\n\n");
+
+    text.push_str("# File/folder discovery backend for filesystem enumeration.\n");
+    text.push_str("# Options: \"auto\" (default) | \"everything\" | \"walkdir\"\n");
+    text.push_str("# - auto: try Everything SDK (Everything64.dll / Everything32.dll);\n");
+    text.push_str("#   fall back to walkdir + ReadDirectoryChangesW if Everything is not running.\n");
+    text.push_str("# - everything: require Everything (fails back to walkdir with a warning).\n");
+    text.push_str("# - walkdir: always use the built-in walkdir + ReadDirectoryChangesW pipeline.\n");
+    text.push_str("file_discovery_backend = ");
+    text.push_str(&json_string(cfg.file_discovery_backend.as_str()));
     text.push_str("\n\n");
 
     text.push_str("# Plugin SDK settings\n");
@@ -789,6 +953,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("active_memory_target_mb = ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
     text.push('\n');
+    text.push_str("# how long (ms) the WebView stays resident after hide before teardown (valid range: 500..600000)\n");
+    text.push_str("ui_warm_release_ms = ");
+    text.push_str(&cfg.ui_warm_release_ms.to_string());
+    text.push('\n');
     text.push_str("# Maximum indexed file/folder items retained in discovery pass\n");
     text.push_str("index_max_items_total = ");
     text.push_str(&cfg.index_max_items_total.to_string());
@@ -808,7 +976,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
 
 pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.max_results < 5 || cfg.max_results > 100 {
-        return Err("max_results out of range".into());
+        return Err(format!(
+            "max_results must be between 5 and 100, got {}",
+            cfg.max_results
+        ));
     }
 
     if cfg.index_db_path.as_os_str().is_empty() {
@@ -824,30 +995,59 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     }
 
     if cfg.clipboard_retention_minutes < 5 || cfg.clipboard_retention_minutes > 43_200 {
-        return Err("clipboard_retention_minutes out of range".into());
+        return Err(format!(
+            "clipboard_retention_minutes must be between 5 and 43200, got {}",
+            cfg.clipboard_retention_minutes
+        ));
     }
 
     if cfg.idle_cache_trim_ms < 100 || cfg.idle_cache_trim_ms > 10_000 {
-        return Err("idle_cache_trim_ms out of range".into());
+        return Err(format!(
+            "idle_cache_trim_ms must be between 100 and 10000, got {}",
+            cfg.idle_cache_trim_ms
+        ));
     }
 
     if cfg.active_memory_target_mb < 20 || cfg.active_memory_target_mb > 512 {
-        return Err("active_memory_target_mb out of range".into());
+        return Err(format!(
+            "active_memory_target_mb must be between 20 and 512, got {}",
+            cfg.active_memory_target_mb
+        ));
     }
+
+    if cfg.ui_warm_release_ms < 500 || cfg.ui_warm_release_ms > 600_000 {
+        return Err(format!(
+            "ui_warm_release_ms must be between 500 and 600000, got {}",
+            cfg.ui_warm_release_ms
+        ));
+    }
+
     if cfg.index_max_items_total < 10_000 || cfg.index_max_items_total > 2_000_000 {
-        return Err("index_max_items_total out of range".into());
+        return Err(format!(
+            "index_max_items_total must be between 10000 and 2000000, got {}",
+            cfg.index_max_items_total
+        ));
     }
 
     if cfg.index_max_items_per_root < 1_000 || cfg.index_max_items_per_root > 1_000_000 {
-        return Err("index_max_items_per_root out of range".into());
+        return Err(format!(
+            "index_max_items_per_root must be between 1000 and 1000000, got {}",
+            cfg.index_max_items_per_root
+        ));
     }
 
     if cfg.index_max_items_per_query_seed < 250 || cfg.index_max_items_per_query_seed > 200_000 {
-        return Err("index_max_items_per_query_seed out of range".into());
+        return Err(format!(
+            "index_max_items_per_query_seed must be between 250 and 200000, got {}",
+            cfg.index_max_items_per_query_seed
+        ));
     }
 
     if cfg.index_max_items_per_root > cfg.index_max_items_total {
-        return Err("index_max_items_per_root must be <= index_max_items_total".into());
+        return Err(format!(
+            "index_max_items_per_root ({}) must be <= index_max_items_total ({})",
+            cfg.index_max_items_per_root, cfg.index_max_items_total
+        ));
     }
 
     if cfg.web_search_provider == WebSearchProvider::Custom {
@@ -895,7 +1095,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     }
 
     crate::settings::validate_hotkey(&cfg.hotkey)
-        .map_err(|error| format!("hotkey is invalid: {error}"))?;
+        .map_err(|error| format!("Invalid hotkey '{hotkey}': {error}", hotkey = cfg.hotkey))?;
 
     if cfg.version == 0 {
         return Err("version must be >= 1".into());
@@ -1107,8 +1307,18 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
-    if source_version < 12 && !raw_has_key(raw, "everything_search_enabled") {
-        cfg.everything_search_enabled = Config::default().everything_search_enabled;
+    if source_version < 14 && !raw_has_key(raw, "search_backend") {
+        cfg.search_backend = Config::default().search_backend;
+        changed = true;
+    }
+
+    if source_version < 15 && !raw_has_key(raw, "file_discovery_backend") {
+        cfg.file_discovery_backend = Config::default().file_discovery_backend;
+        changed = true;
+    }
+
+    if source_version < 16 && !raw_has_key(raw, "ui_warm_release_ms") {
+        cfg.ui_warm_release_ms = Config::default().ui_warm_release_ms;
         changed = true;
     }
 
@@ -1175,9 +1385,28 @@ fn parse_text(raw: &str) -> Result<Config, ConfigError> {
             Ok(cfg) => Ok(cfg),
             Err(json_err) => match json5::from_str::<Config>(raw) {
                 Ok(cfg) => Ok(cfg),
-                Err(json5_err) => Err(ConfigError::Parse(format!(
-                    "invalid config format. toml error: {toml_err}; json error: {json_err}; json5 error: {json5_err}"
-                ))),
+                Err(_json5_err) => {
+                    let looks_like_toml = raw.contains('[') || raw.contains(" = ");
+                    let looks_like_json = raw.trim_start().starts_with('{');
+
+                    let msg = if looks_like_toml {
+                        format!(
+                            "Config error: {}. Check your config.toml syntax.",
+                            toml_err
+                        )
+                    } else if looks_like_json {
+                        format!(
+                            "Config error: {}. JSON config is still read but TOML is preferred. Use config.toml instead.",
+                            json_err
+                        )
+                    } else {
+                        format!(
+                            "Config error: {}. Check your config file format — TOML is expected (key = \"value\").",
+                            toml_err
+                        )
+                    };
+                    Err(ConfigError::Parse(msg))
+                }
             },
         },
     }

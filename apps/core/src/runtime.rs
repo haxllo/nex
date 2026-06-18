@@ -18,7 +18,7 @@ pub(crate) use crate::runtime_diagnostics::{
     build_status_diagnostics_json, parse_status_diagnostics_snapshot, summarize_query_profiles,
 };
 pub(crate) use crate::runtime_diagnostics::{
-    command_diagnostics_bundle, command_probe_everything, command_status_json, env_var_with_legacy,
+    command_diagnostics_bundle, command_probe_index, command_status_json, env_var_with_legacy,
     load_query_profile_status_report, load_status_diagnostics_snapshot, write_diagnostics_bundle,
 };
 #[cfg(test)]
@@ -124,7 +124,7 @@ pub enum RuntimeCommand {
     SyncStartup,
     SetLaunchAtStartup(bool),
     DiagnosticsBundle,
-    ProbeEverything,
+    ProbeIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +137,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             command: RuntimeCommand::Run,
-            background: false,
+            background: true,
         }
     }
 }
@@ -169,10 +169,10 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--ensure-config" => options.command = RuntimeCommand::EnsureConfig,
             "--sync-startup" => options.command = RuntimeCommand::SyncStartup,
             "--diagnostics-bundle" => options.command = RuntimeCommand::DiagnosticsBundle,
-            "--probe-everything" => options.command = RuntimeCommand::ProbeEverything,
+            "--probe-index" => options.command = RuntimeCommand::ProbeIndex,
             "--help" | "-h" => {
                 return Err(
-                    "usage: nex [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle|--probe-everything]".to_string(),
+                    "usage: nex [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle|--probe-index]".to_string(),
                 )
             }
             unknown => return Err(format!("unknown argument: {unknown}")),
@@ -213,7 +213,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
             return command_set_launch_at_startup(enabled);
         }
         RuntimeCommand::DiagnosticsBundle => return command_diagnostics_bundle(),
-        RuntimeCommand::ProbeEverything => return command_probe_everything(),
+        RuntimeCommand::ProbeIndex => return command_probe_index(),
         RuntimeCommand::Run => {}
     }
 
@@ -330,9 +330,16 @@ mod tests {
             .expect("clock should be valid")
             .as_nanos();
         let path = std::env::temp_dir().join(format!("nex-overlay-search-{unique}.tmp"));
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-overlay-search-cfg-{unique}.toml"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -344,15 +351,15 @@ mod tests {
             .expect("item should upsert");
 
         let parsed = ParsedQuery::parse("code", true);
-        let cfg = Config::default();
-        let plugins = PluginRegistry::default();
+        let plugins = PluginRegistry::load_from_config(&cfg);
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
 
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 1, "expected 1 result, got: {results:?}");
         assert_eq!(results[0].id, "item-1");
 
         std::fs::remove_file(path).expect("temp file should be removed");
+        let _ = std::fs::remove_file(isolated_config_path);
     }
 
     #[test]
@@ -1001,7 +1008,7 @@ mod tests {
 [1] [INFO] [nex] startup indexed_items=310 discovered=320 upserted=16 removed=4
 [2] [INFO] [nex] index_provider name=start-menu-apps discovered=120 upserted=4 removed=1 elapsed_ms=42
 [3] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
-[4] [INFO] [nex] stale_prune scanned=512 removed=3 cached_items_remaining=738
+[4] [INFO] [nex] stale_prune scanned=16 removed=3 cached_items_remaining=738
 [5] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
 [6] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";
@@ -1056,7 +1063,7 @@ mod tests {
             .last_stale_prune_line
             .as_deref()
             .unwrap_or_default()
-            .contains("stale_prune scanned=512"));
+            .contains("stale_prune scanned=16"));
         assert!(snapshot
             .last_cache_compaction_line
             .as_deref()
@@ -1079,7 +1086,7 @@ mod tests {
 [1773000028] [INFO] [nex] startup_phase phase=indexing_completed elapsed_ms=2600 worker_elapsed_ms=2593 indexed_items=310 discovered=320 upserted=16 removed=4
 [1773000029] [INFO] [nex] startup_phase phase=cache_applied elapsed_ms=2605 cached_items=310 initial_cache_empty=true
 [1773000030] [INFO] [nex] provider_freshness name=filesystem skipped=false last_scan_age_secs=0 reconcile_interval_secs=1800 has_stamp=true
-[1773000031] [INFO] [nex] stale_prune scanned=512 removed=3 cached_items_remaining=738
+[1773000031] [INFO] [nex] stale_prune scanned=16 removed=3 cached_items_remaining=738
 [1773000032] [INFO] [nex] cache_compaction input_total=812 retained=596 dropped=216 retained_apps=20 retained_file_folders=576 retained_other=0 effective_file_seed_cap=576 broad_root_mode=true active_memory_target_mb=72
 [1773000033] [INFO] [nex] overlay_icon_cache reason=cache_clear hits=12 misses=8 load_failures=1 evictions=0 cleared_entries=9 live_entries=0 max_entries=90
 ";

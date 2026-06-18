@@ -70,10 +70,24 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
     let wide_target = to_wide(&target);
+
+    // For directories, ask the shell to *explore* rather than *open*:
+    // the default "open" verb goes through the file-association lookup,
+    // and folders without a registered association (e.g. dot-prefixed
+    // directories like `.codex`, `.config`) trigger an "Open with"
+    // dialog. `explore` is the verb Explorer uses to open a folder
+    // window and bypasses association lookup.
+    let wide_verb_explore: Vec<u16> = "explore".encode_utf16().chain(std::iter::once(0)).collect();
+    let verb_ptr = if Path::new(target).is_dir() {
+        wide_verb_explore.as_ptr()
+    } else {
+        std::ptr::null()
+    };
+
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
-            std::ptr::null(),
+            verb_ptr,
             wide_target.as_ptr(),
             std::ptr::null(),
             std::ptr::null(),

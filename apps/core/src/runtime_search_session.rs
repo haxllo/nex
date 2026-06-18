@@ -205,54 +205,13 @@ pub(crate) fn search_overlay_results_with_session(
         merged.extend(clipboard_results);
     }
 
-    #[cfg(target_os = "windows")]
-    let mut everything_ms = 0_u128;
-    #[cfg(target_os = "windows")]
-    let mut everything_added = 0_usize;
-    #[cfg(not(target_os = "windows"))]
-    let everything_ms = 0_u128;
-    #[cfg(not(target_os = "windows"))]
-    let everything_added = 0_usize;
-    #[cfg(target_os = "windows")]
-    if !parsed_query.command_mode
-        && cfg.everything_search_enabled
-        && (cfg.show_files || cfg.show_folders)
-        && !normalized_query.is_empty()
-    {
-        // Everything is the primary file search source. For very short queries
-        // (1-2 chars), cap max_results lower to keep IPC latency acceptable.
-        let everything_limit = if normalized_query.len() <= 2 {
-            candidate_limit.min(8)
-        } else {
-            candidate_limit
-        };
-        let everything_started = Instant::now();
-        if let Some(everything_items) = crate::everything::live_everything_search(
-            text_query,
-            &cfg.discovery_roots,
-            &cfg.discovery_exclude_roots,
-            cfg.show_files,
-            cfg.show_folders,
-            everything_limit as u32,
-        ) {
-            let pre_len = merged.len();
-            for item in everything_items {
-                if !merged.iter().any(|e| e.id == item.id) {
-                    merged.push(item);
-                }
-            }
-            everything_added = merged.len() - pre_len;
-        }
-        everything_ms = everything_started.elapsed().as_millis();
-    }
-
     let rank_started = Instant::now();
     let ranked = search_with_filter(&merged, text_query, result_limit, &filter);
     let rank_ms = rank_started.elapsed().as_millis();
     let total_ms = search_started.elapsed().as_millis();
     if total_ms >= QUERY_PROFILE_LOG_THRESHOLD_MS {
         log_info(&format!(
-            "[nex] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} clipboard_count={} clipboard_ms={} everything_added={} everything_ms={} rank_ms={} total_ms={}",
+            "[nex] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} clipboard_count={} clipboard_ms={} rank_ms={} total_ms={}",
             sanitize_query_for_profile_log(text_query),
             format!("{:?}", filter.mode).to_ascii_lowercase(),
             candidate_limit,
@@ -269,8 +228,6 @@ pub(crate) fn search_overlay_results_with_session(
             plugin_action_count,
             clipboard_count,
             clipboard_ms,
-            everything_added,
-            everything_ms,
             rank_ms,
             total_ms
         ));

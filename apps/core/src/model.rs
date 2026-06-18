@@ -7,6 +7,7 @@ pub struct SearchItem {
     pub subtitle: String,
     pub use_count: u32,
     pub last_accessed_epoch_secs: i64,
+    pub pre_score: Option<i64>,
     normalized_title: String,
     normalized_search_text: String,
 }
@@ -61,9 +62,15 @@ impl SearchItem {
             subtitle,
             use_count,
             last_accessed_epoch_secs,
+            pre_score: None,
             normalized_title,
             normalized_search_text,
         }
+    }
+
+    pub fn with_pre_score(mut self, pre_score: i64) -> Self {
+        self.pre_score = Some(pre_score);
+        self
     }
 
     pub fn with_usage(mut self, use_count: u32, last_accessed_epoch_secs: i64) -> Self {

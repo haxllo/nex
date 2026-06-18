@@ -2,7 +2,7 @@ use crate::model::{self, SearchItem};
 use crate::runtime::log_warn;
 use crate::uninstall_registry;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
+use crate::overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
 
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
@@ -10,10 +10,7 @@ pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
 pub(crate) const STATUS_ROW_NO_COMMAND_RESULTS: &str = "No command matches";
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_TYPE_TO_SEARCH: &str = "Start typing to search";
-#[cfg(target_os = "windows")]
-pub(crate) const STATUS_ROW_INDEXING: &str = "Indexing in background...";
-#[cfg(target_os = "windows")]
-pub(crate) const STATUS_TEXT_INDEX_READY: &str = "Index ready";
+
 pub(crate) const ACTION_UNINSTALL_CONFIRM_ID: &str = "action:uninstall:confirm";
 pub(crate) const ACTION_UNINSTALL_CANCEL_ID: &str = "action:uninstall:cancel";
 
@@ -49,6 +46,7 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
     ));
 
     let mut app_indices = Vec::new();
+    let mut folder_indices = Vec::new();
     let mut file_indices = Vec::new();
     let mut action_indices = Vec::new();
     let mut clipboard_indices = Vec::new();
@@ -57,8 +55,9 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
     for (index, item) in results.iter().enumerate().skip(1) {
         if item.kind.eq_ignore_ascii_case("app") {
             app_indices.push(index);
-        } else if item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder")
-        {
+        } else if item.kind.eq_ignore_ascii_case("folder") {
+            folder_indices.push(index);
+        } else if item.kind.eq_ignore_ascii_case("file") {
             file_indices.push(index);
         } else if item.kind.eq_ignore_ascii_case("action") {
             action_indices.push(index);
@@ -69,17 +68,37 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
         }
     }
 
-    append_group_rows(&mut rows, &app_indices, results, command_mode);
-    append_group_rows(&mut rows, &file_indices, results, command_mode);
-    append_group_rows(&mut rows, &action_indices, results, command_mode);
-    append_group_rows(&mut rows, &clipboard_indices, results, command_mode);
-    append_group_rows(&mut rows, &other_indices, results, command_mode);
+    // Folders come above files within the file-system section so that
+    // directory navigation surfaces before document content.
+    // Top-hit app on top (no section header), then group the rest.
+    if let Some(first) = app_indices.first() {
+        rows.push(result_row(
+            &results[*first],
+            *first,
+            OverlayRowRole::TopHit,
+            command_mode,
+        ));
+        for index in &app_indices[1..] {
+            rows.push(result_row(
+                &results[*index],
+                *index,
+                OverlayRowRole::Item,
+                command_mode,
+            ));
+        }
+    }
+    append_group_rows(&mut rows, "Folders", &folder_indices, results, command_mode);
+    append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
+    append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
+    append_group_rows(&mut rows, "Clipboard", &clipboard_indices, results, command_mode);
+    append_group_rows(&mut rows, "Other", &other_indices, results, command_mode);
     rows
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn append_group_rows(
     rows: &mut Vec<OverlayRow>,
+    label: &str,
     indices: &[usize],
     results: &[SearchItem],
     command_mode: bool,
@@ -87,6 +106,7 @@ pub(crate) fn append_group_rows(
     if indices.is_empty() {
         return;
     }
+    rows.push(header_row(label));
     for index in indices {
         rows.push(result_row(
             &results[*index],
@@ -106,11 +126,26 @@ pub(crate) fn result_row(
 ) -> OverlayRow {
     OverlayRow {
         role,
-        result_index: result_index as i32,
+        result_index: Some(result_index),
         kind: item.kind.clone(),
         title: item.title.clone(),
         path: overlay_subtitle(item, command_mode),
         icon_path: item.path.clone(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn header_row(label: &str) -> OverlayRow {
+    OverlayRow {
+        role: OverlayRowRole::Header,
+        // `None` signals "no backing result index"; header rows are
+        // not selectable and do not contribute to the
+        // result->row mapping.
+        result_index: None,
+        kind: String::new(),
+        title: label.to_string(),
+        path: String::new(),
+        icon_path: String::new(),
     }
 }
 
@@ -390,16 +425,26 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     {
         return String::new();
     }
+    // Always hide shell: URIs — they're internal implementation paths.
+    let path = item.path.trim();
+    let is_shell = path.starts_with("shell:");
     if item.kind.eq_ignore_ascii_case("app") {
-        return item.subtitle.trim().to_string();
+        let s = item.subtitle.trim();
+        if s.is_empty() || s.contains('\\') || s.contains('/') || s.contains(':') {
+            return String::new();
+        }
+        return s.to_string();
     }
     if item.kind.eq_ignore_ascii_case("action") {
-        if item.path.trim().is_empty() {
+        if path.is_empty() {
             return "Nex action".to_string();
         }
-        return item.path.trim().to_string();
+        return path.to_string();
     }
-    abbreviate_path(&item.path)
+    if is_shell {
+        return String::new();
+    }
+    abbreviate_path(path)
 }
 
 #[cfg(target_os = "windows")]
@@ -447,7 +492,7 @@ pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message
     overlay.clear_placeholder_hint();
     let rows = [OverlayRow {
         role: OverlayRowRole::Status,
-        result_index: -1,
+        result_index: None,
         kind: "status".to_string(),
         title: message.to_string(),
         path: String::new(),

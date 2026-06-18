@@ -1,6 +1,10 @@
 # Indexing Approach Comparison & Recommendation
 
 > **Purpose:** Compare file indexing strategies for Nex and recommend the best approach.
+>
+> **Status (June 2026, v1.3.0)**: Decision **implemented**. Everything SDK is the primary backend; walkdir is the fallback. USN Journal was rejected; ReadDirectoryChangesW (`file_watcher.rs`) is implemented but not wired.
+>
+> See `apps/core/src/everything_bridge.rs` + `apps/core/src/discovery.rs` for the actual implementation.
 
 ---
 

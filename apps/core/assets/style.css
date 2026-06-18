@@ -1,0 +1,335 @@
+/* Nex — premium Raycast-dark cmdk overlay.
+   The native window is transparent with a DWM acrylic backdrop; the
+   panel paints a subtle tint on top so it reads as frosted glass. */
+
+:root {
+  --radius: 8px;
+  --row-radius: 6px;
+  --pad-x: 16px;
+  --font: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI",
+    system-ui, -apple-system, sans-serif;
+
+  /* dark palette */
+  --bg: rgba(22, 22, 25, 0.62);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #f4f4f6;
+  --text-dim: #a8a8b3;
+  --text-faint: #76767f;
+  --sel: rgba(255, 255, 255, 0.09);
+  --sel-border: rgba(255, 255, 255, 0.08);
+  --accent: #6ea8fe;
+  --divider: rgba(255, 255, 255, 0.06);
+  --kbd-bg: rgba(255, 255, 255, 0.08);
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.32), 0 1px 4px rgba(0, 0, 0, 0.18);
+  --icon-bg: rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="light"] {
+  --bg: rgba(246, 246, 248, 0.72);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text: #16161a;
+  --text-dim: #55555f;
+  --text-faint: #8a8a93;
+  --sel: rgba(0, 0, 0, 0.06);
+  --sel-border: rgba(0, 0, 0, 0.06);
+  --accent: #2f6bff;
+  --divider: rgba(0, 0, 0, 0.07);
+  --kbd-bg: rgba(0, 0, 0, 0.06);
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+  --icon-bg: rgba(0, 0, 0, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html,
+body {
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#panel {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  backdrop-filter: saturate(140%);
+}
+
+#panel.enter {
+  animation: panel-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ── search row ───────────────────────────────────────────── */
+#search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 60px;
+  padding: 0 var(--pad-x);
+}
+
+#search-icon {
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--text-faint);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: opacity 120ms ease;
+}
+
+#query {
+  flex: 1 1 auto;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 18px;
+  font-family: inherit;
+  font-weight: 400;
+  letter-spacing: 0.1px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#query::placeholder {
+  color: var(--text-faint);
+}
+
+#help {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+#help svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+#help:hover {
+  background: var(--kbd-bg);
+  color: var(--text-dim);
+}
+
+/* ── list / rows ──────────────────────────────────────────── */
+#divider {
+  height: 1px;
+  background: var(--divider);
+  margin: 0 0 6px;
+}
+
+#body.idle,
+#list:empty {
+  display: none;
+}
+
+#list {
+  list-style: none;
+  max-height: 416px;
+  overflow-y: auto;
+  padding: 0 8px 6px;
+  scroll-behavior: smooth;
+}
+#list:empty {
+  display: none;
+}
+
+#list::-webkit-scrollbar {
+  width: 8px;
+}
+#list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 12px;
+  border-radius: var(--row-radius);
+  cursor: pointer;
+  position: relative;
+  animation: row-in 150ms ease both;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.row.selected {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+}
+
+.row .icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  object-fit: contain;
+}
+.row .icon.placeholder {
+  display: grid;
+  place-items: center;
+}
+
+.row .text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.row .title {
+  font-size: 14px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row.selected .title {
+  color: #fff;
+}
+html[data-theme="light"] .row.selected .title {
+  color: #000;
+}
+
+.row .subtitle {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row .kind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  text-transform: capitalize;
+  opacity: 0;
+}
+.row.selected .kind {
+  opacity: 1;
+}
+
+/* calculator row */
+.row.calculator {
+  height: 64px;
+}
+.row.calculator .title {
+  font-size: 22px;
+  font-weight: 500;
+}
+.row.calculator .subtitle {
+  font-size: 13px;
+  color: var(--accent);
+}
+
+/* section header */
+.section {
+  padding: 12px 12px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* status / empty */
+#status {
+  padding: 18px var(--pad-x) 22px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+/* ── footer ───────────────────────────────────────────────── */
+#footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  margin-top: 8px;
+  padding: 8px var(--pad-x) 0;
+  border-top: 1px solid var(--divider);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+#footer .hint {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+#footer .dot {
+  color: var(--text-faint);
+  opacity: 0.5;
+}
+
+#footer.idle {
+  display: none;
+}
+
+.kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1;
+}
+
+.hidden {
+  display: none !important;
+}

@@ -147,50 +147,6 @@ pub(crate) fn command_diagnostics_bundle() -> Result<(), RuntimeError> {
     Ok(())
 }
 
-pub(crate) fn command_probe_everything() -> Result<(), RuntimeError> {
-    #[cfg(target_os = "windows")]
-    {
-        let cfg = config::load(None)?;
-        let enabled = cfg.everything_search_enabled;
-
-        if !enabled {
-            log_info("[nex] everything_probe enabled=disabled_in_config");
-            log_info(
-                "[nex] everything_probe hint=Set everything_search_enabled: true in your config",
-            );
-            return Ok(());
-        }
-
-        match crate::everything::probe_everything_sdk() {
-            Ok(true) => {
-                log_info("[nex] everything_probe status=ok sdk_loaded=true");
-                log_info("[nex] everything_probe hint=Everything SDK loaded successfully. Nex will use Everything for instant search.");
-            }
-            Ok(_) => {
-                log_info(
-                    "[nex] everything_probe status=unavailable sdk_loaded=false reason=unknown",
-                );
-                log_info("[nex] everything_probe hint=Nex will fall back to filesystem provider (Windows Search / walkdir).");
-            }
-            Err(msg) => {
-                log_info(&format!(
-                    "[nex] everything_probe status=unavailable sdk_loaded=false reason={msg}"
-                ));
-                log_info("[nex] everything_probe hint=Nex will fall back to filesystem provider (Windows Search / walkdir).");
-            }
-        }
-
-        return Ok(());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        log_info("[nex] everything_probe status=unsupported_platform");
-        log_info("[nex] everything_probe hint=Everything SDK is only available on Windows.");
-        Ok(())
-    }
-}
-
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn load_status_diagnostics_snapshot() -> Option<StatusDiagnosticsSnapshot> {
     let content = crate::logging::candidate_log_paths()
@@ -641,6 +597,37 @@ pub(crate) fn percentile_u128(values: &mut [u128], percentile: f64) -> u128 {
     values[idx.min(last)]
 }
 
+fn probe_index_health(cfg: &config::Config) -> serde_json::Value {
+    use crate::fts5_search::Fts5Index;
+    use crate::tantivy_search::TantivyIndex;
+    use std::path::Path;
+
+    let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
+    let tantivy_path = index_dir.join("index.tantivy");
+
+    let tantivy = match TantivyIndex::open(&tantivy_path) {
+        Ok(idx) => match idx.num_docs() {
+            Ok(n) => serde_json::json!({"status": "ok", "num_docs": n}),
+            Err(e) => serde_json::json!({"status": "error", "detail": e}),
+        },
+        Err(e) => serde_json::json!({"status": "error", "detail": e}),
+    };
+
+    let fts5 = match Fts5Index::open(&cfg.index_db_path) {
+        Ok(idx) => match idx.num_docs() {
+            Ok(n) => serde_json::json!({"status": "ok", "num_docs": n}),
+            Err(e) => serde_json::json!({"status": "error", "detail": e}),
+        },
+        Err(e) => serde_json::json!({"status": "error", "detail": e}),
+    };
+
+    serde_json::json!({
+        "tantivy": tantivy,
+        "fts5": fts5,
+        "search_backend": format!("{:?}", cfg.search_backend),
+    })
+}
+
 pub(crate) fn write_diagnostics_bundle(
     cfg: &config::Config,
 ) -> Result<std::path::PathBuf, RuntimeError> {
@@ -699,11 +686,17 @@ pub(crate) fn write_diagnostics_bundle(
         "discovery_roots_count": cfg.discovery_roots.len(),
         "discovery_exclude_roots_count": cfg.discovery_exclude_roots.len(),
         "show_files": cfg.show_files,
-        "show_folders": cfg.show_folders
+        "show_folders": cfg.show_folders,
+        "search_backend": format!("{:?}", cfg.search_backend)
     });
     let encoded = serde_json::to_string_pretty(&sanitized_cfg)
         .map_err(|e| RuntimeError::Args(format!("failed to encode sanitized config: {e}")))?;
     std::fs::write(bundle_dir.join("config.sanitized.json"), encoded)?;
+
+    let index_health = probe_index_health(cfg);
+    let index_health_json = serde_json::to_string_pretty(&index_health)
+        .map_err(|e| RuntimeError::Args(format!("failed to encode index health: {e}")))?;
+    std::fs::write(bundle_dir.join("index_health.json"), index_health_json)?;
 
     copy_recent_logs_to_bundle(&crate::logging::logs_dir(), &bundle_dir.join("logs"))?;
 
@@ -741,6 +734,39 @@ fn copy_recent_logs_to_bundle(
         if let Some(name) = path.file_name() {
             let _ = std::fs::copy(&path, target_logs_dir.join(name));
         }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
+    use crate::fts5_search::Fts5Index;
+    use crate::tantivy_search::TantivyIndex;
+    use std::path::Path;
+
+    let cfg = config::load(None)?;
+    let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
+    let tantivy_path = index_dir.join("index.tantivy");
+
+    println!("[nex] index probe");
+    println!("  config_path: {}", cfg.config_path.display());
+    println!("  index_db_path: {}", cfg.index_db_path.display());
+    println!("  search_backend: {:?}", cfg.search_backend);
+
+    match TantivyIndex::open(&tantivy_path) {
+        Ok(idx) => match idx.num_docs() {
+            Ok(n) => println!("  tantivy: OK ({} documents)", n),
+            Err(e) => println!("  tantivy: opened but num_docs failed: {e}"),
+        },
+        Err(e) => println!("  tantivy: FAILED ({e})"),
+    }
+
+    match Fts5Index::open(&cfg.index_db_path) {
+        Ok(idx) => match idx.num_docs() {
+            Ok(n) => println!("  fts5: OK ({} documents)", n),
+            Err(e) => println!("  fts5: opened but num_docs failed: {e}"),
+        },
+        Err(e) => println!("  fts5: FAILED ({e})"),
     }
 
     Ok(())

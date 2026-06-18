@@ -27,7 +27,6 @@ fn accepts_default_config() {
     assert_eq!(cfg.index_max_items_per_root, 40_000);
     assert_eq!(cfg.index_max_items_per_query_seed, 5_000);
     assert!(!cfg.game_mode_enabled);
-    assert!(cfg.everything_search_enabled);
     assert!(
         cfg.index_db_path.to_string_lossy().contains("nex")
             || cfg.index_db_path.to_string_lossy().contains("Nex")
@@ -242,7 +241,14 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert_eq!(loaded.index_max_items_per_root, 40_000);
     assert_eq!(loaded.index_max_items_per_query_seed, 5_000);
     assert!(!loaded.game_mode_enabled);
-    assert!(loaded.everything_search_enabled);
+    assert_eq!(
+        loaded.search_backend,
+        nex_core::config::SearchBackend::Tantivy
+    );
+    assert_eq!(
+        loaded.file_discovery_backend,
+        nex_core::config::DiscoveryBackend::Auto
+    );
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(updated_raw.contains("\"hotkey\": \"Ctrl+Alt+P\""));
@@ -256,7 +262,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));
     assert!(updated_raw.contains("\"index_max_items_per_query_seed\": 5000"));
     assert!(updated_raw.contains("\"game_mode_enabled\": false"));
-    assert!(updated_raw.contains("\"everything_search_enabled\": true"));
+    assert!(updated_raw.contains("\"search_backend\": \"tantivy\""));
 
     let backups: Vec<_> = std::fs::read_dir(&config_dir)
         .unwrap()
@@ -306,8 +312,44 @@ ignore_hotkeys_on_fullscreen = true
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(updated_raw.contains("game_mode_enabled = false"));
-    assert!(updated_raw.contains("everything_search_enabled = true"));
+    assert!(updated_raw.contains("search_backend = \"tantivy\""));
+    assert!(updated_raw.contains("file_discovery_backend = \"auto\""));
     assert!(!updated_raw.contains("ignore_hotkeys_on_fullscreen"));
+
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::remove_dir_all(&config_dir).unwrap();
+}
+
+#[test]
+fn file_discovery_backend_migrates_from_legacy_toml() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_dir = std::env::temp_dir()
+        .join("swiftfind")
+        .join(format!("migrate-discovery-{unique}"));
+    let config_path = config_dir.join("config.toml");
+
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"
+version = 14
+hotkey = "Ctrl+Space"
+search_backend = "tantivy"
+"#,
+    )
+    .unwrap();
+
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
+    assert_eq!(
+        loaded.file_discovery_backend,
+        nex_core::config::DiscoveryBackend::Auto
+    );
+
+    let updated_raw = std::fs::read_to_string(&config_path).unwrap();
+    assert!(updated_raw.contains("file_discovery_backend = \"auto\""));
 
     std::fs::remove_file(&config_path).unwrap();
     std::fs::remove_dir_all(&config_dir).unwrap();

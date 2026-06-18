@@ -70,7 +70,23 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
 
     // Folders come above files within the file-system section so that
     // directory navigation surfaces before document content.
-    append_group_rows(&mut rows, "Apps", &app_indices, results, command_mode);
+    // Top-hit app on top (no section header), then group the rest.
+    if let Some(first) = app_indices.first() {
+        rows.push(result_row(
+            &results[*first],
+            *first,
+            OverlayRowRole::TopHit,
+            command_mode,
+        ));
+        for index in &app_indices[1..] {
+            rows.push(result_row(
+                &results[*index],
+                *index,
+                OverlayRowRole::Item,
+                command_mode,
+            ));
+        }
+    }
     append_group_rows(&mut rows, "Folders", &folder_indices, results, command_mode);
     append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
     append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
@@ -409,16 +425,26 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     {
         return String::new();
     }
+    // Always hide shell: URIs — they're internal implementation paths.
+    let path = item.path.trim();
+    let is_shell = path.starts_with("shell:");
     if item.kind.eq_ignore_ascii_case("app") {
-        return item.subtitle.trim().to_string();
+        let s = item.subtitle.trim();
+        if s.is_empty() || s.contains('\\') || s.contains('/') || s.contains(':') {
+            return String::new();
+        }
+        return s.to_string();
     }
     if item.kind.eq_ignore_ascii_case("action") {
-        if item.path.trim().is_empty() {
+        if path.is_empty() {
             return "Nex action".to_string();
         }
-        return item.path.trim().to_string();
+        return path.to_string();
     }
-    abbreviate_path(&item.path)
+    if is_shell {
+        return String::new();
+    }
+    abbreviate_path(path)
 }
 
 #[cfg(target_os = "windows")]

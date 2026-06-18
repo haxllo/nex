@@ -10,12 +10,11 @@ use windows_sys::Win32::UI::Shell::{
     NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, GetCursorPos, GetWindowLongPtrW, RegisterClassW, SetForegroundWindow,
-    SetWindowLongPtrW, TrackPopupMenu, GWLP_USERDATA, HWND_MESSAGE, MF_CHECKED, MF_SEPARATOR,
-    MF_STRING, MF_UNCHECKED,
-    SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, CREATESTRUCTW, DefWindowProcW, DestroyIcon,
+    DestroyMenu, DestroyWindow, GetCursorPos, GetWindowLongPtrW, RegisterClassW,
+    SetForegroundWindow, SetWindowLongPtrW, TrackPopupMenu, GWLP_USERDATA, HWND_MESSAGE, MF_CHECKED,
+    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WM_APP, WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 use crate::overlay::model::OverlayEvent;
@@ -252,6 +251,12 @@ unsafe extern "system" fn tray_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_CREATE {
+        let create_struct = lparam as *const CREATESTRUCTW;
+        let state_ptr = unsafe { (*create_struct).lpCreateParams };
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
+        return 0;
+    }
     if msg == NEX_WM_TRAY_ICON {
         if hwnd.is_null() {
             return 0;
@@ -260,31 +265,40 @@ unsafe extern "system" fn tray_wnd_proc(
         if state_ptr == 0 {
             return 0;
         }
-        let state: &Arc<Mutex<TrayState>> = unsafe { &*(state_ptr as *const Arc<Mutex<TrayState>>) };
-        let guard = state.lock().unwrap();
+        let state: &Mutex<TrayState> = unsafe { &*(state_ptr as *const Mutex<TrayState>) };
 
         let lp = lparam as u32;
-        if lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK {
-            let _ = guard.event_tx.send(OverlayEvent::ExternalShow);
-        } else if lp == WM_RBUTTONUP {
-            show_context_menu(hwnd, &guard);
+        if lp == WM_RBUTTONUP {
+            // Snapshot what we need *before* TrackPopupMenu blocks,
+            // so the mutex is not held across the modal menu loop.
+            let snapshot = {
+                let guard = state.lock().unwrap();
+                MenuSnapshot {
+                    event_tx: guard.event_tx.clone(),
+                    config_path: guard.config_path.clone(),
+                    game_mode_enabled: guard.game_mode_enabled,
+                }
+            };
+            show_context_menu(hwnd, &snapshot);
+        } else if lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK {
+            let _ = state.lock().unwrap().event_tx.send(OverlayEvent::ExternalShow);
         }
         return 0;
     }
     if msg == WM_DESTROY {
-        let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-        if state_ptr != 0 {
-            unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                drop(Box::from_raw(state_ptr as *mut Arc<Mutex<TrayState>>));
-            }
-        }
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
         return 0;
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn show_context_menu(hwnd: HWND, state: &TrayState) {
+struct MenuSnapshot {
+    event_tx: Sender<OverlayEvent>,
+    config_path: String,
+    game_mode_enabled: bool,
+}
+
+fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return;
@@ -314,7 +328,7 @@ fn show_context_menu(hwnd: HWND, state: &TrayState) {
         AppendMenuW(
             menu,
             MF_STRING
-                | if state.game_mode_enabled {
+                | if s.game_mode_enabled {
                     MF_CHECKED
                 } else {
                     MF_UNCHECKED
@@ -348,13 +362,20 @@ fn show_context_menu(hwnd: HWND, state: &TrayState) {
         )
     } as u32;
 
+    // Required by Win32: post a benign message so the menu's
+    // internal message loop exits cleanly. Without this the
+    // menu can appear frozen / uninteractive.
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, 0, 0, 0);
+    }
+
     match selected {
         0 => {}
         TRAY_MENU_SHOW => {
-            let _ = state.event_tx.send(OverlayEvent::ExternalShow);
+            let _ = s.event_tx.send(OverlayEvent::ExternalShow);
         }
         TRAY_MENU_OPEN_CONFIG => {
-            let config_path = to_wide(&state.config_path);
+            let config_path = to_wide(&s.config_path);
             unsafe {
                 ShellExecuteW(
                     std::ptr::null_mut(),
@@ -367,13 +388,13 @@ fn show_context_menu(hwnd: HWND, state: &TrayState) {
             }
         }
         TRAY_MENU_CHECK_UPDATES => {
-            let _ = state.event_tx.send(OverlayEvent::TrayCheckForUpdates);
+            let _ = s.event_tx.send(OverlayEvent::TrayCheckForUpdates);
         }
         TRAY_MENU_GAME_MODE => {
-            let _ = state.event_tx.send(OverlayEvent::TrayToggleGameMode);
+            let _ = s.event_tx.send(OverlayEvent::TrayToggleGameMode);
         }
         TRAY_MENU_QUIT => {
-            let _ = state.event_tx.send(OverlayEvent::ExternalQuit);
+            let _ = s.event_tx.send(OverlayEvent::ExternalQuit);
         }
         _ => {}
     }

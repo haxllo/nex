@@ -1,33 +1,207 @@
-//! Stub for the legacy `windows_overlay::indexing_progress` module.
+//! First-time indexing progress window (tao + wry).
 //!
-//! The legacy implementation spun up a tiny modal Win32 window that
-//! displayed a progress bar while the first-time indexer ran. The
-//! Iced shell replaces that with a progress message in the
-//! `status_text` field of the model; for Phase 7 we just run the
-//! closure directly on a worker thread and ignore the progress
-//! `Arc<AtomicU32>` handle, so the runtime can keep calling
-//! `run_with_progress_window` and the new path is a no-op UI-wise.
-//! A full Iced progress bar lands in Phase 6.
+//! Replaces the legacy Win32 modal progress window and the Iced stub.
+//! A tiny borderless tao window hosts a wry WebView that renders an
+//! animated progress bar; the indexing closure writes to an
+//! `Arc<AtomicU32>` and a polling thread pushes `requestAnimationFrame`
+//! updates via `evaluate_script`. The window lives only while the
+//! closure runs.
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::AtomicU32;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+
+use tao::dpi::{LogicalSize, PhysicalPosition};
+use tao::event::Event;
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::run_return::EventLoopExtRunReturn;
+use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
+use tao::window::WindowBuilder;
+use wry::WebViewBuilder;
+
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+};
+
+const WINDOW_WIDTH: f64 = 360.0;
+const WINDOW_HEIGHT: f64 = 120.0;
+
+const PROGRESS_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Nex Indexing</title>
+<style>
+:root{--bg:rgba(22,22,25,0.92);--text:#f4f4f6;--bar-bg:rgba(255,255,255,0.08);--bar-fg:#6ea8fe;--radius:10px}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:transparent;font-family:"Segoe UI Variable","Segoe UI",sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}
+body{display:flex;align-items:center;justify-content:center;height:100vh}
+#panel{width:100%;height:100%;background:var(--bg);border-radius:var(--radius);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px}
+#label{font-size:14px;color:var(--text);text-align:center}
+#track{width:260px;height:6px;background:var(--bar-bg);border-radius:3px;overflow:hidden}
+#bar{width:0%;height:100%;background:var(--bar-fg);border-radius:3px;transition:width 200ms ease}
+#pct{font-size:12px;color:var(--bar-fg)}
+</style></head>
+<body>
+<main id="panel">
+  <div id="label">Indexing your files…</div>
+  <div id="track"><div id="bar"></div></div>
+  <div id="pct">0%</div>
+</main>
+<script>
+window.updateProgress=function(v){var p=Math.max(0,Math.min(100,v));document.getElementById("bar").style.width=p+"%";document.getElementById("pct").textContent=p+"%"};
+</script>
+</body>
+</html>"#;
+
+enum Cmd {
+    Update(u32),
+    Close,
+}
 
 pub(crate) fn run_with_progress_window<F, T>(work: F) -> T
 where
     F: FnOnce(Arc<AtomicU32>) -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<T>();
-    thread::Builder::new()
-        .name("nex-stub-indexer".into())
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let progress = Arc::new(AtomicU32::new(0));
+
+    let progress_for_work = progress.clone();
+
+    // Spawn the indexing work on its own thread.
+    let work_thread = thread::Builder::new()
+        .name("nex-indexer".into())
         .spawn(move || {
-            let _ = tx.send(work(Arc::new(AtomicU32::new(0))));
+            let result = work(progress_for_work);
+            let _ = result_tx.send(result);
         })
-        .expect("failed to spawn stub indexer thread");
-    rx.recv()
-        .expect("stub indexer thread finished without sending result")
+        .expect("failed to spawn indexer thread");
+
+    // Run the progress window on the current (main) thread.
+    let mut event_loop = EventLoopBuilder::<Cmd>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    let window = WindowBuilder::new()
+        .with_title("Nex Indexing")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_always_on_top(true)
+        .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+        .with_skip_taskbar(true)
+        .with_no_redirection_bitmap(true)
+        .with_window_classname("NexProgressWindowClass")
+        .build(&event_loop)
+        .expect("failed to create progress window");
+
+    // Position on the primary monitor, centered, upper third.
+    let (x, y) = progress_window_position();
+    window.set_outer_position(PhysicalPosition::new(x, y));
+
+    // Apply DWM rounded corners.
+    unsafe {
+        let pref: i32 = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(
+            window.hwnd() as windows_sys::Win32::Foundation::HWND,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+
+    // Apply acrylic if available; falls back to CSS opaque panel.
+    let _ = window_vibrancy::apply_acrylic(&window, Some((18, 18, 20, 130)));
+
+    let webview = WebViewBuilder::new()
+        .with_transparent(true)
+        .with_html(PROGRESS_PAGE)
+        .build(&window)
+        .expect("failed to build progress webview");
+
+    window.set_visible(true);
+
+    // Spawn a polling thread that reads the AtomicU32 and posts Cmd::Update.
+    let progress_for_poll = progress.clone();
+    let proxy_for_poll = proxy.clone();
+    let _poll_thread = thread::Builder::new()
+        .name("nex-progress-poll".into())
+        .spawn(move || {
+            let mut last = u32::MAX;
+            loop {
+                thread::sleep(Duration::from_millis(120));
+                let current = progress_for_poll.load(Ordering::Relaxed);
+                if current >= 100 {
+                    let _ = proxy_for_poll.send_event(Cmd::Update(100));
+                    break;
+                }
+                if current != last {
+                    let _ = proxy_for_poll.send_event(Cmd::Update(current));
+                    last = current;
+                }
+            }
+        })
+        .ok();
+
+    let mut closed = false;
+
+    let _ = event_loop.run_return(move |event, _target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+
+        match event {
+            Event::UserEvent(Cmd::Update(v)) => {
+                let _ = webview.evaluate_script(&format!(
+                    "window.updateProgress&&window.updateProgress({v})"
+                ));
+                if v >= 100 {
+                    // Give the user a moment to see 100%, then close.
+                    let p = proxy.clone();
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(600));
+                        let _ = p.send_event(Cmd::Close);
+                    });
+                }
+            }
+            Event::UserEvent(Cmd::Close) => {
+                if !closed {
+                    closed = true;
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
+            _ => {}
+        }
+    });
+
+    // Wait for the work thread to finish, then return the result.
+    // The work thread sends its result through the channel; we receive
+    // it here. Join the thread to propagate any panics.
+    let _ = work_thread.join();
+    result_rx
+        .recv_timeout(Duration::from_secs(300))
+        .expect("indexer thread finished without sending result")
+}
+
+fn progress_window_position() -> (i32, i32) {
+    use windows_sys::Win32::Foundation::{RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN;
+
+    let primary_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    // Get primary monitor work area.
+    let monitor = unsafe { MonitorFromPoint(std::mem::zeroed(), MONITOR_DEFAULTTOPRIMARY) };
+    let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } != 0 {
+        let work: RECT = info.rcWork;
+        let x = work.left + ((work.right - work.left - WINDOW_WIDTH as i32) / 2);
+        let y = work.top + ((work.bottom - work.top) as f32 * 0.25) as i32;
+        (x.max(0), y.max(0))
+    } else {
+        (((primary_w - WINDOW_WIDTH as i32) / 2).max(0), 100)
+    }
 }

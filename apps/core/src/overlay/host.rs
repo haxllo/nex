@@ -498,7 +498,7 @@ fn apply_window_chrome(window: &Window, hwnd: HWND, state: &Arc<Mutex<ShimState>
     } else {
         Some((245, 245, 247, 140))
     };
-    if let Err(e) = window_vibrancy::apply_acrylic(window, tint) {
+    if let Err(_e) = window_vibrancy::apply_acrylic(window, tint) {
         crate::logging::info("[nex] acrylic unavailable; using opaque panel");
     }
 }

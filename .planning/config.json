@@ -1,0 +1,22 @@
+{
+  "project": "nex",
+  "initialized": "2026-06-08",
+  "workflow": {
+    "auto_mode": true,
+    "phases_as_milestones": true,
+    "commit_per_task": true,
+    "review_per_phase": true
+  },
+  "preferences": {
+    "priority": ["stability", "performance", "architecture"],
+    "timeline": "quality-driven",
+    "new_features": ["snippets", "theming-ui", "iced-migration"],
+    "non_goals": ["cross-platform", "slint", "egui", "tauri"]
+  },
+  "quality_gates": {
+    "build": "cargo build --bin nex",
+    "test": "cargo test -p nex-cli",
+    "smoke": "cargo test -p nex-cli --test windows_runtime_smoke_test",
+    "perf": "cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms"
+  }
+}

@@ -1,63 +1,57 @@
 # UI/UX Improvements
 
-## Priority 1: Inline Calculator
+> **Status (June 2026, v1.3.0)**: Both priorities **complete**.
+
+## Priority 1: Inline Calculator ✅ **SHIPPED** (custom parser, not `meval`)
 
 Detect `=` prefix or standalone math expressions in the search input and show the evaluated result as an overlay row.
 
-### Implementation
+### Implementation (Actual)
 
-1. **Add `meval` crate** — zero-dependency Rust math expression parser/evaluator (`cargo add meval`). Supports `+`, `-`, `*`, `/`, `^`, `%`, `sqrt()`, `sin()`, `cos()`, `pi`, `e`, etc.
+- **Custom shunting-yard parser** in `apps/core/src/calculator.rs` (no `meval` dependency, since the plan flagged it as unmaintained)
+- Supports: `+`, `-`, `*`, `/`, `%`, `^`, parentheses, `sqrt()`, `abs()`, `ln()`, `round()`, `floor()`, `ceil()`, `pi`, `e`
+- Trigger: query starts with `=` (e.g., `=2+3*4` → 14)
+- Wired in `runtime_loop.rs:306` (when overlay already open) and `runtime_loop.rs:681-695` (when typing into empty query)
+- 36 unit tests in `calculator.rs::tests` cover all operators, error cases, and edge cases
 
-2. **Detect calculator query** — in `runtime_overlay_rows.rs::overlay_rows()` or the query dispatch path, check if the raw query starts with `=` or is a standalone math expression. If so, evaluate and produce a single `OverlayRow` with role `TopHit` or a new `Calculator` variant (need to add `OverlayRowRole::Calculator`).
+### Files touched
+- `apps/core/src/calculator.rs` (new)
+- `apps/core/src/lib.rs` (mod export)
+- `apps/core/src/runtime_loop.rs` (dispatch)
 
-3. **Result display** — the row shows the expression (truncated if long) as title, the evaluated result as path/meta with monospace formatting.
-
-4. **Edge cases** — division by zero, invalid syntax, overflow. Show error as a status row instead of crashing.
-
-### Files to touch
-- `apps/core/Cargo.toml` — add `meval`
-- `apps/core/src/runtime_overlay_rows.rs` — calculator detection + row creation
-- `apps/core/src/runtime_loop.rs` — pass raw query for calculator check
-- `apps/core/src/windows_overlay/types.rs` — optional `OverlayRowRole::Calculator` variant
-- `apps/core/src/windows_overlay/painting.rs` — render calculator rows (same as `Item` but different font/color)
-- `apps/core/src/windows_overlay/layout.rs` — optional measurement tweaks
-
-### Risks
-- `meval` is unmaintained (last publish 2021). If it fails to compile with current Rust, fall back to a hand-rolled shunting-yard evaluator (small, ~200 lines).
+### Deviations from plan
+- Skipped `meval` per risk note → custom parser
+- No new `OverlayRowRole::Calculator` variant → reuses existing `Item` role
 
 ---
 
-## Priority 2: Mica Backdrop
+## Priority 2: Mica Backdrop ✅ **SHIPPED**
 
 Apply Windows 11 Mica material behind the overlay panel so the pill has a translucent, desktop-integrated look.
 
-### Implementation
+### Implementation (Actual)
 
-1. **Set `DWMWA_SYSTEMBACKDROP_TYPE`** — call `DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_MAINWINDOW, sizeof(DWMSBT_MAINWINDOW))` after window creation in `window.rs::create()`.
+1. **`DWMWA_SYSTEMBACKDROP_TYPE`** call in `apps/core/src/windows_overlay/layout.rs:512`:
+   ```rust
+   DwmSetWindowAttribute(
+       hwnd,
+       DWMWA_SYSTEMBACKDROP_TYPE as u32,
+       &DWMSBT_MAINWINDOW as *const _ as *const c_void,
+       std::mem::size_of::<i32>() as u32,
+   );
+   ```
+2. Constants from `windows-sys 0.59` (`DWMWA_SYSTEMBACKDROP_TYPE = 38`, `DWMSBT_MAINWINDOW = 2`) — no manual constant definitions needed.
+3. Panel fill alpha reduced to `0x90` (144/255) per `windows_overlay/types.rs:344` (`PANEL_FILL_ALPHA_MICA = 0x90`) so Mica shows through.
+4. 32-bit DIB for per-pixel alpha rendering per `state.rs:233` comment.
 
-2. **Add constant** — `DWMWA_SYSTEMBACKDROP_TYPE = 38`, `DWMSBT_MAINWINDOW = 2` (already in windows-sys 0.59 via `Win32_Graphics_Dwm`).
+### Caveats encountered
+- `WS_EX_LAYERED` (kept for animation alpha) is compatible with Mica in practice on Win11 22H2+ — no need for `ULW_ALPHA` rewrite.
+- Win10 fallback: DwmSetWindowAttribute is a no-op on older builds, so no conditional check needed.
 
-3. **Update panel rendering** — the panel background must become translucent for Mica to show:
-   - In `painting.rs::draw_panel_background`, change the fill color alpha from `0xFF` to `0x80`–`0xA0` (or use `Acrylic` blending).
-   - The pill border can stay opaque or become semi-transparent.
+### Files touched
+- `apps/core/src/windows_overlay/layout.rs` (DwmSetWindowAttribute call)
+- `apps/core/src/windows_overlay/types.rs` (Mica alpha constant)
 
-4. **Theme handling** — Mica has separate dark/light modes. Use `DWMWA_USE_IMMERSIVE_DARK_MODE` to match the system theme or config.
-
-5. **Windows 11 check** — Mica only works on Win11 build 22000+. Use `RtlGetVersion` or check `BuildNumber >= 22000` before applying.
-
-### Layered window caveat
-`WS_EX_LAYERED` with `SetLayeredWindowAttributes` (alpha-per-window) may fight with Mica. Two approaches:
-- **Option A**: Remove `WS_EX_LAYERED` and use only Mica + `UpdateLayeredWindow` for per-pixel transparency (the `experiment/skia-renderer` branch approach). Mica renders into the non-client area.
-- **Option B**: Keep `WS_EX_LAYERED` but use `ULW_ALPHA` with a transparent bitmap where the Mica area should show through.
-
-Option A is cleaner but requires the per-pixel-alpha rendering path to land first.
-
-### Files to touch
-- `apps/core/src/windows_overlay/window.rs` — DwmSetWindowAttribute call after CreateWindowExW
-- `apps/core/src/windows_overlay/painting.rs` — panel fill alpha, update_window_display global alpha
-- `apps/core/src/windows_overlay/types.rs` — Mica constants if not in windows-sys
-- `apps/core/src/windows_overlay/state.rs` — optional mica_enabled flag
-
-### Risks
-- Mica + layered window interaction is poorly documented. May need fallback to solid color on Win10 or if compositing fails.
-- Performance: Mica samples the desktop wallpaper each frame, adding GPU overhead on battery.
+### Deviations from plan
+- No `mica_enabled` config flag (always on)
+- No `BuildNumber >= 22000` check (DWM silently ignores the attribute on older builds)

@@ -1,8 +1,9 @@
 ---
-status: verifying
+status: resolved
 trigger: "hover-screentear-and-flash - Selection hover transition screen tearing between rows; random whole-panel micro-flash on hotkey open and first-letter typing; list-only flash on subsequent keystrokes"
 created: 2026-05-28T00:00:00Z
-updated: 2026-05-28T00:00:00Z
+updated: 2026-06-02T00:00:00Z
+resolved: 2026-06-02T00:00:00Z
 ---
 
 ## Current Focus

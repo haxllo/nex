@@ -249,3 +249,117 @@ fn visibility_filter_can_hide_folders() {
     assert!(!ids.contains(&"folder"));
     assert!(ids.contains(&"app"));
 }
+
+#[test]
+fn dedup_removes_same_app_from_different_sources() {
+    let items = vec![
+        SearchItem::new("firefox-lnk", "app", "Firefox",
+            "C:\\Users\\Admin\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Firefox.lnk"),
+        SearchItem::new("firefox-uninstall", "app", "Firefox",
+            "C:\\Program Files\\Mozilla Firefox\\uninstall\\helper.exe"),
+        SearchItem::new("firefox-exe", "app", "Firefox",
+            "C:\\Program Files\\Mozilla Firefox\\firefox.exe")
+            .with_usage(50, 2_000_000_000),
+        SearchItem::new("chrome", "app", "Chrome",
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
+    ];
+
+    let results = nex_core::search::search(&items, "fir", 10);
+    let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
+
+    assert!(ids.contains(&"firefox-exe"));
+    assert!(!ids.contains(&"firefox-lnk"));
+    assert!(!ids.contains(&"firefox-uninstall"));
+    assert!(ids.contains(&"chrome"));
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn dedup_fills_slots_with_next_best_non_duplicates() {
+    let mut items = Vec::new();
+    for i in 0..8 {
+        items.push(SearchItem::new(
+            &format!("firefox-{}", i), "app", "Firefox",
+            &format!("C:\\Program Files\\Firefox{}\\firefox.exe", i),
+        ));
+    }
+    items.push(SearchItem::new("chrome", "app", "Chrome",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"));
+
+    let results = nex_core::search::search(&items, "fire", 5);
+
+    let firefox_count = results.iter().filter(|i| i.title == "Firefox").count();
+    assert_eq!(firefox_count, 1);
+    assert!(results.iter().any(|i| i.id == "chrome"));
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn dedup_does_not_affect_non_app_items() {
+    let items = vec![
+        SearchItem::new("firefox-app1", "app", "Firefox",
+            "C:\\Program Files\\Firefox\\firefox.exe"),
+        SearchItem::new("firefox-app2", "app", "Firefox",
+            "C:\\Users\\Admin\\Desktop\\Firefox.lnk"),
+        SearchItem::new("firefox-file", "file", "Firefox",
+            "C:\\Docs\\Firefox.txt"),
+        SearchItem::new("firefox-folder", "folder", "Firefox",
+            "C:\\Projects\\Firefox"),
+    ];
+
+    let results = nex_core::search::search(&items, "firefox", 10);
+    let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
+
+    let app_count = results.iter().filter(|i| i.kind == "app" && i.title == "Firefox").count();
+    assert_eq!(app_count, 1);
+    assert!(ids.contains(&"firefox-file"));
+    assert!(ids.contains(&"firefox-folder"));
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn dedup_different_apps_same_title_different_basename_keeps_both() {
+    let items = vec![
+        SearchItem::new("windows-settings", "app", "Settings",
+            "C:\\Windows\\System32\\SystemSettings.exe"),
+        SearchItem::new("nvidia-settings", "app", "Settings",
+            "C:\\Program Files\\NVIDIA Corporation\\nvidia-settings.exe"),
+    ];
+
+    let results = nex_core::search::search(&items, "settings", 10);
+
+    assert_eq!(results.len(), 2);
+    let ids: Vec<&str> = results.iter().map(|i| i.id.as_str()).collect();
+    assert!(ids.contains(&"windows-settings"));
+    assert!(ids.contains(&"nvidia-settings"));
+}
+
+#[test]
+fn dedup_preserves_top_hit_confidence_guard_behavior() {
+    let items = vec![
+        SearchItem::new("app-v", "app", "Vivaldi",
+            "C:\\Program Files\\Vivaldi\\vivaldi.exe"),
+        SearchItem::new("file-v", "file", "V",
+            "C:\\Users\\Admin\\v.txt"),
+        SearchItem::new("app-v2", "app", "Vivaldi",
+            "C:\\Program Files\\Vivaldi\\vivaldi.exe"),
+    ];
+
+    let results = nex_core::search::search(&items, "v", 10);
+
+    assert_eq!(results[0].kind, "app");
+    let vivaldi_count = results.iter().filter(|i| i.title == "Vivaldi").count();
+    assert_eq!(vivaldi_count, 1);
+}
+
+#[test]
+fn dedup_empty_or_single_item_no_panic() {
+    let items: Vec<SearchItem> = vec![];
+    let results = nex_core::search::search(&items, "test", 10);
+    assert!(results.is_empty());
+
+    let items = vec![SearchItem::new("single", "app", "Test", "C:\\test.exe")];
+    let results = nex_core::search::search(&items, "test", 10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].id, "single");
+}

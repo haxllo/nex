@@ -10,7 +10,7 @@ use crate::model::SearchItem;
 const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
 const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
 const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "2";
-const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
+pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "windows",
     "program files",
     "program files (x86)",
@@ -18,7 +18,7 @@ const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "system volume information",
     "appdata",
 ];
-const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
+pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
     "node_modules",
     ".git",
     ".venv",
@@ -31,7 +31,7 @@ const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
     ".dropbox.cache",
     ".ssh",
 ];
-const EXCLUDED_FILE_NAMES: &[&str] = &["pagefile.sys", "hiberfil.sys"];
+pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &["pagefile.sys", "hiberfil.sys"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
@@ -57,6 +57,12 @@ impl std::error::Error for ProviderError {}
 pub trait DiscoveryProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
     fn discover(&self) -> Result<Vec<SearchItem>, ProviderError>;
+    fn discover_with_progress(
+        &self,
+        _on_item_discovered: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<Vec<SearchItem>, ProviderError> {
+        self.discover()
+    }
     fn change_stamp(&self) -> Option<String> {
         None
     }
@@ -210,6 +216,28 @@ pub struct FileSystemDiscoveryProvider {
     show_folders: bool,
     max_items_total: usize,
     max_items_per_root: usize,
+    backend: FileBackend,
+}
+
+#[cfg(target_os = "windows")]
+enum FileBackend {
+    Everything(crate::everything_bridge::EverythingBridge),
+    Walkdir,
+}
+
+#[cfg(not(target_os = "windows"))]
+enum FileBackend {
+    Walkdir,
+}
+
+impl FileBackend {
+    fn kind_label(&self) -> &'static str {
+        match self {
+            #[cfg(target_os = "windows")]
+            Self::Everything(_) => "everything",
+            Self::Walkdir => "walkdir",
+        }
+    }
 }
 
 impl FileSystemDiscoveryProvider {
@@ -232,6 +260,7 @@ impl FileSystemDiscoveryProvider {
             show_folders,
             max_items_total: DEFAULT_INDEX_MAX_ITEMS_TOTAL,
             max_items_per_root: DEFAULT_INDEX_MAX_ITEMS_PER_ROOT,
+            backend: FileBackend::Walkdir,
         }
     }
 
@@ -241,6 +270,82 @@ impl FileSystemDiscoveryProvider {
         self.max_items_total = total;
         self.max_items_per_root = per_root;
         self
+    }
+
+    pub fn backend_label(&self) -> &'static str {
+        self.backend.kind_label()
+    }
+
+    pub fn from_config(
+        config: &crate::config::Config,
+        max_depth: usize,
+    ) -> Self {
+        let mut provider = Self::with_options(
+            config.discovery_roots.clone(),
+            max_depth,
+            config.discovery_exclude_roots.clone(),
+            config.show_files,
+            config.show_folders,
+        )
+        .with_index_limits(
+            config.index_max_items_total as usize,
+            config.index_max_items_per_root as usize,
+        );
+
+        let requested = config.file_discovery_backend;
+        provider.backend = resolve_file_backend(requested);
+        provider
+    }
+}
+
+fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBackend {
+    #[cfg(target_os = "windows")]
+    {
+        let backend = match requested {
+            crate::config::DiscoveryBackend::Walkdir => FileBackend::Walkdir,
+            crate::config::DiscoveryBackend::Everything => {
+                match crate::everything_bridge::EverythingBridge::detect() {
+                    Some(bridge) if bridge.is_service_running() => {
+                        FileBackend::Everything(bridge)
+                    }
+                    Some(_) => {
+                        crate::runtime::log_warn(
+                            "[nex] file_discovery_backend=everything requested but Everything service is not running; falling back to walkdir (start Everything.exe to use the SDK backend)",
+                        );
+                        FileBackend::Walkdir
+                    }
+                    None => {
+                        crate::runtime::log_warn(
+                            "[nex] file_discovery_backend=everything requested but Everything SDK was not detected; falling back to walkdir",
+                        );
+                        FileBackend::Walkdir
+                    }
+                }
+            }
+            crate::config::DiscoveryBackend::Auto => {
+                match crate::everything_bridge::EverythingBridge::detect() {
+                    Some(bridge) if bridge.is_service_running() => {
+                        FileBackend::Everything(bridge)
+                    }
+                    Some(_) => {
+                        crate::runtime::log_info(
+                            "[nex] Everything SDK present but service not running; using walkdir (start Everything.exe to use the SDK backend)",
+                        );
+                        FileBackend::Walkdir
+                    }
+                    None => FileBackend::Walkdir,
+                }
+            }
+        };
+        if matches!(backend, FileBackend::Everything(_)) {
+            crate::runtime::log_info("[nex] Everything SDK loaded; using Everything as filesystem backend");
+        }
+        backend
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = requested;
+        FileBackend::Walkdir
     }
 }
 
@@ -254,15 +359,112 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             return Ok(Vec::new());
         }
 
-        discover_filesystem_walk(
-            &self.roots,
-            &self.excluded_roots,
-            self.max_depth,
-            self.show_files,
-            self.show_folders,
-            self.max_items_total,
-            self.max_items_per_root,
-        )
+        match &self.backend {
+            #[cfg(target_os = "windows")]
+            FileBackend::Everything(bridge) => {
+                match discover_filesystem_everything(
+                    bridge,
+                    &self.roots,
+                    &self.excluded_roots,
+                    self.show_files,
+                    self.show_folders,
+                    self.max_items_total,
+                    self.max_items_per_root,
+                ) {
+                    Ok(items) => Ok(items),
+                    Err(e) => {
+                        // If the Everything IPC call failed mid-run, the
+                        // service most likely stopped or was never running.
+                        // Retry once with walkdir so the user still gets a
+                        // populated index instead of a silent failure that
+                        // leaves the launcher searching 80K items per
+                        // keystroke.
+                        crate::runtime::log_warn(&format!(
+                            "[nex] Everything discover failed ({e}); falling back to walkdir"
+                        ));
+                        discover_filesystem_walk(
+                            &self.roots,
+                            &self.excluded_roots,
+                            self.max_depth,
+                            self.show_files,
+                            self.show_folders,
+                            self.max_items_total,
+                            self.max_items_per_root,
+                            None,
+                        )
+                    }
+                }
+            }
+            FileBackend::Walkdir => discover_filesystem_walk(
+                &self.roots,
+                &self.excluded_roots,
+                self.max_depth,
+                self.show_files,
+                self.show_folders,
+                self.max_items_total,
+                self.max_items_per_root,
+                None,
+            ),
+        }
+    }
+
+    fn discover_with_progress(
+        &self,
+        on_item_discovered: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<Vec<SearchItem>, ProviderError> {
+        if !self.show_files && !self.show_folders {
+            return Ok(Vec::new());
+        }
+
+        match &self.backend {
+            #[cfg(target_os = "windows")]
+            FileBackend::Everything(bridge) => {
+                let mut cb = on_item_discovered;
+                match discover_filesystem_everything(
+                    bridge,
+                    &self.roots,
+                    &self.excluded_roots,
+                    self.show_files,
+                    self.show_folders,
+                    self.max_items_total,
+                    self.max_items_per_root,
+                ) {
+                    Ok(items) => {
+                        if let Some(ref mut cb) = cb {
+                            for _ in 0..items.len() {
+                                cb(1);
+                            }
+                        }
+                        Ok(items)
+                    }
+                    Err(e) => {
+                        crate::runtime::log_warn(&format!(
+                            "[nex] Everything discover failed ({e}); falling back to walkdir"
+                        ));
+                        discover_filesystem_walk(
+                            &self.roots,
+                            &self.excluded_roots,
+                            self.max_depth,
+                            self.show_files,
+                            self.show_folders,
+                            self.max_items_total,
+                            self.max_items_per_root,
+                            cb,
+                        )
+                    }
+                }
+            }
+            FileBackend::Walkdir => discover_filesystem_walk(
+                &self.roots,
+                &self.excluded_roots,
+                self.max_depth,
+                self.show_files,
+                self.show_folders,
+                self.max_items_total,
+                self.max_items_per_root,
+                on_item_discovered,
+            ),
+        }
     }
 
     fn change_stamp(&self) -> Option<String> {
@@ -288,6 +490,30 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn discover_filesystem_everything(
+    bridge: &crate::everything_bridge::EverythingBridge,
+    roots: &[PathBuf],
+    excluded_roots: &[PathBuf],
+    show_files: bool,
+    show_folders: bool,
+    max_items_total: usize,
+    max_items_per_root: usize,
+) -> Result<Vec<SearchItem>, ProviderError> {
+    let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
+    let total_budget = max_items_total.max(1);
+    let per_root_budget = max_items_per_root.max(1).min(total_budget);
+
+    bridge.discover(
+        roots,
+        &exclusion_policy,
+        show_files,
+        show_folders,
+        total_budget,
+        per_root_budget,
+    )
+}
+
 fn discover_filesystem_walk(
     roots: &[PathBuf],
     excluded_roots: &[PathBuf],
@@ -296,6 +522,7 @@ fn discover_filesystem_walk(
     show_folders: bool,
     max_items_total: usize,
     max_items_per_root: usize,
+    mut on_item_discovered: Option<&mut dyn FnMut(usize)>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     let mut out = Vec::new();
     let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
@@ -355,6 +582,9 @@ fn discover_filesystem_walk(
                 ));
                 total_added += 1;
                 root_added += 1;
+                if let Some(callback) = on_item_discovered.as_deref_mut() {
+                    callback(total_added);
+                }
                 continue;
             }
 
@@ -379,6 +609,9 @@ fn discover_filesystem_walk(
             ));
             total_added += 1;
             root_added += 1;
+            if let Some(callback) = on_item_discovered.as_deref_mut() {
+                callback(total_added);
+            }
         }
     }
 
@@ -399,7 +632,7 @@ fn discover_filesystem_walk(
 }
 
 #[derive(Debug, Clone)]
-struct DiscoveryExclusionPolicy {
+pub(crate) struct DiscoveryExclusionPolicy {
     excluded_roots: Vec<String>,
     user_excluded_roots: Vec<String>,
     top_level_dir_names: HashSet<&'static str>,
@@ -408,7 +641,7 @@ struct DiscoveryExclusionPolicy {
 }
 
 impl DiscoveryExclusionPolicy {
-    fn new(user_excluded_roots: &[PathBuf]) -> Self {
+    pub(crate) fn new(user_excluded_roots: &[PathBuf]) -> Self {
         Self {
             excluded_roots: normalized_exclusion_roots(&builtin_exclusion_roots()),
             user_excluded_roots: normalized_exclusion_roots(user_excluded_roots),
@@ -418,7 +651,7 @@ impl DiscoveryExclusionPolicy {
         }
     }
 
-    fn should_exclude_path_under_root(&self, path: &Path, root: &Path) -> bool {
+    pub(crate) fn should_exclude_path_under_root(&self, path: &Path, root: &Path) -> bool {
         // The explicitly configured root is never excluded.
         if path == root {
             return false;

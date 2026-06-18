@@ -7,13 +7,10 @@ use crate::core_service::CoreService;
 use crate::plugin_sdk::PluginRegistry;
 use crate::runtime::log_info;
 use crate::runtime::log_warn;
-use crate::runtime_overlay_rows::{
-    set_idle_overlay_state, PendingUninstallConfirmation, STATUS_ROW_TYPE_TO_SEARCH,
-    STATUS_TEXT_INDEX_READY,
-};
+use crate::runtime_overlay_rows::PendingUninstallConfirmation;
 use crate::runtime_search_session::OverlaySearchSession;
 #[cfg(target_os = "windows")]
-use crate::windows_overlay::NativeOverlayShell;
+use crate::overlay::NativeOverlayShell;
 
 #[cfg(target_os = "windows")]
 const QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS: u64 = 1200;
@@ -34,11 +31,11 @@ pub(crate) struct BackgroundIndexRefresh {
     pub(crate) completed: Arc<AtomicBool>,
     pub(crate) result: Arc<Mutex<Option<Result<crate::core_service::IndexRefreshReport, String>>>>,
     pub(crate) cache_applied: bool,
+    pub(crate) indexes_synced: bool,
     pub(crate) initial_cache_empty: bool,
     pub(crate) pending_discovery_reindex: bool,
     pub(crate) pending_discovery_reindex_due_at: Option<Instant>,
     pub(crate) pending_discovery_reindex_requests: usize,
-    pub(crate) ready_notice_pending: bool,
     pub(crate) started_at: Instant,
     pub(crate) startup_started_at: Instant,
 }
@@ -55,10 +52,23 @@ pub(crate) fn start_background_index_refresh(
     let result_worker = result.clone();
     let worker_config = config.clone();
     std::thread::spawn(move || {
-        let outcome = CoreService::new(worker_config)
-            .map(|service| service.with_runtime_providers())
-            .and_then(|service| service.rebuild_index_incremental_with_report())
-            .map_err(|error| format!("background indexing failed: {error}"));
+        // Catch panics so a buggy provider can never silently leave the main
+        // thread waiting on a completion flag that will never flip.
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CoreService::new(worker_config)
+                .map(|service| service.with_runtime_providers())
+                .and_then(|service| service.rebuild_index_incremental_with_report())
+                .map_err(|error| format!("background indexing failed: {error}"))
+        })) {
+            Ok(result) => result,
+            Err(payload) => {
+                let message = panic_message_to_string(&payload);
+                log_warn(&format!(
+                    "[nex] background indexing thread panicked: {message}"
+                ));
+                Err(format!("background indexing panicked: {message}"))
+            }
+        };
         let mut slot = match result_worker.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -71,11 +81,11 @@ pub(crate) fn start_background_index_refresh(
         completed,
         result,
         cache_applied: false,
+        indexes_synced: false,
         initial_cache_empty,
         pending_discovery_reindex: false,
         pending_discovery_reindex_due_at: None,
         pending_discovery_reindex_requests: 0,
-        ready_notice_pending: false,
         started_at: Instant::now(),
         startup_started_at,
     }
@@ -88,6 +98,19 @@ pub(crate) fn maybe_apply_background_index_refresh(
     runtime_config: &Config,
 ) {
     if state.cache_applied {
+        if !state.indexes_synced {
+            match service.sync_indexes_from_cache() {
+                Ok(()) => {
+                    state.indexes_synced = true;
+                    log_info("[nex] Tantivy/FTS5 search indexes synced from cache");
+                }
+                Err(e) => {
+                    log_warn(&format!(
+                        "[nex] background indexing Tantivy/FTS5 sync failed: {e}"
+                    ));
+                }
+            }
+        }
         maybe_start_queued_discovery_reindex(service, state, runtime_config);
         return;
     }
@@ -135,15 +158,20 @@ pub(crate) fn maybe_apply_background_index_refresh(
                             provider.elapsed_ms
                         ));
                     }
+                    if let Err(e) = service.sync_indexes_from_cache() {
+                        log_warn(&format!(
+                            "[nex] background indexing Tantivy/FTS5 sync failed: {e}"
+                        ));
+                    } else {
+                        state.indexes_synced = true;
+                        log_info("[nex] Tantivy/FTS5 search indexes synced from cache");
+                    }
                 }
                 Err(error) => {
                     log_warn(&format!(
                         "[nex] background indexing cache refresh failed: {error}"
                     ));
                 }
-            }
-            if state.initial_cache_empty {
-                state.ready_notice_pending = true;
             }
         }
         Some(Err(error)) => {
@@ -162,11 +190,6 @@ pub(crate) fn maybe_apply_background_index_refresh(
         );
         maybe_start_queued_discovery_reindex(service, state, runtime_config);
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn should_show_indexing_status(state: &BackgroundIndexRefresh) -> bool {
-    state.initial_cache_empty && !state.cache_applied
 }
 
 #[cfg(target_os = "windows")]
@@ -219,26 +242,18 @@ pub(crate) fn maybe_start_queued_discovery_reindex(
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn maybe_show_background_index_ready_notice(
-    overlay: &NativeOverlayShell,
-    state: &mut BackgroundIndexRefresh,
-) {
-    if !state.ready_notice_pending || !overlay.is_visible() {
-        return;
-    }
-    if !overlay.query_text().trim().is_empty() {
-        return;
-    }
-
-    set_idle_overlay_state(overlay);
-    overlay.show_placeholder_hint(STATUS_ROW_TYPE_TO_SEARCH);
-    overlay.set_status_text(STATUS_TEXT_INDEX_READY);
-    state.ready_notice_pending = false;
-}
-
-#[cfg(target_os = "windows")]
 pub(crate) fn config_file_modified_time(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
+}
+
+fn panic_message_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -284,6 +299,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             overlay.set_performance_tuning(
                 runtime_config.idle_cache_trim_ms,
                 runtime_config.active_memory_target_mb,
+                runtime_config.ui_warm_release_ms,
             );
             overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);

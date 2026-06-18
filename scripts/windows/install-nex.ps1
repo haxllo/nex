@@ -128,6 +128,15 @@ foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {
   }
 }
 
+$sourceDir = Split-Path -Parent $SourceExe
+foreach ($dllName in @("Everything64.dll", "Everything32.dll")) {
+  $sourceDll = Join-Path $sourceDir $dllName
+  if (Test-Path -LiteralPath $sourceDll) {
+    Copy-Item -LiteralPath $sourceDll (Join-Path $binDir $dllName) -Force
+    Write-Host "  Bundled $dllName"
+  }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $assetCandidates = @(
   (Join-Path $scriptDir "..\assets\nex.svg"),              # packaged zip layout

@@ -77,5 +77,9 @@ fn map_service_error(error: ServiceError) -> ErrorResponse {
             code: ErrorCode::Provider,
             message: message.to_string(),
         },
+        ServiceError::SearchIndex(message) => ErrorResponse {
+            code: ErrorCode::Store,
+            message,
+        },
     }
 }

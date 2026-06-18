@@ -75,7 +75,7 @@ use crate::overlay::tray::TrayIcon;
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
-    mut runtime_config: Config,
+    runtime_config: Config,
     service: CoreService,
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(Mutex::new(service));
@@ -85,7 +85,7 @@ pub(crate) fn run_windows_runtime(
         guard.cached_items_len() == 0
     };
 
-    let mut background_index_refresh = if initial_cache_empty {
+    let background_index_refresh = if initial_cache_empty {
         let use_progress_window = match runtime_config.file_discovery_backend {
             DiscoveryBackend::Everything => false,
             DiscoveryBackend::Walkdir => true,
@@ -161,7 +161,7 @@ pub(crate) fn run_windows_runtime(
         start_background_index_refresh(&runtime_config, false, startup_started_at)
     };
 
-    let mut plugin_registry = PluginRegistry::load_from_config(&runtime_config);
+    let plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
         log_warn(&format!("[nex] plugin_warning {warning}"));
     }
@@ -193,7 +193,7 @@ pub(crate) fn run_windows_runtime(
         return Ok(());
     }
 
-    let mut overlay_state = OverlayState::default();
+    let overlay_state = OverlayState::default();
     let overlay = NativeOverlayShell::create().map_err(RuntimeError::Overlay)?;
     overlay.set_help_config_path(runtime_config.config_path.to_string_lossy().as_ref());
     overlay.set_hotkey_hint(&runtime_config.hotkey);

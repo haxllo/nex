@@ -58,17 +58,9 @@ body {
 }
 
 #panel-wrap {
-  position: relative;
-}
-
-#panel-wrap::before {
-  content: "";
-  position: absolute;
-  inset: 0;
+  margin: 5px;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.12);
   border-radius: var(--radius);
-  background: var(--bg);
-  filter: drop-shadow(0 0 5px rgba(0, 0, 0, 0.12));
-  z-index: -1;
 }
 
 #panel {

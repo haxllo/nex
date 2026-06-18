@@ -58,7 +58,10 @@ tao = "0.35.3"
 window-vibrancy = "0.7.1"
 
 [dev-dependencies]
+resvg = "0.47.0"
 tempfile = "3.12.0"
+tiny-skia = "0.12.0"
+usvg = "0.47.0"
 
 [build-dependencies]
 winres = "0.1"

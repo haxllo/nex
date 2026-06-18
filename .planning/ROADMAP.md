@@ -127,7 +127,7 @@ Plans:
 
 ## Phase 7: Performance — Indexing & Memory
 
-**Status:** Planned
+**Status:** COMPLETE
 **Branch:** `iced-ui`
 **Plans:** 3 plans
 
@@ -142,9 +142,9 @@ Performance optimization:
 **Verification:** Perf gate (p95 under 15ms), memory under targets, incremental sync <500ms
 
 Plans:
-- [ ] 07-01-PLAN.md — Incremental search indexing (Tantivy + FTS5 delta sync)
-- [ ] 07-02-PLAN.md — Index compaction (batch commits, merge policy, FTS5 optimize)
-- [ ] 07-03-PLAN.md — Memory profiling & icon cache tuning
+- [x] 07-01-PLAN.md — Incremental search indexing (Tantivy + FTS5 delta sync)
+- [x] 07-02-PLAN.md — Index compaction (batch commits, merge policy, FTS5 optimize)
+- [x] 07-03-PLAN.md — Memory profiling & icon cache tuning
 
 ---
 

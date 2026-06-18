@@ -1,16 +1,12 @@
 # Nex — Project State
 
 **Last Updated:** 2026-06-08
-**Current Phase:** Phase 7 (Perf: Indexing & Memory) — **Planned, 3 plans ready** | Phase 8 (Perf: Search Quality) — **Planned, 2 plans ready**
+**Current Phase:** Phase 8 (Perf: Search Quality) — **Not Started**
 
 **Active Branch:** `iced-ui`
 ## Current Status
 
-The Iced 0.14 UI migration (Phases 1-5) is complete. The legacy `windows_overlay/` 
-directory has been deleted (~8,200 lines removed). All platform glue, icon 
-pipeline, view rendering, shim wire-up, and legacy cleanup are done.
-
-`cargo check -p nex-cli` passes with zero errors.
+The Iced 0.14 UI migration (Phases 1-5) is complete. Stability hardening (Phase 6) is complete. Performance: Indexing & Memory (Phase 7) is complete.
 
 ### Overlay Module (complete)
 
@@ -38,7 +34,8 @@ pipeline, view rendering, shim wire-up, and legacy cleanup are done.
 | 4 — Shim & Wire-Up | COMPLETE |
 | 5 — Legacy Removal | COMPLETE |
 | 6 — Stability | COMPLETE |
-| 7 — Perf: Indexing & Memory | Planned |
+| 7 — Perf: Indexing & Memory | COMPLETE |
+| 8 — Perf: Search Quality | Not Started |
 | 8 — Perf: Search Quality | Planned |
 | 9 — UI Polish | Not Started |
 | 10 — Snippets | Not Started |
@@ -54,10 +51,8 @@ pipeline, view rendering, shim wire-up, and legacy cleanup are done.
 
 1. ~~Complete Phase 1-5 — Iced migration~~ ✅
 2. ~~Begin stability hardening (Phase 6)~~ ✅
-3. **Execute Phase 7 plans** — `/gsd-execute-phase 7`
-4. Performance optimization (Phase 8)
-5. UI polish (Phase 9)
-6. Snippets feature (Phase 10)
-7. Testing expansion (Phase 11)
-
-Run `/gsd-plan-phase 7` to plan Phase 7 (Perf: Indexing & Memory).
+3. ~~Execute Phase 7 plans~~ ✅
+4. **Plan Phase 8** — `/gsd-plan-phase 8` (can run in parallel with future phases)
+5. Plan Phase 9 (UI Polish)
+6. Plan Phase 10 (Snippets)
+7. Plan Phase 11 (Testing)

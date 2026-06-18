@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::clipboard_history;
 #[cfg(target_os = "windows")]
@@ -41,7 +41,7 @@ use crate::runtime_index::{
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
-    filter_suppressed_uninstall_results, next_selection_index, overlay_rows,
+    filter_suppressed_uninstall_results, overlay_rows,
     reconcile_suppressed_uninstall_titles, set_idle_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, PendingUninstallConfirmation, ACTION_UNINSTALL_CANCEL_ID,
     ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS,
@@ -60,13 +60,11 @@ use crate::runtime_search_session::{
 use crate::search_worker::SearchWorker;
 
 #[cfg(target_os = "windows")]
-use crate::overlay::boot::Boot;
+use crate::overlay::host::Host;
 #[cfg(target_os = "windows")]
 use crate::overlay::hotkey::HotkeyListener;
 #[cfg(target_os = "windows")]
 use crate::overlay::indexing_progress::run_with_progress_window;
-#[cfg(target_os = "windows")]
-use crate::overlay::NEX_WM_SEARCH_RESULTS_READY;
 #[cfg(target_os = "windows")]
 use crate::overlay::{
     signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
@@ -202,6 +200,7 @@ pub(crate) fn run_windows_runtime(
     overlay.set_performance_tuning(
         runtime_config.idle_cache_trim_ms,
         runtime_config.active_memory_target_mb,
+        runtime_config.ui_warm_release_ms,
     );
     overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
     log_info("[nex] native overlay shell initialized (hidden)");
@@ -210,8 +209,9 @@ pub(crate) fn run_windows_runtime(
         startup_started_at.elapsed().as_millis()
     ));
 
-    // Build the event channel that the Iced `State` and the hotkey
-    // listener write to, and the runtime worker thread reads from.
+    // Build the event channel that the WebView host's IPC handler
+    // (and the hotkey listener / tray) write to, and the runtime
+    // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
     // Create the system tray icon with context menu. The tray uses
@@ -256,13 +256,13 @@ pub(crate) fn run_windows_runtime(
         service.clone(),
         runtime_config.clone(),
         Arc::new(plugin_registry.clone()),
-        overlay.hwnd(),
-        NEX_WM_SEARCH_RESULTS_READY,
+        event_tx.clone(),
     );
 
     // Register the global hotkey on its own OS thread, sending
     // `OverlayEvent::Hotkey(id)` to the shared event channel.
-    let (hotkey_listener, hotkey_issue_status) =
+    let hotkey_listener: Arc<Mutex<Option<HotkeyListener>>> = Arc::new(Mutex::new(None));
+    let hotkey_issue_status =
         match HotkeyListener::start(&runtime_config.hotkey, event_tx.clone()) {
             Ok(listener) => {
                 log_info(&format!(
@@ -275,7 +275,8 @@ pub(crate) fn run_windows_runtime(
                 ));
                 overlay.set_hotkey_issue_active(false);
                 let _ = tray_hi_tx.send(false);
-                (Some(listener), None)
+                *hotkey_listener.lock().unwrap() = Some(listener);
+                None
             }
             Err(error) => {
                 let recovery_message = hotkey_registration_recovery_message(
@@ -296,7 +297,7 @@ pub(crate) fn run_windows_runtime(
                 let _ = tray_hi_tx.send(true);
                 let status = hotkey_registration_status_text(&runtime_config.hotkey);
                 overlay.set_status_text(&status);
-                (None, Some(status))
+                Some(status)
             }
         };
     log_info(&format!(
@@ -313,26 +314,27 @@ pub(crate) fn run_windows_runtime(
         last_modified: config_file_modified_time(runtime_config.config_path.as_path()),
     };
 
-    // Build the Iced `Boot`. The Iced event loop runs on the main
-    // thread (winit 0.30 requires `EventLoop::new` on the main
-    // thread), reading from the shared model and writing events
-    // to the `event_tx` channel.
-    let shared_model = overlay.shared_model();
+    // Build the WebView host. The tao event loop runs on the main
+    // thread (it cannot be created off the main thread), reading from
+    // the shared state and writing events to the `event_tx` channel.
+    let shared_state = overlay.shared_state();
+    let proxy_slot = overlay.proxy_slot();
     let is_running = overlay.is_running();
     let icon_cache = overlay.icon_cache();
     is_running.store(true, std::sync::atomic::Ordering::SeqCst);
-    let boot = Boot {
-        model: shared_model,
+    let host = Host {
+        state: shared_state,
+        proxy_slot,
         icon_cache,
         event_tx: event_tx.clone(),
         is_running: is_running.clone(),
     };
 
     // Diagnostic: if `--test-show` was passed, post a synthetic
-    // `OverlayEvent::Hotkey(1)` 2 s after the Iced event loop is
-    // about to start. This exercises the full show/hide path without
-    // depending on a physical keyboard, so the build is verifiable
-    // in a CI / scripted environment.
+    // `OverlayEvent::Hotkey(1)` 2 s after the WebView host event loop
+    // is about to start. This exercises the full show/hide path
+    // without depending on a physical keyboard, so the build is
+    // verifiable in a CI / scripted environment.
     let test_show = matches!(
         std::env::var("NEX_TEST_SHOW").as_deref(),
         Ok("1") | Ok("true")
@@ -373,6 +375,10 @@ pub(crate) fn run_windows_runtime(
         is_running,
         tray_gm_tx,
         tray_hi_tx,
+        hotkey_listener: hotkey_listener.clone(),
+        event_tx: event_tx.clone(),
+        hotkey_check_counter: 0,
+        last_memory_log: Instant::now(),
     };
 
     let worker_join = std::thread::Builder::new()
@@ -380,21 +386,21 @@ pub(crate) fn run_windows_runtime(
         .spawn(move || worker.run())
         .map_err(|e| RuntimeError::Overlay(format!("failed to spawn runtime thread: {e}")))?;
 
-    // Run the Iced event loop on the main thread (blocking). This
-    // is the only place `iced::application().run()` can be called:
-    // winit 0.30 panics if the EventLoop is created on a non-main
-    // thread.
-    let iced_result = crate::overlay::boot::run(boot);
+    // Run the WebView host event loop on the main thread (blocking).
+    // tao, like winit, panics if the EventLoop is created on a
+    // non-main thread. The host owns the tao window + wry WebView and
+    // drives show/hide/warm-release from `UiCommand`s posted by the
+    // shim. The runtime worker thread (above) drains `event_rx` and
+    // calls `on_event` for each `OverlayEvent`; the host flips
+    // `is_running` to `false` when its event loop exits.
+    let host_result = crate::overlay::host::run(host);
 
-    // When the Iced event loop exits, `boot::run` already set
-    // `is_running = false`, so the worker's `run_message_pump`
-    // loop will exit on the next 50ms tick. Drop the hotkey
-    // listener (unregisters the hotkey) and wait for the worker
-    // to finish.
-    drop(hotkey_listener);
+    // Drop the hotkey listener (unregisters the global hotkey) and
+    // wait for the worker thread to finish its `run_message_pump`.
+    drop(hotkey_listener.lock().unwrap().take());
     let _ = worker_join.join();
 
-    iced_result.map_err(RuntimeError::Overlay)
+    host_result.map_err(RuntimeError::Overlay)
 }
 
 /// All mutable state owned by the runtime worker thread. The
@@ -423,6 +429,10 @@ struct RuntimeWorker {
     is_running: Arc<AtomicBool>,
     tray_gm_tx: crossbeam_channel::Sender<bool>,
     tray_hi_tx: crossbeam_channel::Sender<bool>,
+    hotkey_listener: Arc<Mutex<Option<HotkeyListener>>>,
+    event_tx: crossbeam_channel::Sender<OverlayEvent>,
+    hotkey_check_counter: u32,
+    last_memory_log: Instant,
 }
 
 impl RuntimeWorker {
@@ -447,6 +457,46 @@ impl RuntimeWorker {
     }
 
     fn on_event(&mut self, event: OverlayEvent) {
+        // Periodic hotkey thread health check: if the listener thread
+        // has crashed, attempt to restart it.
+        self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
+
+        // Periodic memory logging every 30 seconds
+        if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
+            if let Ok(guard) = self.service.lock() {
+                guard.log_memory_stats();
+            }
+            self.last_memory_log = Instant::now();
+        }
+
+        if self.hotkey_check_counter % 32 == 0 {
+            let needs_restart = match self.hotkey_listener.lock() {
+                Ok(guard) => match guard.as_ref() {
+                    Some(listener) => !listener.is_alive(),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+            if needs_restart {
+                log_warn("[nex] hotkey listener thread died; attempting restart");
+                if let Ok(mut guard) = self.hotkey_listener.lock() {
+                    *guard = None;
+                    match HotkeyListener::start(&self.runtime_config.hotkey, self.event_tx.clone())
+                    {
+                        Ok(new_listener) => {
+                            log_info("[nex] hotkey listener restarted successfully");
+                            *guard = Some(new_listener);
+                        }
+                        Err(error) => {
+                            log_warn(&format!(
+                                "[nex] hotkey listener restart failed: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // The message-pump callback must never block on the service
         // lock. The service is shared with the background indexer
         // thread and the per-root directory-watcher consumer threads,
@@ -572,6 +622,10 @@ impl RuntimeWorker {
                         self.last_sent_generation = 0;
                         self.search_session.clear();
                         self.search_worker.clear_session();
+                        // Drain any in-flight results still sitting in the
+                        // channel so they don't overwrite the idle state on
+                        // the next show.
+                        while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
                             &*self.service.lock().unwrap(),
                             &mut self.background_index_refresh,
@@ -581,9 +635,9 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::ExternalShow => {
-                self.overlay_state.set_visible(self.overlay.is_visible());
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 self.overlay.show_and_focus();
+                self.overlay_state.set_visible(true);
                 if self.runtime_config.clipboard_enabled {
                     let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                 }
@@ -599,9 +653,9 @@ impl RuntimeWorker {
                 self.last_query.clear();
                 self.last_sent_generation = 0;
                 self.search_session.clear();
-                unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-                }
+                self.search_worker.clear_session();
+                while self.search_worker.try_recv().is_some() {}
+                self.overlay.quit_if_running();
             }
             OverlayEvent::TrayToggleGameMode => {
                 toggle_game_mode_from_tray(&self.overlay, &mut self.runtime_config);
@@ -618,7 +672,7 @@ impl RuntimeWorker {
             }
             OverlayEvent::Escape => {
                 if self.overlay_state.on_escape() {
-                    self.overlay.hide_now();
+                    self.overlay.hide();
                     reset_overlay_session(
                         &self.overlay,
                         &mut self.current_results,
@@ -627,7 +681,10 @@ impl RuntimeWorker {
                     self.pending_uninstall_confirmation = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
-                    self.search_session.clear();
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                        while self.search_worker.try_recv().is_some() {}
+                    while self.search_worker.try_recv().is_some() {}
                 }
             }
             OverlayEvent::QueryChanged(query) => {
@@ -645,6 +702,13 @@ impl RuntimeWorker {
                 );
             }
             OverlayEvent::SearchResultsReady => {
+                // Don't apply results from stale pre-hide searches
+                // that complete after the overlay is re-shown with
+                // an empty query.
+                if self.overlay.query_text().trim().is_empty() {
+                    let _ = self.search_worker.try_recv();
+                    return;
+                }
                 apply_search_results(
                     &self.search_worker,
                     &self.overlay,
@@ -655,18 +719,6 @@ impl RuntimeWorker {
                     &mut self.selected_index,
                     self.last_sent_generation,
                 );
-            }
-            OverlayEvent::MoveSelection(direction) => {
-                if self.current_results.is_empty() {
-                    return;
-                }
-
-                self.selected_index = next_selection_index(
-                    self.selected_index,
-                    self.current_results.len(),
-                    direction,
-                );
-                self.overlay.set_selected_index(self.selected_index);
             }
             OverlayEvent::Submit => {
                 if self.current_results.is_empty() {
@@ -859,6 +911,7 @@ impl RuntimeWorker {
                     }
                 }
             }
+            _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
         }
     }
 }
@@ -995,7 +1048,13 @@ fn apply_search_results(
         let indexing_in_progress = !background_index_refresh
             .completed
             .load(std::sync::atomic::Ordering::Acquire);
-        let message = if indexing_in_progress && !command_mode {
+        // Only show "Indexing, please wait…" on first-time indexing
+        // (empty cache).  Async background refreshes on a populated
+        // index are invisible — the existing cache is queryable.
+        let message = if indexing_in_progress
+            && background_index_refresh.initial_cache_empty
+            && !command_mode
+        {
             "Indexing, please wait..."
         } else if command_mode {
             STATUS_ROW_NO_COMMAND_RESULTS

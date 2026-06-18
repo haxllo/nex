@@ -299,6 +299,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             overlay.set_performance_tuning(
                 runtime_config.idle_cache_trim_ms,
                 runtime_config.active_memory_target_mb,
+                runtime_config.ui_warm_release_ms,
             );
             overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);

@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use crossbeam_channel::Sender;
 
+use crate::logging;
 use crate::overlay::model::OverlayEvent;
 
 /// Owns a dedicated OS thread that holds a registered hotkey.
@@ -51,34 +52,45 @@ impl HotkeyListener {
         let modifiers = modifiers_from_names(&parsed.modifiers)?;
         let vk = vk_from_key(&parsed.key)?;
 
-        // Register with id 1 (only one hotkey at a time).
         let id: i32 = 1;
-        let ok = unsafe {
-            windows_sys::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(
-                std::ptr::null_mut(),
-                id,
-                modifiers,
-                vk,
-            )
-        };
-        if ok == 0 {
-            return Err(format!("RegisterHotKey failed for '{hotkey_str}'"));
-        }
-
         let should_exit = Arc::new(AtomicBool::new(false));
         let should_exit_clone = should_exit.clone();
         let event_tx_clone = event_tx.clone();
-        let id_for_thread = id;
         let thread_id: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
         let thread_id_for_thread = thread_id.clone();
+
+        // RegisterHotKey(NULL, ...) delivers WM_HOTKEY to the thread
+        // that called it.  GetMessageW also runs on the listener
+        // thread, so RegisterHotKey must be called inside the spawned
+        // thread — otherwise WM_HOTKEY lands on the wrong queue.
+        let (reg_tx, reg_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let hotkey_owned = hotkey_str.to_string();
         let thread = thread::Builder::new()
             .name("nex-hotkey-listener".into())
             .spawn(move || {
-                let id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
-                let _ = thread_id_for_thread.set(id);
-                run_get_message_loop(should_exit_clone, event_tx_clone, id_for_thread);
+                let ok = unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(
+                        std::ptr::null_mut(),
+                        id,
+                        modifiers,
+                        vk,
+                    )
+                };
+                if ok == 0 {
+                    let _ = reg_tx.send(Err(format!(
+                        "RegisterHotKey failed for '{hotkey_owned}'"
+                    )));
+                    return;
+                }
+                let _ = reg_tx.send(Ok(()));
+                let tid =
+                    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+                let _ = thread_id_for_thread.set(tid);
+                run_get_message_loop(should_exit_clone, event_tx_clone, id);
             })
             .map_err(|e| format!("failed to spawn hotkey thread: {e}"))?;
+
+        reg_rx.recv().unwrap_or(Err("hotkey thread panicked".into()))?;
 
         Ok(Self {
             inner: Some(HotkeyListenerInner {
@@ -109,31 +121,30 @@ impl HotkeyListener {
         }
         inner.thread_id.get().copied()
     }
+
+    /// Returns `true` if the hotkey listener thread is still running.
+    pub(crate) fn is_alive(&self) -> bool {
+        match &self.inner {
+            Some(inner) => {
+                !inner.should_exit.load(Ordering::SeqCst)
+                    && inner.thread.as_ref().is_some_and(|t| !t.is_finished())
+            }
+            None => false,
+        }
+    }
 }
 
 impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
-            // `GetMessageW` is blocking; we cannot unblock it from
-            // this thread. We accept the small leak — the OS will
-            // reclaim the thread when the process exits, and the
-            // listener is short-lived (one per process). For a
-            // graceful unregister, post a WM_QUIT by unregistering
-            // the hotkey first; the thread continues to idle in
-            // `GetMessageW` until the next WM_HOTKEY (which never
-            // arrives) or process exit.
-            unsafe {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
-                    std::ptr::null_mut(),
-                    inner.id,
-                );
-            }
-            // Give the thread a short window to notice the unregister,
-            // then move on. Don't block forever — Drop is often called
-            // during shutdown when joining is impossible.
+            // The listener thread blocks on GetMessageW forever; we
+            // can't wake it from outside.  The hotkey is unregistered
+            // by the OS when the process exits, so we skip an explicit
+            // UnregisterHotKey call (it would also run on the wrong
+            // thread now that RegisterHotKey moved inside the thread).
             if let Some(handle) = inner.thread.take() {
-                let _ = handle.join(); // may never return; that's OK
+                let _ = handle.join();
             }
         }
     }
@@ -164,6 +175,9 @@ fn run_get_message_loop(
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+    if !should_exit.load(Ordering::SeqCst) {
+        logging::warn("[nex] hotkey message loop exited unexpectedly");
     }
 }
 

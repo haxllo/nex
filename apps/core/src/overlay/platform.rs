@@ -22,7 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::overlay::model::OverlayEvent;
-use crate::overlay::theme::Theme;
+use crate::overlay::model::Theme;
 
 const CLASS_NAME: &str = "NexOverlayWindowClass";
 const SIGNAL_SHOW_REGISTERED: &str = "Nex.ExternalShow.v1";

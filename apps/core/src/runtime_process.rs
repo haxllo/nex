@@ -21,36 +21,77 @@ pub(crate) fn runtime_executable_names() -> impl Iterator<Item = &'static str> {
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn detect_hotkey_conflict_process(hotkey: &str) -> Option<String> {
+    let parts: Vec<&str> = hotkey.split('+').map(|s| s.trim()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let key = parts.last()?;
+    let common_conflicts: &[(&str, &[&str])] = &[
+        ("PowerToys", &["Space", "F1", "F2"]),
+        ("AHK scripts (AutoHotkey)", &["Space", "F"]),
+        ("Discord", &["`"]),
+        ("NVIDIA GeForce Experience", &["Z", "F1", "F2", "F3"]),
+        ("AMD Adrenalin", &["R", "Z"]),
+        ("Xbox Game Bar", &["G"]),
+        ("Snipping Tool", &["S"]),
+        ("OneNote", &["S", "N"]),
+    ];
+
+    let conflicts: Vec<&str> = common_conflicts
+        .iter()
+        .filter(|(_, keys)| keys.contains(&key))
+        .map(|(app, _)| *app)
+        .collect();
+
+    if conflicts.is_empty() {
+        Some(format!("Hotkey '{hotkey}' may be in use by another application. Check for applications that register global hotkeys (gaming overlays, screenshot tools, launchers)."))
+    } else {
+        Some(format!(
+            "Hotkey '{hotkey}' is likely in use by: {}. Close these applications or change your Nex hotkey.",
+            conflicts.join(", ")
+        ))
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn hotkey_registration_recovery_message(
     hotkey: &str,
     config_path: &std::path::Path,
 ) -> String {
     let suggestions = crate::settings::suggested_hotkey_presets(hotkey, 3);
-    if suggestions.is_empty() {
-        return format!(
-            "Hotkey '{hotkey}' is unavailable. Open {} and choose a different modifier+key combination.",
-            config_path.display()
-        );
-    }
+    let conflict_info = detect_hotkey_conflict_process(hotkey)
+        .unwrap_or_else(|| format!("Hotkey '{hotkey}' is unavailable."));
 
-    format!(
-        "Hotkey '{hotkey}' is unavailable. Try {}. Edit {} to change it.",
-        suggestions.join(", "),
-        config_path.display()
-    )
+    let mut msg = conflict_info;
+
+    if !suggestions.is_empty() {
+        msg.push_str(&format!(
+            " Try {}. Edit {} to change it.",
+            suggestions.join(", "),
+            config_path.display()
+        ));
+    } else {
+        msg.push_str(&format!(
+            " Edit {} to choose a different hotkey.",
+            config_path.display()
+        ));
+    }
+    msg
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn hotkey_registration_status_text(hotkey: &str) -> String {
     let suggestions = crate::settings::suggested_hotkey_presets(hotkey, 2);
-    if suggestions.is_empty() {
-        return format!("Hotkey unavailable: {hotkey}. Open config from the tray.");
-    }
+    let conflict = detect_hotkey_conflict_process(hotkey)
+        .unwrap_or_else(|| format!("Hotkey unavailable: {hotkey}."));
 
-    format!(
-        "Hotkey unavailable: {hotkey}. Try {}.",
-        suggestions.join(" or ")
-    )
+    if suggestions.is_empty() {
+        format!("{conflict} Open config from the tray to change it.")
+    } else {
+        format!("{conflict} Try {}.", suggestions.join(" or "))
+    }
 }
 
 // ---------------------------------------------------------------------------

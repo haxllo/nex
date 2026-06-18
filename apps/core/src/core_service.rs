@@ -82,6 +82,8 @@ pub struct CoreService {
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
+    compaction_write_count: Mutex<u32>,
+    last_compaction_time: Mutex<Option<Instant>>,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
@@ -179,6 +181,8 @@ impl CoreService {
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             progress: Mutex::new(None),
+            compaction_write_count: Mutex::new(0),
+            last_compaction_time: Mutex::new(None),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
@@ -997,14 +1001,29 @@ impl CoreService {
 
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
         let items = index_store::list_items(&self.db)?;
+
+        // Determine if this is the first sync (both backends have 0 docs)
+        let tantivy_is_first = self
+            .tantivy_index
+            .lock()
+            .map(|g| g.as_ref().map_or(true, |idx| idx.num_docs().unwrap_or(0) == 0))
+            .unwrap_or(true);
+        let fts5_is_first = self
+            .fts5_index
+            .lock()
+            .map(|g| g.as_ref().map_or(true, |idx| idx.num_docs().unwrap_or(0) == 0))
+            .unwrap_or(true);
+
         crate::logging::info(&format!(
-            "[nex] sync_indexes items={} tantivy_available={} fts5_available={}",
+            "[nex] sync_indexes items={} tantivy_available={} fts5_available={} tantivy_first={} fts5_first={}",
             items.len(),
             self.tantivy_index
                 .lock()
                 .map(|g| g.is_some())
                 .unwrap_or(false),
             self.fts5_index.lock().map(|g| g.is_some()).unwrap_or(false),
+            tantivy_is_first,
+            fts5_is_first,
         ));
 
         let tantivy_guard = match self.tantivy_index.lock() {
@@ -1012,7 +1031,12 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(ref idx) = *tantivy_guard {
-            if let Err(e) = idx.index_items(&items) {
+            let result = if tantivy_is_first {
+                idx.index_items(&items)
+            } else {
+                idx.incremental_sync_items(&items)
+            };
+            if let Err(e) = result {
                 crate::logging::info(&format!("[nex] Tantivy index sync error: {e}"));
             }
         }
@@ -1023,10 +1047,17 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(ref idx) = *fts5_guard {
-            if let Err(e) = idx.index_items(&items) {
+            let result = if fts5_is_first {
+                idx.index_items(&items)
+            } else {
+                idx.incremental_sync_items(&items)
+            };
+            if let Err(e) = result {
                 crate::logging::info(&format!("[nex] FTS5 index sync error: {e}"));
             }
         }
+
+        self.maybe_compact_backends();
 
         Ok(())
     }
@@ -1048,6 +1079,8 @@ impl CoreService {
         if let Some(ref idx) = *fts5_guard {
             let _ = idx.upsert_item(item);
         }
+
+        self.bump_compaction_counter();
     }
 
     fn remove_item_from_backends(&self, id: &str) {
@@ -1067,7 +1100,94 @@ impl CoreService {
         if let Some(ref idx) = *fts5_guard {
             let _ = idx.delete_item(id);
         }
+
+        self.bump_compaction_counter();
     }
+
+    fn bump_compaction_counter(&self) {
+        let mut count = match self.compaction_write_count.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *count += 1;
+        if *count >= 500 {
+            drop(count);
+            self.maybe_compact_backends();
+        }
+    }
+
+    pub(crate) fn maybe_compact_backends(&self) {
+        let should_compact = {
+            let mut last = match self.last_compaction_time.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let now = Instant::now();
+            match *last {
+                Some(prev) if now.duration_since(prev) < Duration::from_secs(300) => false,
+                _ => {
+                    *last = Some(now);
+                    true
+                }
+            }
+        };
+
+        if should_compact {
+            let tantivy_guard = match self.tantivy_index.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(ref idx) = *tantivy_guard {
+                let _ = idx.flush();
+            }
+            drop(tantivy_guard);
+
+            let fts5_guard = match self.fts5_index.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(ref idx) = *fts5_guard {
+                let _ = idx.optimize();
+            }
+
+            let mut count = match self.compaction_write_count.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *count = 0;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn log_memory_stats(&self) {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let mut pmc: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+        pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ret = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) };
+        if ret != 0 {
+            let working_set_mb = pmc.WorkingSetSize / (1024 * 1024);
+            let pagefile_mb = pmc.PagefileUsage / (1024 * 1024);
+
+            let tantivy_mb = match self.tantivy_index.lock() {
+                Ok(g) => g
+                    .as_ref()
+                    .map_or(0, |idx| idx.mem_usage_bytes()),
+                Err(_) => 0,
+            } / (1024 * 1024);
+
+            crate::logging::info(&format!(
+                "[nex] memory_stats working_set_mb={} pagefile_mb={} tantivy_mb={}",
+                working_set_mb, pagefile_mb, tantivy_mb,
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn log_memory_stats(&self) {}
 
     fn record_successful_launch(&self, item: &SearchItem) -> Result<(), ServiceError> {
         let now = now_epoch_secs();
@@ -1097,6 +1217,7 @@ impl CoreService {
         };
 
         if !should_prune {
+            self.maybe_compact_backends();
             return Ok(());
         }
 

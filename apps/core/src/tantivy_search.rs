@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
+use tantivy::merge_policy::LogMergePolicy;
 use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur};
 use tantivy::schema::*;
 use tantivy::{doc, query::Query, Index, IndexReader, IndexWriter, TantivyDocument};
@@ -29,6 +31,8 @@ pub(crate) struct TantivyIndex {
     writer: Mutex<IndexWriter>,
     fields: TantivyFields,
     schema: Schema,
+    write_count: Mutex<u32>,
+    commit_threshold: u32,
 }
 
 impl TantivyIndex {
@@ -63,6 +67,12 @@ impl TantivyIndex {
             .writer(16_000_000)
             .map_err(|e| format!("failed to create tantivy writer: {e}"))?;
 
+        let mut merge_policy = LogMergePolicy::default();
+        merge_policy.set_min_num_segments(3);
+        merge_policy.set_level_log_size(5.0);
+        merge_policy.set_del_docs_ratio_before_merge(0.5);
+        writer.set_merge_policy(Box::new(merge_policy));
+
         Ok(Self {
             index_path: index_path.to_path_buf(),
             reader,
@@ -78,6 +88,8 @@ impl TantivyIndex {
                 last_accessed_epoch_secs,
             },
             schema,
+            write_count: Mutex::new(0),
+            commit_threshold: 500,
         })
     }
 
@@ -216,22 +228,19 @@ impl TantivyIndex {
     }
 
     pub fn delete_item(&self, item_id: &str) -> Result<(), String> {
-        let mut writer = self
+        let writer = self
             .writer
             .lock()
             .map_err(|e| format!("tantivy writer lock error: {e}"))?;
 
         writer.delete_term(tantivy::Term::from_field_text(self.fields.id, item_id));
-        writer
-            .commit()
-            .map_err(|e| format!("tantivy commit error: {e}"))?;
-        let _ = writer.garbage_collect_files().wait();
+        drop(writer);
 
-        Ok(())
+        self.maybe_commit_and_gc()
     }
 
     pub fn upsert_item(&self, item: &SearchItem) -> Result<(), String> {
-        let mut writer = self
+        let writer = self
             .writer
             .lock()
             .map_err(|e| format!("tantivy writer lock error: {e}"))?;
@@ -250,12 +259,97 @@ impl TantivyIndex {
                 self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
             ))
             .map_err(|e| format!("tantivy add document error: {e}"))?;
+        drop(writer);
+
+        self.maybe_commit_and_gc()
+    }
+
+    pub fn incremental_sync_items(&self, items: &[SearchItem]) -> Result<(), String> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+
+        // Collect existing document IDs from the current index
+        self.reader.reload().ok();
+        let reader = self.reader.searcher();
+        let mut existing_ids: HashSet<String> = HashSet::new();
+        for (segment_ord, segment_reader) in reader.segment_readers().iter().enumerate() {
+            for doc_id in 0u32..segment_reader.num_docs() as u32 {
+                let doc_address = tantivy::DocAddress::new(segment_ord as u32, doc_id);
+                let doc: TantivyDocument = reader
+                    .doc::<TantivyDocument>(doc_address)
+                    .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
+                if let Some(id_val) = doc.get_first(self.fields.id).and_then(|v| v.as_str()) {
+                    existing_ids.insert(id_val.to_string());
+                }
+            }
+        }
+
+        // Collect incoming item IDs
+        let incoming_ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
+
+        // Delete removed items (exist in index but not in incoming set)
+        for existing_id in existing_ids.difference(&incoming_ids) {
+            writer
+                .delete_term(tantivy::Term::from_field_text(self.fields.id, existing_id));
+        }
+
+        // Add/update incoming items
+        for item in items {
+            writer
+                .delete_term(tantivy::Term::from_field_text(self.fields.id, &item.id));
+            writer
+                .add_document(doc!(
+                    self.fields.id => item.id.as_str(),
+                    self.fields.title => item.title.as_str(),
+                    self.fields.path => item.path.as_str(),
+                    self.fields.subtitle => item.subtitle.as_str(),
+                    self.fields.kind => item.kind.as_str(),
+                    self.fields.extension => extract_extension(&item.path),
+                    self.fields.use_count => item.use_count as i64,
+                    self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
+                ))
+                .map_err(|e| format!("tantivy add document error: {e}"))?;
+        }
 
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        let _ = writer.garbage_collect_files().wait();
 
         Ok(())
+    }
+
+    pub fn flush(&self) -> Result<(), String> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+        writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        let _ = writer.garbage_collect_files().wait();
+        let mut count = self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))?;
+        *count = 0;
+        Ok(())
+    }
+
+    fn maybe_commit_and_gc(&self) -> Result<(), String> {
+        let mut count = self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))?;
+        *count += 1;
+        if *count >= self.commit_threshold {
+            drop(count);
+            self.flush()
+        } else {
+            Ok(())
+        }
     }
 
     pub fn num_docs(&self) -> Result<u64, String> {
@@ -264,6 +358,13 @@ impl TantivyIndex {
             .map_err(|e| format!("tantivy reload error: {e}"))?;
         let searcher = self.reader.searcher();
         Ok(searcher.num_docs() as u64)
+    }
+
+    pub fn mem_usage_bytes(&self) -> usize {
+        let arena = 16_000_000;
+        let reader = self.reader.searcher();
+        let segment_mem = reader.segment_readers().len() * 2_000_000;
+        arena + segment_mem
     }
 }
 
@@ -420,9 +521,110 @@ mod tests {
         assert_eq!(index.num_docs().unwrap(), 2);
 
         index.delete_item("2").unwrap();
+        index.flush().unwrap(); // flush deferred commit
         assert_eq!(index.num_docs().unwrap(), 1);
 
         let results = index.search("delete", 10).unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_tantivy_incremental_sync_basic() {
+        let (index, _dir) = open_temp_index();
+
+        // Start with items [A, B]
+        index
+            .index_items(&[
+                SearchItem::new("a", "app", "Alpha", "/a"),
+                SearchItem::new("b", "app", "Beta", "/b"),
+            ])
+            .unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        // Incremental sync to [A, C] — B deleted, C added, A untouched
+        let new_items = vec![
+            SearchItem::new("a", "app", "Alpha Updated", "/a"),
+            SearchItem::new("c", "app", "Charlie", "/c"),
+        ];
+        index.incremental_sync_items(&new_items).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        // B should not be found
+        let results = index.search("beta", 10).unwrap();
+        assert_eq!(results.len(), 0);
+
+        // C should be found
+        let results = index.search("charlie", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "c");
+
+        // A should still be found, with updated title
+        let results = index.search("alpha", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn test_tantivy_incremental_sync_empty_index() {
+        let (index, _dir) = open_temp_index();
+
+        // Sync items into empty index
+        let items = vec![
+            SearchItem::new("1", "app", "Hello", "/hello"),
+            SearchItem::new("2", "app", "World", "/world"),
+        ];
+        index.incremental_sync_items(&items).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        let results = index.search("hello", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "1");
+    }
+
+    #[test]
+    fn test_tantivy_incremental_sync_empty_list() {
+        let (index, _dir) = open_temp_index();
+
+        index
+            .index_items(&[SearchItem::new("1", "app", "Hello", "/hello")])
+            .unwrap();
+        assert_eq!(index.num_docs().unwrap(), 1);
+
+        // Sync with empty list — removes all
+        let empty: Vec<SearchItem> = vec![];
+        index.incremental_sync_items(&empty).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_tantivy_deferred_commit_and_flush() {
+        let (index, _dir) = open_temp_index();
+
+        // Add item with deferred commit (upsert_item doesn't commit immediately)
+        index
+            .upsert_item(&SearchItem::new("d1", "app", "Deferred", "/d1"))
+            .unwrap();
+
+        // Search shouldn't see it yet (not committed)
+        let results = index.search("deferred", 10).unwrap();
+        assert_eq!(results.len(), 0);
+
+        // Flush to persist
+        index.flush().unwrap();
+
+        // Now search should see it
+        let results = index.search("deferred", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "d1");
+        assert_eq!(index.num_docs().unwrap(), 1);
+
+        // Delete with deferred commit
+        index.delete_item("d1").unwrap();
+        // Search still sees it (not committed yet)
+        assert_eq!(index.num_docs().unwrap(), 1);
+
+        // Flush to persist the delete
+        index.flush().unwrap();
+        assert_eq!(index.num_docs().unwrap(), 0);
     }
 }

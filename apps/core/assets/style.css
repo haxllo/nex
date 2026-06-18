@@ -50,16 +50,10 @@ html[data-theme="light"] {
 html,
 body {
   background: transparent;
-  overflow: hidden;
   font-family: var(--font);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-}
-
-#panel-wrap {
-  box-shadow: 0 0 5px rgba(0, 0, 0, 0.12);
-  border-radius: var(--radius);
 }
 
 #panel {
@@ -67,7 +61,8 @@ body {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  clip-path: inset(0 round var(--radius));
+  filter: drop-shadow(0 0 5px rgba(0, 0, 0, 0.12));
   backdrop-filter: saturate(140%);
 }
 

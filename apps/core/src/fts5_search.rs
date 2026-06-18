@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection};
@@ -137,12 +138,74 @@ impl Fts5Index {
         Ok(())
     }
 
+    pub fn incremental_sync_items(&self, items: &[SearchItem]) -> Result<(), String> {
+        // Collect incoming item IDs
+        let incoming_ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
+
+        // Query existing IDs
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM item_fts5")
+            .map_err(|e| format!("FTS5 select ids error: {e}"))?;
+        let existing_ids: HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("FTS5 query ids error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Wrap deletes + inserts in a single transaction
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("FTS5 begin tx error: {e}"))?;
+
+        // Delete removed items (exist in index but not in incoming set)
+        for existing_id in existing_ids.difference(&incoming_ids) {
+            self.conn
+                .execute("DELETE FROM item_fts5 WHERE id = ?1", params![existing_id])
+                .map_err(|e| format!("FTS5 delete error: {e}"))?;
+        }
+
+        // Add/update incoming items
+        for item in items {
+            self.conn
+                .execute("DELETE FROM item_fts5 WHERE id = ?1", params![item.id])
+                .map_err(|e| format!("FTS5 delete for upsert error: {e}"))?;
+            self.conn
+                .execute(
+                    "INSERT INTO item_fts5 (id, title, path, subtitle, kind, extension)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        item.id,
+                        item.title,
+                        item.path,
+                        item.subtitle,
+                        item.kind,
+                        extract_extension(&item.path),
+                    ],
+                )
+                .map_err(|e| format!("FTS5 insert error: {e}"))?;
+        }
+
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("FTS5 commit tx error: {e}"))?;
+
+        Ok(())
+    }
+
     pub fn num_docs(&self) -> Result<u64, String> {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM item_fts5", [], |row| row.get(0))
             .map_err(|e| format!("FTS5 count error: {e}"))?;
         Ok(count as u64)
+    }
+
+    pub fn optimize(&self) -> Result<(), String> {
+        self.conn
+            .execute("INSERT INTO item_fts5(item_fts5) VALUES('optimize')", [])
+            .map_err(|e| format!("FTS5 optimize error: {e}"))?;
+        Ok(())
     }
 }
 
@@ -264,5 +327,70 @@ mod tests {
 
         let results = index.search("delete", 10).unwrap();
         assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_fts5_incremental_sync_basic() {
+        let (index, _dir) = open_temp_index();
+
+        // Start with items [A, B]
+        index
+            .index_items(&[
+                SearchItem::new("a", "app", "Alpha", "/a"),
+                SearchItem::new("b", "app", "Beta", "/b"),
+            ])
+            .unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        // Incremental sync to [A, C] — B deleted, C added, A untouched
+        let new_items = vec![
+            SearchItem::new("a", "app", "Alpha Updated", "/a"),
+            SearchItem::new("c", "app", "Charlie", "/c"),
+        ];
+        index.incremental_sync_items(&new_items).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        // B should not be found
+        let results = index.search("beta", 10).unwrap();
+        assert_eq!(results.len(), 0);
+
+        // C should be found
+        let results = index.search("charlie", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "c");
+
+        // A should still be found
+        let results = index.search("alpha", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn test_fts5_incremental_sync_empty_index() {
+        let (index, _dir) = open_temp_index();
+
+        let items = vec![
+            SearchItem::new("1", "app", "Hello", "/hello"),
+            SearchItem::new("2", "app", "World", "/world"),
+        ];
+        index.incremental_sync_items(&items).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 2);
+
+        let results = index.search("hello", 10).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_fts5_incremental_sync_empty_list() {
+        let (index, _dir) = open_temp_index();
+
+        index
+            .index_items(&[SearchItem::new("1", "app", "Hello", "/hello")])
+            .unwrap();
+        assert_eq!(index.num_docs().unwrap(), 1);
+
+        let empty: Vec<SearchItem> = vec![];
+        index.incremental_sync_items(&empty).unwrap();
+        assert_eq!(index.num_docs().unwrap(), 0);
     }
 }

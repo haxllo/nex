@@ -162,6 +162,7 @@ pub fn search_with_filter_with_boosts(
     }
     scored.sort_unstable_by(compare_scored);
     apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
+    deduplicate_apps(&mut scored);
 
     scored
         .into_iter()
@@ -761,6 +762,68 @@ fn subsequence_penalties(haystack: &str, needle: &str) -> Option<(i64, i64)> {
     }
 
     Some((start_penalty.unwrap_or(0), gap_penalty))
+}
+
+fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+
+    // Group app items by (normalized_title, normalized_basename)
+    for (idx, s) in scored.iter().enumerate() {
+        if !s.item.kind.eq_ignore_ascii_case("app") {
+            continue;
+        }
+        let key = (
+            normalize_for_search(&s.item.title),
+            extract_base_name(&s.item.path),
+        );
+        groups.entry(key).or_default().push(idx);
+    }
+
+    // For each group, find the index with the highest score, mark others for removal
+    let mut remove_indices: Vec<usize> = Vec::new();
+    for (_, indices) in groups.iter() {
+        if indices.len() <= 1 {
+            continue;
+        }
+        // Find the best index (highest score, then best match_kind, etc.)
+        let best_idx = indices
+            .iter()
+            .max_by(|&&a, &&b| compare_scored(&scored[a], &scored[b]))
+            .copied()
+            .unwrap();
+        for &idx in indices {
+            if idx != best_idx {
+                remove_indices.push(idx);
+            }
+        }
+    }
+
+    // Sort descending so we remove from back to front (preserves earlier indices)
+    remove_indices.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in remove_indices {
+        scored.remove(idx);
+    }
+}
+
+fn extract_base_name(path: &str) -> String {
+    let filename = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path);
+    // Strip extension (e.g., "firefox.exe" -> "firefox")
+    let stem = if let Some(pos) = filename.rfind('.') {
+        &filename[..pos]
+    } else {
+        filename
+    };
+    normalize_for_search(stem)
+}
+
+#[allow(dead_code)]
+fn same_base_name(a: &str, b: &str) -> bool {
+    let base_a = extract_base_name(a);
+    let base_b = extract_base_name(b);
+    base_a == base_b
 }
 
 fn now_epoch_secs() -> i64 {

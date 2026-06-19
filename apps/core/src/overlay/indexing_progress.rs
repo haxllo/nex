@@ -58,6 +58,7 @@ window.updateProgress=function(v){var p=Math.max(0,Math.min(100,v));document.get
 
 enum Cmd {
     Update(u32),
+    WorkDone,
     Close,
 }
 
@@ -66,17 +67,20 @@ where
     F: FnOnce(Arc<AtomicU32>) -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let progress = Arc::new(AtomicU32::new(0));
+    let result_slot: Arc<std::sync::Mutex<Option<T>>> = Arc::new(std::sync::Mutex::new(None));
 
     let progress_for_work = progress.clone();
+    let result_slot_for_work = result_slot.clone();
 
     // Spawn the indexing work on its own thread.
+    let (work_done_tx, work_done_rx) = std::sync::mpsc::channel::<()>();
     let work_thread = thread::Builder::new()
         .name("nex-indexer".into())
         .spawn(move || {
             let result = work(progress_for_work);
-            let _ = result_tx.send(result);
+            *result_slot_for_work.lock().unwrap() = Some(result);
+            let _ = work_done_tx.send(());
         })
         .expect("failed to spawn indexer thread");
 
@@ -145,6 +149,17 @@ where
         })
         .ok();
 
+    // Watch for work-thread completion so the window always closes,
+    // even if the indexer errors before writing progress=100.
+    let proxy_for_done = proxy.clone();
+    let _done_watcher = thread::Builder::new()
+        .name("nex-progress-done-watcher".into())
+        .spawn(move || {
+            let _ = work_done_rx.recv();
+            let _ = proxy_for_done.send_event(Cmd::WorkDone);
+        })
+        .expect("failed to spawn done-watcher thread");
+
     let mut closed = false;
 
     let _ = event_loop.run_return(move |event, _target, control_flow| {
@@ -164,6 +179,15 @@ where
                     });
                 }
             }
+            Event::UserEvent(Cmd::WorkDone) => {
+                // Work thread finished (success or error). If progress
+                // never reached 100 the Update(100)->Close path never
+                // fires, so close now to unblock the main thread.
+                if !closed {
+                    closed = true;
+                    *control_flow = ControlFlow::Exit;
+                }
+            }
             Event::UserEvent(Cmd::Close) => {
                 if !closed {
                     closed = true;
@@ -175,12 +199,15 @@ where
     });
 
     // Wait for the work thread to finish, then return the result.
-    // The work thread sends its result through the channel; we receive
-    // it here. Join the thread to propagate any panics.
+    // Join propagates any panics. The done-watcher ensured the
+    // event loop already exited, so this is non-blocking.
     let _ = work_thread.join();
-    result_rx
-        .recv_timeout(Duration::from_secs(300))
-        .expect("indexer thread finished without sending result")
+    let result = result_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("indexer thread finished without storing result");
+    result
 }
 
 fn progress_window_position() -> (i32, i32) {

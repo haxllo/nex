@@ -145,6 +145,8 @@ impl CoreService {
         };
 
         let fts5_index = if tantivy_index.is_none() {
+            // FTS5 is the sole backend — clear so sync_indexes_from_cache
+            // takes the full-rebuild path.
             match Fts5Index::open(&config.index_db_path) {
                 Ok(idx) => {
                     let _ = idx.clear();
@@ -158,11 +160,11 @@ impl CoreService {
                 }
             }
         } else {
+            // Tantivy is primary. Don't clear FTS5 here — let
+            // sync_indexes_from_cache decide first vs incremental
+            // based on the existing doc count.
             match Fts5Index::open(&config.index_db_path) {
-                Ok(idx) => {
-                    let _ = idx.clear();
-                    Some(idx)
-                }
+                Ok(idx) => Some(idx),
                 Err(e) => {
                     crate::logging::info(&format!("[nex] FTS5 fallback index init: {e}"));
                     None
@@ -1257,6 +1259,12 @@ impl CoreService {
                 let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
                 guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
             }
+        }
+
+        // Remove stale entries from Tantivy and FTS5 backends so
+        // deleted-on-disk files stop appearing in search results.
+        for stale_id in &stale_ids {
+            self.remove_item_from_backends(stale_id);
         }
 
         crate::logging::info(&format!(

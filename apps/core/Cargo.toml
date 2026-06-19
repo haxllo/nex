@@ -36,6 +36,7 @@ windows-sys = { version = "0.59.0", features = [
   "Win32_System_Environment",
   "Win32_System_LibraryLoader",
   "Win32_System_Com",
+  "Win32_System_Console",
   "Win32_System_DataExchange",
   "Win32_System_Ole",
   "Win32_System_ProcessStatus",
@@ -58,10 +59,7 @@ tao = "0.35.3"
 window-vibrancy = "0.7.1"
 
 [dev-dependencies]
-resvg = "0.47.0"
 tempfile = "3.12.0"
-tiny-skia = "0.12.0"
-usvg = "0.47.0"
 
 [build-dependencies]
 winres = "0.1"

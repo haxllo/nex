@@ -124,11 +124,19 @@ pub(crate) fn run_windows_runtime(
                             provider.elapsed_ms
                         ));
                     }
+                    // Sync Tantivy + FTS5 immediately so the first
+                    // keystroke never hits the CPU-bound cached_items
+                    // scan.  The progress window just closed and the
+                    // overlay + hotkey haven't been created yet, so
+                    // the user perceives no delay.
+                    if let Ok(svc) = service.write() {
+                        let _ = svc.sync_indexes_from_cache();
+                    }
                     BackgroundIndexRefresh {
                         completed: Arc::new(AtomicBool::new(true)),
                         result: Arc::new(Mutex::new(Some(Ok(report)))),
                         cache_applied: true,
-                        indexes_synced: false,
+                        indexes_synced: true,
                         initial_cache_empty: true,
                         pending_discovery_reindex: false,
                         pending_discovery_reindex_due_at: None,
@@ -252,17 +260,10 @@ pub(crate) fn run_windows_runtime(
         })
         .map_err(|e| RuntimeError::Overlay(format!("tray updater thread: {e}")))?;
 
-    let search_worker = SearchWorker::new(
-        service.clone(),
-        runtime_config.clone(),
-        Arc::new(plugin_registry.clone()),
-        event_tx.clone(),
-    );
-
     // Register the global hotkey on its own OS thread, sending
     // `OverlayEvent::Hotkey(id)` to the shared event channel.
     let hotkey_listener: Arc<Mutex<Option<HotkeyListener>>> = Arc::new(Mutex::new(None));
-    let hotkey_issue_status =
+    let hotkey_issue_status: Option<String> =
         match HotkeyListener::start(&runtime_config.hotkey, event_tx.clone()) {
             Ok(listener) => {
                 log_info(&format!(
@@ -300,12 +301,20 @@ pub(crate) fn run_windows_runtime(
                 Some(status)
             }
         };
+
     log_info(&format!(
         "[nex] startup_phase phase=hotkey_ready elapsed_ms={} hotkey={}",
         startup_started_at.elapsed().as_millis(),
         runtime_config.hotkey
     ));
     log_info("[nex] event loop running (native overlay)");
+
+    let search_worker = SearchWorker::new(
+        service.clone(),
+        runtime_config.clone(),
+        Arc::new(plugin_registry.clone()),
+        event_tx.clone(),
+    );
 
     let max_results = runtime_config.max_results as usize;
     let config_watcher = RuntimeConfigWatcher {

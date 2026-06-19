@@ -301,7 +301,7 @@ let mut service = self.write();
 | # | Bottleneck | Est. latency | Fix effort | Status |
 |---|-----------|-------------|-----------|--------|
 | B-2 | `evaluate_script` blocking host loop | 2–40ms | Medium | ✅ `60622fc` |
-| B-3 | Full JSON re-serialization per Apply | 1–5ms | Medium | ✅ `e4f3cd4` |
+| B-3 | Full JSON re-serialization per Apply | 1–5ms | Medium | ❌ reverted (`write_json_str` iterated `bytes()` corrupting UTF-8; uses `serde_json` instead) |
 | B-1 | Fixed 40ms debounce | 0–40ms | Low | ✅ `c3fe990` |
 | B-9 | Stale prune in search path | 0–500ms (rare) | Low | ✅ `faf9548` |
 | B-10 | `Mutex<CoreService>` on search | 0–full-sync (rare) | Medium | ✅ `e4f3cd4` |
@@ -311,4 +311,4 @@ let mut service = self.write();
 | B-6 | `querySelectorAll` per arrow | <1ms | Low | ✅ `51f0cf9` |
 | B-8 | `scrollIntoView` forced layout | <1ms | Low | ✅ `51f0cf9` |
 
-**All 10 bottlenecks implemented.**
+**9 of 10 bottlenecks implemented. B-3 reverted — uses `serde_json` (correct, negligible perf impact for 10–30 result rows).**

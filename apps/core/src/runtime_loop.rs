@@ -601,6 +601,15 @@ impl RuntimeWorker {
                 let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
                 match action {
                     HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
+                        // Warm search indexes synchronously before showing the
+                        // overlay.  The user can't type until the window appears
+                        // (~160ms animation) and the IPC channel is live, so
+                        // the ~50ms warmup finishes well before the first char.
+                        // Uses blocking read() — a background indexer holding
+                        // the write lock is rare at show time.
+                        if let Ok(guard) = self.service.read() {
+                            guard.warm_search_cache();
+                        }
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
                         );
@@ -640,6 +649,11 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::ExternalShow => {
+                // Same sync warmup as ShowAndFocus — user can't type until
+                // window appears + IPC handler is live.
+                if let Ok(guard) = self.service.read() {
+                    guard.warm_search_cache();
+                }
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
@@ -652,18 +666,6 @@ impl RuntimeWorker {
                         self.overlay.set_status_text(issue);
                     }
                 }
-                // Warm the Tantivy index on a background thread so the
-                // user's first keystroke doesn't pay OS page-fault cost
-                // or Tantivy reader initialization latency.
-                let svc = self.service.clone();
-                std::thread::Builder::new()
-                    .name("nex-warm-search".into())
-                    .spawn(move || {
-                        if let Ok(guard) = svc.try_read() {
-                            guard.warm_search_cache();
-                        }
-                    })
-                    .ok();
             }
             OverlayEvent::ExternalQuit => {
                 self.overlay.hide_now();

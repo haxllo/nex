@@ -4,9 +4,12 @@ use std::ffi::CString;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HMODULE};
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+};
 use windows_sys::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
 };
@@ -18,11 +21,28 @@ use crate::model::SearchItem;
 const EVERYTHING_REQUEST_FILE_NAME: u32 = 0x01;
 const EVERYTHING_REQUEST_PATH: u32 = 0x02;
 
+/// The voidtools Everything SDK stores all query/result state in
+/// process-global mutable storage (`Everything_SetSearchW`,
+/// `Everything_QueryW`, `Everything_GetResultFullPathNameW`, ...).
+/// Any two `EverythingBridge` instances — and there can be more than
+/// one, e.g. the startup indexer thread and the background refresh
+/// thread each build their own `CoreService` — share that global
+/// state, so concurrent SDK calls corrupt each other's results.
+///
+/// This mutex serializes every SDK touch across all bridges in the
+/// process, which is what makes the `Send + Sync` impl below sound.
+static SDK_LOCK: Mutex<()> = Mutex::new(());
+
 pub(crate) struct EverythingBridge {
     lib: HMODULE,
     fns: EverythingFns,
 }
 
+// SAFETY: `lib` (HMODULE) and `fns` (function pointers) are themselves
+// plain immutable data and safe to share across threads. The dangerous
+// part — the SDK's process-global mutable state — is guarded by
+// `SDK_LOCK`, which every method acquires before calling any SDK
+// function. So a shared `&EverythingBridge` cannot race.
 unsafe impl Send for EverythingBridge {}
 unsafe impl Sync for EverythingBridge {}
 
@@ -52,10 +72,35 @@ impl EverythingBridge {
     pub(crate) fn detect() -> Option<Self> {
         let mut attempts: Vec<String> = Vec::new();
 
+        // Probe absolute candidate paths first (registry + Program Files
+        // + tool dirs). Only if none resolve do we fall back to a
+        // search-order load — and even then via LoadLibraryExW with
+        // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, which restricts the search
+        // to safe system directories rather than the unsafe default
+        // order (cwd, application dir, ...). This avoids the DLL
+        // planting surface of a bare `LoadLibraryW("Everything64.dll")`.
+        for path in candidate_dll_paths() {
+            attempts.push(format!("{}", path.display()));
+            if let Some(bridge) = try_load_dll(&path) {
+                let major = unsafe { (bridge.fns.get_major_version)() };
+                logging::info(&format!(
+                    "[nex] everything_bridge detected version={major} path={} (probed location)",
+                    path.display()
+                ));
+                return Some(bridge);
+            }
+        }
+
         for dll_name in &["Everything64.dll", "Everything32.dll"] {
             let wide = to_wide(dll_name);
-            let lib = unsafe { LoadLibraryW(wide.as_ptr()) };
-            attempts.push(format!("LoadLibraryW({dll_name})"));
+            let lib = unsafe {
+                LoadLibraryExW(
+                    wide.as_ptr(),
+                    core::ptr::null_mut(),
+                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+                )
+            };
+            attempts.push(format!("LoadLibraryExW({dll_name}, SEARCH_DEFAULT_DIRS)"));
             if lib.is_null() {
                 continue;
             }
@@ -67,18 +112,6 @@ impl EverythingBridge {
                 return Some(Self { lib, fns });
             }
             unsafe { FreeLibrary(lib); }
-        }
-
-        for path in candidate_dll_paths() {
-            attempts.push(format!("{}", path.display()));
-            if let Some(bridge) = try_load_dll(&path) {
-                let major = unsafe { (bridge.fns.get_major_version)() };
-                logging::info(&format!(
-                    "[nex] everything_bridge detected version={major} path={} (probed location)",
-                    path.display()
-                ));
-                return Some(bridge);
-            }
         }
 
         logging::info(&format!(
@@ -98,6 +131,9 @@ impl EverythingBridge {
     /// SDK accepted it; some versions return 0 for both. The version probe
     /// is the strongest signal on its own.
     pub(crate) fn is_service_running(&self) -> bool {
+        // Hold SDK_LOCK for the whole probe so the no-op query cannot
+        // clobber an in-flight discover() on another thread.
+        let _guard = SDK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let major = unsafe { (self.fns.get_major_version)() };
         if major == 0 {
             return false;
@@ -121,6 +157,11 @@ impl EverythingBridge {
         max_items_total: usize,
         max_items_per_root: usize,
     ) -> Result<Vec<SearchItem>, crate::discovery::ProviderError> {
+        // The Everything SDK uses process-global query/result state.
+        // Serialize the entire discover() so a concurrent
+        // is_service_running() or a second discover() on another bridge
+        // can't interleave and corrupt the result set.
+        let _guard = SDK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             (self.fns.set_match_path)(1);
             (self.fns.set_sort)(1);
@@ -297,7 +338,17 @@ fn try_load_dll(path: &Path) -> Option<EverythingBridge> {
         return None;
     }
     let wide = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
-    let lib = unsafe { LoadLibraryW(wide.as_ptr()) };
+    // Absolute path with LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: the path is
+    // fully qualified so no search order applies, but the flag keeps the
+    // DLL's own dependency resolution (if any) off the unsafe default
+    // search order.
+    let lib = unsafe {
+        LoadLibraryExW(
+            wide.as_ptr(),
+            core::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+    };
     if lib.is_null() {
         return None;
     }

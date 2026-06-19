@@ -243,13 +243,16 @@ impl NativeOverlayShell {
         });
         self.post(UiCommand::Apply);
 
-        // Warm the icon cache on a background thread.  Icons appear
+        // Warm the icon cache on a background thread. Icons appear
         // on the *next* search from cache — no repaint flash.
         let cache = self.inner.icon_cache.clone();
         let rows = rows.to_vec();
-        std::thread::spawn(move || {
-            crate::overlay::icons::prefetch_rows(&cache, &rows);
-        });
+        std::thread::Builder::new()
+            .name("nex-icon-prefetch".into())
+            .spawn(move || {
+                crate::overlay::icons::prefetch_rows(&cache, &rows);
+            })
+            .ok();
     }
 
     pub fn set_selected_index(&self, selected_index: usize) {

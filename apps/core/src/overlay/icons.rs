@@ -334,6 +334,9 @@ fn extract_shell_icon_png(_shell_path: &str) -> Option<Vec<u8>> {
 pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
     #[cfg(target_os = "windows")]
     unsafe {
+        // Initialize COM for this thread so ExtractIconExW and shell
+        // IDataObject work. Match each CoInitializeEx with CoUninitialize
+        // so the apartment is torn down when the thread exits.
         let _ = windows_sys::Win32::System::Com::CoInitializeEx(
             std::ptr::null(),
             2, // COINIT_APARTMENTTHREADED
@@ -343,6 +346,10 @@ pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
         if !row.icon_path.is_empty() {
             cache.png_bytes(&row.icon_path);
         }
+    }
+    #[cfg(target_os = "windows")]
+    unsafe {
+        windows_sys::Win32::System::Com::CoUninitialize();
     }
 }
 

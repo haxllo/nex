@@ -27,6 +27,12 @@ struct Inner {
     idle_trim: Duration,
 }
 
+impl Inner {
+    fn touch(&mut self, key: PathBuf) {
+        self.last_touch.insert(key, Instant::now());
+    }
+}
+
 impl Default for IconCache {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_ENTRIES, DEFAULT_IDLE_TRIM_MS)
@@ -55,13 +61,16 @@ impl IconCache {
         }
         let key = PathBuf::from(path);
         if let Ok(mut inner) = self.inner.lock() {
-            if let Some(bytes) = inner.png.get(&key) {
-                return Some(bytes.clone());
+            let bytes = inner.png.get(&key).cloned();
+            if bytes.is_some() {
+                inner.touch(key);
+                return bytes;
             }
         }
         let bytes = Arc::new(decode_png(&key)?);
         if let Ok(mut inner) = self.inner.lock() {
-            inner.png.put(key, bytes.clone());
+            inner.png.put(key.clone(), bytes.clone());
+            inner.touch(key);
         }
         Some(bytes)
     }
@@ -75,7 +84,9 @@ impl IconCache {
         }
         let key = PathBuf::from(path);
         let mut inner = self.inner.lock().ok()?;
-        inner.png.get(&key).cloned()
+        let bytes = inner.png.get(&key).cloned()?;
+        inner.touch(key);
+        Some(bytes)
     }
 
     pub(crate) fn trim_unused(&self) -> usize {
@@ -86,10 +97,16 @@ impl IconCache {
         let cutoff = Instant::now()
             .checked_sub(inner.idle_trim)
             .unwrap_or_else(Instant::now);
+        // Remove any stale entries from both the LRU and the touch map.
+        // Also clean up touch entries that were left behind by LRU eviction.
         let stale: Vec<PathBuf> = inner
             .last_touch
             .iter()
-            .filter_map(|(k, t)| (*t < cutoff).then(|| k.clone()))
+            .filter_map(|(k, t)| {
+                let expired = *t < cutoff;
+                let evicted = !inner.png.contains(k);
+                (expired || evicted).then(|| k.clone())
+            })
             .collect();
         for k in &stale {
             inner.png.pop(k);

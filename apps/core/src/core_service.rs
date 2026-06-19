@@ -73,7 +73,7 @@ pub enum LaunchTarget<'a> {
 
 pub struct CoreService {
     config: RwLock<Config>,
-    db: Connection,
+    db: Mutex<Connection>,
     providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
@@ -174,7 +174,7 @@ impl CoreService {
 
         Ok(Self {
             config: RwLock::new(config),
-            db,
+            db: Mutex::new(db),
             providers: RwLock::new(Vec::new()),
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
@@ -188,6 +188,10 @@ impl CoreService {
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
+    }
+
+    fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn with_providers(self, providers: Vec<Box<dyn DiscoveryProvider>>) -> Self {
@@ -426,7 +430,7 @@ impl CoreService {
         match target {
             LaunchTarget::Path(path) => launch_path(path).map_err(ServiceError::from),
             LaunchTarget::Id(id) => {
-                let item = index_store::get_item(&self.db, id)?
+                let item = index_store::get_item(&*self.db(), id)?
                     .ok_or_else(|| ServiceError::ItemNotFound(id.to_string()))?;
                 match launch_path(&item.path) {
                     Ok(()) => {
@@ -437,7 +441,7 @@ impl CoreService {
                         Ok(())
                     }
                     Err(error) if should_prune_after_launch_error(&item, &error) => {
-                        index_store::delete_item(&self.db, &item.id)?;
+                        index_store::delete_item(&*self.db(), &item.id)?;
                         self.remove_cached_item_by_id(&item.id);
                         Err(ServiceError::from(error))
                     }
@@ -461,7 +465,7 @@ impl CoreService {
             return Ok(());
         }
         index_store::record_query_selection(
-            &self.db,
+            &*self.db(),
             &query_norm,
             search_mode_key(mode),
             item_id,
@@ -504,7 +508,7 @@ impl CoreService {
             });
         }
 
-        let mut existing_items = index_store::list_items(&self.db)?;
+        let mut existing_items = index_store::list_items(&*self.db())?;
         let mut existing_by_id: HashMap<String, SearchItem> = existing_items
             .drain(..)
             .map(|item| (item.id.clone(), item))
@@ -541,7 +545,7 @@ impl CoreService {
             };
             if incremental_mode
                 && should_skip_provider_discovery(
-                    &self.db,
+                    &*self.db(),
                     &provider_name,
                     provider_stamp.as_deref(),
                     now_epoch_secs,
@@ -555,7 +559,7 @@ impl CoreService {
                     skipped: true,
                     elapsed_ms: started.elapsed().as_millis(),
                 });
-                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, true)?;
+                log_provider_freshness_status(&*self.db(), &provider_name, now_epoch_secs, true)?;
                 cumulative_weight = cumulative_weight.saturating_add(provider_weight);
                 if let Some(ref pct) = progress_pct {
                     pct.store(cumulative_weight.min(95), Ordering::Relaxed);
@@ -621,7 +625,7 @@ impl CoreService {
                     .map(|previous| previous != &item)
                     .unwrap_or(true);
                 if changed {
-                    index_store::upsert_item(&self.db, &item)?;
+                    index_store::upsert_item(&*self.db(), &item)?;
                     upserted += 1;
                     upserted_total += 1;
                 }
@@ -649,7 +653,7 @@ impl CoreService {
                 .collect();
 
             for id in &removable_ids {
-                index_store::delete_item(&self.db, id)?;
+                index_store::delete_item(&*self.db(), id)?;
                 existing_by_id.remove(id);
             }
 
@@ -665,12 +669,12 @@ impl CoreService {
 
             if incremental_mode {
                 persist_provider_discovery_state(
-                    &self.db,
+                    &*self.db(),
                     &provider_name,
                     provider_stamp.as_deref(),
                     now_epoch_secs,
                 )?;
-                log_provider_freshness_status(&self.db, &provider_name, now_epoch_secs, false)?;
+                log_provider_freshness_status(&*self.db(), &provider_name, now_epoch_secs, false)?;
             }
         }
 
@@ -700,7 +704,7 @@ impl CoreService {
     }
 
     pub fn upsert_item(&self, item: &SearchItem) -> Result<(), ServiceError> {
-        index_store::upsert_item(&self.db, item)?;
+        index_store::upsert_item(&*self.db(), item)?;
         self.upsert_cached_item(item.clone());
         self.index_item_on_backends(item);
         Ok(())
@@ -710,7 +714,7 @@ impl CoreService {
     /// and the Tantivy/FTS5 search indexes. Idempotent: deleting a
     /// missing id is not an error.
     pub fn delete_item_by_id(&self, id: &str) -> Result<(), ServiceError> {
-        index_store::delete_item(&self.db, id)?;
+        index_store::delete_item(&*self.db(), id)?;
         self.remove_cached_item_by_id(id);
         self.remove_item_from_backends(id);
         Ok(())
@@ -719,14 +723,14 @@ impl CoreService {
     /// Spawn a background stale-pruner thread that runs
     /// `prune_stale_items_if_due` on a 15 s cadence so the search
     /// critical path never blocks on a write lock. Uses
-    /// `try_lock` so a concurrent search is never delayed.
-    pub fn start_stale_pruner(&self, service_arc: &Arc<Mutex<CoreService>>) {
+    /// `try_write` so a concurrent search is never delayed.
+    pub fn start_stale_pruner(&self, service_arc: &Arc<RwLock<CoreService>>) {
         let svc = Arc::clone(service_arc);
         std::thread::Builder::new()
             .name("nex-stale-pruner".into())
             .spawn(move || loop {
                 std::thread::sleep(STALE_PRUNE_INTERVAL);
-                if let Ok(guard) = svc.try_lock() {
+                if let Ok(guard) = svc.try_write() {
                     let _ = guard.prune_stale_items_if_due();
                 }
             })
@@ -737,12 +741,12 @@ impl CoreService {
     /// filesystem changes to the live index. Idempotent: calling twice
     /// is a no-op. No-op on non-Windows targets.
     ///
-    /// `service_arc` is the same `Arc<Mutex<CoreService>>` that owns this
+    /// `service_arc` is the same `Arc<RwLock<CoreService>>` that owns this
     /// service; the consumer threads re-acquire it to apply changes.
     #[cfg(target_os = "windows")]
     pub fn start_file_watchers(
         &self,
-        service_arc: &Arc<Mutex<CoreService>>,
+        service_arc: &Arc<RwLock<CoreService>>,
     ) -> Result<(), ServiceError> {
         let mut slot = match self.file_watchers.lock() {
             Ok(guard) => guard,
@@ -910,7 +914,7 @@ impl CoreService {
         }
 
         let rows =
-            index_store::list_query_selections(&self.db, &query_norm, search_mode_key(mode), 64)?;
+            index_store::list_query_selections(&*self.db(), &query_norm, search_mode_key(mode), 64)?;
         let now = now_epoch_secs();
         let mut boosts = HashMap::with_capacity(rows.len());
         for (item_id, selected_count, last_selected_epoch_secs) in rows {
@@ -926,7 +930,7 @@ impl CoreService {
 
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
         let config_snapshot = self.config_snapshot();
-        let latest_full = index_store::list_items(&self.db)?;
+        let latest_full = index_store::list_items(&*self.db())?;
         let latest_apps = collect_app_items(&latest_full);
         let latest = {
             let compact_started = std::time::Instant::now();
@@ -1028,7 +1032,7 @@ impl CoreService {
     }
 
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
-        let items = index_store::list_items(&self.db)?;
+        let items = index_store::list_items(&*self.db())?;
 
         // Determine if this is the first sync (both backends have 0 docs)
         let tantivy_is_first = self
@@ -1223,7 +1227,7 @@ impl CoreService {
         updated.use_count = updated.use_count.saturating_add(1);
         updated.last_accessed_epoch_secs = now.max(updated.last_accessed_epoch_secs);
 
-        index_store::upsert_item(&self.db, &updated)?;
+        index_store::upsert_item(&*self.db(), &updated)?;
         self.upsert_cached_item(updated);
         Ok(())
     }
@@ -1261,7 +1265,7 @@ impl CoreService {
         }
 
         for stale_id in &stale_ids {
-            index_store::delete_item(&self.db, stale_id)?;
+            index_store::delete_item(&*self.db(), stale_id)?;
         }
 
         match self.cached_items.write() {

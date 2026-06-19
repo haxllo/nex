@@ -5,7 +5,7 @@ use std::rc::Rc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 #[cfg(target_os = "windows")]
 use std::time::{Duration, Instant};
 
@@ -78,10 +78,10 @@ pub(crate) fn run_windows_runtime(
     runtime_config: Config,
     service: CoreService,
 ) -> Result<(), RuntimeError> {
-    let service = Arc::new(Mutex::new(service));
+    let service = Arc::new(RwLock::new(service));
 
     let initial_cache_empty = {
-        let guard = service.lock().unwrap();
+        let guard = service.read().unwrap();
         guard.cached_items_len() == 0
     };
 
@@ -98,7 +98,7 @@ pub(crate) fn run_windows_runtime(
             log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
             let service_arc = service.clone();
             let result = run_with_progress_window(move |pct| {
-                let svc = service_arc.lock().unwrap();
+                let svc = service_arc.write().unwrap();
                 *svc.progress.lock().unwrap() = Some(pct);
                 let report = svc.rebuild_index_incremental_with_report();
                 *svc.progress.lock().unwrap() = None;
@@ -154,7 +154,7 @@ pub(crate) fn run_windows_runtime(
         log_info(&format!(
             "[nex] startup cached_items={} (async indexing scheduled)",
             {
-                let guard = service.lock().unwrap();
+                let guard = service.read().unwrap();
                 guard.cached_items_len()
             }
         ));
@@ -409,7 +409,7 @@ pub(crate) fn run_windows_runtime(
 /// so it can be called from the worker thread.
 struct RuntimeWorker {
     overlay: NativeOverlayShell,
-    service: Arc<Mutex<CoreService>>,
+    service: Arc<RwLock<CoreService>>,
     runtime_config: Config,
     background_index_refresh: BackgroundIndexRefresh,
     plugin_registry: PluginRegistry,
@@ -463,7 +463,7 @@ impl RuntimeWorker {
 
         // Periodic memory logging every 30 seconds
         if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
-            if let Ok(guard) = self.service.lock() {
+            if let Ok(guard) = self.service.read() {
                 guard.log_memory_stats();
             }
             self.last_memory_log = Instant::now();
@@ -509,7 +509,7 @@ impl RuntimeWorker {
             .completed
             .load(std::sync::atomic::Ordering::Acquire);
 
-        if let Ok(svc) = self.service.try_lock() {
+        if let Ok(svc) = self.service.try_write() {
             maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
@@ -628,7 +628,7 @@ impl RuntimeWorker {
                         // the next show.
                         while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
-                            &*self.service.lock().unwrap(),
+                            &*self.service.write().unwrap(),
                             &mut self.background_index_refresh,
                             &self.runtime_config,
                         );
@@ -655,7 +655,7 @@ impl RuntimeWorker {
                 std::thread::Builder::new()
                     .name("nex-warm-search".into())
                     .spawn(move || {
-                        if let Ok(guard) = svc.try_lock() {
+                        if let Ok(guard) = svc.try_read() {
                             guard.warm_search_cache();
                         }
                     })
@@ -769,7 +769,7 @@ impl RuntimeWorker {
                         self.overlay.hide_now();
                         self.overlay_state.on_escape();
                         match execute_action_selection(
-                            &*self.service.lock().unwrap(),
+                            &*self.service.write().unwrap(),
                             &self.runtime_config,
                             &self.plugin_registry,
                             &pending.uninstall_action,
@@ -896,7 +896,7 @@ impl RuntimeWorker {
                 }
 
                 match launch_overlay_selection(
-                    &*self.service.lock().unwrap(),
+                    &*self.service.write().unwrap(),
                     &self.runtime_config,
                     &self.plugin_registry,
                     &self.current_results,

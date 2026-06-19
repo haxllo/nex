@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -65,7 +65,7 @@ impl FileWatcherHandle {
     pub(crate) fn start(
         roots: Vec<PathBuf>,
         excluded_roots: Vec<PathBuf>,
-        service: Arc<Mutex<CoreService>>,
+        service: Arc<RwLock<CoreService>>,
     ) -> Self {
         let mut entries = Vec::new();
         for root in roots {
@@ -111,7 +111,7 @@ impl Drop for FileWatcherHandle {
 fn spawn_consumer(
     root: PathBuf,
     rx: Receiver<Vec<WatcherEvent>>,
-    service: Arc<Mutex<CoreService>>,
+    service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
@@ -133,7 +133,7 @@ fn spawn_consumer(
 fn run_consumer(
     root: PathBuf,
     rx: Receiver<Vec<WatcherEvent>>,
-    service: Arc<Mutex<CoreService>>,
+    service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
 ) {
     // The receiver can produce one or more `Vec<WatcherEvent>`s per batch.
@@ -222,7 +222,7 @@ fn apply_event_to_pending(
 
 fn flush_pending(
     root: &Path,
-    service: &Arc<Mutex<CoreService>>,
+    service: &Arc<RwLock<CoreService>>,
     excluded_roots: &[PathBuf],
     pending_added: &mut HashMap<PathBuf, ()>,
     pending_removed: &mut HashSet<PathBuf>,
@@ -244,7 +244,7 @@ fn flush_pending(
 
     let mut upsert_items: Vec<SearchItem> = Vec::with_capacity(added.len());
     {
-        let guard = match service.lock() {
+        let guard = match service.read() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -281,7 +281,7 @@ fn flush_pending(
     let mut deleted = 0usize;
     let mut upserted = 0usize;
     {
-        let guard = match service.lock() {
+        let guard = match service.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };

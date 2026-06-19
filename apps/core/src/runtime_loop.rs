@@ -531,6 +531,7 @@ impl RuntimeWorker {
             // cache becomes usable. The handle is idempotent: it is a
             // no-op if a watcher is already running.
             if self.background_index_refresh.cache_applied {
+                svc.start_stale_pruner(&self.service);
                 if let Err(error) = svc.start_file_watchers(&self.service) {
                     log_warn(&format!("[nex] directory_watcher start failed: {error}"));
                 }

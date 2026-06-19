@@ -337,8 +337,6 @@ impl CoreService {
             ));
         }
 
-        self.prune_stale_items_if_due()?;
-
         // Path 1: indexed search (Tantivy/FTS5) returns pre-ranked candidates
         // directly. The index is only populated when background indexing has
         // finished successfully. When the index is empty (e.g., Everything
@@ -716,6 +714,23 @@ impl CoreService {
         self.remove_cached_item_by_id(id);
         self.remove_item_from_backends(id);
         Ok(())
+    }
+
+    /// Spawn a background stale-pruner thread that runs
+    /// `prune_stale_items_if_due` on a 15 s cadence so the search
+    /// critical path never blocks on a write lock. Uses
+    /// `try_lock` so a concurrent search is never delayed.
+    pub fn start_stale_pruner(&self, service_arc: &Arc<Mutex<CoreService>>) {
+        let svc = Arc::clone(service_arc);
+        std::thread::Builder::new()
+            .name("nex-stale-pruner".into())
+            .spawn(move || loop {
+                std::thread::sleep(STALE_PRUNE_INTERVAL);
+                if let Ok(guard) = svc.try_lock() {
+                    let _ = guard.prune_stale_items_if_due();
+                }
+            })
+            .ok();
     }
 
     /// Start the per-root `DirectoryWatcher` consumers that apply

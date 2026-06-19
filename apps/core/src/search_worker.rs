@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -36,7 +36,7 @@ pub(crate) struct SearchWorker {
 
 impl SearchWorker {
     pub(crate) fn new(
-        service: Arc<Mutex<CoreService>>,
+        service: Arc<RwLock<CoreService>>,
         runtime_config: Config,
         plugin_registry: Arc<PluginRegistry>,
         event_tx: Sender<OverlayEvent>,
@@ -66,7 +66,7 @@ impl SearchWorker {
 
                             let outcome =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let service_guard = match service.lock() {
+                                    let service_guard = match service.read() {
                                         Ok(g) => g,
                                         Err(_) => {
                                             return Err(

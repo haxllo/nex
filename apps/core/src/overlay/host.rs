@@ -43,7 +43,7 @@ use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
 
 use crate::overlay::icons::IconCache;
-use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState};
+use crate::overlay::model::{OverlayEvent, OverlayRow, OverlayRowRole, ShimState};
 use crate::overlay::model::Theme;
 
 const WINDOW_WIDTH: f64 = 720.0;
@@ -452,64 +452,132 @@ fn focus_input(webview: &Option<WebView>) {
 
 /// Serialize the overlay state into the JSON the page consumes.
 fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
-    let rows: Vec<serde_json::Value> = s
-        .rows
-        .iter()
-        .map(|r| {
-            let role = match r.role {
-                OverlayRowRole::Header => "header",
-                OverlayRowRole::Status => "status",
-                OverlayRowRole::Calculator => "calculator",
-                OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
-            };
-            let selectable = matches!(
-                r.role,
-                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
-            );
-            let icon = if r.icon_path.is_empty() {
-                serde_json::Value::Null
-            } else {
-                // Embed the icon as a data: URI so the WebView doesn't
-                // need to fetch it — custom protocols don't work for
-                // subresource requests in WebView2.
-                let b64 = icons
-                    .png_bytes(&r.icon_path)
-                    .map(|arc| base64_png(arc.as_ref()))
-                    .unwrap_or_default();
-                if b64.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(b64)
-                }
-            };
-            serde_json::json!({
-                "role": role,
-                "title": r.title,
-                "subtitle": r.path,
-                "kind": r.kind,
-                "icon": icon,
-                "selectable": selectable,
-                "resultIndex": r.result_index,
-            })
-        })
-        .collect();
-
     let theme = match s.theme {
         Theme::Dark => "dark",
         Theme::Light => "light",
     };
 
-    serde_json::json!({
-        "query": s.query,
-        "rows": rows,
-        "selected": s.selected,
-        "status": s.status_text,
-        "placeholder": s.placeholder_hint,
-        "hotkeyHint": s.hotkey_hint,
-        "hotkeyIssue": s.hotkey_issue_active,
-        "theme": theme,
-    })
-    .to_string()
+    let mut out = String::with_capacity(16_384);
+    out.push_str(r#"{"query":"#);
+    write_json_str(&mut out, &s.query);
+
+    out.push_str(r#","rows":["#);
+    for (i, r) in s.rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_row_json(&mut out, r, icons);
+    }
+
+    out.push_str(r#"],"selected":"#);
+    write_usize(&mut out, s.selected);
+
+    out.push_str(r#","status":"#);
+    write_json_str(&mut out, &s.status_text);
+
+    out.push_str(r#","placeholder":"#);
+    match &s.placeholder_hint {
+        Some(hint) => write_json_str(&mut out, hint),
+        None => out.push_str("null"),
+    }
+
+    out.push_str(r#","hotkeyHint":"#);
+    write_json_str(&mut out, &s.hotkey_hint);
+
+    out.push_str(r#","hotkeyIssue":"#);
+    out.push_str(if s.hotkey_issue_active { "true" } else { "false" });
+
+    out.push_str(r#","theme":""#);
+    out.push_str(theme);
+    out.push('"');
+    out.push('}');
+    out
+}
+
+fn write_row_json(out: &mut String, r: &OverlayRow, icons: &Arc<IconCache>) {
+    let role = match r.role {
+        OverlayRowRole::Header => "header",
+        OverlayRowRole::Status => "status",
+        OverlayRowRole::Calculator => "calculator",
+        OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
+    };
+    let selectable = matches!(
+        r.role,
+        OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
+    );
+
+    out.push_str(r#"{"role":""#);
+    out.push_str(role);
+
+    out.push_str(r#","title":"#);
+    write_json_str(out, &r.title);
+
+    out.push_str(r#","subtitle":"#);
+    write_json_str(out, &r.path);
+
+    out.push_str(r#","kind":"#);
+    write_json_str(out, &r.kind);
+
+    out.push_str(r#","icon":"#);
+    if r.icon_path.is_empty() {
+        out.push_str("null");
+    } else {
+        let b64 = icons
+            .png_bytes(&r.icon_path)
+            .map(|arc| base64_png(arc.as_ref()))
+            .unwrap_or_default();
+        if b64.is_empty() {
+            out.push_str("null");
+        } else {
+            write_json_str(out, &b64);
+        }
+    }
+
+    out.push_str(r#","selectable":"#);
+    out.push_str(if selectable { "true" } else { "false" });
+
+    out.push_str(r#","resultIndex":"#);
+    match r.result_index {
+        Some(idx) => write_usize(out, idx),
+        None => out.push_str("null"),
+    }
+
+    out.push('}');
+}
+
+fn write_json_str(out: &mut String, s: &str) {
+    out.push('"');
+    for b in s.bytes() {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0..=0x1f => {
+                use std::fmt::Write;
+                write!(out, "\\u{:04x}", b).ok();
+            }
+            _ => out.push(b as char),
+        }
+    }
+    out.push('"');
+}
+
+fn write_usize(out: &mut String, n: usize) {
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    let mut n = n;
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&buf[i..]) });
 }
 
 // ─────────────────────────────────────────────────────────────────

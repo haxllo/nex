@@ -93,6 +93,21 @@ impl TantivyIndex {
         })
     }
 
+    /// Warm up the OS page cache and Tantivy reader by issuing a
+    /// cheap search. Call once after the overlay shows so the user's
+    /// first real keystroke doesn't pay page-fault latency.
+    pub fn warmup(&self) {
+        let _ = self.reader.reload();
+        let searcher = self.reader.searcher();
+        if let Ok(query) = build_prefix_query(
+            &searcher.index(),
+            "a",
+            &[self.fields.title, self.fields.path, self.fields.subtitle],
+        ) {
+            let _ = searcher.search(&query, &TopDocs::with_limit(1).order_by_score());
+        }
+    }
+
     pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<SearchItem>, String> {
         if query_text.trim().is_empty() {
             return Ok(Vec::new());

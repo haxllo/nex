@@ -648,6 +648,18 @@ impl RuntimeWorker {
                         self.overlay.set_status_text(issue);
                     }
                 }
+                // Warm the Tantivy index on a background thread so the
+                // user's first keystroke doesn't pay OS page-fault cost
+                // or Tantivy reader initialization latency.
+                let svc = self.service.clone();
+                std::thread::Builder::new()
+                    .name("nex-warm-search".into())
+                    .spawn(move || {
+                        if let Ok(guard) = svc.try_lock() {
+                            guard.warm_search_cache();
+                        }
+                    })
+                    .ok();
             }
             OverlayEvent::ExternalQuit => {
                 self.overlay.hide_now();

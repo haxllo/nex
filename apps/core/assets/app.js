@@ -249,8 +249,12 @@
     true
   );
 
-  // ── query input (debounced) ──────────────────────────────
+  // ── query input (adaptive debounce) ──────────────────────
+  // First char of each typing burst fires immediately (0ms).
+  // Subsequent rapid chars coalesce at 80ms so SearchWorker
+  // drains stale requests from its mpsc channel.
   let debounce = null;
+  let lastInputTime = 0;
   input.addEventListener("input", () => {
     let raw = input.value;
     // In command mode the `>` prefix is kept out of the display
@@ -264,8 +268,11 @@
     const query = inCommandMode ? ">" + raw : raw;
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
+    const now = performance.now();
+    const delay = (now - lastInputTime > 300) ? 0 : 80;
+    lastInputTime = now;
     clearTimeout(debounce);
-    debounce = setTimeout(() => post("query", query), 40);
+    debounce = setTimeout(() => post("query", query), delay);
   });
 
   help.addEventListener("click", () => post("openConfig"));

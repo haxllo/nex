@@ -3,9 +3,10 @@
 //! Replaces the Iced boot/view. A single borderless, transparent,
 //! always-on-top tao window hosts a wry WebView that renders the
 //! premium cmdk-style UI from embedded HTML/CSS/JS assets. The Rust
-//! side pushes state to JS via `evaluate_script("window.nex.apply(..)")`
-//! and receives input via the wry IPC handler, translating it into the
-//! existing [`OverlayEvent`] channel the runtime worker already drains.
+//! side pushes state to JS via `ICoreWebView2::PostWebMessageAsString`
+//! (fire-and-forget, never blocks the host event loop) and receives
+//! input via the wry IPC handler, translating it into the existing
+//! [`OverlayEvent`] channel the runtime worker already drains.
 //!
 //! The window is positioned on the monitor under the cursor, grabs
 //! foreground focus on show (the `AttachThreadInput` trick — winit/tao
@@ -34,6 +35,7 @@ use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use wry::http::{header::CONTENT_TYPE, Request, Response};
+use wry::WebViewExtWindows;
 use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -423,12 +425,23 @@ fn handle_ipc(
 }
 
 /// Push the current state snapshot to the page.
+/// Uses `ICoreWebView2::PostWebMessageAsString` (fire-and-forget) so the
+/// host event loop is never blocked by a synchronous script evaluation.
 fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>) {
     let Some(wv) = webview else { return };
     let Ok(s) = state.lock() else { return };
     let json = snapshot_json(&s, icons);
     drop(s);
-    let _ = wv.evaluate_script(&format!("window.nex&&window.nex.apply({json})"));
+    let wv2 = wv.webview();
+    let wide: Vec<u16> = json
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = wv2.PostWebMessageAsString(
+            windows_core::PCWSTR::from_raw(wide.as_ptr()),
+        );
+    }
 }
 
 fn focus_input(webview: &Option<WebView>) {

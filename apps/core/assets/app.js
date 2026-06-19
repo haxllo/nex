@@ -2,7 +2,7 @@
 //
 // Owns the search input + result list locally so navigation has zero
 // round-trip latency. Talks to Rust through `window.ipc.postMessage`
-// (JSON) and receives state via `window.nex.apply(state)`.
+// (JSON) and receives state via WebView2 `message` events.
 
 (function () {
   "use strict";
@@ -28,6 +28,14 @@
     try {
       window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
     } catch (_) {}
+  }
+
+  // Receive state from Rust via WebView2 PostWebMessageAsString
+  // (fire-and-forget, never blocks the host event loop).
+  if (window.chrome?.webview) {
+    window.chrome.webview.addEventListener("message", (e) => {
+      try { nex.apply(JSON.parse(e.data)); } catch (_) {}
+    });
   }
 
   // ── render ───────────────────────────────────────────────

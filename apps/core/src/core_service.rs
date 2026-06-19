@@ -888,6 +888,17 @@ impl CoreService {
         Ok(Vec::new())
     }
 
+    /// Warm up the Tantivy index by issuing a dummy query so the
+    /// user's first real keystroke doesn't wait for OS page-cache
+    /// faults and Tantivy reader initialization.
+    pub fn warm_search_cache(&self) {
+        if let Ok(guard) = self.tantivy_index.lock() {
+            if let Some(ref idx) = *guard {
+                idx.warmup();
+            }
+        }
+    }
+
     fn query_personalization_boosts(
         &self,
         query: &str,

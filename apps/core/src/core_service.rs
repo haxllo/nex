@@ -892,15 +892,29 @@ impl CoreService {
         Ok(Vec::new())
     }
 
-    /// Warm up the Tantivy index by issuing a dummy query so the
-    /// user's first real keystroke doesn't wait for OS page-cache
-    /// faults and Tantivy reader initialization.
+    /// Warm search indexes + SQLite page cache so the user's first
+    /// keystroke doesn't pay cold-page-fault latency.  Must be called
+    /// with the outer service lock held (read or write).
     pub fn warm_search_cache(&self) {
+        // Warm Tantivy reader + page cache
         if let Ok(guard) = self.tantivy_index.lock() {
             if let Some(ref idx) = *guard {
                 idx.warmup();
             }
         }
+        // Warm FTS5 reader + page cache
+        if let Ok(guard) = self.fts5_index.lock() {
+            if let Some(ref idx) = *guard {
+                idx.warmup();
+            }
+        }
+        // Touch the SQLite database: issue a no-op query so the OS
+        // pages in the hot portions of the file (personalization
+        // boosts table, use_count tracking, etc.).
+        let _ = self.db().query_row("SELECT 1", [], |_| Ok(()));
+        // Touch the cached items inner lock to warm the cache line.
+        drop(self.cached_items.read());
+        drop(self.cached_app_items.read());
     }
 
     fn query_personalization_boosts(

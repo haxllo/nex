@@ -32,6 +32,11 @@ impl Fts5Index {
         Ok(Self { conn })
     }
 
+    /// Warm the OS page cache by issuing a trivial query.
+    pub fn warmup(&self) {
+        let _ = self.conn.query_row("SELECT 1", [], |_| Ok(()));
+    }
+
     pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<SearchItem>, String> {
         if query_text.trim().is_empty() {
             return Ok(Vec::new());

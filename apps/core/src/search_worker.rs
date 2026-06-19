@@ -66,11 +66,11 @@ impl SearchWorker {
 
                             let outcome =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let service_guard = match service.read() {
+                                    let service_guard = match service.try_read() {
                                         Ok(g) => g,
                                         Err(_) => {
                                             return Err(
-                                                "search index is locked (internal error)"
+                                                "search engine temporarily locked"
                                                     .to_string(),
                                             )
                                         }

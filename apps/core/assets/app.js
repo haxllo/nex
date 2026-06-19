@@ -23,6 +23,7 @@
   let queryEcho = ""; // last query Rust pushed back (avoid input clobber)
   let lastQuerySent = "";
   let inCommandMode = false;
+  let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
 
   function post(t, v) {
     try {
@@ -131,6 +132,12 @@
     // Atomic swap — no flash between clearing and rebuilding.
     list.replaceChildren(frag);
 
+    // Rebuild row map for O(1) selection toggles.
+    rowMap = new Map();
+    for (const li of list.children) {
+      if (li.classList.contains("row")) rowMap.set(Number(li.dataset.index), li);
+    }
+
     // Status / empty state.
     const hasRows = rows.some((r) => r.role !== "status");
     if (!hasRows && statusEl.dataset.text) {
@@ -150,17 +157,24 @@
 
   function setSelected(i, scroll) {
     if (i === selected) return;
+    const prev = selected;
     selected = i;
-    for (const el of list.querySelectorAll(".row")) {
-      el.classList.toggle("selected", Number(el.dataset.index) === selected);
-    }
+    const prevEl = rowMap.get(prev);
+    if (prevEl) prevEl.classList.remove("selected");
+    const nextEl = rowMap.get(selected);
+    if (nextEl) nextEl.classList.add("selected");
     if (scroll) scrollToSelected();
     post("select", selected);
   }
 
   function scrollToSelected() {
-    const el = list.querySelector(".row.selected");
-    if (el) el.scrollIntoView({ block: "nearest" });
+    const el = rowMap.get(selected);
+    if (!el) return;
+    const top = el.offsetTop;
+    const bot = top + el.offsetHeight;
+    if (top < list.scrollTop || bot > list.scrollTop + list.clientHeight) {
+      el.scrollIntoView({ block: "nearest" });
+    }
   }
 
   function moveSelection(delta) {

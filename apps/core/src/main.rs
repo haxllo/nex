@@ -1,4 +1,14 @@
+// GUI subsystem: Windows never allocates a console for `nex.exe`, so
+// double-click / startup launches don't flash a black cmd window. CLI
+// commands that print to the terminal reattach to the parent console in
+// `attach_parent_console_if_present()` below, so `--status`, `--quit`,
+// etc. still work when run from cmd/PowerShell/Windows Terminal.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 fn main() {
+    #[cfg(windows)]
+    attach_parent_console_if_present();
+
     let stdio_enabled = std::env::var("NEX_SUPPRESS_STDIO")
         .or_else(|_| std::env::var("SWIFTFIND_SUPPRESS_STDIO"))
         .map(|value| !(value == "1" || value.eq_ignore_ascii_case("true")))
@@ -20,5 +30,23 @@ fn main() {
             eprintln!("[nex] runtime failed: {error}");
         }
         std::process::exit(1);
+    }
+}
+
+/// Reattach to the parent's console (if any) so CLI commands that print
+/// to stdout/stderr (`--status`, `--status-json`, `--quit`, ... and the
+/// `eprintln!` error paths above) keep working under the GUI subsystem.
+///
+/// When nex is started from cmd / PowerShell / Windows Terminal, this
+/// attaches to that console and stdout/stderr land there as expected.
+/// When started from Explorer, the shell, or the Run key (no parent
+/// console), `AttachConsole` fails silently — no console is allocated,
+/// which is exactly what prevents the startup flash.
+#[cfg(windows)]
+fn attach_parent_console_if_present() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        // Returns 0 on failure (e.g. no parent console); ignore it.
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
 }

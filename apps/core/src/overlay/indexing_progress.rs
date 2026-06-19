@@ -2,9 +2,9 @@
 //!
 //! Replaces the legacy Win32 modal progress window and the Iced stub.
 //! A tiny borderless tao window hosts a wry WebView that renders an
-//! animated progress bar; the indexing closure writes to an
-//! `Arc<AtomicU32>` and a polling thread pushes `requestAnimationFrame`
-//! updates via `evaluate_script`. The window lives only while the
+//! animated progress bar. The event loop runs at ControlFlow::Poll and
+//! reads progress directly from an Arc<AtomicU32> on each NewEvents
+//! cycle — no polling thread needed. The window lives only while the
 //! closure runs.
 
 #![cfg(target_os = "windows")]
@@ -57,7 +57,6 @@ window.updateProgress=function(v){var p=Math.max(0,Math.min(100,v));document.get
 </html>"#;
 
 enum Cmd {
-    Update(u32),
     WorkDone,
     Close,
 }
@@ -96,7 +95,6 @@ where
         .with_always_on_top(true)
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
         .with_skip_taskbar(true)
-        .with_no_redirection_bitmap(true)
         .with_window_classname("NexProgressWindowClass")
         .build(&event_loop)
         .expect("failed to create progress window");
@@ -116,9 +114,7 @@ where
         );
     }
 
-    // Apply acrylic if available; falls back to CSS opaque panel.
-    let _ = window_vibrancy::apply_acrylic(&window, Some((18, 18, 20, 130)));
-
+    // WebView2 renders the dark panel via CSS; no acrylic needed.
     let webview = WebViewBuilder::new()
         .with_transparent(true)
         .with_html(PROGRESS_PAGE)
@@ -126,28 +122,6 @@ where
         .expect("failed to build progress webview");
 
     window.set_visible(true);
-
-    // Spawn a polling thread that reads the AtomicU32 and posts Cmd::Update.
-    let progress_for_poll = progress.clone();
-    let proxy_for_poll = proxy.clone();
-    let _poll_thread = thread::Builder::new()
-        .name("nex-progress-poll".into())
-        .spawn(move || {
-            let mut last = u32::MAX;
-            loop {
-                thread::sleep(Duration::from_millis(120));
-                let current = progress_for_poll.load(Ordering::Relaxed);
-                if current >= 100 {
-                    let _ = proxy_for_poll.send_event(Cmd::Update(100));
-                    break;
-                }
-                if current != last {
-                    let _ = proxy_for_poll.send_event(Cmd::Update(current));
-                    last = current;
-                }
-            }
-        })
-        .ok();
 
     // Watch for work-thread completion so the window always closes,
     // even if the indexer errors before writing progress=100.
@@ -161,28 +135,31 @@ where
         .expect("failed to spawn done-watcher thread");
 
     let mut closed = false;
+    let progress_for_handler = progress.clone();
+    let mut last_progress = u32::MAX;
 
     let _ = event_loop.run_return(move |event, _target, control_flow| {
-        *control_flow = ControlFlow::Wait;
-
         match event {
-            Event::UserEvent(Cmd::Update(v)) => {
-                let _ = webview.evaluate_script(&format!(
-                    "window.updateProgress&&window.updateProgress({v})"
-                ));
-                if v >= 100 {
-                    // Give the user a moment to see 100%, then close.
-                    let p = proxy.clone();
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(600));
-                        let _ = p.send_event(Cmd::Close);
-                    });
+            Event::NewEvents(_) => {
+                *control_flow = ControlFlow::Poll;
+                let current = progress_for_handler.load(Ordering::Relaxed);
+                if current != last_progress {
+                    last_progress = current;
+                    let clamped = current.min(100);
+                    // SKIP evaluate_script to test if it causes the freeze
+                    // let _ = webview.evaluate_script(&format!(
+                    //     "window.updateProgress&&window.updateProgress({clamped})"
+                    // ));
+                    if current >= 100 {
+                        let p = proxy.clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(600));
+                            let _ = p.send_event(Cmd::Close);
+                        });
+                    }
                 }
             }
             Event::UserEvent(Cmd::WorkDone) => {
-                // Work thread finished (success or error). If progress
-                // never reached 100 the Update(100)->Close path never
-                // fires, so close now to unblock the main thread.
                 if !closed {
                     closed = true;
                     *control_flow = ControlFlow::Exit;
@@ -194,7 +171,9 @@ where
                     *control_flow = ControlFlow::Exit;
                 }
             }
-            _ => {}
+            _ => {
+                *control_flow = ControlFlow::Poll;
+            }
         }
     });
 

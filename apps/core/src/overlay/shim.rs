@@ -243,16 +243,23 @@ impl NativeOverlayShell {
         });
         self.post(UiCommand::Apply);
 
-        // Warm the icon cache on a background thread. Icons appear
-        // on the *next* search from cache — no repaint flash.
+        // Decode first 8 icons synchronously so they appear on this
+        // render. Defer the rest to a background thread — icons beyond
+        // the first visible batch appear on the next search.
         let cache = self.inner.icon_cache.clone();
-        let rows = rows.to_vec();
-        std::thread::Builder::new()
-            .name("nex-icon-prefetch".into())
-            .spawn(move || {
-                crate::overlay::icons::prefetch_rows(&cache, &rows);
-            })
-            .ok();
+        let fast_count = 8.min(rows.len());
+        if fast_count > 0 {
+            crate::overlay::icons::prefetch_rows(&cache, &rows[..fast_count]);
+        }
+        let slow_rows: Vec<OverlayRow> = rows.iter().skip(fast_count).cloned().collect();
+        if !slow_rows.is_empty() {
+            std::thread::Builder::new()
+                .name("nex-icon-prefetch".into())
+                .spawn(move || {
+                    crate::overlay::icons::prefetch_rows(&cache, &slow_rows);
+                })
+                .ok();
+        }
     }
 
     pub fn set_selected_index(&self, selected_index: usize) {

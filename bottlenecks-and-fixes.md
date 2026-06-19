@@ -298,17 +298,17 @@ let mut service = self.write();
 
 ## Summary by impact
 
-| # | Bottleneck | Est. latency | Fix effort | Net gain |
-|---|-----------|-------------|-----------|---------|
-| B-2 | `evaluate_script` blocking host loop | 2–40ms | Medium | Async dispatch removes blocking |
-| B-3 | Full JSON re-serialization per Apply | 1–5ms | Medium | Faster Apply, less GC |
-| B-1 | Fixed 40ms debounce | 0–40ms | Low | First char instant, burst smoother |
-| B-9 | Stale prune in search path | 0–500ms (rare) | Low | Removes write-lock from search |
-| B-10 | `Mutex<CoreService>` on search | 0–full-sync (rare) | Medium | Read-lock allows concurrent search |
-| B-5 | `recv_timeout(50ms)` jitter | 0–50ms (rare) | Low | Removes worst-case idle jitter |
-| B-4 | Cold icon decode | visible on 2nd keystroke | Low | Icons visible on 1st render |
-| B-7 | Double JSON parse | 1–3ms | Free w/ B-2 fix | Eliminated by post_message |
-| B-6 | `querySelectorAll` per arrow | <1ms | Low | O(n)→O(1) selection |
-| B-8 | `scrollIntoView` forced layout | <1ms | Low | Skip when already visible |
+| # | Bottleneck | Est. latency | Fix effort | Status |
+|---|-----------|-------------|-----------|--------|
+| B-2 | `evaluate_script` blocking host loop | 2–40ms | Medium | ✅ `60622fc` |
+| B-3 | Full JSON re-serialization per Apply | 1–5ms | Medium | ✅ `e4f3cd4` |
+| B-1 | Fixed 40ms debounce | 0–40ms | Low | ✅ `c3fe990` |
+| B-9 | Stale prune in search path | 0–500ms (rare) | Low | ✅ `faf9548` |
+| B-10 | `Mutex<CoreService>` on search | 0–full-sync (rare) | Medium | ✅ `e4f3cd4` |
+| B-5 | `recv_timeout(50ms)` jitter | 0–50ms (rare) | Low | ✅ `6ef6db6` |
+| B-4 | Cold icon decode | visible on 2nd keystroke | Low | ✅ `43287c4` |
+| B-7 | Double JSON parse | 1–3ms | Free w/ B-2 | ✅ `4dc402e` |
+| B-6 | `querySelectorAll` per arrow | <1ms | Low | ✅ `51f0cf9` |
+| B-8 | `scrollIntoView` forced layout | <1ms | Low | ✅ `51f0cf9` |
 
-**Recommended order:** B-2 (post_message) → B-1 (adaptive debounce) → B-9 (prune off search path) → B-10 (RwLock) → B-3 (fast JSON) → B-4 (icon throttle) → B-5/B-6/B-8 polish.
+**All 10 bottlenecks implemented.**

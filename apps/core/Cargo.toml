@@ -27,6 +27,8 @@ toml = "0.8.19"
 walkdir = "2.5.0"
 
 [target.'cfg(windows)'.dependencies]
+webview2-com-sys = "0.38.2"
+windows-core = "0.61"
 windows-sys = { version = "0.59.0", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

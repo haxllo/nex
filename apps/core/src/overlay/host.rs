@@ -425,8 +425,10 @@ fn handle_ipc(
 }
 
 /// Push the current state snapshot to the page.
-/// Uses `ICoreWebView2::PostWebMessageAsString` (fire-and-forget) so the
-/// host event loop is never blocked by a synchronous script evaluation.
+/// Uses `ICoreWebView2::PostWebMessageAsJson` (fire-and-forget) so the
+/// host event loop is never blocked by a synchronous script evaluation,
+/// and the WebView2 runtime delivers `e.data` as an already-parsed
+/// JavaScript object (no extra `JSON.parse` on the JS side).
 fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>) {
     let Some(wv) = webview else { return };
     let Ok(s) = state.lock() else { return };
@@ -438,7 +440,7 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
         .chain(std::iter::once(0))
         .collect();
     unsafe {
-        let _ = wv2.PostWebMessageAsString(
+        let _ = wv2.PostWebMessageAsJson(
             windows_core::PCWSTR::from_raw(wide.as_ptr()),
         );
     }

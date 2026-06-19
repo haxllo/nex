@@ -31,11 +31,12 @@
     } catch (_) {}
   }
 
-  // Receive state from Rust via WebView2 PostWebMessageAsString
-  // (fire-and-forget, never blocks the host event loop).
+  // Receive state from Rust via WebView2 PostWebMessageAsJson
+  // (fire-and-forget, never blocks the host event loop). The
+  // WebView2 runtime already parsed the JSON — e.data is a JS object.
   if (window.chrome?.webview) {
     window.chrome.webview.addEventListener("message", (e) => {
-      try { nex.apply(JSON.parse(e.data)); } catch (_) {}
+      try { nex.apply(e.data); } catch (_) {}
     });
   }
 

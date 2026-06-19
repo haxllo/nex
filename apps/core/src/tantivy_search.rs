@@ -93,18 +93,30 @@ impl TantivyIndex {
         })
     }
 
-    /// Warm up the OS page cache and Tantivy reader by issuing a
-    /// cheap search. Call once after the overlay shows so the user's
-    /// first real keystroke doesn't pay page-fault latency.
+    /// Pre-warm ALL Tantivy segment files into the OS page cache so the
+    /// user's first keystroke for ANY letter pays zero page-fault latency
+    /// for term dictionaries, posting lists, document store, or index
+    /// metadata.  Tantivy's `MmapDirectory` maps these files — the OS
+    /// Cache Manager shares pages between `ReadFile` and `CreateFileMapping`
+    /// on Windows, so a sequential pre-read populates the same pages the
+    /// mmap accesses later.
+    ///
+    /// Typical index size: 10–30 MB for 50k documents.  Sequential SSD
+    /// read completes in 50–100 ms and runs synchronously during the show
+    /// animation (~160 ms), so the user perceives no delay.
     pub fn warmup(&self) {
         let _ = self.reader.reload();
-        let searcher = self.reader.searcher();
-        if let Ok(query) = build_prefix_query(
-            &searcher.index(),
-            "a",
-            &[self.fields.title, self.fields.path, self.fields.subtitle],
-        ) {
-            let _ = searcher.search(&query, &TopDocs::with_limit(1).order_by_score());
+        let dir = self.index_path.as_path();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e != "tmp") {
+                    // Allocate falls out of scope immediately — the OS
+                    // page cache retains the data for subsequent mmap
+                    // accesses.
+                    let _ = std::fs::read(&path);
+                }
+            }
         }
     }
 

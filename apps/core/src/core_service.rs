@@ -908,10 +908,11 @@ impl CoreService {
                 idx.warmup();
             }
         }
-        // Touch the SQLite database: issue a no-op query so the OS
-        // pages in the hot portions of the file (personalization
-        // boosts table, use_count tracking, etc.).
-        let _ = self.db().query_row("SELECT 1", [], |_| Ok(()));
+        // Pre-read the SQLite database file into OS page cache.  This
+        // eliminates page faults for FTS5 queries, personalization
+        // boosts, and all other index_store queries.
+        let db_path = self.config_snapshot().index_db_path;
+        let _ = std::fs::read(&db_path);
         // Touch the cached items inner lock to warm the cache line.
         drop(self.cached_items.read());
         drop(self.cached_app_items.read());

@@ -123,7 +123,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  Subsequent
     // re-shows after warm-release rebuild lazily (same Show path).
-    let mut webview = match build_webview(&window, &state, &proxy, &event_tx, &icon_cache) {
+    let mut webview = match build_webview(&window, &state, &proxy, &event_tx) {
         Ok(wv) => Some(wv),
         Err(e) => {
             crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -195,7 +195,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Show => {
                     if webview.is_none() {
                         ready = false;
-                        match build_webview(&window, &state, &proxy, &event_tx, &icon_cache) {
+                        match build_webview(&window, &state, &proxy, &event_tx) {
                             Ok(wv) => webview = Some(wv),
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -302,9 +302,7 @@ fn build_webview(
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
-    icon_cache: &Arc<IconCache>,
 ) -> Result<WebView, String> {
-    let proto_icons = icon_cache.clone();
     let ipc_state = state.clone();
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
@@ -313,7 +311,7 @@ fn build_webview(
         .with_transparent(true)
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request, &proto_icons)
+            serve_asset(request)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
@@ -325,7 +323,6 @@ fn build_webview(
 /// Serve embedded UI assets.
 fn serve_asset(
     request: Request<Vec<u8>>,
-    _icons: &Arc<IconCache>,
 ) -> Response<std::borrow::Cow<'static, [u8]>> {
     let path = request.uri().path().to_string();
 

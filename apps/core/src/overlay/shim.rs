@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use tao::event_loop::EventLoopProxy;
 
 use crate::overlay::host::UiCommand;
@@ -40,6 +40,11 @@ struct Inner {
     /// is built. `None` until then — setters degrade to state-only
     /// updates (the host pushes the full snapshot on `WebviewReady`).
     proxy: Arc<Mutex<Option<EventLoopProxy<UiCommand>>>>,
+    /// Send a stop signal to the message pump. When the host event loop
+    /// exits, the runtime calls `stop()` so the worker thread unblocks
+    /// immediately instead of waiting for the next recv_timeout tick.
+    stop_tx: Sender<()>,
+    stop_rx: Receiver<()>,
 }
 
 impl NativeOverlayShell {
@@ -48,12 +53,15 @@ impl NativeOverlayShell {
     /// for that, and [`run_message_pump`] on a worker thread to drive
     /// the runtime callback.
     pub fn create() -> Result<Self, String> {
+        let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         Ok(Self {
             inner: Arc::new(Inner {
                 state: Arc::new(Mutex::new(ShimState::default())),
                 icon_cache: Arc::new(IconCache::default()),
                 is_running: Arc::new(AtomicBool::new(false)),
                 proxy: Arc::new(Mutex::new(None)),
+                stop_tx,
+                stop_rx,
             }),
         })
     }
@@ -90,6 +98,13 @@ impl NativeOverlayShell {
     /// Shared `is_running` flag. Set to `true` by the runtime before
     /// starting the host; set to `false` by the host when its event
     /// loop exits; checked by the worker's [`run_message_pump`] loop.
+    /// Signal the message pump to stop. The worker thread unblocks
+    /// from its `recv` call immediately rather than waiting up to
+    /// 50 ms for the next `is_running` poll.
+    pub fn stop(&self) {
+        let _ = self.inner.stop_tx.send(());
+    }
+
     pub fn is_running(&self) -> Arc<AtomicBool> {
         self.inner.is_running.clone()
     }
@@ -292,11 +307,16 @@ impl NativeOverlayShell {
     where
         F: FnMut(OverlayEvent),
     {
+        let stop_rx = self.inner.stop_rx.clone();
         while is_running.load(Ordering::SeqCst) {
-            match event_rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(event) => on_event(event),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            crossbeam_channel::select! {
+                recv(event_rx) -> event => {
+                    match event {
+                        Ok(ev) => on_event(ev),
+                        Err(_) => break,
+                    }
+                }
+                recv(stop_rx) -> _ => break,
             }
         }
         Ok(())

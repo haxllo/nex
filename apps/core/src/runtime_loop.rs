@@ -395,6 +395,10 @@ pub(crate) fn run_windows_runtime(
     // `is_running` to `false` when its event loop exits.
     let host_result = crate::overlay::host::run(host);
 
+    // Signal the worker thread to stop immediately instead of waiting
+    // for the next recv tick (removes up to 50 ms jitter on shutdown).
+    overlay.stop();
+
     // Drop the hotkey listener (unregisters the global hotkey) and
     // wait for the worker thread to finish its `run_message_pump`.
     drop(hotkey_listener.lock().unwrap().take());

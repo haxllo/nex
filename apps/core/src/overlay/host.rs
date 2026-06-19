@@ -136,6 +136,43 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut last_show = Instant::now();
     let mut show_pending = false;
 
+    // Single warm-release timer thread. Hide arms it with (gen, delay);
+    // it sends Teardown(gen) when the deadline passes. Re-arming replaces
+    // the previous deadline, so rapid hide/show cycles don't stack
+    // sleeping threads.
+    let (warm_release_tx, warm_release_rx) =
+        crossbeam_channel::unbounded::<Option<(u64, Duration)>>();
+    let warm_release_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-ui-warm-release".into())
+        .spawn(move || {
+            let mut armed: Option<(Instant, u64)> = None;
+            loop {
+                let timeout = armed
+                    .map(|(when, _)| when.saturating_duration_since(Instant::now()));
+                let result = match timeout {
+                    Some(d) => warm_release_rx.recv_timeout(d),
+                    None => warm_release_rx
+                        .recv()
+                        .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+                };
+                match result {
+                    Ok(Some((gen, delay))) => {
+                        armed = Some((Instant::now() + delay, gen));
+                    }
+                    Ok(None) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if let Some((_, gen)) = armed.take() {
+                            let _ = warm_release_proxy.send_event(UiCommand::Teardown(gen));
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok();
+    let warm_release_arm = warm_release_tx.clone();
+
     let _ = event_loop.run_return(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -196,19 +233,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = false;
                     warm_gen = warm_gen.wrapping_add(1);
                     let gen = warm_gen;
-                    let p = proxy.clone();
                     let delay = state
                         .lock()
                         .map(|s| s.ui_warm_release_ms)
                         .unwrap_or(5_000)
                         .max(500) as u64;
-                    std::thread::Builder::new()
-                        .name("nex-ui-warm-release".into())
-                        .spawn(move || {
-                            std::thread::sleep(Duration::from_millis(delay));
-                            let _ = p.send_event(UiCommand::Teardown(gen));
-                        })
-                        .ok();
+                    // Re-arm the single warm-release timer thread.
+                    let _ = warm_release_arm.send(Some((gen, Duration::from_millis(delay))));
                 }
                 UiCommand::Teardown(gen) => {
                     let still_hidden = !state.lock().map(|s| s.visible).unwrap_or(false);

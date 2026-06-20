@@ -17,6 +17,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::time::Duration;
+
 use crossbeam_channel::{Receiver, Sender};
 use tao::event_loop::EventLoopProxy;
 
@@ -308,6 +310,10 @@ impl NativeOverlayShell {
         F: FnMut(OverlayEvent),
     {
         let stop_rx = self.inner.stop_rx.clone();
+        // Periodic tick so the loop rechecks `is_running` even when
+        // `stop_rx` fails to wake from `select!` (observed on shutdown
+        // after overlay stop + hotkey listener drop).
+        let tick = crossbeam_channel::tick(Duration::from_millis(250));
         while is_running.load(Ordering::SeqCst) {
             crossbeam_channel::select! {
                 recv(event_rx) -> event => {
@@ -317,6 +323,7 @@ impl NativeOverlayShell {
                     }
                 }
                 recv(stop_rx) -> _ => break,
+                recv(tick) -> _ => {},
             }
         }
         Ok(())

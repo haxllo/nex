@@ -266,6 +266,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::Quit => {
                     *control_flow = ControlFlow::Exit;
+                    // Post WM_QUIT to force GetMessageW in run_return to
+                    // return 0. Without this, if the tao state machine is
+                    // stuck in HandlingMainEvents (no pending WM_PAINT to
+                    // transition it to Idle), the exit check
+                    // (!runner.handling_events()) fails and the loop hangs
+                    // on GetMessageW forever.
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(
+                            0,
+                        );
+                    }
                 }
             },
             Event::WindowEvent {

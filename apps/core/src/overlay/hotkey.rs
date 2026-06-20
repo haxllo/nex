@@ -36,7 +36,7 @@ struct HotkeyListenerInner {
     should_exit: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     id: i32,
-    thread_id: std::sync::OnceLock<u32>,
+    thread_id: Arc<std::sync::OnceLock<u32>>,
 }
 
 impl HotkeyListener {
@@ -56,7 +56,7 @@ impl HotkeyListener {
         let should_exit = Arc::new(AtomicBool::new(false));
         let should_exit_clone = should_exit.clone();
         let event_tx_clone = event_tx.clone();
-        let thread_id: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let thread_id: Arc<std::sync::OnceLock<u32>> = Arc::new(std::sync::OnceLock::new());
         let thread_id_for_thread = thread_id.clone();
 
         // RegisterHotKey(NULL, ...) delivers WM_HOTKEY to the thread
@@ -138,15 +138,41 @@ impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
-            // The listener thread blocks on GetMessageW forever; we
-            // can't wake it from outside.  The hotkey is unregistered
-            // by the OS when the process exits, so we skip an explicit
-            // UnregisterHotKey call (it would also run on the wrong
-            // thread now that RegisterHotKey moved inside the thread).
+            // Wake the listener thread's GetMessageW so it can observe
+            // `should_exit` (or simply return 0) and exit. Without this
+            // the thread blocks forever on its message queue and the
+            // `handle.join()` below deadlocks the dropping thread —
+            // which is the main thread at shutdown, hanging the whole
+            // process after the overlay and tray are already gone.
+            //
+            // RegisterHotKey bound the hotkey to the listener thread,
+            // so we also unregister from that same thread before it
+            // exits (see run_get_message_loop). Posting WM_QUIT makes
+            // GetMessageW return 0, breaking the loop cleanly.
+            if let Some(&tid) = inner.thread_id.get() {
+                logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
+                post_quit_to_thread(tid);
+            } else {
+                logging::warn("[nex] shutdown: hotkey thread_id not available, cannot post WM_QUIT");
+            }
             if let Some(handle) = inner.thread.take() {
+                logging::info("[nex] shutdown: joining hotkey thread");
                 let _ = handle.join();
+                logging::info("[nex] shutdown: hotkey thread joined");
             }
         }
+    }
+}
+
+/// Post `WM_QUIT` to the listener thread so its `GetMessageW` returns.
+/// This is the only way to wake a thread parked in `GetMessageW` from
+/// outside; the atomic `should_exit` flag alone cannot do it.
+fn post_quit_to_thread(thread_id: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+    // Returns 0 on failure; nothing useful to do — the join still
+    // proceeds, and at worst the thread lingers until process exit.
+    unsafe {
+        let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
     }
 }
 

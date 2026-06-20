@@ -332,6 +332,8 @@
   };
 
   // Tell Rust the page is ready to receive state.
+  // Do NOT call measure() here — it posts "painted" which races with
+  // the first push_state.  painted must only fire after nex.apply()
+  // renders the pushed state, otherwise the window appears blank.
   post("ready");
-  measure();
 })();

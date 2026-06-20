@@ -1060,6 +1060,14 @@ impl CoreService {
             .map(|g| g.as_ref().map_or(true, |idx| idx.num_docs().unwrap_or(0) == 0))
             .unwrap_or(true);
 
+        // Short-circuit when both indexes already match cached item count.
+        // After progress window rebuild, each item is already indexed
+        // individually — re-indexing all items here is pure waste.
+        if !tantivy_is_first && !fts5_is_first {
+            self.maybe_compact_backends();
+            return Ok(());
+        }
+
         crate::logging::info(&format!(
             "[nex] sync_indexes items={} tantivy_available={} fts5_available={} tantivy_first={} fts5_first={}",
             items.len(),

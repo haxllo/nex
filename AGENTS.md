@@ -69,6 +69,22 @@ Two concurrent APIs — GDI+ owns all non-listbox painting; GDI handles only `WM
 
 TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new keys to the JSON template** — only TOML template (`apps/core/src/config.rs::write_user_template_toml`). Config is versioned (`CURRENT_CONFIG_VERSION = 13`); migrations in `apply_migrations()`.
 
+## Release
+
+```bash
+# 1. bump version in Cargo.toml, commit, tag
+cargo build --release --bin nex
+
+# 2. build artifacts (zip, setup, manifest)
+pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
+pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
+
+# 3. write release notes to docs/releases/v<ver>-notes.md
+# 4. git push origin master --tags
+```
+
+Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + manifest.
+
 ## Style & Conventions
 
 - `cargo build` warnings: ~22 dead-code warnings (pre-existing, mostly unused D2D functions)

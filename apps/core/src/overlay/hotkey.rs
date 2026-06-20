@@ -160,10 +160,6 @@ fn run_get_message_loop(
     };
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while !should_exit.load(Ordering::SeqCst) {
-        // `GetMessageW` is blocking. We can't easily wake it from
-        // outside, so we just run it until the thread is signalled
-        // to exit (which it never will be by Drop). The OS will
-        // clean up on process exit.
         let status = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if status == -1 || status == 0 {
             break;

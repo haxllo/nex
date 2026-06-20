@@ -1049,7 +1049,6 @@ impl CoreService {
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
         let items = index_store::list_items(&*self.db())?;
 
-        // Determine if this is the first sync (both backends have 0 docs)
         let tantivy_is_first = self
             .tantivy_index
             .lock()
@@ -1103,9 +1102,9 @@ impl CoreService {
                 crate::logging::info(&format!("[nex] FTS5 index sync error: {e}"));
             }
         }
+        drop(fts5_guard);
 
         self.maybe_compact_backends();
-
         Ok(())
     }
 

@@ -5,6 +5,8 @@ pub mod clipboard_history;
 pub mod config;
 pub mod contract;
 pub mod core_service;
+#[cfg(target_os = "windows")]
+pub(crate) mod console_signal;
 pub mod discovery;
 #[cfg(target_os = "windows")]
 pub(crate) mod everything_bridge;

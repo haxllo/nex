@@ -222,6 +222,12 @@ pub(crate) fn run_windows_runtime(
     // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
+    // Install a console Ctrl+C handler so `nex --foreground` can be
+    // stopped from the terminal. The handler sends ExternalQuit down
+    // the same channel the tray uses. Only effective when a console
+    // is present (AttachConsole succeeded in main.rs).
+    crate::console_signal::install(event_tx.clone());
+
     // Create the system tray icon with context menu. The tray uses
     // the same event channel so menu selections are delivered as
     // OverlayEvent variants to the worker thread.
@@ -402,16 +408,25 @@ pub(crate) fn run_windows_runtime(
     // shim. The runtime worker thread (above) drains `event_rx` and
     // calls `on_event` for each `OverlayEvent`; the host flips
     // `is_running` to `false` when its event loop exits.
+    log_info("[nex] shutdown: host event loop returned");
     let host_result = crate::overlay::host::run(host);
+
+    // Clear the console handler's sender so a late Ctrl+C does not
+    // deliver ExternalQuit into a channel nobody reads anymore.
+    crate::console_signal::clear();
 
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).
+    log_info("[nex] shutdown: stopping worker message pump");
     overlay.stop();
 
     // Drop the hotkey listener (unregisters the global hotkey) and
     // wait for the worker thread to finish its `run_message_pump`.
+    log_info("[nex] shutdown: dropping hotkey listener");
     drop(hotkey_listener.lock().unwrap().take());
+    log_info("[nex] shutdown: joining worker thread");
     let _ = worker_join.join();
+    log_info("[nex] shutdown: complete, process exiting");
 
     host_result.map_err(RuntimeError::Overlay)
 }

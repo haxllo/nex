@@ -80,7 +80,10 @@ pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
 
 # 3. write release notes to docs/releases/v<ver>-notes.md
-# 4. git push origin master --tags
+
+# 4. push + create GitHub release
+git push origin master --tags
+gh release create v<ver> --title "v<ver> — <title>" --notes-file docs/releases/v<ver>-notes.md artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe,manifest.json}
 ```
 
 Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + manifest.

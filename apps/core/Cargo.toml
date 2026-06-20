@@ -1,6 +1,6 @@
 [package]
-name = "nex-cli"
-version = "1.3.0"
+name = "nex-launch"
+version = "2.1.0"
 edition = "2021"
 description = "A keyboard-first launcher for Windows"
 license = "MIT"

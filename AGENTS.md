@@ -6,13 +6,13 @@
 cargo build --bin nex                    # debug build
 cargo build --release --bin nex          # release build
 cargo test -p nex                        # all unit tests (cross-platform)
-cargo test -p nex-cli --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
-cargo test -p nex-cli --test windows_runtime_smoke_test  # CI-only smoke test
+cargo test -p nex-launch --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
+cargo test -p nex-launch --test windows_runtime_smoke_test  # CI-only smoke test
 ```
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
-**CI order**: `vitest --run` → `cargo test -p nex-cli` → perf gate → smoke gate.
+**CI order**: `vitest --run` → `cargo test -p nex-launch` → perf gate → smoke gate.
 
 ## Running
 
@@ -29,7 +29,7 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 
 ## Project Structure
 
-- Single Rust workspace member: `apps/core` (crate `nex-cli`, lib name `nex_core`)
+- Single Rust workspace member: `apps/core` (crate `nex-launch`, lib name `nex_core`)
 - Binary entry: `apps/core/src/main.rs` → `nex_core::runtime::run_with_options`
 - Library entry: `apps/core/src/lib.rs`
 - **Windows-only modules**: `rt`-gated `windows_overlay`, `runtime_loop`, `everything`, `runtime_overlay_rows`

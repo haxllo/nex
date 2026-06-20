@@ -272,7 +272,6 @@ pub(crate) fn maybe_apply_runtime_config_reload(
         return;
     }
     watcher.last_checked = Instant::now();
-
     let modified = config_file_modified_time(watcher.path.as_path());
     if modified == watcher.last_modified {
         return;
@@ -381,5 +380,5 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 "[nex] config reload skipped due to invalid config: {error}"
             ));
         }
+        }
     }
-}

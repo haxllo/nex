@@ -470,11 +470,8 @@ impl RuntimeWorker {
     }
 
     fn on_event(&mut self, event: OverlayEvent) {
-        // Periodic hotkey thread health check: if the listener thread
-        // has crashed, attempt to restart it.
         self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
 
-        // Periodic memory logging every 30 seconds
         if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
             if let Ok(guard) = self.service.read() {
                 guard.log_memory_stats();

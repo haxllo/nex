@@ -1,5 +1,3 @@
-# v{VER} — {TITLE}
-
 {1-2 sentence summary of release}
 
 ## Changelog ({N} commits since v{PREV})

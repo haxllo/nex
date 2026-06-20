@@ -87,6 +87,10 @@ impl Fts5Index {
     pub fn index_items(&self, items: &[SearchItem]) -> Result<(), String> {
         self.clear()?;
 
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("FTS5 begin tx error: {e}"))?;
+
         let mut stmt = self
             .conn
             .prepare(
@@ -106,6 +110,10 @@ impl Fts5Index {
             ])
             .map_err(|e| format!("FTS5 insert error: {e}"))?;
         }
+
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("FTS5 commit tx error: {e}"))?;
 
         Ok(())
     }

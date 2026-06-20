@@ -22,8 +22,15 @@ use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
 
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXSCREEN,
 };
 
 const WINDOW_WIDTH: f64 = 360.0;
@@ -34,11 +41,11 @@ const PROGRESS_PAGE: &str = r#"<!DOCTYPE html>
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Nex Indexing</title>
 <style>
-:root{--bg:rgba(22,22,25,0.92);--text:#f4f4f6;--bar-bg:rgba(255,255,255,0.08);--bar-fg:#6ea8fe;--radius:10px}
+:root{--bg:rgba(22,22,25,0.62);--text:#f4f4f6;--bar-bg:rgba(255,255,255,0.08);--bar-fg:#6ea8fe;--border:rgba(255,255,255,0.09)}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:transparent;font-family:"Segoe UI Variable","Segoe UI",sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}
+html,body{background:transparent;font-family:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}
 body{display:flex;align-items:center;justify-content:center;height:100vh}
-#panel{width:100%;height:100%;background:var(--bg);border-radius:var(--radius);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px}
+#panel{width:100%;height:100%;background:var(--bg);border:1px solid var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:20px}
 #label{font-size:14px;color:var(--text);text-align:center}
 #track{width:260px;height:6px;background:var(--bar-bg);border-radius:3px;overflow:hidden}
 #bar{width:0%;height:100%;background:var(--bar-fg);border-radius:3px;transition:width 200ms ease}
@@ -58,7 +65,24 @@ window.updateProgress=function(v){var p=Math.max(0,Math.min(100,v));document.get
 
 enum Cmd {
     WorkDone,
+    Show,
     Close,
+}
+
+/// Apply rounded corners + acrylic blur. Mirrors `host.rs::apply_window_chrome`
+/// but without the drop shadow (avoids double-border artifact with acrylic).
+fn apply_chrome(window: &tao::window::Window, hwnd: HWND) {
+    unsafe {
+        let pref: i32 = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+    let tint = Some((18, 18, 20, 130));
+    let _ = window_vibrancy::apply_acrylic(window, tint);
 }
 
 pub(crate) fn run_with_progress_window<F, T>(work: F) -> T
@@ -91,6 +115,8 @@ where
         .with_title("Nex Indexing")
         .with_decorations(false)
         .with_transparent(true)
+        .with_visible(false) // hidden until WebView2 paints first frame
+        .with_no_redirection_bitmap(true)
         .with_resizable(false)
         .with_always_on_top(true)
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -103,25 +129,28 @@ where
     let (x, y) = progress_window_position();
     window.set_outer_position(PhysicalPosition::new(x, y));
 
-    // Apply DWM rounded corners.
-    unsafe {
-        let pref: i32 = 2; // DWMWCP_ROUND
-        DwmSetWindowAttribute(
-            window.hwnd() as windows_sys::Win32::Foundation::HWND,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            &pref as *const i32 as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
+    let hwnd = window.hwnd() as HWND;
 
-    // WebView2 renders the dark panel via CSS; no acrylic needed.
+    // Chrome: rounded corners + drop shadow + acrylic blur.
+    apply_chrome(&window, hwnd);
+
+    // WebView2 renders the dark panel.
     let webview = WebViewBuilder::new()
         .with_transparent(true)
         .with_html(PROGRESS_PAGE)
         .build(&window)
         .expect("failed to build progress webview");
 
-    window.set_visible(true);
+    // Delay showing the window so WebView2 can init & paint first frame
+    // — avoids the blank white flash.
+    let proxy_show = proxy.clone();
+    thread::Builder::new()
+        .name("nex-progress-show".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let _ = proxy_show.send_event(Cmd::Show);
+        })
+        .expect("failed to spawn show thread");
 
     // Watch for work-thread completion so the window always closes,
     // even if the indexer errors before writing progress=100.
@@ -146,10 +175,9 @@ where
                 if current != last_progress {
                     last_progress = current;
                     let clamped = current.min(100);
-                    // SKIP evaluate_script to test if it causes the freeze
-                    // let _ = webview.evaluate_script(&format!(
-                    //     "window.updateProgress&&window.updateProgress({clamped})"
-                    // ));
+                    let _ = webview.evaluate_script(&format!(
+                        "window.updateProgress&&window.updateProgress({clamped})"
+                    ));
                     if current >= 100 {
                         let p = proxy.clone();
                         thread::spawn(move || {
@@ -159,15 +187,20 @@ where
                     }
                 }
             }
+            Event::UserEvent(Cmd::Show) => {
+                window.set_visible(true);
+            }
             Event::UserEvent(Cmd::WorkDone) => {
                 if !closed {
                     closed = true;
+                    window.set_visible(false);
                     *control_flow = ControlFlow::Exit;
                 }
             }
             Event::UserEvent(Cmd::Close) => {
                 if !closed {
                     closed = true;
+                    window.set_visible(false);
                     *control_flow = ControlFlow::Exit;
                 }
             }
@@ -190,15 +223,7 @@ where
 }
 
 fn progress_window_position() -> (i32, i32) {
-    use windows_sys::Win32::Foundation::{RECT};
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN;
-
     let primary_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    // Get primary monitor work area.
     let monitor = unsafe { MonitorFromPoint(std::mem::zeroed(), MONITOR_DEFAULTTOPRIMARY) };
     let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;

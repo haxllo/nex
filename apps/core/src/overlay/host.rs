@@ -197,6 +197,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Show => {
                     if webview.is_none() {
                         ready = false;
+                        // Mark the show as pending before building the
+                        // WebView so that spurious Focused(false) events
+                        // (sent by Tao/Windows during WebView creation)
+                        // do not trigger Escape and hide the overlay
+                        // before WebviewReady can display it.
+                        show_pending = true;
                         match build_webview(&window, &state, &proxy, &event_tx) {
                             Ok(wv) => webview = Some(wv),
                             Err(e) => {

@@ -2,6 +2,15 @@
 
 Date: 2026-06-21
 
+## Status
+
+**Bug — Launch freeze + no results on re-open** (SQLITE_BUSY during background indexing):
+fix: **fixed in commit 6283ee7**.
+
+**Bug — First hotkey after warm-release teardown does nothing** (Focused(false) sends
+Escape before WebviewReady can show):
+fix: **fixed in commits 2e1428c + 3697862**.
+
 ## Scope
 
 This audit is based on static inspection of the current repository source and scripts. Existing docs were treated as hints only because several docs are stale. Tests and runtime smoke checks were not run by request because the test suite is currently broken after migrations.

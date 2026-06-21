@@ -62,6 +62,8 @@ Applied fix:
 
 ### 2. Index sync can short-circuit while Tantivy/FTS5 are stale
 
+Status: **fixed in commit c8e1b91**.
+
 Source:
 
 - `apps/core/src/core_service.rs:627-631`

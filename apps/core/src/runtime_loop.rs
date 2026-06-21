@@ -315,10 +315,13 @@ pub(crate) fn run_windows_runtime(
     ));
     log_info("[nex] event loop running (native overlay)");
 
+    let shared_config = Arc::new(RwLock::new(runtime_config.clone()));
+    let shared_plugin_registry = Arc::new(RwLock::new(plugin_registry.clone()));
+
     let search_worker = SearchWorker::new(
         service.clone(),
-        runtime_config.clone(),
-        Arc::new(plugin_registry.clone()),
+        shared_config.clone(),
+        shared_plugin_registry.clone(),
         event_tx.clone(),
     );
 
@@ -372,6 +375,8 @@ pub(crate) fn run_windows_runtime(
         overlay: overlay.clone(),
         service: service.clone(),
         runtime_config,
+        shared_config,
+        shared_plugin_registry,
         background_index_refresh,
         plugin_registry,
         search_worker,
@@ -439,6 +444,8 @@ struct RuntimeWorker {
     overlay: NativeOverlayShell,
     service: Arc<RwLock<CoreService>>,
     runtime_config: Config,
+    shared_config: Arc<RwLock<Config>>,
+    shared_plugin_registry: Arc<RwLock<PluginRegistry>>,
     background_index_refresh: BackgroundIndexRefresh,
     plugin_registry: PluginRegistry,
     search_worker: SearchWorker,
@@ -546,6 +553,14 @@ impl RuntimeWorker {
                 &mut self.config_watcher,
                 &mut self.background_index_refresh,
             );
+            // Keep the search worker's config in sync so it doesn't
+            // serve stale results with old show_files/show_folders etc.
+            if let Ok(mut cfg) = self.shared_config.write() {
+                *cfg = self.runtime_config.clone();
+            }
+            if let Ok(mut reg) = self.shared_plugin_registry.write() {
+                *reg = self.plugin_registry.clone();
+            }
             maybe_apply_background_index_refresh(
                 &*svc,
                 &mut self.background_index_refresh,

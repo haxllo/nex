@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 pub const APP_DISPLAY_NAME: &str = "Nex";
 pub const LEGACY_APP_DISPLAY_NAME: &str = "SwiftFind";
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 #[cfg(target_os = "windows")]
 const APP_DIR_NAME_WINDOWS: &str = "Nex";
 #[cfg(target_os = "windows")]
@@ -258,7 +262,7 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             show_files: false,
             show_folders: false,
-            hotkey: "Ctrl+Shift+Space".to_string(),
+            hotkey: "Ctrl+Space".to_string(),
             launch_at_startup: false,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."
@@ -522,239 +526,7 @@ pub fn write_user_template(cfg: &Config, path: &Path) -> Result<(), ConfigError>
         std::fs::create_dir_all(parent)?;
     }
 
-    if is_toml_path(path) {
-        return write_user_template_toml(cfg, path);
-    }
-
-    let roots_section = json5_path_array_section(&cfg.discovery_roots);
-    let excluded_roots_section = json5_path_array_section(&cfg.discovery_exclude_roots);
-
-    let mut text = String::new();
-    text.push_str("{\n");
-    text.push_str("  // Nex config (comments are allowed).\n");
-    text.push_str("  //\n");
-    text.push_str("  // How to use this file:\n");
-    text.push_str("  // - Edit values and save.\n");
-    text.push_str("  // - Most settings apply automatically within about 1 second.\n");
-    text.push_str("  // - Restart required after changing hotkey or index_db_path.\n");
-    text.push_str("  // - Keep strings in double quotes.\n");
-    text.push_str(
-        "  // - Use double backslashes for Windows paths (C:\\\\Users\\\\Admin\\\\...).\n",
-    );
-    text.push_str("  // - true/false and numbers must not be quoted.\n");
-    text.push_str("  // - This file is the active config while using .json format.\n");
-    text.push_str("  //\n");
-    text.push_str("  // Quick setup:\n");
-    text.push_str("  // 1) Keep exactly ONE `hotkey` line uncommented.\n");
-    text.push_str("  // 2) Save file.\n");
-    text.push_str("  // 3) Restart only if you changed hotkey/index_db_path.\n");
-    text.push_str("  //\n");
-    text.push_str("  // Safer Windows-friendly hotkeys (uncomment one if you prefer):\n");
-
-    for option in &cfg.hotkey_recommended {
-        if option != &cfg.hotkey {
-            text.push_str("  // \"hotkey\": ");
-            text.push_str(&json_string(option));
-            text.push_str(",\n");
-        }
-    }
-
-    text.push_str(
-        "  // Avoid common OS-reserved/conflicting shortcuts like Win+..., Alt+Tab, Ctrl+Esc.\n",
-    );
-    text.push_str("  \"hotkey\": ");
-    text.push_str(&json_string(&cfg.hotkey));
-    text.push_str(",\n");
-    text.push_str("  // Start Nex automatically when you sign in (true/false)\n");
-    text.push_str("  \"launch_at_startup\": ");
-    text.push_str(if cfg.launch_at_startup {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n\n");
-
-    text.push_str("  // Optional tuning:\n");
-    text.push_str("  // Number of results shown per query (valid range: 5..100)\n");
-    text.push_str("  \"max_results\": ");
-    text.push_str(&cfg.max_results.to_string());
-    text.push_str(",\n\n");
-
-    text.push_str("  // Optional: folders scanned for local files.\n");
-    text.push_str("  // Add/remove paths as needed.\n");
-    text.push_str("  \"discovery_roots\": ");
-    text.push_str(&roots_section);
-    text.push_str(",\n\n");
-    text.push_str("  // Optional: folders to exclude from local-file discovery.\n");
-    text.push_str("  // Any file/folder under these roots is ignored.\n");
-    text.push_str("  // Nex also skips common system/temp/dev-noise paths automatically\n");
-    text.push_str(
-        "  // (for example: Windows, Program Files, AppData, node_modules, .git, __pycache__).\n",
-    );
-    text.push_str(
-        "  // These built-in exclusions affect file/folder indexing only, not app discovery.\n",
-    );
-    text.push_str("  \"discovery_exclude_roots\": ");
-    text.push_str(&excluded_roots_section);
-    text.push_str(",\n\n");
-    text.push_str("  // Toggle file and folder visibility in results.\n");
-    text.push_str("  \"show_files\": ");
-    text.push_str(if cfg.show_files { "true" } else { "false" });
-    text.push_str(",\n");
-    text.push_str("  \"show_folders\": ");
-    text.push_str(if cfg.show_folders { "true" } else { "false" });
-    text.push_str(",\n\n");
-
-    text.push_str("  // Search mode default: all | apps | files | actions | clipboard\n");
-    text.push_str("  \"search_mode_default\": ");
-    text.push_str(&json_string(match cfg.search_mode_default {
-        SearchMode::All => "all",
-        SearchMode::Apps => "apps",
-        SearchMode::Files => "files",
-        SearchMode::Actions => "actions",
-        SearchMode::Clipboard => "clipboard",
-    }));
-    text.push_str(",\n");
-    text.push_str(
-        "  // Enable query operators like kind:, modified:, created:, AND/OR/NOT and -term\n",
-    );
-    text.push_str("  \"search_dsl_enabled\": ");
-    text.push_str(if cfg.search_dsl_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  // Enable command mode uninstall actions (e.g. > uninstall appname)\n");
-    text.push_str("  \"uninstall_actions_enabled\": ");
-    text.push_str(if cfg.uninstall_actions_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n\n");
-    text.push_str("  // Web search in command mode (press > then type your query)\n");
-    text.push_str("  // Default is google for most users.\n");
-    text.push_str(
-        "  // Options: google | duckduckgo | bing | brave | startpage | ecosia | yahoo | custom\n",
-    );
-    text.push_str("  \"web_search_provider\": ");
-    text.push_str(&json_string(match cfg.web_search_provider {
-        WebSearchProvider::Duckduckgo => "duckduckgo",
-        WebSearchProvider::Google => "google",
-        WebSearchProvider::Bing => "bing",
-        WebSearchProvider::Brave => "brave",
-        WebSearchProvider::Startpage => "startpage",
-        WebSearchProvider::Ecosia => "ecosia",
-        WebSearchProvider::Yahoo => "yahoo",
-        WebSearchProvider::Custom => "custom",
-    }));
-    text.push_str(",\n");
-    text.push_str("  // Used only when provider is custom. Must include {query}.\n");
-    text.push_str("  // Example: \"https://example.com/search?q={query}\"\n");
-    text.push_str("  \"web_search_custom_template\": ");
-    text.push_str(&json_string(&cfg.web_search_custom_template));
-    text.push_str(",\n\n");
-
-    text.push_str("  // Clipboard history provider settings\n");
-    text.push_str("  \"clipboard_enabled\": ");
-    text.push_str(if cfg.clipboard_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  // Retention in minutes (valid range: 5..43200)\n");
-    text.push_str("  \"clipboard_retention_minutes\": ");
-    text.push_str(&cfg.clipboard_retention_minutes.to_string());
-    text.push_str(",\n");
-    text.push_str(
-        "  // Substring patterns that should be skipped when capturing clipboard entries\n",
-    );
-    text.push_str("  \"clipboard_exclude_sensitive_patterns\": [\n");
-    for (idx, pattern) in cfg.clipboard_exclude_sensitive_patterns.iter().enumerate() {
-        text.push_str("    ");
-        text.push_str(&json_string(pattern));
-        if idx + 1 != cfg.clipboard_exclude_sensitive_patterns.len() {
-            text.push(',');
-        }
-        text.push('\n');
-    }
-    text.push_str("  ],\n\n");
-
-    text.push_str("  // Search backend for full-text indexed file/folder search.\n");
-    text.push_str("  // Options: \"tantivy\" (default) | \"fts5\"\n");
-    text.push_str(
-        "  // Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n",
-    );
-    text.push_str("  // FTS5 uses SQLite's built-in FTS5 engine with porter stemming.\n");
-    text.push_str("  \"search_backend\": ");
-    text.push_str(&json_string(match cfg.search_backend {
-        SearchBackend::Tantivy => "tantivy",
-        SearchBackend::Fts5 => "fts5",
-    }));
-    text.push_str(",\n\n");
-
-    text.push_str("  // Plugin SDK settings\n");
-    text.push_str("  \"plugins_enabled\": ");
-    text.push_str(if cfg.plugins_enabled { "true" } else { "false" });
-    text.push_str(",\n");
-    text.push_str("  // Keep safe mode true to prevent plugin command execution.\n");
-    text.push_str("  \"plugins_safe_mode\": ");
-    text.push_str(if cfg.plugins_safe_mode {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  // Game Mode: suppress the launcher hotkey while a likely game/fullscreen app is active.\n");
-    text.push_str("  \"game_mode_enabled\": ");
-    text.push_str(if cfg.game_mode_enabled {
-        "true"
-    } else {
-        "false"
-    });
-    text.push_str(",\n");
-    text.push_str("  \"plugin_paths\": [\n");
-    for (idx, path) in cfg.plugin_paths.iter().enumerate() {
-        text.push_str("    ");
-        text.push_str(&json_string(&path.to_string_lossy()));
-        if idx + 1 != cfg.plugin_paths.len() {
-            text.push(',');
-        }
-        text.push('\n');
-    }
-    text.push_str("  ],\n\n");
-
-    text.push_str("  // Runtime performance targets\n");
-    text.push_str("  // cache trim after hide in milliseconds (valid range: 100..10000)\n");
-    text.push_str("  \"idle_cache_trim_ms\": ");
-    text.push_str(&cfg.idle_cache_trim_ms.to_string());
-    text.push_str(",\n");
-    text.push_str("  // active memory target in MB (valid range: 20..512)\n");
-    text.push_str("  \"active_memory_target_mb\": ");
-    text.push_str(&cfg.active_memory_target_mb.to_string());
-    text.push_str(",\n");
-    text.push_str("  // how long (ms) the WebView stays resident after hide before teardown (valid range: 500..600000)\n");
-    text.push_str("  \"ui_warm_release_ms\": ");
-    text.push_str(&cfg.ui_warm_release_ms.to_string());
-    text.push_str(",\n");
-    text.push_str("  // Maximum indexed file/folder items retained in database discovery pass\n");
-    text.push_str("  \"index_max_items_total\": ");
-    text.push_str(&cfg.index_max_items_total.to_string());
-    text.push_str(",\n");
-    text.push_str("  // Maximum indexed file/folder items retained per discovery root\n");
-    text.push_str("  \"index_max_items_per_root\": ");
-    text.push_str(&cfg.index_max_items_per_root.to_string());
-    text.push_str(",\n");
-    text.push_str("  // Runtime candidate budget for per-query file/folder retrieval\n");
-    text.push_str("  \"index_max_items_per_query_seed\": ");
-    text.push_str(&cfg.index_max_items_per_query_seed.to_string());
-    text.push('\n');
-    text.push_str("}\n");
-
-    std::fs::write(path, text)?;
-    Ok(())
+    write_user_template_toml(cfg, path)
 }
 
 fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError> {
@@ -1139,20 +911,6 @@ fn write_atomic(path: &Path, encoded: &str) -> Result<(), ConfigError> {
     }
 }
 
-fn json5_path_array_section(paths: &[PathBuf]) -> String {
-    let body = paths
-        .iter()
-        .map(|path| format!("    {}", json_string(&path.to_string_lossy())))
-        .collect::<Vec<_>>()
-        .join(",\n");
-
-    if body.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[\n{body}\n  ]")
-    }
-}
-
 fn toml_path_array_section(paths: &[PathBuf]) -> String {
     let values = paths
         .iter()
@@ -1410,10 +1168,6 @@ fn parse_text(raw: &str) -> Result<Config, ConfigError> {
             },
         },
     }
-}
-
-fn json_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 #[cfg(target_os = "windows")]

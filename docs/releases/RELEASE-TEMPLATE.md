@@ -21,6 +21,6 @@
 
 ## Binary
 
-- [⬇ Download `nex-{VER}-windows-x64.zip`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64.zip)
-- [⚡ Install `nex-{VER}-windows-x64-setup.exe`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64-setup.exe)
-- [📋 Manifest `nex-{VER}-windows-x64-manifest.json`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64-manifest.json)
+- [Download `nex-{VER}-windows-x64.zip`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64.zip)
+- [Install `nex-{VER}-windows-x64-setup.exe`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64-setup.exe)
+- [Manifest `nex-{VER}-windows-x64-manifest.json`](https://github.com/haxllo/nex/releases/download/v{VER}/nex-{VER}-windows-x64-manifest.json)

@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
@@ -109,6 +112,7 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
 fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
     std::process::Command::new("explorer.exe")
         .arg(target)
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .spawn()
         .map_err(|error| LaunchError::LaunchFailed {
             message: format!("failed to launch shell target '{target}': {error}"),

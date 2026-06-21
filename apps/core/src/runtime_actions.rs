@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use crate::action_registry::{
     ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
     ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID, ACTION_TRIM_MEMORY_ID,
@@ -171,6 +174,7 @@ pub(crate) fn execute_plugin_action(
             }
             std::process::Command::new(command)
                 .args(args)
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
                 .spawn()
                 .map_err(|e| format!("plugin command spawn failed: {e}"))?;
             Ok(())

@@ -79,25 +79,6 @@ impl SearchMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum SearchBackend {
-    #[default]
-    Tantivy,
-    Fts5,
-}
-
-impl SearchBackend {
-    pub fn parse(value: &str) -> Option<Self> {
-        let normalized = value.trim().to_ascii_lowercase();
-        match normalized.as_str() {
-            "tantivy" => Some(Self::Tantivy),
-            "fts5" => Some(Self::Fts5),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
 pub enum DiscoveryBackend {
     #[default]
     Auto,
@@ -233,7 +214,6 @@ pub struct Config {
     pub clipboard_enabled: bool,
     pub clipboard_retention_minutes: u32,
     pub clipboard_exclude_sensitive_patterns: Vec<String>,
-    pub search_backend: SearchBackend,
     pub file_discovery_backend: DiscoveryBackend,
     pub plugins_enabled: bool,
     pub plugin_paths: Vec<PathBuf>,
@@ -291,7 +271,6 @@ impl Default for Config {
                 "apikey".to_string(),
                 "api_key".to_string(),
             ],
-            search_backend: SearchBackend::Tantivy,
             file_discovery_backend: DiscoveryBackend::Auto,
             plugins_enabled: true,
             plugin_paths: vec![app_dir.join("plugins")],
@@ -667,17 +646,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# Substring patterns skipped when capturing clipboard entries\n");
     text.push_str("clipboard_exclude_sensitive_patterns = ");
     text.push_str(&clipboard_patterns_section);
-    text.push_str("\n\n");
-
-    text.push_str("# Search backend for full-text indexed file/folder search.\n");
-    text.push_str("# Options: \"tantivy\" (default) | \"fts5\"\n");
-    text.push_str("# Tantivy provides fast prefix, fuzzy, and phrase queries with BM25 scoring.\n");
-    text.push_str("# FTS5 uses SQLite's built-in FTS5 engine with porter stemming.\n");
-    text.push_str("search_backend = ");
-    text.push_str(&json_string(match cfg.search_backend {
-        SearchBackend::Tantivy => "tantivy",
-        SearchBackend::Fts5 => "fts5",
-    }));
     text.push_str("\n\n");
 
     text.push_str("# File/folder discovery backend for filesystem enumeration.\n");
@@ -1062,11 +1030,6 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
 
     if source_version < 10 && !raw_has_key(raw, "game_mode_enabled") {
         cfg.game_mode_enabled = Config::default().game_mode_enabled;
-        changed = true;
-    }
-
-    if source_version < 14 && !raw_has_key(raw, "search_backend") {
-        cfg.search_backend = Config::default().search_backend;
         changed = true;
     }
 

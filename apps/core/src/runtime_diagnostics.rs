@@ -598,7 +598,6 @@ pub(crate) fn percentile_u128(values: &mut [u128], percentile: f64) -> u128 {
 }
 
 fn probe_index_health(cfg: &config::Config) -> serde_json::Value {
-    use crate::fts5_search::Fts5Index;
     use crate::tantivy_search::TantivyIndex;
     use std::path::Path;
 
@@ -613,18 +612,8 @@ fn probe_index_health(cfg: &config::Config) -> serde_json::Value {
         Err(e) => serde_json::json!({"status": "error", "detail": e}),
     };
 
-    let fts5 = match Fts5Index::open(&cfg.index_db_path) {
-        Ok(idx) => match idx.num_docs() {
-            Ok(n) => serde_json::json!({"status": "ok", "num_docs": n}),
-            Err(e) => serde_json::json!({"status": "error", "detail": e}),
-        },
-        Err(e) => serde_json::json!({"status": "error", "detail": e}),
-    };
-
     serde_json::json!({
         "tantivy": tantivy,
-        "fts5": fts5,
-        "search_backend": format!("{:?}", cfg.search_backend),
     })
 }
 
@@ -692,7 +681,6 @@ pub(crate) fn write_diagnostics_bundle(
         "discovery_exclude_roots_count": cfg.discovery_exclude_roots.len(),
         "show_files": cfg.show_files,
         "show_folders": cfg.show_folders,
-        "search_backend": format!("{:?}", cfg.search_backend)
     });
     let encoded = serde_json::to_string_pretty(&sanitized_cfg)
         .map_err(|e| RuntimeError::Args(format!("failed to encode sanitized config: {e}")))?;
@@ -749,7 +737,6 @@ fn copy_recent_logs_to_bundle(
 }
 
 pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
-    use crate::fts5_search::Fts5Index;
     use crate::tantivy_search::TantivyIndex;
     use std::path::Path;
 
@@ -760,7 +747,6 @@ pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
     println!("[nex] index probe");
     println!("  config_path: {}", cfg.config_path.display());
     println!("  index_db_path: {}", cfg.index_db_path.display());
-    println!("  search_backend: {:?}", cfg.search_backend);
 
     match TantivyIndex::open(&tantivy_path) {
         Ok(idx) => match idx.num_docs() {
@@ -768,14 +754,6 @@ pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
             Err(e) => println!("  tantivy: opened but num_docs failed: {e}"),
         },
         Err(e) => println!("  tantivy: FAILED ({e})"),
-    }
-
-    match Fts5Index::open(&cfg.index_db_path) {
-        Ok(idx) => match idx.num_docs() {
-            Ok(n) => println!("  fts5: OK ({} documents)", n),
-            Err(e) => println!("  fts5: opened but num_docs failed: {e}"),
-        },
-        Err(e) => println!("  fts5: FAILED ({e})"),
     }
 
     Ok(())

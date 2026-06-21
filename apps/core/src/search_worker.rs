@@ -37,8 +37,8 @@ pub(crate) struct SearchWorker {
 impl SearchWorker {
     pub(crate) fn new(
         service: Arc<RwLock<CoreService>>,
-        runtime_config: Config,
-        plugin_registry: Arc<PluginRegistry>,
+        shared_config: Arc<RwLock<Config>>,
+        shared_plugin_registry: Arc<RwLock<PluginRegistry>>,
         event_tx: Sender<OverlayEvent>,
     ) -> Self {
         let (req_tx, req_rx) = std::sync::mpsc::channel::<SearchRequest>();
@@ -88,8 +88,8 @@ impl SearchWorker {
                                     };
                                     search_overlay_results_with_session(
                                         &*service_guard,
-                                        &runtime_config,
-                                        &plugin_registry,
+                                        &*shared_config.read().map_err(|e| format!("config lock: {e}"))?,
+                                        &*shared_plugin_registry.read().map_err(|e| format!("plugin lock: {e}"))?,
                                         &latest.parsed_query,
                                         latest.max_results,
                                         &mut session,

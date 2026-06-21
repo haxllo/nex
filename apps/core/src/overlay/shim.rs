@@ -145,7 +145,14 @@ impl NativeOverlayShell {
     pub fn show_and_focus(&self) {
         self.with_state(|s| {
             s.visible = true;
-            s.has_focus = true;
+            // Don't claim has_focus here — the window hasn't been shown
+            // yet (it's queued via UiCommand::Show and handled async on
+            // the main thread).  If we set has_focus=true now, a rapid
+            // second hotkey press (before WebView rebuild completes or
+            // the page paints) will see "visible + focused" and toggle
+            // the overlay closed before the user ever saw it.
+            // WindowEvent::Focused(true) sets has_focus after the window
+            // is actually shown and gains focus.
         });
         self.post(UiCommand::Show);
     }

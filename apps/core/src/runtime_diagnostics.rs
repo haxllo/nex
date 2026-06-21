@@ -656,10 +656,15 @@ pub(crate) fn write_diagnostics_bundle(
             .and_then(|ext| ext.to_str())
             .filter(|ext| !ext.trim().is_empty())
             .unwrap_or("txt");
-        let _ = std::fs::copy(
-            &cfg.config_path,
-            bundle_dir.join(format!("config.raw.{raw_ext}")),
-        );
+        // Raw config is only included when NEX_INCLUDE_RAW_DIAGNOSTICS=1
+        // is set, to avoid leaking indexed paths and plugin paths in
+        // support bundles. The sanitized config below excludes paths.
+        if std::env::var("NEX_INCLUDE_RAW_DIAGNOSTICS").as_deref() == Ok("1") {
+            let _ = std::fs::copy(
+                &cfg.config_path,
+                bundle_dir.join(format!("config.raw.{raw_ext}")),
+            );
+        }
     }
 
     let sanitized_cfg = serde_json::json!({
@@ -698,7 +703,11 @@ pub(crate) fn write_diagnostics_bundle(
         .map_err(|e| RuntimeError::Args(format!("failed to encode index health: {e}")))?;
     std::fs::write(bundle_dir.join("index_health.json"), index_health_json)?;
 
-    copy_recent_logs_to_bundle(&crate::logging::logs_dir(), &bundle_dir.join("logs"))?;
+    // Recent logs are only included when NEX_INCLUDE_RAW_DIAGNOSTICS=1
+    // is set, to avoid leaking user query text in support bundles.
+    if std::env::var("NEX_INCLUDE_RAW_DIAGNOSTICS").as_deref() == Ok("1") {
+        copy_recent_logs_to_bundle(&crate::logging::logs_dir(), &bundle_dir.join("logs"))?;
+    }
 
     Ok(bundle_dir)
 }

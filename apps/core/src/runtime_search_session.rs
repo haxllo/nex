@@ -574,18 +574,26 @@ pub(crate) fn is_prefix_cache_eligible_query(
 }
 
 pub(crate) fn sanitize_query_for_profile_log(query: &str) -> String {
-    const MAX_QUERY_LOG_CHARS: usize = 48;
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return "-".to_string();
     }
-    let mut cleaned = String::new();
-    for ch in trimmed.chars().take(MAX_QUERY_LOG_CHARS) {
-        if ch.is_control() {
-            cleaned.push(' ');
-        } else {
-            cleaned.push(ch);
+    // Debug mode: show raw truncated query
+    if std::env::var("NEX_DEBUG_QUERY_TEXT").as_deref() == Ok("1") {
+        let mut cleaned = String::new();
+        for ch in trimmed.chars().take(48) {
+            if ch.is_control() {
+                cleaned.push(' ');
+            } else {
+                cleaned.push(ch);
+            }
         }
+        return cleaned.trim().to_string();
     }
-    cleaned.trim().to_string()
+    // Default: hash the query so support bundles never expose typed text
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    trimmed.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!("{:016x}", hash)
 }

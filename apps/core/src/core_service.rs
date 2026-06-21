@@ -13,7 +13,7 @@ use crate::search::SearchFilter;
 use crate::tantivy_search::TantivyIndex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -81,6 +81,7 @@ pub struct CoreService {
     fts5_index: Mutex<Option<Fts5Index>>,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
+    stale_pruner_started: AtomicBool,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
@@ -182,6 +183,7 @@ impl CoreService {
             fts5_index: Mutex::new(fts5_index),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
+            stale_pruner_started: AtomicBool::new(false),
             progress: Mutex::new(None),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
@@ -724,9 +726,14 @@ impl CoreService {
     /// `prune_stale_items_if_due` on a 15 s cadence so the search
     /// critical path never blocks on a write lock. Uses
     /// `try_write` so a concurrent search is never delayed.
+    /// Idempotent: repeated calls after startup are a no-op.
     pub fn start_stale_pruner(&self, service_arc: &Arc<RwLock<CoreService>>) {
+        if self.stale_pruner_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
         let svc = Arc::clone(service_arc);
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("nex-stale-pruner".into())
             .spawn(move || loop {
                 std::thread::sleep(STALE_PRUNE_INTERVAL);
@@ -734,7 +741,10 @@ impl CoreService {
                     let _ = guard.prune_stale_items_if_due();
                 }
             })
-            .ok();
+        {
+            self.stale_pruner_started.store(false, Ordering::Release);
+            crate::logging::warn(&format!("[nex] stale pruner start failed: {error}"));
+        }
     }
 
     /// Start the per-root `DirectoryWatcher` consumers that apply

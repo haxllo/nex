@@ -14,7 +14,6 @@ pub(crate) mod everything_bridge;
 pub(crate) mod file_watcher;
 #[cfg(target_os = "windows")]
 pub(crate) mod file_watcher_consumer;
-pub(crate) mod fts5_search;
 pub mod hotkey;
 pub mod hotkey_runtime;
 pub mod index_store;

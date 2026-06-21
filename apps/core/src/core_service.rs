@@ -6,7 +6,6 @@ use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse}
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
-use crate::fts5_search::Fts5Index;
 use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
@@ -78,7 +77,6 @@ pub struct CoreService {
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
     tantivy_index: Mutex<Option<TantivyIndex>>,
-    fts5_index: Mutex<Option<Fts5Index>>,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
@@ -137,38 +135,10 @@ impl CoreService {
                     Ok(idx) => Some(idx),
                     Err(e) => {
                         crate::logging::info(&format!(
-                            "[nex] Tantivy index init after reset: {e}, falling back to FTS5"
+                            "[nex] Tantivy index init after reset: {e}, running without search index"
                         ));
                         None
                     }
-                }
-            }
-        };
-
-        let fts5_index = if tantivy_index.is_none() {
-            // FTS5 is the sole backend — clear so sync_indexes_from_cache
-            // takes the full-rebuild path.
-            match Fts5Index::open(&config.index_db_path) {
-                Ok(idx) => {
-                    let _ = idx.clear();
-                    Some(idx)
-                }
-                Err(e) => {
-                    crate::logging::info(&format!(
-                        "[nex] FTS5 index init: {e}, running without FTS index"
-                    ));
-                    None
-                }
-            }
-        } else {
-            // Tantivy is primary. Don't clear FTS5 here — let
-            // sync_indexes_from_cache decide first vs incremental
-            // based on the existing doc count.
-            match Fts5Index::open(&config.index_db_path) {
-                Ok(idx) => Some(idx),
-                Err(e) => {
-                    crate::logging::info(&format!("[nex] FTS5 fallback index init: {e}"));
-                    None
                 }
             }
         };
@@ -180,7 +150,6 @@ impl CoreService {
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
             tantivy_index: Mutex::new(tantivy_index),
-            fts5_index: Mutex::new(fts5_index),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
@@ -885,7 +854,7 @@ impl CoreService {
             return Ok(Vec::new());
         }
 
-        // Try Tantivy first
+        // Try Tantivy
         let tantivy_guard = match self.tantivy_index.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -895,26 +864,12 @@ impl CoreService {
                 Ok(results) => return Ok(results),
                 Err(e) => {
                     crate::logging::info(&format!(
-                        "[nex] Tantivy search failed: {e}, falling back to FTS5"
+                        "[nex] Tantivy search failed: {e}"
                     ));
                 }
             }
         }
         drop(tantivy_guard);
-
-        // Fall back to FTS5
-        let fts5_guard = match self.fts5_index.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(ref idx) = *fts5_guard {
-            match idx.search(query, limit) {
-                Ok(results) => return Ok(results),
-                Err(e) => {
-                    crate::logging::info(&format!("[nex] FTS5 search failed: {e}"));
-                }
-            }
-        }
 
         Ok(Vec::new())
     }
@@ -929,15 +884,7 @@ impl CoreService {
                 idx.warmup();
             }
         }
-        // Warm FTS5 reader + page cache
-        if let Ok(guard) = self.fts5_index.lock() {
-            if let Some(ref idx) = *guard {
-                idx.warmup();
-            }
-        }
-        // Pre-read the SQLite database file into OS page cache.  This
-        // eliminates page faults for FTS5 queries, personalization
-        // boosts, and all other index_store queries.
+        // Pre-read the SQLite database file into OS page cache.
         let db_path = self.config_snapshot().index_db_path;
         let _ = std::fs::read(&db_path);
         // Touch the cached items inner lock to warm the cache line.
@@ -1082,35 +1029,24 @@ impl CoreService {
             .lock()
             .ok()
             .and_then(|g| g.as_ref().and_then(|idx| idx.num_docs().ok()));
-        let fts5_docs = self
-            .fts5_index
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|idx| idx.num_docs().ok()));
 
         let tantivy_is_first = tantivy_docs.map(|d| d == 0).unwrap_or(true);
-        let fts5_is_first = fts5_docs.map(|d| d == 0).unwrap_or(true);
 
-        // Short-circuit when both Tantivy and FTS5 already match the
-        // cached item count. After a progress-window or background rebuild
-        // where items were added/removed, the backends may be stale even
-        // if they are non-empty — comparing against the actual count (not
-        // just zero vs non-zero) catches this.
-        let expected_docs = item_count as u64;
-        let tantivy_matches = tantivy_docs == Some(expected_docs);
-        let fts5_matches = fts5_docs == Some(expected_docs);
-        if tantivy_matches && fts5_matches {
+        // Short-circuit when Tantivy already matches the cached item count.
+        // After a progress-window or background rebuild where items were
+        // added/removed, the backend may be stale even if non-empty —
+        // comparing against the actual count (not just zero vs non-zero)
+        // catches this.
+        if tantivy_docs == Some(item_count as u64) {
             self.maybe_compact_backends();
             return Ok(());
         }
 
         crate::logging::info(&format!(
-            "[nex] sync_indexes items={} tantivy_docs={:?} fts5_docs={:?} tantivy_first={} fts5_first={}",
+            "[nex] sync_indexes items={} tantivy_docs={:?} tantivy_first={}",
             item_count,
             tantivy_docs,
-            fts5_docs,
             tantivy_is_first,
-            fts5_is_first,
         ));
 
         let tantivy_guard = match self.tantivy_index.lock() {
@@ -1129,22 +1065,6 @@ impl CoreService {
         }
         drop(tantivy_guard);
 
-        let fts5_guard = match self.fts5_index.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(ref idx) = *fts5_guard {
-            let result = if fts5_is_first {
-                idx.index_items(&items)
-            } else {
-                idx.incremental_sync_items(&items)
-            };
-            if let Err(e) = result {
-                crate::logging::info(&format!("[nex] FTS5 index sync error: {e}"));
-            }
-        }
-        drop(fts5_guard);
-
         self.maybe_compact_backends();
         Ok(())
     }
@@ -1157,16 +1077,6 @@ impl CoreService {
         if let Some(ref idx) = *tantivy_guard {
             let _ = idx.upsert_item(item);
         }
-        drop(tantivy_guard);
-
-        let fts5_guard = match self.fts5_index.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(ref idx) = *fts5_guard {
-            let _ = idx.upsert_item(item);
-        }
-
         self.bump_compaction_counter();
     }
 
@@ -1178,16 +1088,6 @@ impl CoreService {
         if let Some(ref idx) = *tantivy_guard {
             let _ = idx.delete_item(id);
         }
-        drop(tantivy_guard);
-
-        let fts5_guard = match self.fts5_index.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(ref idx) = *fts5_guard {
-            let _ = idx.delete_item(id);
-        }
-
         self.bump_compaction_counter();
     }
 
@@ -1228,14 +1128,6 @@ impl CoreService {
                 let _ = idx.flush();
             }
             drop(tantivy_guard);
-
-            let fts5_guard = match self.fts5_index.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(ref idx) = *fts5_guard {
-                let _ = idx.optimize();
-            }
 
             let mut count = match self.compaction_write_count.lock() {
                 Ok(g) => g,

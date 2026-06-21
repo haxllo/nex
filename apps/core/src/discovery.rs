@@ -573,7 +573,7 @@ fn discover_filesystem_walk(
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-                let id = format!("folder:{}", path.to_string_lossy());
+                let id = format!("folder:{}", path.to_string_lossy().to_ascii_lowercase());
                 out.push(SearchItem::new(
                     &id,
                     "folder",
@@ -600,7 +600,7 @@ fn discover_filesystem_walk(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-            let id = format!("file:{}", path.to_string_lossy());
+            let id = format!("file:{}", path.to_string_lossy().to_ascii_lowercase());
             out.push(SearchItem::new(
                 &id,
                 "file",

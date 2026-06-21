@@ -316,7 +316,10 @@ fn is_under_root(path: &Path, root: &Path) -> bool {
 fn id_for_path(path: &Path) -> String {
     // The id scheme is `file:<path>` / `folder:<path>` and must match
     // `discover_filesystem_walk` and the Everything backend exactly.
-    let lowercased = path.to_string_lossy();
+    // Windows paths are case-insensitive, so we normalize to lowercase
+    // to ensure watcher events and discovery don't create duplicate IDs
+    // for the same file with different casing.
+    let lowercased = path.to_string_lossy().to_ascii_lowercase();
     let kind = if path.is_dir() { "folder" } else { "file" };
     format!("{kind}:{lowercased}")
 }

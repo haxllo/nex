@@ -60,6 +60,17 @@ impl SearchWorker {
                                 latest = next;
                             }
 
+                            // Drain the clear channel again after recv.
+                            // A clear_session() signal that arrived while
+                            // we were blocked on recv() would have been
+                            // missed by the top-of-loop drain — without
+                            // this, the first post-clear query can use a
+                            // stale OverlaySearchSession with cached results
+                            // from before the hide/reload.
+                            while clear_rx.try_recv().is_ok() {
+                                session.clear();
+                            }
+
                             if latest.max_results == 0 {
                                 continue;
                             }

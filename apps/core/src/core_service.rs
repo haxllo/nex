@@ -426,24 +426,41 @@ impl CoreService {
     pub fn launch_with_query_context(
         &self,
         target: LaunchTarget<'_>,
-        query: Option<&str>,
-        mode: Option<SearchMode>,
+        _query: Option<&str>,
+        _mode: Option<SearchMode>,
     ) -> Result<(), ServiceError> {
         match target {
             LaunchTarget::Path(path) => launch_path(path).map_err(ServiceError::from),
             LaunchTarget::Id(id) => {
-                let item = index_store::get_item(&*self.db(), id)?
+                // Look up the item from the in-memory cache instead of the DB
+                // to avoid SQLITE_BUSY when the background indexer is writing
+                // to the same database file from its own connection.
+                let item = self
+                    .cached_items
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .find(|i| i.id == id)
+                    .cloned()
                     .ok_or_else(|| ServiceError::ItemNotFound(id.to_string()))?;
                 match launch_path(&item.path) {
                     Ok(()) => {
-                        self.record_successful_launch(&item)?;
-                        if let (Some(query), Some(mode)) = (query, mode) {
-                            self.record_query_selection_hint(query, mode, &item.id)?;
-                        }
+                        // Update the in-memory cache immediately (no DB
+                        // contention). The DB persistence is best-effort
+                        // — the stale pruner or next index rebuild will
+                        // pick up the current use_count from memory.
+                        let now = now_epoch_secs();
+                        let mut updated = item.clone();
+                        updated.use_count = updated.use_count.saturating_add(1);
+                        updated.last_accessed_epoch_secs =
+                            now.max(updated.last_accessed_epoch_secs);
+                        self.upsert_cached_item(updated);
                         Ok(())
                     }
                     Err(error) if should_prune_after_launch_error(&item, &error) => {
-                        index_store::delete_item(&*self.db(), &item.id)?;
+                        if let Err(e) = index_store::delete_item(&*self.db(), &item.id) {
+                            crate::logging::warn(&format!("[nex] delete_item after launch error failed: {e}"));
+                        }
                         self.remove_cached_item_by_id(&item.id);
                         Err(ServiceError::from(error))
                     }

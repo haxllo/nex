@@ -1075,34 +1075,40 @@ impl CoreService {
 
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
         let items = index_store::list_items(&*self.db())?;
+        let item_count = items.len();
 
-        let tantivy_is_first = self
+        let tantivy_docs = self
             .tantivy_index
             .lock()
-            .map(|g| g.as_ref().map_or(true, |idx| idx.num_docs().unwrap_or(0) == 0))
-            .unwrap_or(true);
-        let fts5_is_first = self
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|idx| idx.num_docs().ok()));
+        let fts5_docs = self
             .fts5_index
             .lock()
-            .map(|g| g.as_ref().map_or(true, |idx| idx.num_docs().unwrap_or(0) == 0))
-            .unwrap_or(true);
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|idx| idx.num_docs().ok()));
 
-        // Short-circuit when both indexes already match cached item count.
-        // After progress window rebuild, each item is already indexed
-        // individually — re-indexing all items here is pure waste.
-        if !tantivy_is_first && !fts5_is_first {
+        let tantivy_is_first = tantivy_docs.map(|d| d == 0).unwrap_or(true);
+        let fts5_is_first = fts5_docs.map(|d| d == 0).unwrap_or(true);
+
+        // Short-circuit when both Tantivy and FTS5 already match the
+        // cached item count. After a progress-window or background rebuild
+        // where items were added/removed, the backends may be stale even
+        // if they are non-empty — comparing against the actual count (not
+        // just zero vs non-zero) catches this.
+        let expected_docs = item_count as u64;
+        let tantivy_matches = tantivy_docs == Some(expected_docs);
+        let fts5_matches = fts5_docs == Some(expected_docs);
+        if tantivy_matches && fts5_matches {
             self.maybe_compact_backends();
             return Ok(());
         }
 
         crate::logging::info(&format!(
-            "[nex] sync_indexes items={} tantivy_available={} fts5_available={} tantivy_first={} fts5_first={}",
-            items.len(),
-            self.tantivy_index
-                .lock()
-                .map(|g| g.is_some())
-                .unwrap_or(false),
-            self.fts5_index.lock().map(|g| g.is_some()).unwrap_or(false),
+            "[nex] sync_indexes items={} tantivy_docs={:?} fts5_docs={:?} tantivy_first={} fts5_first={}",
+            item_count,
+            tantivy_docs,
+            fts5_docs,
             tantivy_is_first,
             fts5_is_first,
         ));

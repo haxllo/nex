@@ -301,6 +301,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 // transient unfocused events that we must ignore).
                 if !focused
                     && was_focused
+                    && !show_pending
                     && last_show.elapsed().as_millis() as u64 >= FOCUS_GRACE_MS
                     && state.lock().map(|s| s.visible).unwrap_or(false)
                 {

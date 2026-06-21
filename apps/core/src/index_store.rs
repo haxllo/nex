@@ -48,6 +48,13 @@ pub fn open_file(path: &Path) -> Result<Connection, StoreError> {
 
     let conn = Connection::open(path)?;
     init_schema(&conn)?;
+    // WAL mode allows concurrent readers while a background indexer
+    // writes to the same database from its own connection. Without
+    // this, every connection sharing the file gets SQLITE_BUSY.
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // A 1-second busy timeout prevents rapid failures when a
+    // background writer briefly holds the commit lock.
+    conn.pragma_update(None, "busy_timeout", 1000)?;
     Ok(conn)
 }
 

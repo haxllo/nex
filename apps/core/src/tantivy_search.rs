@@ -302,7 +302,17 @@ impl TantivyIndex {
         let reader = self.reader.searcher();
         let mut existing_ids: HashSet<String> = HashSet::new();
         for (segment_ord, segment_reader) in reader.segment_readers().iter().enumerate() {
-            for doc_id in 0u32..segment_reader.num_docs() as u32 {
+            let max_doc = segment_reader.max_doc();
+            let alive_bitset = segment_reader.alive_bitset();
+            for doc_id in 0u32..max_doc {
+                // After deletions, live doc IDs can exist at positions
+                // >= num_docs(). Iterate max_doc() and skip deleted docs
+                // via the alive bitset to avoid missing live entries.
+                if let Some(ref bitset) = alive_bitset {
+                    if !bitset.is_alive(doc_id) {
+                        continue;
+                    }
+                }
                 let doc_address = tantivy::DocAddress::new(segment_ord as u32, doc_id);
                 let doc: TantivyDocument = reader
                     .doc::<TantivyDocument>(doc_address)

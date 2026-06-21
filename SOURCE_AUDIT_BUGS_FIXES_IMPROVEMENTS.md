@@ -76,6 +76,31 @@ Fix:
 - Better: persist a backend sync stamp with item count, revision, and/or cache hash, then sync when the stamp differs.
 - Update the misleading comment after fixing the logic.
 
+### 2a. Launch path blocks on SQLITE_BUSY from concurrent background indexer
+
+Status: **fixed in commit 6283ee7**.
+
+Source:
+
+- `apps/core/src/core_service.rs:424-449`
+- `apps/core/src/index_store.rs:44-55`
+
+Original problem:
+
+`launch_with_query_context` called `index_store::get_item(&*self.db(), id)` to look up the launch target. The background indexer (spawned at startup) opens its own SQLite connection to the same database file and holds write locks for the duration of indexing (up to 80s). With default SQLite journal mode (DELETE, no WAL) and busy_timeout=0, every `get_item` call during indexing immediately returns `SQLITE_BUSY`. The error propagates up through `record_successful_launch` and `record_query_selection_hint`, wasting 5-6 seconds before surfacing the failure.
+
+Impact:
+
+- Every program launch attempt during background indexing fails with "database is locked" after a 5-6s freeze.
+- The overlay stays visible during the freeze, the acrylic backdrop becomes solid (DWM starvation from thread scheduling pressure), and the window closes ~3s later via the warm-release timer.
+- On re-open, the Submit handler sees empty results (stale state from the failed hide) and shows no search results until the indexer completes.
+
+Applied fix:
+
+- `launch_with_query_context` now reads the launch target from `self.cached_items` (in-memory RwLock) instead of the DB. Zero contention with the background indexer.
+- Post-launch DB writes (`record_successful_launch`, `record_query_selection_hint`) were removed from the launch path entirely. The in-memory cache is updated directly (use_count + last_accessed), and persistence is picked up by the stale pruner or next index rebuild.
+- `open_file` in `index_store.rs` now sets `journal_mode=WAL` and `busy_timeout=1000` on every SQLite connection, enabling concurrent reads during writes and a graceful 1-second retry window for any remaining write contention.
+
 ## High Findings
 
 ### 3. Search worker keeps stale config and plugin registry after config reload

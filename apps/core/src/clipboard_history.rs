@@ -7,6 +7,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_CLIPBOARD_ENTRIES: usize = 500;
+/// Magic bytes prefixing DPAPI-encrypted clipboard history files so we can
+/// distinguish them from plaintext JSON (legacy format) on read.
+const DPAPI_MAGIC: &[u8; 8] = b"NXCLPDPA";
 
 static CLIPBOARD_CACHE: Mutex<Option<Vec<ClipboardEntry>>> = Mutex::new(None);
 
@@ -129,10 +132,17 @@ fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
 
 fn load_entries_from_disk(cfg: &Config) -> Vec<ClipboardEntry> {
     let path = history_path(cfg);
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    let Ok(raw) = std::fs::read(path) else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<ClipboardEntry>>(&raw).unwrap_or_default()
+    let decrypted = dpapi_try_decrypt(&raw)
+        .or_else(|| {
+            // Legacy plaintext JSON — first read on this format triggers an
+            // upgrade: the next save_entries call will rewrite it encrypted.
+            std::str::from_utf8(&raw).ok().map(|s| s.as_bytes().to_vec())
+        })
+        .unwrap_or(raw);
+    serde_json::from_slice::<Vec<ClipboardEntry>>(&decrypted).unwrap_or_default()
 }
 
 fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> {
@@ -143,9 +153,112 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
     }
     let encoded = serde_json::to_string(entries)
         .map_err(|e| format!("failed to encode clipboard history: {e}"))?;
-    std::fs::write(path, encoded).map_err(|e| format!("failed to write clipboard history: {e}"))?;
+    let blob = dpapi_encrypt(encoded.as_bytes());
+    std::fs::write(path, blob)
+        .map_err(|e| format!("failed to write clipboard history: {e}"))?;
     *CLIPBOARD_CACHE.lock().unwrap() = Some(entries.to_vec());
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct DPAPIBlob {
+    cb_data: u32,
+    pb_data: *mut u8,
+}
+
+/// Encrypt plaintext bytes using Windows DPAPI (CryptProtectData).
+/// On non-Windows, returns the input unchanged.
+fn dpapi_encrypt(plaintext: &[u8]) -> Vec<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Security::Cryptography::CryptProtectData;
+
+        unsafe {
+            let data_in = DPAPIBlob {
+                cb_data: plaintext.len() as u32,
+                pb_data: plaintext.as_ptr() as *mut u8,
+            };
+            let mut data_out = DPAPIBlob {
+                cb_data: 0,
+                pb_data: std::ptr::null_mut(),
+            };
+
+            if CryptProtectData(
+                &data_in as *const DPAPIBlob as *const _,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0x00000004, // CRYPTPROTECT_LOCAL_MACHINE
+                &mut data_out as *mut DPAPIBlob as *mut _,
+            ) != 0
+            {
+                let ciphertext =
+                    std::slice::from_raw_parts(data_out.pb_data, data_out.cb_data as usize);
+                let mut result = DPAPI_MAGIC.to_vec();
+                result.extend_from_slice(ciphertext);
+                windows_sys::Win32::Foundation::LocalFree(data_out.pb_data as _);
+                return result;
+            }
+        }
+        // Fallback: plaintext (encryption failed, which is rare)
+        let mut fallback = DPAPI_MAGIC.to_vec();
+        fallback.extend_from_slice(plaintext);
+        fallback
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        plaintext.to_vec()
+    }
+}
+
+/// Decrypt bytes that were previously encrypted with `dpapi_encrypt`.
+/// Returns `None` if the data does not carry the DPAPI magic or if
+/// decryption fails (e.g. different user, different machine).
+fn dpapi_try_decrypt(data: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Security::Cryptography::CryptUnprotectData;
+
+        if !data.starts_with(DPAPI_MAGIC) {
+            return None;
+        }
+        let ciphertext = &data[DPAPI_MAGIC.len()..];
+
+        unsafe {
+            let data_in = DPAPIBlob {
+                cb_data: ciphertext.len() as u32,
+                pb_data: ciphertext.as_ptr() as *mut u8,
+            };
+            let mut data_out = DPAPIBlob {
+                cb_data: 0,
+                pb_data: std::ptr::null_mut(),
+            };
+
+            if CryptUnprotectData(
+                &data_in as *const DPAPIBlob as *const _,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0x00000001, // CRYPTPROTECT_UI_FORBIDDEN
+                &mut data_out as *mut DPAPIBlob as *mut _,
+            ) != 0
+            {
+                let plain =
+                    std::slice::from_raw_parts(data_out.pb_data, data_out.cb_data as usize);
+                let result = plain.to_vec();
+                windows_sys::Win32::Foundation::LocalFree(data_out.pb_data as _);
+                return Some(result);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 pub fn invalidate_entries_cache() {

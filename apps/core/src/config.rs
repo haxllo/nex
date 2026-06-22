@@ -260,7 +260,7 @@ impl Default for Config {
             uninstall_actions_enabled: true,
             web_search_provider: WebSearchProvider::Google,
             web_search_custom_template: String::new(),
-            clipboard_enabled: true,
+            clipboard_enabled: false,
             clipboard_retention_minutes: 8 * 60,
             clipboard_exclude_sensitive_patterns: vec![
                 "password".to_string(),

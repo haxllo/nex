@@ -8,9 +8,7 @@ All 9 priority findings plus #10, #11, #12, #13, #14, #15, #16, #17, #18,
 and #19 from the Medium/Lower-Priority sections have been fixed.
 
 The 9 priority findings plus #13 and #15 were fixed in the v2.2.0 release.
-#10, #11, and #12 are fixed on the `fix/audit-10-11-12-package-name-drift`
-branch (pending merge). #14, #16, #17, #18, and #19 are fixed on `master`
-(this commit).
+#10, #11, #12, #14, #16, #17, #18, and #19 are fixed on `master`.
 
 | Finding | Status | Commit |
 |---------|--------|--------|

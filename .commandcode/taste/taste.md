@@ -1,7 +1,7 @@
 # Taste (Continuously Learned by [CommandCode][cmd])
 
 [cmd]: https://commandcode.ai/
-
+
 
 # codebase
 - SOURCE_AUDIT_BUGS_FIXES_IMPROVEMENTS.md is the authoritative documentation source; other docs may be unreliable. Confidence: 0.70
@@ -14,7 +14,7 @@
 - Add diagnostic logging before making targeted fixes, then revert the diagnostics in a clean commit (no debug cruft in final code). Confidence: 0.70
 
 # build
-- Verify every change with `cargo build -p nex-launch --bin nex` before committing. Confidence: 0.75
+- Verify every change with `cargo build -p nex --bin nex` before committing. Confidence: 0.75
 
 # documentation
 - Use plain text download links (no emoji icons) in the release template Binary section. Confidence: 0.70

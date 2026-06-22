@@ -142,6 +142,7 @@ fn run_consumer(
     let mut pending_added: HashMap<PathBuf, ()> = HashMap::new();
     let mut pending_removed: HashSet<PathBuf> = HashSet::new();
     let mut total_dropped: usize = 0;
+    let mut dropped_since_last_flush: usize = 0;
 
     loop {
         let recv = rx.recv_timeout(CONSUMER_FLUSH_INTERVAL);
@@ -150,6 +151,8 @@ fn run_consumer(
                 for event in batch {
                     if pending_added.len() + pending_removed.len() >= CONSUMER_BATCH_CAP {
                         total_dropped = total_dropped.saturating_add(1);
+                        dropped_since_last_flush =
+                            dropped_since_last_flush.saturating_add(1);
                         continue;
                     }
                     apply_event_to_pending(event, &mut pending_added, &mut pending_removed);
@@ -172,6 +175,7 @@ fn run_consumer(
                         "[nex] directory_watcher root=\"{}\" dropped {total_dropped} events due to batch cap",
                         root.display()
                     ));
+                    trigger_resync(&service, &root);
                 }
                 return;
             }
@@ -185,6 +189,53 @@ fn run_consumer(
                 &mut pending_added,
                 &mut pending_removed,
             );
+        }
+
+        // If we dropped events during this flush window, the index is
+        // likely stale (a path we never saw could be missing, or an
+        // event we never received could leave a stale row in place).
+        // Log immediately and kick an incremental resync so the index
+        // reconverges from disk on the next event burst.
+        if dropped_since_last_flush > 0 {
+            crate::runtime::log_warn(&format!(
+                "[nex] directory_watcher root=\"{}\" dropped {} events in current flush window; triggering resync",
+                root.display(),
+                dropped_since_last_flush
+            ));
+            dropped_since_last_flush = 0;
+            trigger_resync(&service, &root);
+        }
+    }
+}
+
+/// Kick an incremental resync against the core service to recover from
+/// any events we could not enqueue. Holds the service write lock only
+/// long enough to schedule; the actual scan runs on the service's own
+/// indexing pipeline. Failure is non-fatal — we log and continue; the
+/// next flush cycle or the queued discovery reindex path will retry.
+fn trigger_resync(service: &Arc<RwLock<CoreService>>, root: &Path) {
+    let report_result = {
+        let guard = match service.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.rebuild_index_incremental_with_report()
+    };
+    match report_result {
+        Ok(report) => {
+            crate::runtime::log_info(&format!(
+                "[nex] directory_watcher root=\"{}\" resync ok discovered={} upserted={} removed={}",
+                root.display(),
+                report.discovered_total,
+                report.upserted_total,
+                report.removed_total
+            ));
+        }
+        Err(error) => {
+            crate::runtime::log_warn(&format!(
+                "[nex] directory_watcher root=\"{}\" resync failed: {error}",
+                root.display()
+            ));
         }
     }
 }

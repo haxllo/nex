@@ -9,3 +9,4 @@ target/
 artifacts
 nul
 Everything64.dll
+.commandcode/taste/

@@ -4,8 +4,12 @@ Date: 2026-06-22
 
 ## Status
 
-All 9 priority findings plus #13 and #15 from the Medium section have been
-fixed in the v2.2.0 release.
+All 9 priority findings plus #10, #11, #12, #13, and #15 from the Medium
+section have been fixed.
+
+The 9 priority findings plus #13 and #15 were fixed in the v2.2.0 release.
+#10, #11, and #12 are fixed on the `fix/audit-10-11-12-package-name-drift`
+branch (pending merge).
 
 | Finding | Status | Commit |
 |---------|--------|--------|
@@ -19,6 +23,9 @@ fixed in the v2.2.0 release.
 | #7 — Windows path ID normalization | Fixed | `d5904bf` |
 | #8 — Console flash on launch | Fixed | `fd4eeba` |
 | #9 — Diagnostics privacy | Fixed | `15d1aaa` |
+| #10 — Cargo package name drift | Fixed | `343a21d` |
+| #11 — Update script wrong repo | Fixed | `78e9152` |
+| #12 — Build-from-source package | Fixed | `7c7abec` |
 | #13 — Default hotkey | Fixed | `fe263a2` |
 | #15 — JSON config template | Fixed | `fe263a2` (TOML only) |
 

@@ -4,7 +4,7 @@
 
 A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
 
-[![crates.io](https://img.shields.io/crates/v/nex-launch?label=crates.io)](https://crates.io/crates/nex-launch)
+[![crates.io](https://img.shields.io/crates/v/nex?label=crates.io)](https://crates.io/crates/nex)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
@@ -27,7 +27,7 @@ After downloading, run the installer and follow the setup instructions.
 Requires Rust and Cargo installed.
 
 ```bash
-cargo install nex-launch; nex
+cargo install nex; nex
 ```
 
 ---

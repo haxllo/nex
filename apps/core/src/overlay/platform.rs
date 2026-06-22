@@ -1,4 +1,4 @@
-//! Platform glue for the Iced overlay. Provides:
+//! Platform glue for the WebView2 overlay. Provides:
 //!   * system theme detection (light vs dark) via the Windows
 //!     `AppsUseLightTheme` registry key,
 //!   * the legacy single-instance signal helpers that look up an
@@ -7,7 +7,7 @@
 //!
 //! The hotkey registration, tray icon, and `RegisterHotKey`
 //! subscription live in `shim.rs` because they are driven by the
-//! Iced runtime.
+//! runtime's overlay host, not the WebView itself.
 
 #![cfg(target_os = "windows")]
 

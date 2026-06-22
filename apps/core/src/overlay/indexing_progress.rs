@@ -1,6 +1,5 @@
 //! First-time indexing progress window (tao + wry).
 //!
-//! Replaces the legacy Win32 modal progress window and the Iced stub.
 //! A tiny borderless tao window hosts a wry WebView that renders an
 //! animated progress bar. The event loop runs at ControlFlow::Poll and
 //! reads progress directly from an Arc<AtomicU32> on each NewEvents

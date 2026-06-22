@@ -83,7 +83,7 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   Write-Host "[1/5] Building release binary from source..." -ForegroundColor Yellow
   Push-Location $repoRoot
   try {
-    cargo build -p nex --release --quiet
+    cargo build -p nex --release --quiet --bin nex
     $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
       "target\release\nex.exe",
       "target\release\nex-core.exe"

@@ -1,6 +1,6 @@
 //! WebView2 overlay host (tao window + wry WebView).
 //!
-//! Replaces the Iced boot/view. A single borderless, transparent,
+//! The current overlay implementation: a single borderless, transparent,
 //! always-on-top tao window hosts a wry WebView that renders the
 //! premium cmdk-style UI from embedded HTML/CSS/JS assets. The Rust
 //! side pushes state to JS via `ICoreWebView2::PostWebMessageAsString`

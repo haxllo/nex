@@ -3,7 +3,7 @@
 ## Stack Direction
 
 - Core service: Rust
-- UI shell: Native Win32 owner-draw overlay (inside `nex`)
+- UI shell: WebView2 overlay via tao + wry (inside `nex`)
 - Local storage: SQLite
 - Config format: TOML
 
@@ -12,9 +12,10 @@
 - `nex.exe`
 - Always-on background process
 - Owns hotkey registration, indexing, search, ranking, and launching
-- Hosts and renders the floating search bar overlay directly (no separate UI process)
+- Hosts the WebView2 overlay in-process on the main thread (no separate UI process)
 
 Rationale:
+
 - Keeps heavy logic in one fast native service
 - Removes IPC/process orchestration overhead between core and UI
 
@@ -24,11 +25,10 @@ Rationale:
 - Registers and handles global shortcut events
 
 - `OverlayController`
-- Opens and closes floating window, sets focus, drives keyboard events
+- Opens and closes the WebView2 floating window, sets focus, drives keyboard events
 
 - `DiscoveryService`
 - Enumerates app sources and configured file roots
-
 - `Indexer`
 - Builds and updates searchable index from discovery results
 

@@ -5,14 +5,13 @@
 //! `GetMessageW`. When the OS delivers a `WM_HOTKEY` (because the
 //! user pressed the registered chord), the thread forwards
 //! `OverlayEvent::Hotkey(id)` to the supplied event channel, which
-//! the runtime drains on the calling thread (the same channel the
-//! Iced event loop uses for keyboard/mouse events).
+//! the runtime drains on the calling thread.
 //!
 //! Why a dedicated thread: `RegisterHotKey` with a `NULL` HWND
 //! delivers `WM_HOTKEY` to the thread that registered it, so the
-//! `GetMessageW` loop must run on that same thread. We do not want
-//! to mix Win32 message dispatch into the Iced event loop, so we
-//! run it on a separate OS thread instead.
+//! `GetMessageW` loop must run on that same thread. The tao event
+//! loop already owns the main thread for window/message dispatch,
+//! so we run the hotkey listener on a separate OS thread instead.
 
 #![cfg(target_os = "windows")]
 

@@ -179,8 +179,13 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
         }
     }
 
-    if options.command != RuntimeCommand::Run && options.background {
-        return Err("background mode is only valid with normal run mode".to_string());
+    // CLI commands (--status, --set-launch-at-startup, etc.) should
+    // never try to spawn a background GUI process — they run, print
+    // (or write registry), and exit.  The default is background=true
+    // because the common case is `nex` (normal run mode), but any
+    // explicit command overrides that.
+    if options.command != RuntimeCommand::Run {
+        options.background = false;
     }
 
     Ok(options)

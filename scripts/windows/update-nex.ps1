@@ -2,7 +2,7 @@ param(
   [ValidateSet("stable", "beta")]
   [string]$Channel = "stable",
   [string]$Version,
-  [string]$Repo = "haxllo/sch",
+  [string]$Repo = "haxllo/nex",
   [switch]$StartAfterUpdate = $true,
   [switch]$KeepBackup,
   [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Nex",

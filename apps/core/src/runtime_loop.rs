@@ -608,6 +608,7 @@ impl RuntimeWorker {
                 &self.overlay,
                 &self.search_worker,
                 &self.runtime_config,
+                self.config_generation,
                 self.max_results,
                 &mut self.pending_uninstall_confirmation,
                 &mut self.current_results,
@@ -759,6 +760,7 @@ impl RuntimeWorker {
                     &self.overlay,
                     &self.search_worker,
                     &self.runtime_config,
+                    self.config_generation,
                     self.max_results,
                     &mut self.pending_uninstall_confirmation,
                     &mut self.current_results,
@@ -1000,6 +1002,7 @@ fn apply_query_change(
     overlay: &NativeOverlayShell,
     search_worker: &SearchWorker,
     runtime_config: &Config,
+    config_generation: u64,
     max_results: usize,
     pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
     current_results: &mut Vec<crate::model::SearchItem>,
@@ -1069,7 +1072,7 @@ fn apply_query_change(
     let parsed_query = ParsedQuery::parse(trimmed, runtime_config.search_dsl_enabled);
     let query_result_limit = result_limit_for_query(max_results, &parsed_query);
 
-    let gen = search_worker.send_request(parsed_query, query_result_limit);
+    let gen = search_worker.send_request(config_generation, parsed_query, query_result_limit);
     *last_sent_generation = gen;
 }
 

@@ -15,6 +15,7 @@ use crate::runtime_search_session::{search_overlay_results_with_session, Overlay
 
 pub(crate) struct SearchRequest {
     pub(crate) generation: u64,
+    pub(crate) config_generation: u64,
     pub(crate) parsed_query: ParsedQuery,
     pub(crate) max_results: usize,
 }
@@ -49,6 +50,7 @@ impl SearchWorker {
             .name("nex-search-worker".into())
             .spawn(move || {
                 let mut session = OverlaySearchSession::default();
+                let mut last_config_generation: u64 = 0;
                 loop {
                     while clear_rx.try_recv().is_ok() {
                         session.clear();
@@ -69,6 +71,18 @@ impl SearchWorker {
                             // from before the hide/reload.
                             while clear_rx.try_recv().is_ok() {
                                 session.clear();
+                            }
+
+                            // Defense-in-depth: even if every clear_session()
+                            // signal was drained correctly above, the config
+                            // generation on the request lets us detect a config
+                            // reload that happened between when the session was
+                            // cleared and when this request was sent.  This is
+                            // redundant with the clear-channel drains today but
+                            // makes the design race-free by construction.
+                            if latest.config_generation != last_config_generation {
+                                session.clear();
+                                last_config_generation = latest.config_generation;
                             }
 
                             if latest.max_results == 0 {
@@ -142,10 +156,16 @@ impl SearchWorker {
         }
     }
 
-    pub(crate) fn send_request(&self, parsed_query: ParsedQuery, max_results: usize) -> u64 {
+    pub(crate) fn send_request(
+        &self,
+        config_generation: u64,
+        parsed_query: ParsedQuery,
+        max_results: usize,
+    ) -> u64 {
         let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
         let _ = self.request_tx.send(SearchRequest {
             generation: gen,
+            config_generation,
             parsed_query,
             max_results,
         });

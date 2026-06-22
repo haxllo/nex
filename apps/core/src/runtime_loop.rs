@@ -390,6 +390,7 @@ pub(crate) fn run_windows_runtime(
         last_query: String::new(),
         last_sent_generation: 0,
         search_session: OverlaySearchSession::default(),
+        config_generation: 0,
         hotkey_issue_status,
         event_rx,
         is_running,
@@ -446,6 +447,10 @@ struct RuntimeWorker {
     runtime_config: Config,
     shared_config: Arc<RwLock<Config>>,
     shared_plugin_registry: Arc<RwLock<PluginRegistry>>,
+    /// Monotonically increasing counter bumped on each config reload so
+    /// subsystems (search worker, overlay, action executor) can detect
+    /// that they should invalidate cached state derived from the old config.
+    config_generation: u64,
     background_index_refresh: BackgroundIndexRefresh,
     plugin_registry: PluginRegistry,
     search_worker: SearchWorker,
@@ -561,6 +566,12 @@ impl RuntimeWorker {
             if let Ok(mut reg) = self.shared_plugin_registry.write() {
                 *reg = self.plugin_registry.clone();
             }
+            // Invalidate search worker caches on every config reload so
+            // the worker picks up the new show_files, show_folders, dsl,
+            // and plugin toggles right away instead of serving stale
+            // results from the previous session.
+            self.config_generation += 1;
+            self.search_worker.clear_session();
             maybe_apply_background_index_refresh(
                 &*svc,
                 &mut self.background_index_refresh,

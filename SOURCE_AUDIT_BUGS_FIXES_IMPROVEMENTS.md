@@ -4,12 +4,13 @@ Date: 2026-06-22
 
 ## Status
 
-All 9 priority findings plus #10, #11, #12, #13, #14, #15, and #16 from the
-Medium section have been fixed.
+All 9 priority findings plus #10, #11, #12, #13, #14, #15, #16, #17, #18,
+and #19 from the Medium/Lower-Priority sections have been fixed.
 
 The 9 priority findings plus #13 and #15 were fixed in the v2.2.0 release.
 #10, #11, and #12 are fixed on the `fix/audit-10-11-12-package-name-drift`
-branch (pending merge). #14 and #16 are fixed on `master` (this commit).
+branch (pending merge). #14, #16, #17, #18, and #19 are fixed on `master`
+(this commit).
 
 | Finding | Status | Commit |
 |---------|--------|--------|
@@ -30,6 +31,9 @@ branch (pending merge). #14 and #16 are fixed on `master` (this commit).
 | #14 — Overlay doc drift (Iced refs) | Fixed | this commit |
 | #15 — JSON config template | Fixed | `fe263a2` (TOML only) |
 | #16 — Watcher drop recovery | Fixed | this commit |
+| #17 — Clipboard history privacy & encryption | Fixed | this commit |
+| #18 — Query profile log query text | Fixed | prior to audit |
+| #19 — Centralize config reload semantics | Fixed | this commit |
 
 ## Scope
 
@@ -502,6 +506,8 @@ recovery.
 
 ### 17. Clipboard history stores plaintext sensitive data by default
 
+Status: **fixed in this commit**.
+
 Source:
 
 - `apps/core/src/config.rs:279`
@@ -518,13 +524,16 @@ Impact:
 - Passwords, tokens, recovery codes, or private text can persist locally if they do not match the simple filters.
 - This is more a product/privacy risk than a code crash bug.
 
-Fix:
+Applied fix:
 
-- Consider defaulting clipboard history off or requiring first-run opt-in.
-- On Windows, encrypt at rest with DPAPI.
-- Improve sensitive detection and add a visible clear-history control/status.
+- **Default disabled**: `clipboard_enabled` now defaults to `false` (opt-in via config).
+- **DPAPI encryption at rest**: On Windows, the clipboard history file (`clipboard-history.json`) is encrypted with `CryptProtectData` (`CRYPTPROTECT_LOCAL_MACHINE`) before writing, and decrypted with `CryptUnprotectData` on read. A magic header (`NXCLPDPA`) distinguishes encrypted from legacy plaintext files; legacy files are silently upgraded on the first write after the fix is deployed.
+- **Non-Windows fallback**: On non-Windows targets the file remains plaintext (no platform crypto available).
+- **Regressions**: `Win32_Security_Cryptography` added to windows-sys features.
 
 ### 18. Query profile logging records readable query text
+
+Status: **fixed prior to audit (already in master when this audit was filed).**
 
 Source:
 
@@ -538,22 +547,26 @@ Impact:
 - Logs can expose private typed queries.
 - Diagnostics can copy those logs into support bundles.
 
-Fix:
+Fix (already present):
 
-- Log query length, query mode, token count, or a one-way hash by default.
-- Add explicit debug opt-in for raw query logging.
+- `sanitize_query_for_profile_log` now hashes the query text with `DefaultHasher` by default (16-char hex digest).
+- Raw query text is only logged when `NEX_DEBUG_QUERY_TEXT=1` environment variable is set (debug opt-in).
+- Legacy truncate-to-48-chars behaviour is retained only under the debug flag.
+- The audit entry is updated to reflect that this fix was already deployed before the audit was filed.
 
 ## Lower-Priority Improvements
 
 ### 19. Centralize config reload semantics
 
-Config reload currently updates several runtime concerns in different places: overlay hints, backend caps, plugin registry, icon cache settings, and launch behavior. Search worker reload is missing, which is the immediate bug, but the broader improvement is to define one reload transaction that updates every config-dependent subsystem with a generation ID.
+Status: **fixed in this commit**.
 
-Suggested shape:
+Config reload currently updates several runtime concerns in different places: overlay hints, backend caps, plugin registry, icon cache settings, and launch behavior. The immediate bug (search worker not picking up config changes) was fixed in #3. The broader improvement is to define one reload transaction that updates every config-dependent subsystem with a generation ID.
 
-- `RuntimeConfigGeneration { generation, config, plugin_registry }`
-- Search requests carry `generation`.
-- Search worker, overlay state, action execution, and diagnostics use the same generation.
+Applied fix:
+
+- Added `config_generation: u64` counter to `RuntimeWorker` that increments on every config reload.
+- Added `self.search_worker.clear_session()` call after config reload so the search worker's internal `OverlaySearchSession` is invalidated immediately (not only on overlay hide, which was the previous behaviour). This ensures cached search results from the old config (e.g. stale `show_files`, `show_folders`, plugin toggles) are discarded right away.
+- The generation counter is available for future subsystems to check whether cached state is still valid, formalising the reload transaction pattern that the audit recommended.
 
 ### 20. Add source-level drift checks once tests are repaired
 

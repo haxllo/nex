@@ -243,7 +243,7 @@ impl Default for Config {
             show_files: false,
             show_folders: false,
             hotkey: "Ctrl+Space".to_string(),
-            launch_at_startup: false,
+            launch_at_startup: true,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."
             ),

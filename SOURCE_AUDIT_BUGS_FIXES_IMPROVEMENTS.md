@@ -4,12 +4,12 @@ Date: 2026-06-22
 
 ## Status
 
-All 9 priority findings plus #10, #11, #12, #13, and #15 from the Medium
-section have been fixed.
+All 9 priority findings plus #10, #11, #12, #13, #14, #15, and #16 from the
+Medium section have been fixed.
 
 The 9 priority findings plus #13 and #15 were fixed in the v2.2.0 release.
 #10, #11, and #12 are fixed on the `fix/audit-10-11-12-package-name-drift`
-branch (pending merge).
+branch (pending merge). #14 and #16 are fixed on `master` (this commit).
 
 | Finding | Status | Commit |
 |---------|--------|--------|
@@ -27,7 +27,9 @@ branch (pending merge).
 | #11 — Update script wrong repo | Fixed | `78e9152` |
 | #12 — Build-from-source package | Fixed | `7c7abec` |
 | #13 — Default hotkey | Fixed | `fe263a2` |
+| #14 — Overlay doc drift (Iced refs) | Fixed | this commit |
 | #15 — JSON config template | Fixed | `fe263a2` (TOML only) |
+| #16 — Watcher drop recovery | Fixed | this commit |
 
 ## Scope
 
@@ -410,25 +412,34 @@ Fix:
 
 ### 14. Overlay architecture docs are stale after WebView2 migration
 
+Status: **fixed in this commit** (doc-only).
+
 Source:
 
-- `apps/core/src/overlay/host.rs`
-- `apps/core/src/overlay/platform.rs:1-10`
-- `AGENTS.md:53-66`
-- `docs/architecture/system-architecture.md:6`
+- `apps/core/src/overlay/host.rs:3` (doc comment)
+- `apps/core/src/overlay/platform.rs:1,10` (doc comment)
+- `apps/core/src/overlay/hotkey.rs:9,14` (doc comment)
+- `apps/core/src/overlay/indexing_progress.rs:3` (doc comment)
+- `docs/architecture/system-architecture.md:6,15,27` (architecture doc)
 
-Current overlay implementation is WebView2-based. Several docs still describe native Win32 owner-draw/listbox/GDI/GDI+ overlay behavior, and `overlay/platform.rs` still mentions an Iced overlay.
+Current overlay implementation is WebView2-based (tao + wry). Several
+doc comments inside the overlay module still referenced the Iced
+runtime as if it were the active stack, and `docs/architecture/system-architecture.md`
+described the UI shell as a "Native Win32 owner-draw overlay".
 
-Impact:
+Applied fix:
 
-- Maintainers may debug or modify the wrong rendering stack.
-- Future agents may resurrect dead architecture or follow stale file ownership notes.
-
-Fix:
-
-- Rewrite overlay docs from current source.
-- Remove or clearly archive legacy GDI/GDI+/Iced references.
-- Add a short current architecture map for `overlay/host.rs`, `overlay/shim.rs`, `overlay/model.rs`, `overlay/icons.rs`, and hotkey/tray integration.
+- Replaced Iced references in `overlay/host.rs`, `overlay/platform.rs`,
+  `overlay/hotkey.rs`, and `overlay/indexing_progress.rs` with accurate
+  descriptions of the WebView2/tao/wry stack and the runtime worker
+  that drains `OverlayEvent`.
+- Updated `docs/architecture/system-architecture.md` to describe the
+  WebView2 overlay and dropped the owner-draw wording.
+- The `overlay/mod.rs` module-level architecture map (already accurate)
+  was left in place as the single source of truth for module ownership.
+- The historical `.planning/` migration plans and summaries still
+  mention Iced because they describe the migration as it was planned
+  and executed; they are deliberately retained as history.
 
 ### 15. JSON config template policy conflicts with current code
 
@@ -457,23 +468,37 @@ Fix:
 
 ### 16. File watcher event drops have no recovery path
 
+Status: **fixed in this commit**.
+
 Source:
 
-- `apps/core/src/file_watcher_consumer.rs:151-154`
+- `apps/core/src/file_watcher_consumer.rs:144-188`
 - `apps/core/src/file_watcher_consumer.rs:170-175`
 
-When a batch exceeds `CONSUMER_BATCH_CAP`, extra events are dropped. The consumer logs dropped events when the watcher channel disconnects, but there is no immediate resync or dirty-state recovery while the runtime continues.
+When a batch exceeds `CONSUMER_BATCH_CAP`, extra events are dropped
+with a counter, but previously the only place a drop was surfaced was
+the `Disconnected` arm of the consumer loop. While the runtime
+continued, a dropped event left the index silently stale.
 
-Impact:
+Applied fix:
 
-- File system storms can silently leave the index stale.
-- The application may keep running with incomplete watcher state.
+- Added `dropped_since_last_flush` counter alongside the existing
+  `total_dropped` total.
+- On the next flush, if `dropped_since_last_flush > 0`, log a warning
+  immediately (not only on disconnect) and call
+  `CoreService::rebuild_index_incremental_with_report` to resync the
+  index from disk.
+- The disconnect arm keeps the same behavior and now also triggers
+  resync when `total_dropped > 0`.
+- Resync failures are non-fatal: logged at warn level, the next flush
+  cycle and the queued discovery reindex path can retry.
 
-Fix:
-
-- If drop count is greater than zero, mark the index dirty and schedule a full or scoped resync.
-- Log the drop at the next flush, not only on disconnect.
-- Surface a low-priority status message if recovery is pending.
+Why resync, not a dirty flag + status message: the resync is cheap
+when the index is already in sync (a few hundred ms of FS walk, no
+Tantivy commit unless the result differs), and it self-heals in a
+single step. A status message would still require the same scan to
+actually reconcile the index, so the resync is the smallest correct
+recovery.
 
 ### 17. Clipboard history stores plaintext sensitive data by default
 

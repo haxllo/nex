@@ -298,9 +298,12 @@ impl CoreService {
         };
 
         if should_use_app_cache(filter) {
-            let guard = match self.cached_app_items.read() {
+            // Uses try_read to avoid blocking when refresh_cache_from_store
+            // holds the write lock — return empty results rather than stalling
+            // the search worker thread.
+            let guard = match self.cached_app_items.try_read() {
                 Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
+                Err(_) => return Ok(Vec::new()),
             };
             let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
             return Ok(crate::search::search_with_filter_with_boosts(
@@ -333,7 +336,10 @@ impl CoreService {
                 );
                 if ranked.len() < effective_limit {
                     // Augment with in-memory cache items the index missed.
-                    if let Ok(guard) = self.cached_items.read() {
+                    // Uses try_read to avoid blocking when refresh_cache_from_store
+                    // or the pruner holds the write lock — skip augmentation rather
+                    // than stalling the search worker thread.
+                    if let Ok(guard) = self.cached_items.try_read() {
                         let cache_ranked = crate::search::search_with_filter_with_boosts(
                             &guard,
                             query,
@@ -357,10 +363,13 @@ impl CoreService {
 
         // Path 2: no index results — rank the in-memory cache directly,
         // holding the read lock only while we score and select.
+        // Uses try_read to avoid blocking when refresh_cache_from_store
+        // or the pruner holds the write lock — return empty results rather
+        // than stalling the search worker thread.
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
-        let guard = match self.cached_items.read() {
+        let guard = match self.cached_items.try_read() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(_) => return Ok(Vec::new()),
         };
         Ok(crate::search::search_with_filter_with_boosts(
             &guard,

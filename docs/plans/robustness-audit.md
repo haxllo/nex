@@ -97,20 +97,22 @@ let json = snapshot_json(&s, icons);
 
 ### 4. Synchronous icon decode blocks worker thread
 
-**Location:** `shim.rs:273-276`
+**Status:** Resolved. All icon prefetching moved to background threads.
 
-First 8 icons decoded synchronously via `prefetch_rows()` on the runtime worker thread. Each involves:
+**Location:** `shim.rs:set_results()`
+
+First 8 icons were decoded synchronously via `prefetch_rows()` on the runtime worker thread. Each involves:
 1. `SHParseDisplayName` + `SHGetFileInfoW` (shell icon extraction)
 2. `image::load_from_memory` (CPU decode)
 3. `rgba_to_png()` (PNG re-encoding)
 
 Each icon takes ~1-5ms. 8 icons = 8-40ms stall on the worker thread, blocking event processing.
 
-**Fix:** Move all icon decoding to background. Show placeholder icons initially, swap when ready via a lightweight update message.
+**What was changed:**
 
-**Files to change:**
-- `apps/core/src/overlay/shim.rs` — remove synchronous prefetch in `set_results()`
-- `apps/core/assets/app.js` — handle icon swap messages
+Removed the synchronous `prefetch_rows` call for the first 8 icons. All icon decoding now happens on a single background `nex-icon-prefetch` thread. The dual-message protocol (Issue #2 fix) sends the state message (~2KB, no icons) immediately, so rows render with placeholder icons. The icon message arrives after background encoding completes, and `patchIcons()` updates the `<img>` elements.
+
+On cold cache, `snapshot_icons_json()` calls `png_bytes()` which may block briefly on the host thread — but the state lock is not held and rows are already visible via the first message.
 
 ---
 

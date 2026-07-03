@@ -421,6 +421,14 @@ pub(crate) fn run_windows_runtime(
     // deliver ExternalQuit into a channel nobody reads anymore.
     crate::console_signal::clear();
 
+    // Stop background threads that hold Arc<RwLock<CoreService>>
+    // so they don't delay service drop on shutdown.
+    if let Ok(guard) = service.read() {
+        guard.stop_stale_pruner();
+        #[cfg(target_os = "windows")]
+        guard.stop_file_watchers();
+    }
+
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).
     log_info("[nex] shutdown: stopping worker message pump");

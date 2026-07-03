@@ -366,7 +366,7 @@ Hits the SQLite database on every query to fetch previously selected items. Adds
 
 ### 18. Stale pruner has no shutdown signal
 
-**Location:** `core_service.rs:596`
+**Location:** `core_service.rs:778`
 
 ```rust
 std::thread::Builder::new()
@@ -383,6 +383,9 @@ Infinite loop with no `AtomicBool` to stop it. Holds an `Arc<RwLock<CoreService>
 
 **Files to change:**
 - `apps/core/src/core_service.rs`
+- `apps/core/src/runtime_loop.rs`
+
+**Status:** ✅ **Resolved** — Added `stale_pruner_stop: Arc<AtomicBool>` to `CoreService`. The pruner thread now checks the flag before and after sleep, exiting cleanly when signaled. `stop_stale_pruner()` sets the flag. Shutdown sequence in `runtime_loop.rs` calls `stop_stale_pruner()` and `stop_file_watchers()` before joining the worker thread, so background threads holding `Arc<RwLock<CoreService>>` are signaled to stop early.
 
 ---
 

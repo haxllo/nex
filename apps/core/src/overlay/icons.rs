@@ -31,6 +31,16 @@ impl Inner {
     fn touch(&mut self, key: PathBuf) {
         self.last_touch.insert(key, Instant::now());
     }
+
+    /// Remove last_touch entries whose keys are no longer in the LRU.
+    /// Called after put() to prevent unbounded HashMap growth when
+    /// LRU eviction removes png entries but last_touch retains them.
+    fn clean_orphaned_touches(&mut self) {
+        if self.last_touch.len() <= self.png.cap().get() {
+            return; // No orphans possible
+        }
+        self.last_touch.retain(|k, _| self.png.contains(k));
+    }
 }
 
 impl Default for IconCache {
@@ -71,6 +81,7 @@ impl IconCache {
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.put(key.clone(), bytes.clone());
             inner.touch(key);
+            inner.clean_orphaned_touches();
         }
         Some(bytes)
     }

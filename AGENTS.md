@@ -5,7 +5,7 @@
 ```bash
 cargo build --bin nex                    # debug build
 cargo build --release --bin nex          # release build
-cargo test -p nex                        # all unit tests (cross-platform)
+cargo test -p nex                        # all unit tests (Windows)
 cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 ```
@@ -32,7 +32,7 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 - Single Rust workspace member: `apps/core` (crate `nex`, lib name `nex_core`)
 - Binary entry: `apps/core/src/main.rs` → `nex_core::runtime::run_with_options`
 - Library entry: `apps/core/src/lib.rs`
-- **Windows-only modules**: `rt`-gated `windows_overlay`, `runtime_loop`, `everything`, `runtime_overlay_rows`
+- **Windows-only modules**: `runtime_loop`, `everything`, `runtime_overlay_rows`
 - Tests in `apps/core/src/runtime.rs:tests` and `apps/core/tests/`, `tests/perf/`
 
 ## Toolchain
@@ -48,22 +48,24 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 | `NEX_WINDOWS_RUNTIME_SMOKE=1` | Enable the windows runtime smoke test (otherwise skips) |
 | `NEX_ALLOW_MISSING_ICON=1` | Allow release build without `nex.ico` (also `SWIFTFIND_ALLOW_MISSING_ICON`) |
 
-## Overlay Rendering Stack
+## Overlay Architecture
 
-Two concurrent APIs — GDI+ owns all non-listbox painting; GDI handles only `WM_DRAWITEM`:
+**WebView2** (tao + wry). Overlay is a `WS_POPUP` window hosting a WebView2
+control. No GDI/GDI+/D2D — all rendering is HTML/CSS/JS.
 
-- **GDI+** (`gdiplus.dll` FFI, `gdiplus_rendering.rs`): panel background (rounded rects, lines, fills), help tip, footer hint, and list-row selection highlight. Uses `GdipCreateFontFromDC` for text, `GdipFillRoundedRectangle` for highlights. Always uses ClearType (`TextRenderingHintClearTypeGridFit`).
-- **GDI** (`windows-sys`, pure Win32): list row text, icons, background fills in `WM_DRAWITEM` (`painting.rs::draw_list_row`). Uses `DrawTextW`, `DrawIconEx`, `FillRect`, GDI font objects. Non-visual GDI calls (`GetTextExtentPoint32W`) still used for layout measurement in footer hints.
-- **D2D + DWrite** (`d2d_renderer.rs`): **fully dead code** — was used for panel background but fully replaced by GDI+. Do not resurrect.
-
-## Key Overlay Architecture
-
-- Overlay is a `WS_POPUP | WS_EX_LAYERED | WS_EX_TOOLWINDOW` window
-- Animates show/hide via `SetLayeredWindowAttributes` alpha (0–255) + `SetWindowPos`
-- Listbox child window handles `WM_DRAWITEM` (all rows painted from parent dialog proc)
-- Mica backdrop via `DWMWA_SYSTEMBACKDROP_TYPE` planned but not yet implemented
-- `hover_index: i32` tracks the hovered/selected row; `=-1` when none selected
-- `selected_index()` reads native `LB_GETCURSEL`; keyboard and Submit use this
+- Panel built from embedded HTML (`INDEX_HTML`, `STYLE_CSS`, `APP_JS` in
+  `overlay/host.rs`), served via `nexasset://` custom protocol.
+- State pushed to JS via `ICoreWebView2::PostWebMessageAsJson` (fire-and-forget,
+  non-blocking). No synchronous `evaluate_script` on the critical path.
+- Icons decoded to PNG, embedded as base64 data URIs in the state snapshot
+  (`overlay/icons.rs`). LRU cache keyed by file path.
+- Window positioning, DPI handling, acrylic backdrop in `overlay/host.rs`.
+- Hotkey listener on dedicated thread (`overlay/hotkey.rs`). System tray icon
+  with context menu (`overlay/tray.rs`).
+- Single warm-release timer thread (crossbeam channel, re-arm on Hide).
+- Theme detection: Windows registry `AppsUseLightTheme` (`overlay/platform.rs`).
+- Indexing progress window: separate tao + wry instance (`overlay/indexing_progress.rs`).
+- Mica backdrop via `DWMWA_SYSTEMBACKDROP_TYPE` planned but not yet implemented.
 
 ## Config
 
@@ -90,7 +92,7 @@ Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + ma
 
 ## Style & Conventions
 
-- `cargo build` warnings: ~22 dead-code warnings (pre-existing, mostly unused D2D functions)
+- `cargo build` warnings: ~12 dead-code warnings (pre-existing, mostly unused overlay/misc functions)
 - No clippy, no formatter enforced in CI
 - Most platform gating: `#[cfg(target_os = "windows")]` on Windows-specific modules/functions
 - Legacy name "SwiftFind" still appears in some env var/constant names — don't rename unless explicitly asked

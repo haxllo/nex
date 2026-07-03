@@ -186,14 +186,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
-                        push_state(&webview, &state, &icon_cache);
+                        push_state(&webview, &state, &icon_cache, true);
                         focus_input(&webview);
                         show_pending = true;
                     }
                 }
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
-                        push_state(&webview, &state, &icon_cache);
+                        push_state(&webview, &state, &icon_cache, false);
                     }
                 }
                 UiCommand::SelectChanged(idx) => {
@@ -238,7 +238,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // cleared to idle) before hiding, so the page is
                     // ready-to-show on the next open.
                     if ready {
-                        push_state(&webview, &state, &icon_cache);
+                        push_state(&webview, &state, &icon_cache, false);
                     }
                     window.set_visible(false);
                     if let Ok(mut s) = state.lock() {
@@ -504,7 +504,7 @@ fn post_json(webview: &WebView, json: &str) {
 /// Both use `PostWebMessageAsJson` (fire-and-forget). The state lock is
 /// released before any icon encoding occurs — only the ShimState clone
 /// runs under the lock (~microseconds).
-fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>) {
+fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>, show_pending: bool) {
     let Some(wv) = webview else { return };
 
     // Phase 1: Clone state under lock (microseconds).
@@ -514,7 +514,7 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
     };
 
     // Phase 2: Build lightweight JSON without icons (~2KB).
-    let state_json = snapshot_state_json(&snapshot);
+    let state_json = snapshot_state_json(&snapshot, show_pending);
 
     // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
     // Note: png_bytes() may block on first decode per icon (cold cache),
@@ -545,7 +545,7 @@ fn focus_input(webview: &Option<WebView>) {
 
 /// Serialize the overlay state into lightweight JSON without icon data.
 /// Icon fields contain only the file path (used as a JS cache key).
-fn snapshot_state_json(s: &ShimState) -> String {
+fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
     let rows: Vec<serde_json::Value> = s
         .rows
         .iter()
@@ -591,6 +591,7 @@ fn snapshot_state_json(s: &ShimState) -> String {
         "hotkeyHint": s.hotkey_hint,
         "hotkeyIssue": s.hotkey_issue_active,
         "theme": theme,
+        "showPending": show_pending,
     })
     .to_string()
 }

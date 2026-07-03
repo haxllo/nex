@@ -231,11 +231,18 @@
   // ── height measurement (resize native window to hug content) ──
   let lastH = 0;
   let initialRenderTimer = null;
+  // Only send post("painted") on the first render after a show event.
+  // Subsequent renders during typing trigger resize-only — the IPC
+  // round-trip is unnecessary and adds latency during rapid input.
+  let needsPainted = false;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
-        post("painted");
+        if (needsPainted) {
+          needsPainted = false;
+          post("painted");
+        }
         if (h !== lastH && h > 0) {
           lastH = h;
           post("resize", h);
@@ -369,6 +376,10 @@
 
       statusEl.dataset.text = state.status || "";
 
+      // Signal that the next render should fire post("painted")
+      // so the Rust side can show + focus the window. Only set on
+      // show (when Rust sends showPending=true in the state JSON).
+      if (state.showPending) needsPainted = true;
       // Add initial-render class so CSS applies the row-in animation
       // only on the first paint after a state push. Removed after the
       // 150ms animation completes so subsequent renders are instant.

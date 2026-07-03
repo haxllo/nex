@@ -25,6 +25,10 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
 
+  // Persistent icon cache — survives DOM rebuilds across state pushes.
+  // Key: icon path (string), Value: data URI (string).
+  const iconCache = new Map();
+
   function post(t, v) {
     try {
       window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
@@ -91,7 +95,13 @@
         if (r.icon && r.kind !== "action") {
           const img = document.createElement("img");
           img.className = "icon";
-          img.src = r.icon;
+          img.dataset.iconPath = r.icon; // store path for patchIcons()
+          if (iconCache.has(r.icon)) {
+            img.src = iconCache.get(r.icon);
+          }
+          // Don't add placeholder class here — patchIcons() will set
+          // src and the browser handles loading. Only onerror triggers
+          // placeholder.
           img.onerror = () => img.classList.add("placeholder");
           li.appendChild(img);
         } else if (r.kind !== "action") {
@@ -187,6 +197,22 @@
     setSelected(sel[pos], true);
   }
 
+  // ── icon patching ─────────────────────────────────────────
+  // Called after icon data arrives. Updates <img> elements from cache.
+  // Does NOT skip placeholder elements — on cold cache, render() creates
+  // icons without src, and patchIcons() must update them all.
+  function patchIcons() {
+    for (const li of list.children) {
+      const img = li.querySelector("img.icon");
+      if (!img) continue;
+      const path = img.dataset.iconPath;
+      if (path && iconCache.has(path)) {
+        const dataUri = iconCache.get(path);
+        if (img.src !== dataUri) img.src = dataUri;
+      }
+    }
+  }
+
   // ── command mode ───────────────────────────────────────────
   function updateSearchIcon() {
     searchIcon.style.opacity = "0";
@@ -204,17 +230,29 @@
 
   // ── height measurement (resize native window to hug content) ──
   let lastH = 0;
+  let initialRenderTimer = null;
+  // Only send post("painted") on the first render after a show event.
+  // Subsequent renders during typing trigger resize-only — the IPC
+  // round-trip is unnecessary and adds latency during rapid input.
+  let needsPainted = false;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
-        post("painted");
+        if (needsPainted) {
+          needsPainted = false;
+          post("painted");
+        }
         if (h !== lastH && h > 0) {
           lastH = h;
           post("resize", h);
         }
       });
     });
+    // Remove initial-render class after the 150ms row-in animation
+    // completes so subsequent renders don't re-trigger the animation.
+    clearTimeout(initialRenderTimer);
+    initialRenderTimer = setTimeout(() => bodyEl.classList.remove("initial-render"), 160);
   }
 
   // ── keyboard ─────────────────────────────────────────────
@@ -266,7 +304,7 @@
 
   // ── query input (adaptive debounce) ──────────────────────
   // First char of each typing burst fires immediately (0ms).
-  // Subsequent rapid chars coalesce at 80ms so SearchWorker
+  // Subsequent rapid chars coalesce at 40ms so SearchWorker
   // drains stale requests from its mpsc channel.
   let debounce = null;
   let lastInputTime = 0;
@@ -284,7 +322,7 @@
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
     const now = performance.now();
-    const delay = (now - lastInputTime > 300) ? 0 : 80;
+    const delay = (now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
     clearTimeout(debounce);
     debounce = setTimeout(() => post("query", query), delay);
@@ -295,6 +333,22 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      // Icon data message: {"icons": {"path": "data:...", ...}}
+      // Sent as a separate PostWebMessageAsJson after the state message.
+      if (state.icons && typeof state.icons === "object" && !state.rows) {
+        for (const [path, dataUri] of Object.entries(state.icons)) {
+          iconCache.set(path, dataUri);
+        }
+        patchIcons();
+        return;
+      }
+
+      // Lightweight selection-only update (no rows = incremental).
+      if (!Array.isArray(state.rows) && typeof state.selected === "number") {
+        setSelected(state.selected, true);
+        return;
+      }
+
       if (state.theme) document.documentElement.dataset.theme = state.theme;
 
       // Only overwrite the input if Rust changed it out from under us
@@ -322,6 +376,14 @@
 
       statusEl.dataset.text = state.status || "";
 
+      // Signal that the next render should fire post("painted")
+      // so the Rust side can show + focus the window. Only set on
+      // show (when Rust sends showPending=true in the state JSON).
+      if (state.showPending) needsPainted = true;
+      // Add initial-render class so CSS applies the row-in animation
+      // only on the first paint after a state push. Removed after the
+      // 150ms animation completes so subsequent renders are instant.
+      bodyEl.classList.add("initial-render");
       render();
     },
 

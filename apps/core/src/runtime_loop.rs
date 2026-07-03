@@ -81,7 +81,7 @@ pub(crate) fn run_windows_runtime(
     let service = Arc::new(RwLock::new(service));
 
     let initial_cache_empty = {
-        let guard = service.read().unwrap();
+        let guard = service.read().unwrap_or_else(|e| e.into_inner());
         guard.cached_items_len() == 0
     };
 
@@ -98,10 +98,10 @@ pub(crate) fn run_windows_runtime(
             log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
             let service_arc = service.clone();
             let result = run_with_progress_window(move |pct| {
-                let svc = service_arc.write().unwrap();
-                *svc.progress.lock().unwrap() = Some(pct);
+                let svc = service_arc.write().unwrap_or_else(|e| e.into_inner());
+                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(pct);
                 let report = svc.rebuild_index_incremental_with_report();
-                *svc.progress.lock().unwrap() = None;
+                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 report
             });
             match result {
@@ -162,7 +162,7 @@ pub(crate) fn run_windows_runtime(
         log_info(&format!(
             "[nex] startup cached_items={} (async indexing scheduled)",
             {
-                let guard = service.read().unwrap();
+                let guard = service.read().unwrap_or_else(|e| e.into_inner());
                 guard.cached_items_len()
             }
         ));
@@ -282,7 +282,7 @@ pub(crate) fn run_windows_runtime(
                 ));
                 overlay.set_hotkey_issue_active(false);
                 let _ = tray_hi_tx.send(false);
-                *hotkey_listener.lock().unwrap() = Some(listener);
+                *hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener);
                 None
             }
             Err(error) => {
@@ -402,9 +402,32 @@ pub(crate) fn run_windows_runtime(
         last_memory_log: Instant::now(),
     };
 
+    let worker_overlay_for_panic = overlay.clone();
     let worker_join = std::thread::Builder::new()
         .name("nex-runtime".to_string())
-        .spawn(move || worker.run())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.run()
+            }));
+            match result {
+                Ok(()) => {
+                    log_info("[nex] runtime worker exited cleanly");
+                }
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "(unknown panic payload)".to_string()
+                    };
+                    log_warn(&format!("[nex] runtime worker PANICKED: {msg}"));
+                    // Signal the overlay to stop so the host event loop
+                    // exits instead of hanging forever with no events.
+                    worker_overlay_for_panic.stop();
+                }
+            }
+        })
         .map_err(|e| RuntimeError::Overlay(format!("failed to spawn runtime thread: {e}")))?;
 
     // Run the WebView host event loop on the main thread (blocking).
@@ -421,6 +444,19 @@ pub(crate) fn run_windows_runtime(
     // deliver ExternalQuit into a channel nobody reads anymore.
     crate::console_signal::clear();
 
+    // Stop background threads that hold Arc<RwLock<CoreService>>
+    // so they don't delay service drop on shutdown.
+    if let Ok(guard) = service.read() {
+        guard.stop_stale_pruner();
+    }
+    // Take the file watcher handle without holding the service read
+    // lock. The consumer thread may be blocked on service.write(),
+    // so we must not hold the RwLock guard while joining — deadlock.
+    #[cfg(target_os = "windows")]
+    let _watcher_handle = service.read().ok().and_then(|g| g.take_file_watchers());
+    // _watcher_handle is dropped here (joins watcher threads) after
+    // the RwLock read guard has been released.
+
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).
     log_info("[nex] shutdown: stopping worker message pump");
@@ -429,7 +465,7 @@ pub(crate) fn run_windows_runtime(
     // Drop the hotkey listener (unregisters the global hotkey) and
     // wait for the worker thread to finish its `run_message_pump`.
     log_info("[nex] shutdown: dropping hotkey listener");
-    drop(hotkey_listener.lock().unwrap().take());
+    drop(hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()).take());
     log_info("[nex] shutdown: joining worker thread");
     let _ = worker_join.join();
     log_info("[nex] shutdown: complete, process exiting");
@@ -689,7 +725,7 @@ impl RuntimeWorker {
                         // the next show.
                         while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
-                            &*self.service.write().unwrap(),
+                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                             &mut self.background_index_refresh,
                             &self.runtime_config,
                         );
@@ -748,9 +784,8 @@ impl RuntimeWorker {
                     self.pending_uninstall_confirmation = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
-                        self.search_session.clear();
-                        self.search_worker.clear_session();
-                        while self.search_worker.try_recv().is_some() {}
+                    self.search_session.clear();
+                    self.search_worker.clear_session();
                     while self.search_worker.try_recv().is_some() {}
                 }
             }
@@ -824,7 +859,7 @@ impl RuntimeWorker {
                         self.overlay.hide_now();
                         self.overlay_state.on_escape();
                         match execute_action_selection(
-                            &*self.service.write().unwrap(),
+                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                             &self.runtime_config,
                             &self.plugin_registry,
                             &pending.uninstall_action,
@@ -951,7 +986,7 @@ impl RuntimeWorker {
                 }
 
                 match launch_overlay_selection(
-                    &*self.service.write().unwrap(),
+                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                     &self.runtime_config,
                     &self.plugin_registry,
                     &self.current_results,

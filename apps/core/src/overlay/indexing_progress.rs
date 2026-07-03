@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::runtime::log_warn;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -210,15 +211,34 @@ where
     });
 
     // Wait for the work thread to finish, then return the result.
-    // Join propagates any panics. The done-watcher ensured the
-    // event loop already exited, so this is non-blocking.
-    let _ = work_thread.join();
+    // The done-watcher ensured the event loop already exited, so this is non-blocking.
+    let join_result = work_thread.join();
     let result = result_slot
         .lock()
-        .unwrap()
-        .take()
-        .expect("indexer thread finished without storing result");
-    result
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+
+    match (join_result, result) {
+        (Ok(()), Some(r)) => r,
+        (Ok(()), None) => {
+            // Thread completed normally but didn't store a result —
+            // shouldn't happen, but handle it gracefully.
+            panic!("indexer thread finished without storing result");
+        }
+        (Err(_), Some(r)) => {
+            // Thread panicked but somehow stored a result before
+            // unwinding — use it rather than crashing.
+            log_warn("[nex] indexer thread panicked but produced a result");
+            r
+        }
+        (Err(_payload), None) => {
+            // Thread panicked and didn't store a result. Propagate
+            // the panic so it's visible in logs and crash reports.
+            // The caller handles Result::Err gracefully.
+            log_warn("[nex] indexer thread panicked during indexing");
+            std::panic::resume_unwind(_payload);
+        }
+    }
 }
 
 fn progress_window_position() -> (i32, i32) {

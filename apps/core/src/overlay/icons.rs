@@ -31,6 +31,16 @@ impl Inner {
     fn touch(&mut self, key: PathBuf) {
         self.last_touch.insert(key, Instant::now());
     }
+
+    /// Remove last_touch entries whose keys are no longer in the LRU.
+    /// Called after put() to prevent unbounded HashMap growth when
+    /// LRU eviction removes png entries but last_touch retains them.
+    fn clean_orphaned_touches(&mut self) {
+        if self.last_touch.len() <= self.png.cap().get() {
+            return; // No orphans possible
+        }
+        self.last_touch.retain(|k, _| self.png.contains(k));
+    }
 }
 
 impl Default for IconCache {
@@ -71,6 +81,7 @@ impl IconCache {
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.put(key.clone(), bytes.clone());
             inner.touch(key);
+            inner.clean_orphaned_touches();
         }
         Some(bytes)
     }
@@ -332,25 +343,38 @@ fn extract_shell_icon_png(_shell_path: &str) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
+    // Initialize COM once per thread lifetime. The persistent
+    // nex-icon-prefetch thread calls this repeatedly; calling
+    // CoInitializeEx/CoUninitialize on every batch wastes cycles
+    // and risks COM state churn. Using MTA (COINIT_MULTITHREADED)
+    // so ExitProcess can terminate this thread without deadlocking
+    // on COM apartment teardown.
     #[cfg(target_os = "windows")]
-    unsafe {
-        // Initialize COM for this thread so ExtractIconExW and shell
-        // IDataObject work. Match each CoInitializeEx with CoUninitialize
-        // so the apartment is torn down when the thread exits.
-        let _ = windows_sys::Win32::System::Com::CoInitializeEx(
-            std::ptr::null(),
-            2, // COINIT_APARTMENTTHREADED
-        );
+    {
+        thread_local! {
+            static COM_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        COM_INIT.with(|flag| {
+            if !flag.get() {
+                unsafe {
+                    let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                        std::ptr::null(),
+                        0, // COINIT_MULTITHREADED
+                    );
+                }
+                flag.set(true);
+            }
+        });
     }
     for row in rows {
         if !row.icon_path.is_empty() {
             cache.png_bytes(&row.icon_path);
         }
     }
-    #[cfg(target_os = "windows")]
-    unsafe {
-        windows_sys::Win32::System::Com::CoUninitialize();
-    }
+    // Note: CoUninitialize is intentionally omitted. COM is cleaned
+    // up by ExitProcess when the process terminates. Calling
+    // CoUninitialize here would undo the initialization for the
+    // entire thread, requiring re-initialization on the next call.
 }
 
 #[cfg(test)]

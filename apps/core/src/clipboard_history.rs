@@ -120,13 +120,13 @@ fn resolve_text_for_result(cfg: &Config, result_id: &str) -> Option<String> {
 
 fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
     {
-        let guard = CLIPBOARD_CACHE.lock().unwrap();
+        let guard = CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = guard.as_ref() {
             return cached.clone();
         }
     }
     let entries = load_entries_from_disk(cfg);
-    *CLIPBOARD_CACHE.lock().unwrap() = Some(entries.clone());
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries.clone());
     entries
 }
 
@@ -156,7 +156,7 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
     let blob = dpapi_encrypt(encoded.as_bytes());
     std::fs::write(path, blob)
         .map_err(|e| format!("failed to write clipboard history: {e}"))?;
-    *CLIPBOARD_CACHE.lock().unwrap() = Some(entries.to_vec());
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries.to_vec());
     Ok(())
 }
 
@@ -262,7 +262,7 @@ fn dpapi_try_decrypt(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 pub fn invalidate_entries_cache() {
-    *CLIPBOARD_CACHE.lock().unwrap() = None;
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 fn prune_entries(cfg: &Config, entries: &mut Vec<ClipboardEntry>, now: i64) {

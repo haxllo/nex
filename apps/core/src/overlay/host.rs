@@ -359,7 +359,7 @@ fn serve_asset(
     // Icon route: /icon/{url_encoded_path}
     if let Some(encoded) = path.strip_prefix("/icon/") {
         let file_path = url_decode(encoded);
-        if let Some(png) = icons.png_bytes_cached(&file_path) {
+        if let Some(png) = icons.png_bytes(&file_path) {
             return Response::builder()
                 .header(CONTENT_TYPE, "image/png")
                 .header("Cache-Control", "max-age=3600")
@@ -403,9 +403,7 @@ fn url_encode(path: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
                 out.push(byte as char);
             }
-            // Path separator: normalize backslash to forward slash
-            b'\\' => out.push('/'),
-            // Everything else: percent-encode
+            // Everything else: percent-encode (including backslash)
             _ => {
                 out.push('%');
                 out.push_str(&format!("{byte:02X}"));

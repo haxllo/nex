@@ -31,6 +31,12 @@ fn main() {
         }
         std::process::exit(1);
     }
+
+    // Force-exit to terminate lingering background threads (icon
+    // prefetch, tray updater, warm-release timer). The CRT's implicit
+    // exit after main() returns does not reliably call ExitProcess on
+    // all Windows toolchains, leaving detached threads alive.
+    std::process::exit(0);
 }
 
 /// Reattach to the parent's console (if any) so CLI commands that print

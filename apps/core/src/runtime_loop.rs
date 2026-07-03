@@ -282,7 +282,7 @@ pub(crate) fn run_windows_runtime(
                 ));
                 overlay.set_hotkey_issue_active(false);
                 let _ = tray_hi_tx.send(false);
-                *hotkey_listener.lock().unwrap() = Some(listener);
+                *hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener);
                 None
             }
             Err(error) => {
@@ -429,7 +429,7 @@ pub(crate) fn run_windows_runtime(
     // Drop the hotkey listener (unregisters the global hotkey) and
     // wait for the worker thread to finish its `run_message_pump`.
     log_info("[nex] shutdown: dropping hotkey listener");
-    drop(hotkey_listener.lock().unwrap().take());
+    drop(hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()).take());
     log_info("[nex] shutdown: joining worker thread");
     let _ = worker_join.join();
     log_info("[nex] shutdown: complete, process exiting");
@@ -689,7 +689,7 @@ impl RuntimeWorker {
                         // the next show.
                         while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
-                            &*self.service.write().unwrap(),
+                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                             &mut self.background_index_refresh,
                             &self.runtime_config,
                         );
@@ -824,7 +824,7 @@ impl RuntimeWorker {
                         self.overlay.hide_now();
                         self.overlay_state.on_escape();
                         match execute_action_selection(
-                            &*self.service.write().unwrap(),
+                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                             &self.runtime_config,
                             &self.plugin_registry,
                             &pending.uninstall_action,
@@ -951,7 +951,7 @@ impl RuntimeWorker {
                 }
 
                 match launch_overlay_selection(
-                    &*self.service.write().unwrap(),
+                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                     &self.runtime_config,
                     &self.plugin_registry,
                     &self.current_results,

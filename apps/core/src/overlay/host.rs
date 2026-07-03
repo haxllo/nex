@@ -127,7 +127,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  Subsequent
     // re-shows after warm-release rebuild lazily (same Show path).
-    let mut webview = match build_webview(&window, &state, &proxy, &event_tx, &icon_cache) {
+    let mut webview = match build_webview(&window, &state, &proxy, &event_tx) {
         Ok(wv) => Some(wv),
         Err(e) => {
             crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -210,7 +210,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
                         show_pending = true;
-                        match build_webview(&window, &state, &proxy, &event_tx, &icon_cache) {
+                        match build_webview(&window, &state, &proxy, &event_tx) {
                             Ok(wv) => webview = Some(wv),
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -329,18 +329,16 @@ fn build_webview(
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
-    icons: &Arc<IconCache>,
 ) -> Result<WebView, String> {
     let ipc_state = state.clone();
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
-    let icon_cache = icons.clone();
 
     WebViewBuilder::new()
         .with_transparent(true)
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request, &icon_cache)
+            serve_asset(request)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
@@ -349,25 +347,11 @@ fn build_webview(
         .map_err(|e| format!("{e}"))
 }
 
-/// Serve embedded UI assets and cached icons.
+/// Serve embedded UI assets.
 fn serve_asset(
     request: Request<Vec<u8>>,
-    icons: &IconCache,
 ) -> Response<std::borrow::Cow<'static, [u8]>> {
     let path = request.uri().path().to_string();
-
-    // Icon route: /icon/{url_encoded_path}
-    if let Some(encoded) = path.strip_prefix("/icon/") {
-        let file_path = url_decode(encoded);
-        if let Some(png) = icons.png_bytes(&file_path) {
-            return Response::builder()
-                .header(CONTENT_TYPE, "image/png")
-                .header("Cache-Control", "max-age=3600")
-                .body(std::borrow::Cow::Owned(png.to_vec()))
-                .unwrap_or_else(|_| empty_response());
-        }
-        return not_found();
-    }
 
     let (content_type, body): (&str, std::borrow::Cow<'static, [u8]>) = match path.as_str() {
         "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
@@ -393,46 +377,32 @@ fn empty_response() -> Response<std::borrow::Cow<'static, [u8]>> {
     Response::new(std::borrow::Cow::Borrowed(&b""[..]))
 }
 
-/// URL-encode a file path for use in `nexasset://icon/` URLs.
-/// Encodes characters that are invalid in URLs or have special meaning.
-fn url_encode(path: &str) -> String {
-    let mut out = String::with_capacity(path.len() + 16);
-    for byte in path.bytes() {
-        match byte {
-            // Unreserved characters (safe in URLs)
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            // Everything else: percent-encode (including backslash)
-            _ => {
-                out.push('%');
-                out.push_str(&format!("{byte:02X}"));
-            }
+/// Encode PNG bytes as a `data:image/png;base64,...` URI for inline
+/// embedding in JSON. Used because WebView2 custom protocols don't
+/// support sub-resource loading for `<img>` tags.
+fn base64_data_uri(bytes: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(22 + bytes.len() * 4 / 3 + 4);
+    out.push_str("data:image/png;base64,");
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() >= 2 {
+            out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(CHARS[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
         }
     }
     out
-}
-
-/// URL-decode a percent-encoded string.
-fn url_decode(encoded: &str) -> String {
-    let bytes = encoded.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap_or_default()
 }
 
 /// Parse one IPC message from the page and act on it.
@@ -572,14 +542,14 @@ fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
             let icon = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {
-                // Pre-warm the cache so the icon is available when the
-                // browser requests it via the nexasset:// protocol.
-                // If decode fails, omit the icon (browser shows placeholder).
-                if icons.png_bytes(&r.icon_path).is_some() {
-                    let url = format!("nexasset://localhost/icon/{}", url_encode(&r.icon_path));
-                    serde_json::Value::String(url)
-                } else {
+                let b64 = icons
+                    .png_bytes(&r.icon_path)
+                    .map(|arc| base64_data_uri(arc.as_ref()))
+                    .unwrap_or_default();
+                if b64.is_empty() {
                     serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(b64)
                 }
             };
             serde_json::json!({

@@ -145,6 +145,51 @@ cargo test
 - [Architecture Notes](docs/README.md)
 - [Release Notes](CHANGELOG.md)
 
+## Overlay Architecture
+
+  The Nex overlay is a native Windows popup built on **tao** (window management) and **wry** (WebView2 embedding). All rendering is HTML/CSS/JS — no GDI or Direct2D.
+
+  | Component | File | Purpose |
+  |---|---|---|
+  | Host | `apps/core/src/overlay/host.rs` | Tao event loop, wry WebView, win32 chrome, positioning, focus |
+  | Model | `apps/core/src/overlay/model.rs` | `OverlayEvent`, `OverlayRow`, `ShimState`, `Theme` types |
+  | Icons | `apps/core/src/overlay/icons.rs` | LRU cache decoding app icons to base64 PNG data URIs |
+  | Shim | `apps/core/src/overlay/shim.rs` | Imperative API the runtime uses to push state to the overlay |
+  | Hotkey | `apps/core/src/overlay/hotkey.rs` | `RegisterHotKey` + `GetMessageW` listener on dedicated thread |
+  | Tray | `apps/core/src/overlay/tray.rs` | System tray icon with context menu |
+  | Platform | `apps/core/src/overlay/platform.rs` | Theme detection (Windows registry), instance signaling |
+  | Indexing Progress | `apps/core/src/overlay/indexing_progress.rs` | Secondary tao + wry instance for first-time indexing UI |
+
+  **Key design decisions:**
+
+  - **Fire-and-forget state push.** Rust sends JSON state snapshots to the WebView via `ICoreWebView2::PostWebMessageAsJson`. No synchronous script evaluation on the critical path.
+  - **Warm-release.** The WebView is created lazily on first show and dropped ~5 seconds after hiding, so Chromium processes aren't resident while idle.
+  - **DWM acrylic backdrop.** Rounded corners and acrylic blur via `DwmSetWindowAttribute` / `DwmExtendFrameIntoClientArea`. Falls back to CSS-painted panel on older Windows versions.
+  - **Cursor-monitor positioning.** Window centers horizontally on the monitor under the cursor, anchored in the upper third (Raycast/Spotlight placement).
+  - **Force-foreground focus.** Uses the `AttachThreadInput` trick to steal focus from background on show — winit/tao alone cannot reliably set foreground on Windows.
+  - **Instance signaling.** Registered window messages (`Nex.ExternalShow.v1`, `Nex.ExternalQuit.v1`) allow a second `nex.exe` process to show or quit the running instance.
+  - **Embedded UI assets.** HTML, CSS, and JS are compiled into the binary via `include_str!` and served through a custom `nexasset://` protocol handler.
+
+## CLI Reference
+
+  | Command | Description |
+  |---|---|
+  | `nex` | Normal mode: launch background hotkey runtime (Ctrl+Space) |
+  | `nex --foreground` | Dev mode: keep terminal attached, log to stdout |
+  | `nex --background` | Explicit background mode (default) |
+  | `nex --status` | Check whether Nex is currently running |
+  | `nex --status-json` | Machine-readable JSON status snapshot |
+  | `nex --quit` | Stop the running Nex instance |
+  | `nex --restart` | Restart the running instance |
+  | `nex --diagnostics-bundle` | Dump diagnostics snapshot to a zip archive |
+  | `nex --ensure-config` | Create default config file if missing |
+  | `nex --sync-startup` | Sync the Windows startup entry |
+  | `nex --set-launch-at-startup=true` | Enable auto-start with Windows |
+  | `nex --set-launch-at-startup=false` | Disable auto-start with Windows |
+  | `nex --probe-index` | Probe search index status |
+
+  CLI commands run synchronously (print output, then exit). They never spawn a background GUI process.
+
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+  MIT License - see [LICENSE](LICENSE) for details.

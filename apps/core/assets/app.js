@@ -322,7 +322,7 @@
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
     const now = performance.now();
-    const delay = (now - lastInputTime > 300) ? 0 : 80;
+    const delay = (now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
     clearTimeout(debounce);
     debounce = setTimeout(() => post("query", query), delay);

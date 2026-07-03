@@ -868,7 +868,7 @@ impl CoreService {
     /// threads). Separation is needed during shutdown because the
     /// consumer thread may be blocked on `service.write()`, so we
     /// must NOT hold the RwLock read guard while joining — deadlock.
-    pub fn take_file_watchers(&self) -> Option<crate::file_watcher_consumer::FileWatcherHandle> {
+    pub(crate) fn take_file_watchers(&self) -> Option<crate::file_watcher_consumer::FileWatcherHandle> {
         let mut slot = match self.file_watchers.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),

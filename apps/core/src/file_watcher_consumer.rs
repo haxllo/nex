@@ -100,10 +100,17 @@ impl Drop for FileWatcherHandle {
     fn drop(&mut self) {
         for entry in self.entries.drain(..) {
             // Drop the watcher first; that signals its OS event loop to
-            // exit. Then the consumer thread sees its `recv` unblock and
-            // returns, which lets the JoinHandle finish.
+            // exit and disconnects the channel. The consumer thread will
+            // see its `recv` unblock and return on the next iteration.
+            //
+            // We intentionally do NOT join the consumer here: during
+            // shutdown the consumer may be blocked in a long index
+            // rebuild (rebuild_index_incremental_with_report) or
+            // service.write(), and joining would stall the process
+            // exit. The consumer holds an Arc<RwLock<CoreService>> so
+            // the service stays alive until it finishes; when the
+            // process exits via ExitProcess all threads are terminated.
             drop(entry._watcher);
-            let _ = entry._consumer.join();
         }
     }
 }

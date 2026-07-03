@@ -108,9 +108,12 @@ impl Drop for FileWatcherHandle {
         // holds Arc<RwLock<CoreService>> — all cleaned up by
         // ExitProcess when the process terminates.
         //
-        // Leak the entries (watcher + consumer JoinHandles) intentionally.
-        // The OS reclaims all resources on process exit.
-        self.entries.clear();
+        // Leak the entries intentionally. Using ManuallyDrop to prevent
+        // WatcherEntry::drop from running, which would trigger
+        // DirectoryWatcher::drop and JoinHandle::join.
+        for entry in self.entries.drain(..) {
+            std::mem::forget(entry);
+        }
     }
 }
 

@@ -448,9 +448,14 @@ pub(crate) fn run_windows_runtime(
     // so they don't delay service drop on shutdown.
     if let Ok(guard) = service.read() {
         guard.stop_stale_pruner();
-        #[cfg(target_os = "windows")]
-        guard.stop_file_watchers();
     }
+    // Take the file watcher handle without holding the service read
+    // lock. The consumer thread may be blocked on service.write(),
+    // so we must not hold the RwLock guard while joining — deadlock.
+    #[cfg(target_os = "windows")]
+    let _watcher_handle = service.read().ok().and_then(|g| g.take_file_watchers());
+    // _watcher_handle is dropped here (joins watcher threads) after
+    // the RwLock read guard has been released.
 
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).

@@ -151,6 +151,8 @@ match work_thread.join() {
 **Files to change:**
 - `apps/core/src/overlay/indexing_progress.rs`
 
+**Status:** ✅ **Resolved** — poisoned mutex handled via `unwrap_or_else(|e| e.into_inner())`, panic payload preserved and logged via `log_warn`, `resume_unwind` propagates original payload for diagnostics. Known limitation: generic `T` return type prevents returning a default error value, so `resume_unwind` still crashes — but with proper logging and no cascading panics from poisoned mutex. Added `use crate::runtime::log_warn;` import.
+
 ---
 
 ### 6. `service.write().unwrap()` in Hide/Submit handlers

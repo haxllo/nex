@@ -295,6 +295,12 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      // Lightweight selection-only update (no rows = incremental).
+      if (!Array.isArray(state.rows) && typeof state.selected === "number") {
+        setSelected(state.selected, true);
+        return;
+      }
+
       if (state.theme) document.documentElement.dataset.theme = state.theme;
 
       // Only overwrite the input if Rust changed it out from under us

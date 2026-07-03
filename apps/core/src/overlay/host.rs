@@ -64,6 +64,8 @@ pub(crate) enum UiCommand {
     WebviewReady,
     /// Re-push the current [`ShimState`] snapshot to the page.
     Apply,
+    /// Only the selected index changed — send a lightweight update.
+    SelectChanged(usize),
     /// Show + focus the overlay (builds the WebView if released).
     Show,
     /// Hide the overlay and arm the warm-release timer.
@@ -192,6 +194,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         push_state(&webview, &state, &icon_cache);
+                    }
+                }
+                UiCommand::SelectChanged(idx) => {
+                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        push_selected(&webview, idx);
                     }
                 }
                 UiCommand::Show => {
@@ -452,6 +459,24 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
     let Ok(s) = state.lock() else { return };
     let json = snapshot_json(&s, icons);
     drop(s);
+    let wv2 = wv.webview();
+    let wide: Vec<u16> = json
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = wv2.PostWebMessageAsJson(
+            windows_core::PCWSTR::from_raw(wide.as_ptr()),
+        );
+    }
+}
+
+/// Push only a selection change to the page (lightweight, no full
+/// re-render). The JS side detects the missing `rows` field and
+/// applies the selection incrementally.
+fn push_selected(webview: &Option<WebView>, selected: usize) {
+    let Some(wv) = webview else { return };
+    let json = serde_json::json!({ "selected": selected }).to_string();
     let wv2 = wv.webview();
     let wide: Vec<u16> = json
         .encode_utf16()

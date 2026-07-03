@@ -225,7 +225,7 @@ where
             // shouldn't happen, but handle it gracefully.
             panic!("indexer thread finished without storing result");
         }
-        (Err(_payload), Some(r)) => {
+        (Err(_), Some(r)) => {
             // Thread panicked but somehow stored a result before
             // unwinding — use it rather than crashing.
             log_warn("[nex] indexer thread panicked but produced a result");

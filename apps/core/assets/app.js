@@ -25,6 +25,10 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
 
+  // Persistent icon cache — survives DOM rebuilds across state pushes.
+  // Key: icon path (string), Value: data URI (string).
+  const iconCache = new Map();
+
   function post(t, v) {
     try {
       window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
@@ -91,7 +95,13 @@
         if (r.icon && r.kind !== "action") {
           const img = document.createElement("img");
           img.className = "icon";
-          img.src = r.icon;
+          img.dataset.iconPath = r.icon; // store path for patchIcons()
+          if (iconCache.has(r.icon)) {
+            img.src = iconCache.get(r.icon);
+          }
+          // Don't add placeholder class here — patchIcons() will set
+          // src and the browser handles loading. Only onerror triggers
+          // placeholder.
           img.onerror = () => img.classList.add("placeholder");
           li.appendChild(img);
         } else if (r.kind !== "action") {
@@ -185,6 +195,22 @@
     if (pos === -1) pos = 0;
     else pos = Math.min(sel.length - 1, Math.max(0, pos + delta));
     setSelected(sel[pos], true);
+  }
+
+  // ── icon patching ─────────────────────────────────────────
+  // Called after icon data arrives. Updates <img> elements from cache.
+  // Does NOT skip placeholder elements — on cold cache, render() creates
+  // icons without src, and patchIcons() must update them all.
+  function patchIcons() {
+    for (const li of list.children) {
+      const img = li.querySelector("img.icon");
+      if (!img) continue;
+      const path = img.dataset.iconPath;
+      if (path && iconCache.has(path)) {
+        const dataUri = iconCache.get(path);
+        if (img.src !== dataUri) img.src = dataUri;
+      }
+    }
   }
 
   // ── command mode ───────────────────────────────────────────
@@ -295,6 +321,16 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      // Icon data message: {"icons": {"path": "data:...", ...}}
+      // Sent as a separate PostWebMessageAsJson after the state message.
+      if (state.icons && typeof state.icons === "object" && !state.rows) {
+        for (const [path, dataUri] of Object.entries(state.icons)) {
+          iconCache.set(path, dataUri);
+        }
+        patchIcons();
+        return;
+      }
+
       // Lightweight selection-only update (no rows = incremental).
       if (!Array.isArray(state.rows) && typeof state.selected === "number") {
         setSelected(state.selected, true);

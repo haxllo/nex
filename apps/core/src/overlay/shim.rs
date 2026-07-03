@@ -267,20 +267,18 @@ impl NativeOverlayShell {
         });
         self.post(UiCommand::Apply);
 
-        // Decode first 8 icons synchronously so they appear on this
-        // render. Defer the rest to a background thread — icons beyond
-        // the first visible batch appear on the next search.
-        let cache = self.inner.icon_cache.clone();
-        let fast_count = 8.min(rows.len());
-        if fast_count > 0 {
-            crate::overlay::icons::prefetch_rows(&cache, &rows[..fast_count]);
-        }
-        let slow_rows: Vec<OverlayRow> = rows.iter().skip(fast_count).cloned().collect();
-        if !slow_rows.is_empty() {
+        // All icon decoding happens on a background thread. The dual-
+        // message protocol sends state without icons first (~2KB), then
+        // icons in a second PostWebMessageAsJson after encoding completes.
+        // JS patchIcons() updates <img> elements when icon data arrives.
+        // No synchronous decode needed on the worker thread.
+        if !rows.is_empty() {
+            let cache = self.inner.icon_cache.clone();
+            let rows: Vec<OverlayRow> = rows.to_vec();
             std::thread::Builder::new()
                 .name("nex-icon-prefetch".into())
                 .spawn(move || {
-                    crate::overlay::icons::prefetch_rows(&cache, &slow_rows);
+                    crate::overlay::icons::prefetch_rows(&cache, &rows);
                 })
                 .ok();
         }

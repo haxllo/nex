@@ -19,6 +19,48 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
 const STALE_PRUNE_BATCH_SIZE: usize = 16;
+const PERSONALIZATION_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// In-memory TTL cache for personalization boosts.
+/// Keyed by (normalized_query, search_mode) → boosts map.
+/// Avoids a SQLite query on every keystroke during rapid typing.
+struct PersonalizationCache {
+    boosts: HashMap<(String, String), (HashMap<String, i64>, Instant)>,
+}
+
+impl PersonalizationCache {
+    fn new() -> Self {
+        Self {
+            boosts: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, query_norm: &str, mode_key: &str) -> Option<HashMap<String, i64>> {
+        let now = Instant::now();
+        self.boosts
+            .get(&(query_norm.to_string(), mode_key.to_string()))
+            .and_then(|(boosts, inserted_at)| {
+                if now.duration_since(*inserted_at) < PERSONALIZATION_CACHE_TTL {
+                    Some(boosts.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn insert(&mut self, query_norm: &str, mode_key: &str, boosts: HashMap<String, i64>) {
+        self.boosts.insert(
+            (query_norm.to_string(), mode_key.to_string()),
+            (boosts, Instant::now()),
+        );
+    }
+
+    /// Invalidate all cached entries. Called when the user selects an item
+    /// so the next search for the same query picks up the new selection count.
+    fn invalidate(&mut self) {
+        self.boosts.clear();
+    }
+}
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -83,6 +125,7 @@ pub struct CoreService {
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
+    personalization_cache: Mutex<PersonalizationCache>,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
@@ -156,6 +199,7 @@ impl CoreService {
             progress: Mutex::new(None),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
+            personalization_cache: Mutex::new(PersonalizationCache::new()),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
@@ -468,6 +512,15 @@ impl CoreService {
             item_id,
             now_epoch_secs(),
         )?;
+        // Invalidate the personalization cache so the next search for the
+        // same query picks up the new selection count.
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.invalidate();
+        }
         Ok(())
     }
 
@@ -911,8 +964,22 @@ impl CoreService {
             return Ok(HashMap::new());
         }
 
+        let mode_key = search_mode_key(mode);
+
+        // Check the in-memory TTL cache first to avoid a SQLite query
+        // on every keystroke during rapid typing.
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(cached) = cache.get(&query_norm, mode_key) {
+                return Ok(cached);
+            }
+        }
+
         let rows =
-            index_store::list_query_selections(&*self.db(), &query_norm, search_mode_key(mode), 64)?;
+            index_store::list_query_selections(&*self.db(), &query_norm, mode_key, 64)?;
         let now = now_epoch_secs();
         let mut boosts = HashMap::with_capacity(rows.len());
         for (item_id, selected_count, last_selected_epoch_secs) in rows {
@@ -923,6 +990,17 @@ impl CoreService {
                 boosts.insert(item_id, total);
             }
         }
+
+        // Cache the result (even if empty — avoids repeated queries for
+        // queries with no personalization history).
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.insert(&query_norm, mode_key, boosts.clone());
+        }
+
         Ok(boosts)
     }
 

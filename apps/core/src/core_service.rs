@@ -857,14 +857,23 @@ impl CoreService {
     /// even if watchers were never started.
     #[cfg(target_os = "windows")]
     pub fn stop_file_watchers(&self) {
+        if let Some(handle) = self.take_file_watchers() {
+            drop(handle); // RAII joins threads
+            crate::runtime::log_info("[nex] directory_watcher: stopped");
+        }
+    }
+
+    /// Take the file watcher handle out of the slot without joining.
+    /// The caller owns the handle and drops it (which joins consumer
+    /// threads). Separation is needed during shutdown because the
+    /// consumer thread may be blocked on `service.write()`, so we
+    /// must NOT hold the RwLock read guard while joining — deadlock.
+    pub fn take_file_watchers(&self) -> Option<crate::file_watcher_consumer::FileWatcherHandle> {
         let mut slot = match self.file_watchers.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(handle) = slot.take() {
-            drop(handle); // RAII joins threads
-            crate::runtime::log_info("[nex] directory_watcher: stopped");
-        }
+        slot.take()
     }
 
     pub fn handle_command(&self, request: CoreRequest) -> Result<CoreResponse, ServiceError> {

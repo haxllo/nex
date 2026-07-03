@@ -402,9 +402,32 @@ pub(crate) fn run_windows_runtime(
         last_memory_log: Instant::now(),
     };
 
+    let worker_overlay_for_panic = overlay.clone();
     let worker_join = std::thread::Builder::new()
         .name("nex-runtime".to_string())
-        .spawn(move || worker.run())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                worker.run()
+            }));
+            match result {
+                Ok(()) => {
+                    log_info("[nex] runtime worker exited cleanly");
+                }
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "(unknown panic payload)".to_string()
+                    };
+                    log_warn(&format!("[nex] runtime worker PANICKED: {msg}"));
+                    // Signal the overlay to stop so the host event loop
+                    // exits instead of hanging forever with no events.
+                    worker_overlay_for_panic.stop();
+                }
+            }
+        })
         .map_err(|e| RuntimeError::Overlay(format!("failed to spawn runtime thread: {e}")))?;
 
     // Run the WebView host event loop on the main thread (blocking).

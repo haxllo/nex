@@ -287,10 +287,14 @@ impl NativeOverlayShell {
     }
 
     pub fn set_selected_index(&self, selected_index: usize) {
-        self.with_state(|s| {
-            s.selected = selected_index.min(s.rows.len().saturating_sub(1));
-        });
-        self.post(UiCommand::Apply);
+        let clamped = if let Ok(mut s) = self.inner.state.lock() {
+            let idx = selected_index.min(s.rows.len().saturating_sub(1));
+            s.selected = idx;
+            idx
+        } else {
+            return;
+        };
+        self.post(UiCommand::SelectChanged(clamped));
     }
 
     pub fn selected_index(&self) -> Option<usize> {

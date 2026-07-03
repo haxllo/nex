@@ -230,6 +230,7 @@
 
   // ── height measurement (resize native window to hug content) ──
   let lastH = 0;
+  let initialRenderTimer = null;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -241,6 +242,10 @@
         }
       });
     });
+    // Remove initial-render class after the 150ms row-in animation
+    // completes so subsequent renders don't re-trigger the animation.
+    clearTimeout(initialRenderTimer);
+    initialRenderTimer = setTimeout(() => bodyEl.classList.remove("initial-render"), 160);
   }
 
   // ── keyboard ─────────────────────────────────────────────
@@ -364,6 +369,10 @@
 
       statusEl.dataset.text = state.status || "";
 
+      // Add initial-render class so CSS applies the row-in animation
+      // only on the first paint after a state push. Removed after the
+      // 150ms animation completes so subsequent renders are instant.
+      bodyEl.classList.add("initial-render");
       render();
     },
 

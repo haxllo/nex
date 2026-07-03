@@ -243,6 +243,8 @@ CSS `backdrop-filter` forces the compositor to read back pixels behind the eleme
 **Files to change:**
 - `apps/core/assets/style.css`
 
+**Status:** ✅ **Resolved** — Removed `backdrop-filter: saturate(140%)` from `#panel`. DWM acrylic already provides the frosted-glass effect; the CSS backdrop-filter was forcing a redundant double blur/saturation pass on every frame.
+
 ---
 
 ### 12. `@keyframes row-in` fires on every render
@@ -268,6 +270,8 @@ Every row gets a fade-in + slide-up animation on every `render()` call. With 20 
 **Files to change:**
 - `apps/core/assets/style.css`
 - `apps/core/assets/app.js` — toggle class on container
+
+**Status:** ✅ **Resolved** — Moved animation from `.row` to `#body.initial-render .row`. JS adds `initial-render` class before `render()` in `apply()`, removes it after 160ms timeout in `measure()`. Timer properly cleared on subsequent renders to prevent stale accumulation.
 
 ---
 

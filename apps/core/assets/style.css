@@ -167,6 +167,8 @@ body {
   border-radius: var(--row-radius);
   cursor: pointer;
   position: relative;
+}
+#body.initial-render .row {
   animation: row-in 150ms ease both;
 }
 

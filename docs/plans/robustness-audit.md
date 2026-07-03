@@ -213,6 +213,8 @@ The only place the search path uses a **blocking `read()`** instead of `try_read
 **Files to change:**
 - `apps/core/src/core_service.rs` — line 333
 
+**Status:** ✅ **Resolved** — All three `cached_items.read()` calls in `search_with_filter_internal` replaced with `try_read()`: (1) Tantivy augmentation path — skips augmentation, returns Tantivy-only results; (2) Fallback Path 2 (no index results) — returns empty results; (3) App cache path — returns empty results. All use the same non-blocking pattern already established in `start_stale_pruner`.
+
 ---
 
 ### 10. Tantivy `incremental_sync_items` holds writer mutex during full scan

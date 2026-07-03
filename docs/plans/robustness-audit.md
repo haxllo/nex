@@ -422,7 +422,7 @@ COM apartment initialized every call via `CoInitializeEx(APARTMENTTHREADED)`. If
 | 1 | Add `UiCommand::SelectChanged` for arrow keys | `shim.rs`, `host.rs`, `app.js` | Eliminates ~20ms lag per arrow key | ✅ Done (commit `06a537f`) |
 | 2 | Dual PostWebMessageAsJson icon delivery | `host.rs`, `app.js` | Eliminates lock contention during icon encoding | ✅ Done |
 | 3 | Replace `unwrap()` with `unwrap_or_else` | `runtime_loop.rs`, `tray.rs`, `clipboard_history.rs` | Prevents cascading panics | ✅ **Done** |
-| 4 | Wrap runtime worker in `catch_unwind` | `runtime_loop.rs` | Prevents silent UI freeze | Pending |
+| 4 | Wrap runtime worker in `catch_unwind` | `runtime_loop.rs` | Prevents silent UI freeze | ✅ **Done** |
 | 5 | Reduce JS debounce to 40ms | `app.js` | ~40ms faster first keystroke | Pending |
 | 6 | Clone state before serialization | `host.rs:push_state` | Reduces lock contention | ✅ Done (part of #2) |
 

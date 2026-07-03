@@ -358,6 +358,8 @@ Hits the SQLite database on every query to fetch previously selected items. Adds
 **Files to change:**
 - `apps/core/src/core_service.rs`
 
+**Status:** ✅ **Resolved** — Added `PersonalizationCache` struct with 5-second TTL to `CoreService`. Cache is keyed by `(normalized_query, mode_key)` → `(HashMap<String, i64>, Instant)`. `query_personalization_boosts` checks the cache before hitting SQLite. `record_query_selection_hint` invalidates the entire cache after recording a selection so the next search picks up the new count.
+
 ---
 
 ### 18. Stale pruner has no shutdown signal

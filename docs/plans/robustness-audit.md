@@ -314,6 +314,8 @@ Called from `render()` on every state push. Triggers `UiCommand::Painted` → `f
 **Files to change:**
 - `apps/core/assets/app.js`
 
+**Status:** ✅ **Resolved** — Rust side now includes `"showPending": show_pending` in state JSON. JS sets `needsPainted` flag only when `state.showPending` is true. `measure()` checks and clears the flag before sending `post("painted")`. Eliminates unnecessary IPC round-trips during rapid typing.
+
 ---
 
 ## P2 — Medium Issues

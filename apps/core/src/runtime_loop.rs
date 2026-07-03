@@ -81,7 +81,7 @@ pub(crate) fn run_windows_runtime(
     let service = Arc::new(RwLock::new(service));
 
     let initial_cache_empty = {
-        let guard = service.read().unwrap();
+        let guard = service.read().unwrap_or_else(|e| e.into_inner());
         guard.cached_items_len() == 0
     };
 
@@ -98,10 +98,10 @@ pub(crate) fn run_windows_runtime(
             log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
             let service_arc = service.clone();
             let result = run_with_progress_window(move |pct| {
-                let svc = service_arc.write().unwrap();
-                *svc.progress.lock().unwrap() = Some(pct);
+                let svc = service_arc.write().unwrap_or_else(|e| e.into_inner());
+                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(pct);
                 let report = svc.rebuild_index_incremental_with_report();
-                *svc.progress.lock().unwrap() = None;
+                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 report
             });
             match result {
@@ -162,7 +162,7 @@ pub(crate) fn run_windows_runtime(
         log_info(&format!(
             "[nex] startup cached_items={} (async indexing scheduled)",
             {
-                let guard = service.read().unwrap();
+                let guard = service.read().unwrap_or_else(|e| e.into_inner());
                 guard.cached_items_len()
             }
         ));
@@ -784,9 +784,8 @@ impl RuntimeWorker {
                     self.pending_uninstall_confirmation = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
-                        self.search_session.clear();
-                        self.search_worker.clear_session();
-                        while self.search_worker.try_recv().is_some() {}
+                    self.search_session.clear();
+                    self.search_worker.clear_session();
                     while self.search_worker.try_recv().is_some() {}
                 }
             }

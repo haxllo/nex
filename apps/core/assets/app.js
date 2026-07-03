@@ -304,7 +304,7 @@
 
   // ── query input (adaptive debounce) ──────────────────────
   // First char of each typing burst fires immediately (0ms).
-  // Subsequent rapid chars coalesce at 80ms so SearchWorker
+  // Subsequent rapid chars coalesce at 40ms so SearchWorker
   // drains stale requests from its mpsc channel.
   let debounce = null;
   let lastInputTime = 0;

@@ -346,11 +346,12 @@ pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
     #[cfg(target_os = "windows")]
     unsafe {
         // Initialize COM for this thread so ExtractIconExW and shell
-        // IDataObject work. Match each CoInitializeEx with CoUninitialize
-        // so the apartment is torn down when the thread exits.
+        // IDataObject work. Use MTA (COINIT_MULTITHREADED) instead of
+        // COINIT_APARTMENTTHREADED so ExitProcess can terminate this
+        // thread without deadlocking on COM apartment teardown.
         let _ = windows_sys::Win32::System::Com::CoInitializeEx(
             std::ptr::null(),
-            2, // COINIT_APARTMENTTHREADED
+            0, // COINIT_MULTITHREADED
         );
     }
     for row in rows {

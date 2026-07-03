@@ -1,6 +1,7 @@
 # Taste (Continuously Learned by [CommandCode][cmd])
 
 [cmd]: https://commandcode.ai/
+
 
 
 # codebase
@@ -20,5 +21,8 @@
 - Use plain text download links (no emoji icons) in the release template Binary section. Confidence: 0.70
 
 # testing
-- Do not run `cargo test` — tests are broken after major migrations and will not pass. Confidence: 0.85
+- Do not run `cargo test` — tests are broken after major migrations and will not pass. Confidence: 0.88
+
+# workflow
+- For major changes: plan first, then investigate each part, fix the plan if issues found, iterate until the plan is robust, then implement. Confidence: 0.80
 

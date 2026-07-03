@@ -124,7 +124,7 @@ pub(crate) fn run_windows_runtime(
                             provider.elapsed_ms
                         ));
                     }
-                    // Sync Tantivy + FTS5 immediately so the first
+                    // Sync Tantivy immediately so the first
                     // keystroke never hits the CPU-bound cached_items
                     // scan.  The progress window just closed and the
                     // overlay + hotkey haven't been created yet, so

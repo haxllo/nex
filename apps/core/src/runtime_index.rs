@@ -160,11 +160,11 @@ pub(crate) fn maybe_apply_background_index_refresh(
                     }
                     if let Err(e) = service.sync_indexes_from_cache() {
                         log_warn(&format!(
-                            "[nex] background indexing Tantivy/FTS5 sync failed: {e}"
+                        "[nex] background indexing Tantivy sync failed: {e}"
                         ));
                     } else {
                         state.indexes_synced = true;
-                        log_info("[nex] Tantivy/FTS5 search indexes synced from cache");
+                    log_info("[nex] Tantivy search index synced from cache");
                     }
                 }
                 Err(error) => {

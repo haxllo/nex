@@ -312,7 +312,7 @@ impl CoreService {
             ));
         }
 
-        // Path 1: indexed search (Tantivy/FTS5) returns pre-ranked candidates
+        // Path 1: indexed search (Tantivy) returns pre-ranked candidates
         // directly. The index is only populated when background indexing has
         // finished successfully. When the index is empty (e.g., Everything
         // service was down during indexing) we fall back to scanning the
@@ -699,7 +699,7 @@ impl CoreService {
     }
 
     /// Delete an item by id from the SQLite store, the in-memory caches,
-    /// and the Tantivy/FTS5 search indexes. Idempotent: deleting a
+    /// and the Tantivy search index. Idempotent: deleting a
     /// missing id is not an error.
     pub fn delete_item_by_id(&self, id: &str) -> Result<(), ServiceError> {
         index_store::delete_item(&*self.db(), id)?;
@@ -1238,7 +1238,7 @@ impl CoreService {
             }
         }
 
-        // Remove stale entries from Tantivy and FTS5 backends so
+        // Remove stale entries from Tantivy backend so
         // deleted-on-disk files stop appearing in search results.
         for stale_id in &stale_ids {
             self.remove_item_from_backends(stale_id);
@@ -1415,7 +1415,7 @@ fn effective_file_folder_cache_cap(cfg: &Config) -> usize {
     }
 
     // SearchItem is roughly 200–500 bytes on disk; size the seed cap to fit
-    // ~25% of the active memory target (leaving headroom for Tantivy/FTS5,
+    // ~25% of the active memory target (leaving headroom for Tantivy,
     // the icon cache, and rank buffers). The previous formula used 8 items
     // per MB, which silently capped a 72MB target to 576 items even when
     // the user explicitly raised index_max_items_per_query_seed to 5000+.

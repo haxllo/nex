@@ -122,6 +122,7 @@ pub struct CoreService {
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
+    stale_pruner_stop: Arc<AtomicBool>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
@@ -196,6 +197,7 @@ impl CoreService {
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
+            stale_pruner_stop: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(None),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
@@ -780,18 +782,34 @@ impl CoreService {
             return;
         }
 
+        // Clear any previous stop signal (idempotent restart).
+        self.stale_pruner_stop.store(false, Ordering::Release);
+        let stop = Arc::clone(&self.stale_pruner_stop);
         let svc = Arc::clone(service_arc);
         if let Err(error) = std::thread::Builder::new()
             .name("nex-stale-pruner".into())
-            .spawn(move || loop {
-                std::thread::sleep(STALE_PRUNE_INTERVAL);
-                if let Ok(guard) = svc.try_write() {
-                    let _ = guard.prune_stale_items_if_due();
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(STALE_PRUNE_INTERVAL);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Ok(guard) = svc.try_write() {
+                        let _ = guard.prune_stale_items_if_due();
+                    }
                 }
             })
         {
             self.stale_pruner_started.store(false, Ordering::Release);
             crate::logging::warn(&format!("[nex] stale pruner start failed: {error}"));
+        }
+    }
+
+    /// Signal the stale pruner thread to stop. The thread will exit at
+    /// the next sleep boundary (up to STALE_PRUNE_INTERVAL = 15 s).
+    pub fn stop_stale_pruner(&self) {
+        if self.stale_pruner_started.swap(false, Ordering::AcqRel) {
+            self.stale_pruner_stop.store(true, Ordering::Release);
         }
     }
 

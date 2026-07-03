@@ -277,7 +277,7 @@ Every row gets a fade-in + slide-up animation on every `render()` call. With 20 
 
 ### 13. JS debounce of 80ms is redundant
 
-**Location:** `apps/core/assets/app.js:272`
+**Location:** `apps/core/assets/app.js:325`
 
 ```javascript
 const delay = (now - lastInputTime > 300) ? 0 : 80;
@@ -285,10 +285,12 @@ const delay = (now - lastInputTime > 300) ? 0 : 80;
 
 The search worker already coalesces stale requests (`while let Ok(next) = req_rx.try_recv()`). The 80ms debounce adds unnecessary latency for moderate typists.
 
-**Fix:** Reduce to 40-50ms, or remove the debounce entirely and rely on search worker coalescing.
+**Fix:** Reduce to 40ms, or remove the debounce entirely and rely on search worker coalescing.
 
 **Files to change:**
 - `apps/core/assets/app.js`
+
+**Status:** ✅ **Resolved** — Reduced debounce from 80ms to 40ms. Search worker already coalesces stale requests, so the debounce only needs to prevent redundant keystroke processing for moderate typists. 40ms is sufficient for coalescing while feeling more responsive.
 
 ---
 

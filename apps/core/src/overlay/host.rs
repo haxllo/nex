@@ -479,17 +479,10 @@ fn handle_ipc(
     }
 }
 
-/// Push the current state snapshot to the page.
-/// Uses `ICoreWebView2::PostWebMessageAsJson` (fire-and-forget) so the
-/// host event loop is never blocked by a synchronous script evaluation.
-/// The WebView2 runtime parses the JSON and delivers the object directly
-/// to `e.data` — the JS side avoids `JSON.parse`.
-fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>) {
-    let Some(wv) = webview else { return };
-    let Ok(s) = state.lock() else { return };
-    let json = snapshot_json(&s, icons);
-    drop(s);
-    let wv2 = wv.webview();
+/// Fire-and-forget: send a JSON string to the WebView page via
+/// `ICoreWebView2::PostWebMessageAsJson`.
+fn post_json(webview: &WebView, json: &str) {
+    let wv2 = webview.webview();
     let wide: Vec<u16> = json
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -498,6 +491,40 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
         let _ = wv2.PostWebMessageAsJson(
             windows_core::PCWSTR::from_raw(wide.as_ptr()),
         );
+    }
+}
+
+/// Push the current state snapshot to the page.
+///
+/// Uses a two-message protocol:
+/// 1. Lightweight state JSON (~2KB) — rows, theme, query, selected.
+///    Icon fields contain only the file path (cache key for JS).
+/// 2. Icon data JSON (~134KB for 20 rows) — `{"icons": {path: dataUri}}`.
+///
+/// Both use `PostWebMessageAsJson` (fire-and-forget). The state lock is
+/// released before any icon encoding occurs — only the ShimState clone
+/// runs under the lock (~microseconds).
+fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>) {
+    let Some(wv) = webview else { return };
+
+    // Phase 1: Clone state under lock (microseconds).
+    let snapshot = {
+        let Ok(s) = state.lock() else { return };
+        s.clone()
+    };
+
+    // Phase 2: Build lightweight JSON without icons (~2KB).
+    let state_json = snapshot_state_json(&snapshot);
+
+    // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
+    // Note: png_bytes() may block on first decode per icon (cold cache),
+    // but the state lock is not held during this work.
+    let icons_json = snapshot_icons_json(&snapshot, icons);
+
+    // Phase 4: Send both messages back-to-back (same frame).
+    post_json(&wv, &state_json);
+    if !icons_json.is_empty() {
+        post_json(&wv, &icons_json);
     }
 }
 
@@ -507,16 +534,7 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
 fn push_selected(webview: &Option<WebView>, selected: usize) {
     let Some(wv) = webview else { return };
     let json = serde_json::json!({ "selected": selected }).to_string();
-    let wv2 = wv.webview();
-    let wide: Vec<u16> = json
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        let _ = wv2.PostWebMessageAsJson(
-            windows_core::PCWSTR::from_raw(wide.as_ptr()),
-        );
-    }
+    post_json(&wv, &json);
 }
 
 fn focus_input(webview: &Option<WebView>) {
@@ -525,8 +543,9 @@ fn focus_input(webview: &Option<WebView>) {
     }
 }
 
-/// Serialize the overlay state into the JSON the page consumes.
-fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
+/// Serialize the overlay state into lightweight JSON without icon data.
+/// Icon fields contain only the file path (used as a JS cache key).
+fn snapshot_state_json(s: &ShimState) -> String {
     let rows: Vec<serde_json::Value> = s
         .rows
         .iter()
@@ -541,23 +560,10 @@ fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
                 r.role,
                 OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
             );
-            // Icons are inlined as base64 data URIs because WebView2
-            // custom protocols don't support <img> sub-resource loading.
-            // Each icon adds ~6.7KB to the JSON payload. See
-            // docs/plans/robustness-audit.md "Investigation Log" for
-            // the full analysis and future alternatives.
             let icon = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {
-                let b64 = icons
-                    .png_bytes(&r.icon_path)
-                    .map(|arc| base64_data_uri(arc.as_ref()))
-                    .unwrap_or_default();
-                if b64.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(b64)
-                }
+                serde_json::Value::String(r.icon_path.clone())
             };
             serde_json::json!({
                 "role": role,
@@ -587,6 +593,37 @@ fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
         "theme": theme,
     })
     .to_string()
+}
+
+/// Serialize icon data as `{"icons": {path: dataUri, ...}}`.
+/// Deduplicates by path to avoid encoding the same icon twice when
+/// multiple rows share a path (e.g. two shortcuts to the same .exe).
+/// Returns an empty string if no icons.
+fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let icon_map: serde_json::Map<String, serde_json::Value> = s
+        .rows
+        .iter()
+        .filter(|r| !r.icon_path.is_empty())
+        .filter(|r| seen.insert(r.icon_path.clone()))
+        .filter_map(|r| {
+            let b64 = icons
+                .png_bytes(&r.icon_path)
+                .map(|arc| base64_data_uri(arc.as_ref()))
+                .unwrap_or_default();
+            if b64.is_empty() {
+                None
+            } else {
+                Some((r.icon_path.clone(), serde_json::Value::String(b64)))
+            }
+        })
+        .collect();
+
+    if icon_map.is_empty() {
+        return String::new();
+    }
+
+    serde_json::json!({ "icons": icon_map }).to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────

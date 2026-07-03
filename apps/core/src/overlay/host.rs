@@ -379,7 +379,9 @@ fn empty_response() -> Response<std::borrow::Cow<'static, [u8]>> {
 
 /// Encode PNG bytes as a `data:image/png;base64,...` URI for inline
 /// embedding in JSON. Used because WebView2 custom protocols don't
-/// support sub-resource loading for `<img>` tags.
+/// support sub-resource loading for `<img>` tags — the browser
+/// silently ignores `nexasset://localhost/icon/...` URLs. See
+/// `docs/plans/robustness-audit.md` "Investigation Log" for details.
 fn base64_data_uri(bytes: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(22 + bytes.len() * 4 / 3 + 4);
@@ -539,6 +541,11 @@ fn snapshot_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
                 r.role,
                 OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
             );
+            // Icons are inlined as base64 data URIs because WebView2
+            // custom protocols don't support <img> sub-resource loading.
+            // Each icon adds ~6.7KB to the JSON payload. See
+            // docs/plans/robustness-audit.md "Investigation Log" for
+            // the full analysis and future alternatives.
             let icon = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {

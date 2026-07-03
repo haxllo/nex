@@ -98,12 +98,21 @@ impl FileWatcherHandle {
 
 impl Drop for FileWatcherHandle {
     fn drop(&mut self) {
+        // Intentionally a no-op: do NOT drop the watcher or join the
+        // consumer during shutdown. DirectoryWatcher::drop joins its
+        // internal thread which may be blocked on ReadDirectoryChangesW,
+        // and the consumer may be blocked in a long index rebuild or
+        // service.write(). Either join would stall the process exit,
+        // preventing std::process::exit(0) in main() from being
+        // reached. The watcher holds Win32 handles and the consumer
+        // holds Arc<RwLock<CoreService>> — all cleaned up by
+        // ExitProcess when the process terminates.
+        //
+        // Leak the entries intentionally. Using ManuallyDrop to prevent
+        // WatcherEntry::drop from running, which would trigger
+        // DirectoryWatcher::drop and JoinHandle::join.
         for entry in self.entries.drain(..) {
-            // Drop the watcher first; that signals its OS event loop to
-            // exit. Then the consumer thread sees its `recv` unblock and
-            // returns, which lets the JoinHandle finish.
-            drop(entry._watcher);
-            let _ = entry._consumer.join();
+            std::mem::forget(entry);
         }
     }
 }

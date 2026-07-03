@@ -47,6 +47,10 @@ struct Inner {
     /// immediately instead of waiting for the next recv_timeout tick.
     stop_tx: Sender<()>,
     stop_rx: Receiver<()>,
+    /// Shared work slot for the single persistent icon-prefetch thread.
+    /// `set_results()` replaces the contents; the background thread
+    /// always processes the latest batch — old work is discarded.
+    prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>>,
 }
 
 impl NativeOverlayShell {
@@ -56,14 +60,47 @@ impl NativeOverlayShell {
     /// the runtime callback.
     pub fn create() -> Result<Self, String> {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+        let prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>> = Arc::new(Mutex::new(None));
+        let icon_cache = Arc::new(IconCache::default());
+        let icon_cache_for_thread = icon_cache.clone();
+        let prefetch_work_for_thread = prefetch_work.clone();
+
+        // Spawn a single persistent icon-prefetch thread. It loops,
+        // draining the shared work slot and processing the latest batch.
+        // When set_results() replaces the slot, the old batch is discarded
+        // — no thread accumulation under rapid typing.
+        std::thread::Builder::new()
+            .name("nex-icon-prefetch".into())
+            .spawn(move || loop {
+                // Sleep until work arrives. Check every 50ms so we
+                // don't miss a slot replacement during rapid typing.
+                let rows: Vec<OverlayRow> = {
+                    let mut slot = match prefetch_work_for_thread.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    match slot.take() {
+                        Some(r) if !r.is_empty() => r,
+                        _ => {
+                            drop(slot);
+                            std::thread::sleep(Duration::from_millis(50));
+                            continue;
+                        }
+                    }
+                };
+                crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, &rows);
+            })
+            .ok();
+
         Ok(Self {
             inner: Arc::new(Inner {
                 state: Arc::new(Mutex::new(ShimState::default())),
-                icon_cache: Arc::new(IconCache::default()),
+                icon_cache,
                 is_running: Arc::new(AtomicBool::new(false)),
                 proxy: Arc::new(Mutex::new(None)),
                 stop_tx,
                 stop_rx,
+                prefetch_work,
             }),
         })
     }
@@ -267,30 +304,26 @@ impl NativeOverlayShell {
         });
         self.post(UiCommand::Apply);
 
-        // Decode first 8 icons synchronously so they appear on this
-        // render. Defer the rest to a background thread — icons beyond
-        // the first visible batch appear on the next search.
-        let cache = self.inner.icon_cache.clone();
-        let fast_count = 8.min(rows.len());
-        if fast_count > 0 {
-            crate::overlay::icons::prefetch_rows(&cache, &rows[..fast_count]);
-        }
-        let slow_rows: Vec<OverlayRow> = rows.iter().skip(fast_count).cloned().collect();
-        if !slow_rows.is_empty() {
-            std::thread::Builder::new()
-                .name("nex-icon-prefetch".into())
-                .spawn(move || {
-                    crate::overlay::icons::prefetch_rows(&cache, &slow_rows);
-                })
-                .ok();
+        // Queue icon decoding on the persistent background thread.
+        // Replacing the slot discards any pending batch — the thread
+        // always processes the latest results, preventing thread
+        // accumulation under rapid typing.
+        if !rows.is_empty() {
+            if let Ok(mut slot) = self.inner.prefetch_work.lock() {
+                *slot = Some(rows.to_vec());
+            }
         }
     }
 
     pub fn set_selected_index(&self, selected_index: usize) {
-        self.with_state(|s| {
-            s.selected = selected_index.min(s.rows.len().saturating_sub(1));
-        });
-        self.post(UiCommand::Apply);
+        let clamped = if let Ok(mut s) = self.inner.state.lock() {
+            let idx = selected_index.min(s.rows.len().saturating_sub(1));
+            s.selected = idx;
+            idx
+        } else {
+            return;
+        };
+        self.post(UiCommand::SelectChanged(clamped));
     }
 
     pub fn selected_index(&self) -> Option<usize> {

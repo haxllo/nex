@@ -63,7 +63,6 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   clip-path: inset(0 round var(--radius));
-  backdrop-filter: saturate(140%);
 }
 
 /* ── search row ───────────────────────────────────────────── */
@@ -168,6 +167,8 @@ body {
   border-radius: var(--row-radius);
   cursor: pointer;
   position: relative;
+}
+#body.initial-render .row {
   animation: row-in 150ms ease both;
 }
 

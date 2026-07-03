@@ -19,6 +19,48 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
 const STALE_PRUNE_BATCH_SIZE: usize = 16;
+const PERSONALIZATION_CACHE_TTL: Duration = Duration::from_secs(5);
+
+/// In-memory TTL cache for personalization boosts.
+/// Keyed by (normalized_query, search_mode) → boosts map.
+/// Avoids a SQLite query on every keystroke during rapid typing.
+struct PersonalizationCache {
+    boosts: HashMap<(String, String), (HashMap<String, i64>, Instant)>,
+}
+
+impl PersonalizationCache {
+    fn new() -> Self {
+        Self {
+            boosts: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, query_norm: &str, mode_key: &str) -> Option<HashMap<String, i64>> {
+        let now = Instant::now();
+        self.boosts
+            .get(&(query_norm.to_string(), mode_key.to_string()))
+            .and_then(|(boosts, inserted_at)| {
+                if now.duration_since(*inserted_at) < PERSONALIZATION_CACHE_TTL {
+                    Some(boosts.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn insert(&mut self, query_norm: &str, mode_key: &str, boosts: HashMap<String, i64>) {
+        self.boosts.insert(
+            (query_norm.to_string(), mode_key.to_string()),
+            (boosts, Instant::now()),
+        );
+    }
+
+    /// Invalidate all cached entries. Called when the user selects an item
+    /// so the next search for the same query picks up the new selection count.
+    fn invalidate(&mut self) {
+        self.boosts.clear();
+    }
+}
 
 #[derive(Debug)]
 pub enum ServiceError {
@@ -80,9 +122,11 @@ pub struct CoreService {
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
+    stale_pruner_stop: Arc<AtomicBool>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
+    personalization_cache: Mutex<PersonalizationCache>,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
@@ -153,9 +197,11 @@ impl CoreService {
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
+            stale_pruner_stop: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(None),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
+            personalization_cache: Mutex::new(PersonalizationCache::new()),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
@@ -298,9 +344,12 @@ impl CoreService {
         };
 
         if should_use_app_cache(filter) {
-            let guard = match self.cached_app_items.read() {
+            // Uses try_read to avoid blocking when refresh_cache_from_store
+            // holds the write lock — return empty results rather than stalling
+            // the search worker thread.
+            let guard = match self.cached_app_items.try_read() {
                 Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
+                Err(_) => return Ok(Vec::new()),
             };
             let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
             return Ok(crate::search::search_with_filter_with_boosts(
@@ -333,7 +382,10 @@ impl CoreService {
                 );
                 if ranked.len() < effective_limit {
                     // Augment with in-memory cache items the index missed.
-                    if let Ok(guard) = self.cached_items.read() {
+                    // Uses try_read to avoid blocking when refresh_cache_from_store
+                    // or the pruner holds the write lock — skip augmentation rather
+                    // than stalling the search worker thread.
+                    if let Ok(guard) = self.cached_items.try_read() {
                         let cache_ranked = crate::search::search_with_filter_with_boosts(
                             &guard,
                             query,
@@ -357,10 +409,13 @@ impl CoreService {
 
         // Path 2: no index results — rank the in-memory cache directly,
         // holding the read lock only while we score and select.
+        // Uses try_read to avoid blocking when refresh_cache_from_store
+        // or the pruner holds the write lock — return empty results rather
+        // than stalling the search worker thread.
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
-        let guard = match self.cached_items.read() {
+        let guard = match self.cached_items.try_read() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(_) => return Ok(Vec::new()),
         };
         Ok(crate::search::search_with_filter_with_boosts(
             &guard,
@@ -459,6 +514,15 @@ impl CoreService {
             item_id,
             now_epoch_secs(),
         )?;
+        // Invalidate the personalization cache so the next search for the
+        // same query picks up the new selection count.
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.invalidate();
+        }
         Ok(())
     }
 
@@ -718,18 +782,34 @@ impl CoreService {
             return;
         }
 
+        // Clear any previous stop signal (idempotent restart).
+        self.stale_pruner_stop.store(false, Ordering::Release);
+        let stop = Arc::clone(&self.stale_pruner_stop);
         let svc = Arc::clone(service_arc);
         if let Err(error) = std::thread::Builder::new()
             .name("nex-stale-pruner".into())
-            .spawn(move || loop {
-                std::thread::sleep(STALE_PRUNE_INTERVAL);
-                if let Ok(guard) = svc.try_write() {
-                    let _ = guard.prune_stale_items_if_due();
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(STALE_PRUNE_INTERVAL);
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Ok(guard) = svc.try_write() {
+                        let _ = guard.prune_stale_items_if_due();
+                    }
                 }
             })
         {
             self.stale_pruner_started.store(false, Ordering::Release);
             crate::logging::warn(&format!("[nex] stale pruner start failed: {error}"));
+        }
+    }
+
+    /// Signal the stale pruner thread to stop. The thread will exit at
+    /// the next sleep boundary (up to STALE_PRUNE_INTERVAL = 15 s).
+    pub fn stop_stale_pruner(&self) {
+        if self.stale_pruner_started.swap(false, Ordering::AcqRel) {
+            self.stale_pruner_stop.store(true, Ordering::Release);
         }
     }
 
@@ -777,14 +857,23 @@ impl CoreService {
     /// even if watchers were never started.
     #[cfg(target_os = "windows")]
     pub fn stop_file_watchers(&self) {
+        if let Some(handle) = self.take_file_watchers() {
+            drop(handle); // RAII joins threads
+            crate::runtime::log_info("[nex] directory_watcher: stopped");
+        }
+    }
+
+    /// Take the file watcher handle out of the slot without joining.
+    /// The caller owns the handle and drops it (which joins consumer
+    /// threads). Separation is needed during shutdown because the
+    /// consumer thread may be blocked on `service.write()`, so we
+    /// must NOT hold the RwLock read guard while joining — deadlock.
+    pub(crate) fn take_file_watchers(&self) -> Option<crate::file_watcher_consumer::FileWatcherHandle> {
         let mut slot = match self.file_watchers.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(handle) = slot.take() {
-            drop(handle); // RAII joins threads
-            crate::runtime::log_info("[nex] directory_watcher: stopped");
-        }
+        slot.take()
     }
 
     pub fn handle_command(&self, request: CoreRequest) -> Result<CoreResponse, ServiceError> {
@@ -902,8 +991,22 @@ impl CoreService {
             return Ok(HashMap::new());
         }
 
+        let mode_key = search_mode_key(mode);
+
+        // Check the in-memory TTL cache first to avoid a SQLite query
+        // on every keystroke during rapid typing.
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(cached) = cache.get(&query_norm, mode_key) {
+                return Ok(cached);
+            }
+        }
+
         let rows =
-            index_store::list_query_selections(&*self.db(), &query_norm, search_mode_key(mode), 64)?;
+            index_store::list_query_selections(&*self.db(), &query_norm, mode_key, 64)?;
         let now = now_epoch_secs();
         let mut boosts = HashMap::with_capacity(rows.len());
         for (item_id, selected_count, last_selected_epoch_secs) in rows {
@@ -914,6 +1017,17 @@ impl CoreService {
                 boosts.insert(item_id, total);
             }
         }
+
+        // Cache the result (even if empty — avoids repeated queries for
+        // queries with no personalization history).
+        {
+            let mut cache = match self.personalization_cache.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.insert(&query_norm, mode_key, boosts.clone());
+        }
+
         Ok(boosts)
     }
 

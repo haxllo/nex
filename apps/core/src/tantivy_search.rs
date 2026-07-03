@@ -292,12 +292,10 @@ impl TantivyIndex {
     }
 
     pub fn incremental_sync_items(&self, items: &[SearchItem]) -> Result<(), String> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
-
-        // Collect existing document IDs from the current index
+        // Phase 1: Collect existing document IDs using the reader only.
+        // The reader is independent from the writer — no writer lock needed.
+        // This is the expensive part (iterates all live docs) and runs
+        // outside the writer lock so concurrent searches are not blocked.
         self.reader.reload().ok();
         let reader = self.reader.searcher();
         let mut existing_ids: HashSet<String> = HashSet::new();
@@ -322,9 +320,18 @@ impl TantivyIndex {
                 }
             }
         }
+        drop(reader);
 
-        // Collect incoming item IDs
+        // Phase 2: Compute diff (no lock needed)
         let incoming_ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
+
+        // Phase 3: Lock writer and apply changes — delete removed,
+        // add/update incoming, commit, and GC. This is fast because
+        // the expensive scan already happened above.
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
 
         // Delete removed items (exist in index but not in incoming set)
         for existing_id in existing_ids.difference(&incoming_ids) {

@@ -1,11 +1,11 @@
 # Nex — Full Codebase Audit & Improvement Roadmap
 
 > **Generated:** May 2026
-> **Last reviewed:** June 2026 (v1.3.0)
+> **Last reviewed:** July 2026 (v1.3.0)
 > **Scope:** Full codebase review, competitive analysis, and prioritized improvement plan
 > **Status:** AI features deferred (out of scope). P0 Everything SDK integration **complete** (v1.1.0+). Overlay and runtime refactors **complete** (pre-v1.2). Tray icon path, freeze-on-Everything-down, and Tantivy memory regressions all fixed in v1.2/v1.3.
 > **See also:**
->   - [Overlay Refactor Plan](./overlay-refactor-plan.md) — `windows_overlay.rs` → 11 modules, **complete**
+>   - [Overlay Refactor Plan](./overlay-refactor-plan.md) — `windows_overlay.rs` → 11 modules, **complete** (legacy code removed, now WebView2-based `overlay/`)
 >   - [Indexing Comparison](./indexing-comparison.md) — Everything SDK vs USN Journal vs walkdir, **decision made** (Everything SDK primary, walkdir fallback, USN rejected)
 >   - [Project Charter](../product/project-charter.md) — original product requirements
 
@@ -23,7 +23,7 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 
 | Component | Lines | Assessment |
 |-----------|-------|------------|
-| `windows_overlay/` | 11 files | Refactored module tree for painting, layout, input, animation, icon loading, and window lifecycle |
+| `overlay/` | 9 files | WebView2-based overlay (tao + wry). HTML/CSS/JS rendering via `nexasset://` protocol. Acrylic backdrop, state pushed via `PostWebMessageAsJson`. |
 | `runtime.rs` | 1,123 | Thin orchestration entrypoint after module extraction |
 | `runtime_*.rs` | 9 files | Runtime split across commands, actions, loop, diagnostics, hotkey, indexing, process, rows, and search session |
 | `discovery.rs` | 1,767 | Reasonable, could split |
@@ -50,9 +50,9 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 - **No AI integration** at all
 - **No window management**
 - **No text expansion / snippets**
-- **No calculator, unit converter, emoji picker**
+- **No emoji picker, color picker**
 - **No extension store**
-- **Test coverage ~9.5%** — insufficient
+- **Test coverage ~25%** — insufficient (target 30%+)
 - **Documentation outdated**
 
 ---
@@ -98,7 +98,7 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 | 5 | **Calculator + unit converter** | 1 week | 🟡 High | ✅ **Complete** (custom shunting-yard in `apps/core/src/calculator.rs` — supports `+`, `-`, `*`, `/`, `%`, `^`, parens, `sqrt`, `abs`, `ln`, `round`, `floor`, `ceil`, `pi`, `e`. `meval` dependency rejected per risk note.) |
 | 6 | **Snippets/text expansion** | 1-2 weeks | 🟡 High | ⏳ Planned |
 | 7 | **Async runtime (tokio)** | 2-3 weeks | 🟡 High | ❌ **Rejected** — sync `std::thread` is sufficient; tokio would add dependency weight without a current need. Re-evaluate if file_watcher or HTTP-based providers land. |
-| 8 | **Refactor large files** — split `windows_overlay.rs` and `runtime.rs` | 1-2 weeks | 🟡 Medium | ✅ **Complete** (11-module `windows_overlay/`, 9-module `runtime_*.rs`) |
+| 8 | **Refactor large files** — split `windows_overlay.rs` and `runtime.rs` | 1-2 weeks | 🟡 Medium | ✅ **Complete** (9-module `overlay/` WebView2 migration, 9-module `runtime_*.rs`) |
 
 ### P2 — Quality of Life (v1.3+)
 
@@ -108,19 +108,19 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 | 10 | **Update documentation** | 1 week | 🟢 Medium | ⏳ In progress (this file is part of that effort) |
 | 11 | **Emoji picker, color picker, web search shortcuts** | 1-2 weeks | 🟢 Medium | ⏳ Planned |
 | 12 | **Performance benchmarking suite** | 1 week | 🟢 Low | ⏳ Planned |
-| 13 | **Mica backdrop** (Windows 11) | 0.5 week | 🟢 Low | ✅ **Complete** (`layout.rs:512` calls `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)`) |
-| 14 | **DirectoryWatcher** (real-time file change events) | 1-2 weeks | 🟡 High | ⏳ Implemented but **not wired** — `apps/core/src/file_watcher.rs` exists with full implementation, gated `#[allow(dead_code)]`. Wiring deferred (feature, not bug fix). |
-| 15 | **GDI RAII wrappers** (`GdiBrush`, `GdiFont`, `GdiIcon`) | 0.5 week | 🟢 Low | ⏳ Deferred — manual `DeleteObject` cleanup is correct, RAII is nice-to-have |
+| 13 | **DirectoryWatcher** (real-time file change events) | 1-2 weeks | 🟡 High | ✅ **Complete** — `apps/core/src/file_watcher.rs` implemented and wired via `core_service.rs:743` (`start_file_watchers`), called from `runtime_loop.rs:586`. Uses `ReadDirectoryChangesW` with debounce. |
+| 14 | **GDI RAII wrappers** (`GdiBrush`, `GdiFont`, `GdiIcon`) | 0.5 week | 🟢 Low | ⏳ Deferred — manual `DeleteObject` cleanup is correct, RAII is nice-to-have |
 
 ---
 
 ## 5. File-by-File Code Review Notes
 
-### `windows_overlay/` module
-- **✅ Refactored:** Window creation, event loop, painting, layout, animation, theming, tray icon, and input handling are split into focused modules
-- **🟡 GDI ownership still deserves review:** Brushes, fonts, and icons remain manual-resource code paths
-- **🟡 Tight coupling remains at the state layer:** `OverlayShellState` is still broad, though module boundaries are now sane
-- **✅ Correct DPI handling** and Dwm rounded corners
+### `overlay/` module (WebView2)
+- **✅ WebView2 migration complete:** tao window + wry WebView, HTML/CSS/JS rendering via `nexasset://` protocol
+- **✅ Acrylic backdrop** via `window-vibrancy` crate (Mica dropped — not implemented)
+- **✅ State pushed to JS** via `PostWebMessageAsJson` (non-blocking, fire-and-forget)
+- **✅ Icons** decoded to PNG, embedded as base64 data URIs in state snapshot
+- **✅ DPI handling** and window positioning on cursor monitor
 
 ### `runtime.rs` + `runtime_*.rs`
 - **✅ Refactored:** Runtime orchestration is split into dedicated modules for commands, actions, event loop, diagnostics, hotkey, indexing, process control, overlay rows, and search session behavior
@@ -148,11 +148,14 @@ Nex is a **keyboard-first Windows launcher** built in Rust (~22K lines). It prov
 
 ---
 
-## 6. Architecture Decision Records Needed
+## 6. Architecture Decision Records
 
-The following decisions should be formally documented:
-1. Plugin runtime choice (WASM vs Lua vs embedded Python)
-2. AI provider strategy (local-first vs cloud-only vs hybrid)
-3. Window management API design
-4. Async runtime selection (tokio vs smol vs manual)
-5. Search index overhaul (Everything SDK vs USN Journal)
+The following decisions have been made or are pending:
+
+1. **Plugin runtime** — Pending (WASM vs Lua vs embedded Python)
+2. **AI provider strategy** — Deferred (out of scope, privacy-first posture)
+3. **Window management API** — Pending (no code yet)
+4. **Async runtime** — **Decided:** sync `std::thread` (tokio rejected — unnecessary dependency weight)
+5. **Search index** — **Decided:** Everything SDK primary, walkdir fallback, USN Journal rejected
+6. **Overlay rendering** — **Decided:** WebView2 (tao + wry), HTML/CSS/JS via custom protocol
+7. **Backdrop material** — **Decided:** Acrylic via `window-vibrancy` crate (Mica dropped)

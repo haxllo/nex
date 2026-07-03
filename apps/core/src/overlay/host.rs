@@ -227,9 +227,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         return;
                     }
                     position_window(&window, hwnd);
-                    // Page already has the idle state from the Hide
-                    // flush — skip push_state to avoid a DOM-rebuild
-                    // flash.
+                    // Push state with show_pending so the JS side sends
+                    // post("painted") to trigger the deferred show.
+                    push_state(&webview, &state, &icon_cache, true);
                     focus_input(&webview);
                     show_pending = true;
                 }

@@ -391,7 +391,7 @@ Infinite loop with no `AtomicBool` to stop it. Holds an `Arc<RwLock<CoreService>
 
 ### 19. `clipboard_history.rs` uses `unwrap()` on global mutex
 
-**Location:** `clipboard_history.rs:~166, 169, 185, 301`
+**Location:** `clipboard_history.rs:~123, 129, 159, 265`
 
 `CLIPBOARD_CACHE.lock().unwrap()` — if any thread panics while holding this global static `Mutex`, all subsequent clipboard operations across the entire process will panic. Clipboard capture runs on every hotkey press.
 
@@ -399,6 +399,8 @@ Infinite loop with no `AtomicBool` to stop it. Holds an `Arc<RwLock<CoreService>
 
 **Files to change:**
 - `apps/core/src/clipboard_history.rs`
+
+**Status:** ✅ **Resolved** — All 4 `CLIPBOARD_CACHE.lock()` calls already use `.unwrap_or_else(|e| e.into_inner())`. Fixed as part of Quick Win #3 (replace `unwrap()` with `unwrap_or_else`). No bare `.unwrap()` calls remain in the file.
 
 ---
 

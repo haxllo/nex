@@ -228,6 +228,8 @@ Iterates every live document in the Tantivy index while holding the writer Mutex
 **Files to change:**
 - `apps/core/src/tantivy_search.rs`
 
+**Status:** ✅ **Resolved** — Split `incremental_sync_items` into 3 phases: (1) collect existing IDs using reader only — no writer lock held, (2) compute diff — no lock needed, (3) lock writer, apply deletes/adds, commit, GC. Writer lock is now only held during the fast write phase (~1ms) instead of during the expensive full scan (~100ms for 50k docs). Race safety guaranteed by outer `tantivy_index` mutex held by `sync_indexes_from_cache`.
+
 ---
 
 ### 11. `backdrop-filter: saturate(140%)` doubles compositor work

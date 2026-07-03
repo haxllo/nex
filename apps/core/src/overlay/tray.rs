@@ -162,13 +162,13 @@ impl TrayIcon {
     }
 
     pub(crate) fn set_game_mode(&self, enabled: bool) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         guard.game_mode_enabled = enabled;
         self.update_tray_tooltip(&guard);
     }
 
     pub(crate) fn set_hotkey_issue(&self, active: bool) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         guard.hotkey_issue_active = active;
         self.update_tray_tooltip(&guard);
     }
@@ -272,7 +272,7 @@ unsafe extern "system" fn tray_wnd_proc(
             // Snapshot what we need *before* TrackPopupMenu blocks,
             // so the mutex is not held across the modal menu loop.
             let snapshot = {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap_or_else(|e| e.into_inner());
                 MenuSnapshot {
                     event_tx: guard.event_tx.clone(),
                     config_path: guard.config_path.clone(),
@@ -281,7 +281,7 @@ unsafe extern "system" fn tray_wnd_proc(
             };
             show_context_menu(hwnd, &snapshot);
         } else if lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK {
-            let _ = state.lock().unwrap().event_tx.send(OverlayEvent::ExternalShow);
+            let _ = state.lock().unwrap_or_else(|e| e.into_inner()).event_tx.send(OverlayEvent::ExternalShow);
         }
         return 0;
     }

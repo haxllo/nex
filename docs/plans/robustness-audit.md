@@ -170,6 +170,8 @@ This contradicts the design principle used in `Hotkey`/`QueryChanged` handlers w
 **Files to change:**
 - `apps/core/src/runtime_loop.rs` — lines 954, 876, 917
 
+**Status:** ✅ **Resolved** — Hot-path Hide/Submit handlers already use `unwrap_or_else(|e| e.into_inner())`. Startup code (lines 84, 101, 102, 104, 165) also hardened with `unwrap_or_else` for consistency. Additionally fixed pre-existing duplicate code bug in Escape handler (`search_session.clear()`, `search_worker.clear_session()`, and `try_recv` drain were duplicated).
+
 ---
 
 ### 7. Tray Win32 callback uses `lock().unwrap()`
@@ -184,6 +186,8 @@ This contradicts the design principle used in `Hotkey`/`QueryChanged` handlers w
 
 **Files to change:**
 - `apps/core/src/overlay/tray.rs` — line 284 and other `.unwrap()` calls in tray (lines 183, 188)
+
+**Status:** ✅ **Resolved** — All `state.lock()` calls in `tray_wnd_proc` already use `.unwrap_or_else(|e| e.into_inner())`. No bare `.unwrap()` calls remain in `tray.rs`.
 
 ---
 
@@ -334,6 +338,8 @@ A new `nex-icon-prefetch` thread spawned per `set_results()` call. No cancellati
 - `apps/core/src/overlay/shim.rs`
 - `apps/core/src/overlay/icons.rs`
 
+**Status:** ✅ **Resolved** — Replaced per-call thread spawning with a single persistent `nex-icon-prefetch` thread using a shared `Arc<Mutex<Option<Vec<OverlayRow>>>>` work slot. The thread loops, sleeping 50ms between checks, and processes the latest batch. `set_results()` replaces the slot atomically, discarding stale batches. No thread accumulation under rapid typing.
+
 ---
 
 ### 16. `last_touch` HashMap not bounded by LRU
@@ -346,6 +352,8 @@ The LRU cache bounds `png` entries, but `last_touch: HashMap<PathBuf, Instant>` 
 
 **Files to change:**
 - `apps/core/src/overlay/icons.rs`
+
+**Status:** ✅ **Resolved** — Added `clean_orphaned_touches()` method that runs after `put()` to remove `last_touch` entries whose keys are no longer in the LRU. `trim_unused()` also cleans both `last_touch` and `png` entries based on cutoff time.
 
 ---
 
@@ -425,7 +433,7 @@ COM apartment initialized every call via `CoInitializeEx(APARTMENTTHREADED)`. If
 | 2 | Dual PostWebMessageAsJson icon delivery | `host.rs`, `app.js` | Eliminates lock contention during icon encoding | ✅ Done |
 | 3 | Replace `unwrap()` with `unwrap_or_else` | `runtime_loop.rs`, `tray.rs`, `clipboard_history.rs` | Prevents cascading panics | ✅ **Done** |
 | 4 | Wrap runtime worker in `catch_unwind` | `runtime_loop.rs` | Prevents silent UI freeze | ✅ **Done** |
-| 5 | Reduce JS debounce to 40ms | `app.js` | ~40ms faster first keystroke | Pending |
+| 5 | Reduce JS debounce to 40ms | `app.js` | ~40ms faster first keystroke | ✅ Done (code already 40ms, comment fixed) |
 | 6 | Clone state before serialization | `host.rs:push_state` | Reduces lock contention | ✅ Done (part of #2) |
 
 ---

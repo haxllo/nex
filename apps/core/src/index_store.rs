@@ -206,9 +206,6 @@ pub fn get_quick_launch_items(
 
     // First: add pinned apps (in the order specified by the user)
     for pinned_path in pinned_paths {
-        if result.len() >= max_items {
-            break;
-        }
         let trimmed = pinned_path.trim();
         if trimmed.is_empty() {
             continue;
@@ -223,7 +220,12 @@ pub fn get_quick_launch_items(
         }
     }
 
-    // Second: fill remaining slots with top apps by launch_count
+    // If pinned items exist, ONLY show pinned items (no auto-fill)
+    if !result.is_empty() {
+        return Ok(result);
+    }
+
+    // No pinned items: auto-fill from usage
     let remaining = max_items.saturating_sub(result.len());
     if remaining > 0 {
         // First try apps with launch_count > 0
@@ -281,7 +283,7 @@ pub fn get_quick_launch_items(
 }
 
 /// Find an item by path or title (case-insensitive).
-fn find_item_by_path_or_title(
+pub fn find_item_by_path_or_title(
     db: &Connection,
     query: &str,
 ) -> Result<Option<(String, String, String, String, String)>, StoreError> {

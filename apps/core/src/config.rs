@@ -712,21 +712,22 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("\n\n");
 
     text.push_str("# Quick Launch: show pinned/frequent apps when the overlay is idle (empty query).\n");
-    text.push_str("quick_launch_enabled = ");
+    text.push_str("[quick_launch]\n");
+    text.push_str("enabled = ");
     text.push_str(if cfg.quick_launch.enabled { "true" } else { "false" });
     text.push('\n');
     text.push_str("# Maximum number of Quick Launch items (valid range: 3..12)\n");
-    text.push_str("quick_launch_max_items = ");
+    text.push_str("max_items = ");
     text.push_str(&cfg.quick_launch.max_items.to_string());
     text.push('\n');
     text.push_str("# Apps pinned to Quick Launch (appear first, in this order).\n");
     text.push_str("# Store app paths or titles — paths are more stable across renames.\n");
     let pinned_section = toml_string_array_section(&cfg.quick_launch.pinned);
-    text.push_str("quick_launch_pinned = ");
+    text.push_str("pinned = ");
     text.push_str(&pinned_section);
     text.push('\n');
     text.push_str("# Auto-fill remaining slots from usage data\n");
-    text.push_str("quick_launch_auto_fill = ");
+    text.push_str("auto_fill = ");
     text.push_str(if cfg.quick_launch.auto_fill { "true" } else { "false" });
     text.push_str("\n\n");
 
@@ -1100,9 +1101,28 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         changed = true;
     }
 
-    if source_version < 17 && !raw_has_key(raw, "quick_launch") {
-        cfg.quick_launch = Config::default().quick_launch;
-        changed = true;
+    if source_version < 17 {
+        if !raw_has_key(raw, "quick_launch") {
+            // Check for old flat format and migrate to nested format
+            let mut quick_launch = Config::default().quick_launch;
+            
+            // Try to read old flat format keys
+            if raw_has_key(raw, "quick_launch_enabled") {
+                quick_launch.enabled = raw_extract_bool(raw, "quick_launch_enabled").unwrap_or(true);
+            }
+            if raw_has_key(raw, "quick_launch_max_items") {
+                quick_launch.max_items = raw_extract_u8(raw, "quick_launch_max_items").unwrap_or(6);
+            }
+            if raw_has_key(raw, "quick_launch_pinned") {
+                quick_launch.pinned = raw_extract_string_array(raw, "quick_launch_pinned");
+            }
+            if raw_has_key(raw, "quick_launch_auto_fill") {
+                quick_launch.auto_fill = raw_extract_bool(raw, "quick_launch_auto_fill").unwrap_or(true);
+            }
+            
+            cfg.quick_launch = quick_launch;
+            changed = true;
+        }
     }
 
     if TEMPLATE_REQUIRED_KEYS
@@ -1158,7 +1178,82 @@ fn raw_has_key(raw: &str, key: &str) -> bool {
         return true;
     }
     let bare = format!("{key}:");
-    raw.contains(&bare)
+    if raw.contains(&bare) {
+        return true;
+    }
+    // Check for TOML section headers like [quick_launch]
+    let section = format!("[{key}]");
+    if raw.contains(&section) {
+        return true;
+    }
+    false
+}
+
+/// Extract a boolean value from a TOML key like `key = true`.
+fn raw_extract_bool(raw: &str, key: &str) -> Option<bool> {
+    let patterns = [format!("{key} = true"), format!("{key}=true")];
+    for pattern in &patterns {
+        if raw.contains(pattern.as_str()) {
+            return Some(true);
+        }
+    }
+    let patterns = [format!("{key} = false"), format!("{key}=false")];
+    for pattern in &patterns {
+        if raw.contains(pattern.as_str()) {
+            return Some(false);
+        }
+    }
+    None
+}
+
+/// Extract a u8 value from a TOML key like `key = 6`.
+fn raw_extract_u8(raw: &str, key: &str) -> Option<u8> {
+    let patterns = [
+        format!("{key} = "),
+        format!("{key}="),
+    ];
+    for pattern in &patterns {
+        if let Some(pos) = raw.find(pattern.as_str()) {
+            let after = &raw[pos + pattern.len()..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(num) = num_str.parse::<u8>() {
+                return Some(num);
+            }
+        }
+    }
+    None
+}
+
+/// Extract a string array from a TOML key like `key = ["a", "b"]`.
+fn raw_extract_string_array(raw: &str, key: &str) -> Vec<String> {
+    let patterns = [
+        format!("{key} = "),
+        format!("{key}="),
+    ];
+    for pattern in &patterns {
+        if let Some(pos) = raw.find(pattern.as_str()) {
+            let after = &raw[pos + pattern.len()..];
+            // Find the array content between [ and ]
+            if let Some(start) = after.find('[') {
+                let arr_content = &after[start..];
+                if let Some(end) = arr_content.find(']') {
+                    let arr_str = &arr_content[1..end];
+                    // Parse quoted strings
+                    let mut result = Vec::new();
+                    for item in arr_str.split(',') {
+                        let trimmed = item.trim();
+                        // Remove quotes
+                        let cleaned = trimmed.trim_matches('"').trim_matches('\'').trim();
+                        if !cleaned.is_empty() {
+                            result.push(cleaned.to_string());
+                        }
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn parse_text(raw: &str) -> Result<Config, ConfigError> {

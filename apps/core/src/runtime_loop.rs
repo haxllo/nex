@@ -654,10 +654,15 @@ impl RuntimeWorker {
             } else {
                 log_info(&format!("[nex] quick_launch pinned '{}'", title));
                 log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
-                self.overlay.set_status_text(&format!("Pinned '{}' to Quick Launch", title));
-                // Reload Quick Launch items from in-memory config
+                // Reload Quick Launch items from in-memory config FIRST
                 self.load_quick_launch_items_from_config();
-                self.show_idle_or_quick_launch();
+                // If in Quick Launch mode (empty query), rebuild the rows
+                if self.overlay.query_text().trim().is_empty() {
+                    self.show_idle_or_quick_launch();
+                } else {
+                    // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                    self.overlay.set_status_text(&format!("Pinned '{}' to Quick Launch", title));
+                }
             }
         }
     }
@@ -688,10 +693,15 @@ impl RuntimeWorker {
         } else {
             log_info(&format!("[nex] quick_launch unpinned '{}'", title));
             log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
-            self.overlay.set_status_text(&format!("Unpinned '{}' from Quick Launch", title));
-            // Reload Quick Launch items from in-memory config
+            // Reload Quick Launch items from in-memory config FIRST
             self.load_quick_launch_items_from_config();
-            self.show_idle_or_quick_launch();
+            // If in Quick Launch mode (empty query), rebuild the rows
+            if self.overlay.query_text().trim().is_empty() {
+                self.show_idle_or_quick_launch();
+            } else {
+                // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                self.overlay.set_status_text(&format!("Unpinned '{}' from Quick Launch", title));
+            }
         }
     }
 
@@ -702,7 +712,7 @@ impl RuntimeWorker {
         // Update the watcher's last_modified to the current file time
         // so the config reloader doesn't see it as "changed" and overwrite our in-memory state.
         if let Some(modified) = crate::runtime_index::config_file_modified_time(&self.runtime_config.config_path) {
-            self.config_watcher.last_modified = modified;
+            self.config_watcher.last_modified = Some(modified);
         }
         Ok(())
     }
@@ -731,10 +741,15 @@ impl RuntimeWorker {
             } else {
                 log_info(&format!("[nex] quick_launch added '{}'", trimmed));
                 log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
-                self.overlay.set_status_text(&format!("Added to Quick Launch"));
-                // Reload Quick Launch items from in-memory config (not from disk)
+                // Reload Quick Launch items from in-memory config FIRST
                 self.load_quick_launch_items_from_config();
-                self.show_idle_or_quick_launch();
+                // If in Quick Launch mode (empty query), rebuild the rows
+                if self.overlay.query_text().trim().is_empty() {
+                    self.show_idle_or_quick_launch();
+                } else {
+                    // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                    self.overlay.set_status_text(&format!("Added to Quick Launch"));
+                }
             }
         } else {
             log_info(&format!("[nex] quick_launch already pinned '{}'", trimmed));
@@ -1056,12 +1071,56 @@ impl RuntimeWorker {
                     &self.runtime_config,
                     &self.background_index_refresh,
                     &self.suppressed_uninstall_titles,
+                    &self.runtime_config.quick_launch.pinned,
                     &mut self.current_results,
                     &mut self.selected_index,
                     self.last_sent_generation,
                 );
             }
             OverlayEvent::Submit => {
+                // Check if we're in Quick Launch mode (empty query, Quick Launch visible)
+                if self.overlay.query_text().trim().is_empty() && !self.quick_launch_items.is_empty() {
+                    if let Some(list_selection) = self.overlay.selected_index() {
+                        if list_selection < self.quick_launch_items.len() {
+                            let item = &self.quick_launch_items[list_selection];
+                            let path = item.path.clone();
+                            self.overlay.hide_now();
+                            self.overlay_state.on_escape();
+                            // Launch the Quick Launch item
+                            match crate::action_executor::launch_open_target(&path) {
+                                Ok(()) => {
+                                    log_info(&format!("[nex] quick_launch launched '{}'", item.title));
+                                    // Record the launch
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0);
+                                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                                    let db = guard.db_ref();
+                                    // Find the item ID by path to record launch
+                                    if let Ok(Some((id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&db, &path) {
+                                        if let Err(error) = crate::index_store::record_launch(&db, &id, now) {
+                                            log_warn(&format!("[nex] record_launch failed: {error}"));
+                                        }
+                                    }
+                                    reset_overlay_session(
+                                        &self.overlay,
+                                        &mut self.current_results,
+                                        &mut self.selected_index,
+                                    );
+                                    self.last_query.clear();
+                                    self.search_session.clear();
+                                    self.search_worker.clear_session();
+                                }
+                                Err(error) => {
+                                    self.overlay.set_status_text(&format!("Launch error: {error}"));
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 if self.current_results.is_empty() {
                     if self.overlay.query_text().trim().is_empty() {
                         set_idle_overlay_state(&self.overlay);
@@ -1365,6 +1424,7 @@ fn apply_search_results(
     _runtime_config: &Config,
     background_index_refresh: &BackgroundIndexRefresh,
     suppressed_uninstall_titles: &[String],
+    pinned_paths: &[String],
     current_results: &mut Vec<crate::model::SearchItem>,
     selected_index: &mut usize,
     last_sent_generation: u64,
@@ -1392,6 +1452,23 @@ fn apply_search_results(
     if !suppressed_uninstall_titles.is_empty() {
         filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
     }
+
+    // Sort pinned items to the top of search results
+    if !pinned_paths.is_empty() {
+        let pinned_normalized: Vec<String> = pinned_paths.iter()
+            .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+            .collect();
+        results.sort_by(|a, b| {
+            let a_pinned = pinned_normalized.iter().any(|p| {
+                a.path.replace('/', "\\").to_ascii_lowercase() == *p
+            });
+            let b_pinned = pinned_normalized.iter().any(|p| {
+                b.path.replace('/', "\\").to_ascii_lowercase() == *p
+            });
+            b_pinned.cmp(&a_pinned) // true (pinned) comes before false
+        });
+    }
+
     *current_results = results;
     *selected_index = 0;
 

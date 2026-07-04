@@ -25,7 +25,6 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let quickLaunchItems = []; // Quick Launch items for idle state
-  let toastTimeout = null; // For toast notification
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
@@ -47,23 +46,10 @@
   }
 
   // ── toast notification ────────────────────────────────────
-  function showToast(message) {
-    let toast = document.querySelector('.toast');
-    if (!toast) {
-      toast = document.createElement('div');
-      toast.className = 'toast';
-      document.body.appendChild(toast);
-    }
-    toast.textContent = message;
-    toast.classList.add('visible');
-    clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => toast.classList.remove('visible'), 2000);
-  }
-
   // ── pin/unpin icons ────────────────────────────────────────
   const pinIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
   const pinIconPinnedSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
-  const addIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="4" x2="9" y2="14"/><line x1="4" y1="9" x2="14" y2="9"/></svg>`;
+  const addIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
 
   function createPinIcon(item, index) {
     const pinIcon = document.createElement('div');
@@ -71,28 +57,43 @@
     pinIcon.innerHTML = item.pinned ? pinIconPinnedSvg : pinIconSvg;
     pinIcon.addEventListener('click', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       if (item.pinned) {
         post('unpin', item.title);
-        showToast(`Unpinned '${item.title}' from Quick Launch`);
       } else {
         post('pin', item.title);
-        showToast(`Pinned '${item.title}' to Quick Launch`);
       }
+      input.focus();
     });
     return pinIcon;
   }
 
+  function isItemPinned(filePath) {
+    if (!filePath) return false;
+    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    return quickLaunchItems.some(item => {
+      const itemPath = (item.path || '').replace(/\\/g, '/').toLowerCase();
+      return itemPath === normalized && item.pinned;
+    });
+  }
+
   function createAddIcon(item) {
     const addIcon = document.createElement('div');
-    addIcon.className = 'add-icon';
-    addIcon.innerHTML = addIconSvg;
+    const filePath = item.filePath || item.icon;
+    const pinned = isItemPinned(filePath);
+    addIcon.className = 'add-icon' + (pinned ? ' pinned' : '');
+    addIcon.innerHTML = pinned ? pinIconPinnedSvg : addIconSvg;
     addIcon.addEventListener('click', (e) => {
       e.stopPropagation();
-      const filePath = item.filePath || item.icon;
+      e.preventDefault();
       if (filePath) {
-        post('addToQuickLaunch', filePath);
-        showToast(`Added '${item.title}' to Quick Launch`);
+        if (pinned) {
+          post('unpin', item.title);
+        } else {
+          post('addToQuickLaunch', filePath);
+        }
       }
+      input.focus();
     });
     return addIcon;
   }

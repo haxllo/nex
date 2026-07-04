@@ -64,7 +64,7 @@ pub fn open_from_config(cfg: &Config) -> Result<Connection, StoreError> {
 
 pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError> {
     db.execute(
-        "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, path=excluded.path, subtitle=excluded.subtitle,
          use_count=excluded.use_count, last_accessed_epoch_secs=excluded.last_accessed_epoch_secs",
         params![
@@ -75,6 +75,8 @@ pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError>
             item.subtitle,
             item.use_count,
             item.last_accessed_epoch_secs,
+            item.launch_count,
+            item.last_launched_at,
         ],
     )?;
     Ok(())
@@ -82,7 +84,7 @@ pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError>
 
 pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreError> {
     let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs FROM item WHERE id = ?1",
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at FROM item WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
     if let Some(row) = rows.next()? {
@@ -93,14 +95,10 @@ pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreEr
         let subtitle: String = row.get(4)?;
         let use_count: u32 = row.get(5)?;
         let last_accessed_epoch_secs: i64 = row.get(6)?;
-        Ok(Some(SearchItem::from_owned_with_subtitle(
-            id,
-            kind,
-            title,
-            path,
-            subtitle,
-            use_count,
-            last_accessed_epoch_secs,
+        let launch_count: u32 = row.get(7)?;
+        let last_launched_at: i64 = row.get(8)?;
+        Ok(Some(SearchItem::from_owned_with_usage(
+            id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at,
         )))
     } else {
         Ok(None)
@@ -109,7 +107,7 @@ pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreEr
 
 pub fn list_items(db: &Connection) -> Result<Vec<SearchItem>, StoreError> {
     let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs FROM item ORDER BY id",
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at FROM item ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
 
@@ -122,14 +120,10 @@ pub fn list_items(db: &Connection) -> Result<Vec<SearchItem>, StoreError> {
         let subtitle: String = row.get(4)?;
         let use_count: u32 = row.get(5)?;
         let last_accessed_epoch_secs: i64 = row.get(6)?;
-        out.push(SearchItem::from_owned_with_subtitle(
-            id,
-            kind,
-            title,
-            path,
-            subtitle,
-            use_count,
-            last_accessed_epoch_secs,
+        let launch_count: u32 = row.get(7)?;
+        let last_launched_at: i64 = row.get(8)?;
+        out.push(SearchItem::from_owned_with_usage(
+            id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at,
         ));
     }
 
@@ -184,6 +178,162 @@ pub fn record_query_selection(
     Ok(())
 }
 
+/// Record an app launch for Quick Launch usage tracking.
+pub fn record_launch(
+    db: &Connection,
+    item_id: &str,
+    launched_at_epoch_secs: i64,
+) -> Result<(), StoreError> {
+    db.execute(
+        "UPDATE item SET
+         launch_count = launch_count + 1,
+         last_launched_at = ?2
+         WHERE id = ?1",
+        params![item_id, launched_at_epoch_secs],
+    )?;
+    Ok(())
+}
+
+/// Get Quick Launch items: pinned apps first, then top by launch_count.
+/// Returns (id, kind, title, path, subtitle, icon_path, is_pinned) tuples.
+pub fn get_quick_launch_items(
+    db: &Connection,
+    pinned_paths: &[String],
+    max_items: usize,
+) -> Result<Vec<(String, String, String, String, String, String, bool)>, StoreError> {
+    let mut result = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    // First: add pinned apps (in the order specified by the user)
+    for pinned_path in pinned_paths {
+        if result.len() >= max_items {
+            break;
+        }
+        let trimmed = pinned_path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Try to find by path first, then by title
+        let item = find_item_by_path_or_title(db, trimmed)?;
+        if let Some((id, kind, title, path, subtitle)) = item {
+            if seen_ids.insert(id.clone()) {
+                let icon_path = path.clone();
+                result.push((id, kind, title, path, subtitle, icon_path, true));
+            }
+        }
+    }
+
+    // Second: fill remaining slots with top apps by launch_count
+    let remaining = max_items.saturating_sub(result.len());
+    if remaining > 0 {
+        // First try apps with launch_count > 0
+        let mut stmt = db.prepare(
+            "SELECT id, kind, title, path, subtitle FROM item
+             WHERE kind = 'app' AND launch_count > 0
+             ORDER BY launch_count DESC, last_launched_at DESC
+             LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![remaining as i64])?;
+        while let Some(row) = rows.next()? {
+            if result.len() >= max_items {
+                break;
+            }
+            let id: String = row.get(0)?;
+            if !seen_ids.contains(&id) {
+                let kind: String = row.get(1)?;
+                let title: String = row.get(2)?;
+                let path: String = row.get(3)?;
+                let subtitle: String = row.get(4)?;
+                let icon_path = path.clone();
+                result.push((id, kind, title, path, subtitle, icon_path, false));
+            }
+        }
+
+        // If still not enough, fill with any apps (alphabetical)
+        let still_remaining = max_items.saturating_sub(result.len());
+        if still_remaining > 0 {
+            let mut stmt = db.prepare(
+                "SELECT id, kind, title, path, subtitle FROM item
+                 WHERE kind = 'app'
+                 ORDER BY title ASC
+                 LIMIT ?1",
+            )?;
+            let mut rows = stmt.query(params![still_remaining as i64])?;
+            while let Some(row) = rows.next()? {
+                if result.len() >= max_items {
+                    break;
+                }
+                let id: String = row.get(0)?;
+                if !seen_ids.insert(id.clone()) {
+                    continue;
+                }
+                let kind: String = row.get(1)?;
+                let title: String = row.get(2)?;
+                let path: String = row.get(3)?;
+                let subtitle: String = row.get(4)?;
+                let icon_path = path.clone();
+                result.push((id, kind, title, path, subtitle, icon_path, false));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Find an item by path or title (case-insensitive).
+fn find_item_by_path_or_title(
+    db: &Connection,
+    query: &str,
+) -> Result<Option<(String, String, String, String, String)>, StoreError> {
+    // Try exact path match first
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE path = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    // Try case-insensitive path match
+    let normalized_query = query.replace('/', "\\").to_ascii_lowercase();
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(REPLACE(path, '/', '\\')) = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![normalized_query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    // Try case-insensitive title match
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(title) = LOWER(?1) LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    Ok(None)
+}
+
 pub fn list_query_selections(
     db: &Connection,
     query_norm: &str,
@@ -225,9 +375,12 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
     if current_version < 4 {
         migration_v4(conn)?;
     }
+    if current_version < 5 {
+        migration_v5(conn)?;
+    }
 
-    if current_version < 4 {
-        conn.pragma_update(None, "user_version", 4_i64)?;
+    if current_version < 5 {
+        conn.pragma_update(None, "user_version", 5_i64)?;
     }
 
     Ok(())
@@ -296,6 +449,37 @@ fn migration_v4(conn: &Connection) -> Result<(), StoreError> {
     if !has_subtitle {
         conn.execute(
             "ALTER TABLE item ADD COLUMN subtitle TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Add launch_count and last_launched_at columns for Quick Launch feature.
+fn migration_v5(conn: &Connection) -> Result<(), StoreError> {
+    let mut has_launch_count = false;
+    let mut has_last_launched_at = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(item)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let column_name: String = row.get(1)?;
+        if column_name.eq_ignore_ascii_case("launch_count") {
+            has_launch_count = true;
+        }
+        if column_name.eq_ignore_ascii_case("last_launched_at") {
+            has_last_launched_at = true;
+        }
+    }
+
+    if !has_launch_count {
+        conn.execute(
+            "ALTER TABLE item ADD COLUMN launch_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !has_last_launched_at {
+        conn.execute(
+            "ALTER TABLE item ADD COLUMN last_launched_at INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }

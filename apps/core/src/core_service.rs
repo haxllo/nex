@@ -211,6 +211,11 @@ impl CoreService {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Public accessor for the database connection (for Quick Launch queries).
+    pub fn db_ref(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.db()
+    }
+
     pub fn with_providers(self, providers: Vec<Box<dyn DiscoveryProvider>>) -> Self {
         self.replace_providers(providers);
         self

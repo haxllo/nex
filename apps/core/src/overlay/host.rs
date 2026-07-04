@@ -475,6 +475,21 @@ fn handle_ipc(
                 open_path(&path);
             }
         }
+        "pin" => {
+            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::PinApp(title.to_string()));
+            }
+        }
+        "unpin" => {
+            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::UnpinApp(title.to_string()));
+            }
+        }
+        "addToQuickLaunch" => {
+            if let Some(path) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
+            }
+        }
         _ => {}
     }
 }
@@ -554,13 +569,20 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 OverlayRowRole::Header => "header",
                 OverlayRowRole::Status => "status",
                 OverlayRowRole::Calculator => "calculator",
+                OverlayRowRole::QuickLaunch => "quick_launch",
                 OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
             };
             let selectable = matches!(
                 r.role,
-                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
+                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator | OverlayRowRole::QuickLaunch
             );
             let icon = if r.icon_path.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(r.icon_path.clone())
+            };
+            // Include the actual file path for addToQuickLaunch
+            let file_path = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(r.icon_path.clone())
@@ -571,6 +593,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 "subtitle": r.path,
                 "kind": r.kind,
                 "icon": icon,
+                "filePath": file_path,
                 "selectable": selectable,
                 "resultIndex": r.result_index,
             })
@@ -582,6 +605,20 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         Theme::Light => "light",
     };
 
+    // Include Quick Launch items for idle state
+    let quick_launch: Vec<serde_json::Value> = s
+        .quick_launch_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "title": item.title,
+                "path": item.path,
+                "icon": item.icon_path,
+                "pinned": item.is_pinned,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "query": s.query,
         "rows": rows,
@@ -592,6 +629,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "hotkeyIssue": s.hotkey_issue_active,
         "theme": theme,
         "showPending": show_pending,
+        "quickLaunch": quick_launch,
+        "quickLaunchVisible": s.quick_launch_visible,
     })
     .to_string()
 }

@@ -254,6 +254,71 @@ html[data-theme="light"] .row.selected .title {
   color: var(--accent);
 }
 
+/* Quick Launch row */
+.row.quick-launch {
+  /* Same base as .row */
+}
+
+.row.quick-launch .pin-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+
+.row.quick-launch:hover .pin-icon,
+.row.quick-launch.selected .pin-icon {
+  opacity: 1;
+}
+
+.row.quick-launch .pin-icon.pinned {
+  opacity: 0.7;
+}
+
+.row.quick-launch:hover .pin-icon.pinned,
+.row.quick-launch.selected .pin-icon.pinned {
+  opacity: 1;
+}
+
+/* Add icon for search results */
+.row .add-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+
+.row:hover .add-icon,
+.row.selected .add-icon {
+  opacity: 1;
+}
+
+/* Toast notification */
+.toast {
+  position: fixed;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--sel);
+  border: 1px solid var(--border);
+  border-radius: var(--row-radius);
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  opacity: 0;
+  transition: opacity 200ms ease;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.toast.visible {
+  opacity: 1;
+}
+
 /* section header */
 .section {
   padding: 12px 12px 6px;

@@ -487,6 +487,38 @@ pub(crate) fn set_idle_overlay_state(overlay: &NativeOverlayShell) {
     overlay.set_status_text("");
 }
 
+/// Build Quick Launch rows for the idle state (empty query).
+/// Returns rows with QuickLaunch role, ready to be pushed to the overlay.
+#[cfg(target_os = "windows")]
+pub(crate) fn build_quick_launch_rows(
+    quick_launch_items: &[crate::overlay::model::QuickLaunchItem],
+) -> Vec<OverlayRow> {
+    quick_launch_items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| OverlayRow {
+            role: OverlayRowRole::QuickLaunch,
+            result_index: Some(index),
+            kind: "app".to_string(),
+            title: item.title.clone(),
+            path: String::new(), // No subtitle for Quick Launch
+            icon_path: item.icon_path.clone(),
+        })
+        .collect()
+}
+
+/// Set the overlay to show Quick Launch items in idle state.
+#[cfg(target_os = "windows")]
+pub(crate) fn set_quick_launch_overlay_state(
+    overlay: &NativeOverlayShell,
+    quick_launch_items: &[crate::overlay::model::QuickLaunchItem],
+) {
+    overlay.clear_placeholder_hint();
+    let rows = build_quick_launch_rows(quick_launch_items);
+    overlay.set_results(&rows, 0);
+    overlay.set_status_text("");
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message: &str) {
     overlay.clear_placeholder_hint();

@@ -183,6 +183,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         match event {
             Event::UserEvent(cmd) => match cmd {
                 UiCommand::WebviewReady => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                     ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
@@ -202,6 +203,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Show => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     if webview.is_none() {
                         ready = false;
                         // Mark the show as pending before building the
@@ -224,6 +226,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if !ready {
                         // WebView exists but page hasn't loaded yet
                         // (e.g. show raced with a prior cold start).
+                        // Reset and rebuild the WebView.
+                        crate::runtime::log_info("[nex] host WebView not ready, resetting");
+                        webview = None;
+                        ready = false;
+                        show_pending = true;
+                        match build_webview(&window, &state, &proxy, &event_tx) {
+                            Ok(wv) => webview = Some(wv),
+                            Err(e) => {
+                                crate::runtime::log_warn(&format!("[nex] webview rebuild failed: {e}"));
+                                return;
+                            }
+                        }
                         return;
                     }
                     position_window(&window, hwnd);
@@ -270,6 +284,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, height));
                 }
                 UiCommand::Painted => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
                     if show_pending {
                         show_pending = false;
                         last_show = Instant::now();

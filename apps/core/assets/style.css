@@ -297,28 +297,16 @@ html[data-theme="light"] .row.selected .title {
   opacity: 1;
 }
 
-/* Toast notification */
-.toast {
-  position: fixed;
-  bottom: 48px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--sel);
-  border: 1px solid var(--border);
-  border-radius: var(--row-radius);
-  padding: 6px 14px;
-  font-size: 12px;
-  color: var(--text-dim);
-  opacity: 0;
-  transition: opacity 200ms ease;
-  pointer-events: none;
-  z-index: 1000;
+.row .add-icon.pinned {
+  opacity: 0.7;
 }
 
-.toast.visible {
+.row:hover .add-icon.pinned,
+.row.selected .add-icon.pinned {
   opacity: 1;
 }
 
+/* Toast notification */
 /* section header */
 .section {
   padding: 12px 12px 6px;

@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 16;
+pub const CURRENT_CONFIG_VERSION: u32 = 17;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -192,6 +192,30 @@ impl WebSearchProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuickLaunchConfig {
+    /// Enable the Quick Launch feature (show pinned/frequent apps on idle).
+    pub enabled: bool,
+    /// Maximum number of items shown in Quick Launch.
+    pub max_items: u8,
+    /// Apps pinned by the user — always appear first, in this order.
+    /// Stored as app paths (stable identifiers).
+    pub pinned: Vec<String>,
+    /// Auto-fill remaining slots from usage data.
+    pub auto_fill: bool,
+}
+
+impl Default for QuickLaunchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_items: 6,
+            pinned: Vec::new(),
+            auto_fill: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
     pub version: u32,
@@ -227,6 +251,8 @@ pub struct Config {
     pub index_max_items_total: u32,
     pub index_max_items_per_root: u32,
     pub index_max_items_per_query_seed: u32,
+    /// Quick Launch settings for idle-state app launcher.
+    pub quick_launch: QuickLaunchConfig,
 }
 
 impl Default for Config {
@@ -282,6 +308,7 @@ impl Default for Config {
             index_max_items_total: 120_000,
             index_max_items_per_root: 40_000,
             index_max_items_per_query_seed: 5_000,
+            quick_launch: QuickLaunchConfig::default(),
         }
     }
 }
@@ -684,6 +711,25 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&plugin_paths_section);
     text.push_str("\n\n");
 
+    text.push_str("# Quick Launch: show pinned/frequent apps when the overlay is idle (empty query).\n");
+    text.push_str("quick_launch_enabled = ");
+    text.push_str(if cfg.quick_launch.enabled { "true" } else { "false" });
+    text.push('\n');
+    text.push_str("# Maximum number of Quick Launch items (valid range: 3..12)\n");
+    text.push_str("quick_launch_max_items = ");
+    text.push_str(&cfg.quick_launch.max_items.to_string());
+    text.push('\n');
+    text.push_str("# Apps pinned to Quick Launch (appear first, in this order).\n");
+    text.push_str("# Store app paths or titles — paths are more stable across renames.\n");
+    let pinned_section = toml_string_array_section(&cfg.quick_launch.pinned);
+    text.push_str("quick_launch_pinned = ");
+    text.push_str(&pinned_section);
+    text.push('\n');
+    text.push_str("# Auto-fill remaining slots from usage data\n");
+    text.push_str("quick_launch_auto_fill = ");
+    text.push_str(if cfg.quick_launch.auto_fill { "true" } else { "false" });
+    text.push_str("\n\n");
+
     text.push_str("# Runtime performance targets\n");
     text.push_str("# cache trim after hide in milliseconds (valid range: 100..10000)\n");
     text.push_str("idle_cache_trim_ms = ");
@@ -832,6 +878,17 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         .any(|pattern| pattern.trim().is_empty())
     {
         return Err("clipboard_exclude_sensitive_patterns contains an empty pattern".into());
+    }
+
+    if cfg.quick_launch.max_items < 3 || cfg.quick_launch.max_items > 12 {
+        return Err(format!(
+            "quick_launch_max_items must be between 3 and 12, got {}",
+            cfg.quick_launch.max_items
+        ));
+    }
+
+    if cfg.quick_launch.pinned.iter().any(|p| p.trim().is_empty()) {
+        return Err("quick_launch_pinned contains an empty entry".into());
     }
 
     crate::settings::validate_hotkey(&cfg.hotkey)
@@ -1040,6 +1097,11 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
 
     if source_version < 16 && !raw_has_key(raw, "ui_warm_release_ms") {
         cfg.ui_warm_release_ms = Config::default().ui_warm_release_ms;
+        changed = true;
+    }
+
+    if source_version < 17 && !raw_has_key(raw, "quick_launch") {
+        cfg.quick_launch = Config::default().quick_launch;
         changed = true;
     }
 

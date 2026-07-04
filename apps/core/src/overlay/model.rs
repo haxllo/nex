@@ -25,6 +25,7 @@ pub enum OverlayRowRole {
     TopHit,
     Status,
     Calculator,
+    QuickLaunch,
 }
 
 /// Events the runtime callback receives on the worker thread.
@@ -40,12 +41,27 @@ pub enum OverlayEvent {
     TrayToggleGameMode,
     TrayCheckForUpdates,
     SearchResultsReady,
+    /// Pin an app to Quick Launch by title.
+    PinApp(String),
+    /// Unpin an app from Quick Launch by title.
+    UnpinApp(String),
+    /// Add an app to Quick Launch by path.
+    AddToQuickLaunch(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Theme {
     Dark,
     Light,
+}
+
+/// A single item in the Quick Launch section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickLaunchItem {
+    pub title: String,
+    pub path: String,
+    pub icon_path: String,
+    pub is_pinned: bool,
 }
 
 /// The shared, framework-agnostic snapshot of overlay state. The
@@ -71,6 +87,10 @@ pub struct ShimState {
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     pub ui_warm_release_ms: u32,
+    /// Quick Launch items for idle state (empty query).
+    pub quick_launch_items: Vec<QuickLaunchItem>,
+    /// Whether Quick Launch is visible (query is empty).
+    pub quick_launch_visible: bool,
 }
 
 impl Default for ShimState {
@@ -91,6 +111,8 @@ impl Default for ShimState {
             idle_cache_trim_ms: 90_000,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
+            quick_launch_items: Vec::new(),
+            quick_launch_visible: false,
         }
     }
 }

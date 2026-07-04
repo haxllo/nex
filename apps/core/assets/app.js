@@ -24,6 +24,8 @@
   let lastQuerySent = "";
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
+  let quickLaunchItems = []; // Quick Launch items for idle state
+  let toastTimeout = null; // For toast notification
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
@@ -42,6 +44,57 @@
     window.chrome.webview.addEventListener("message", (e) => {
       try { nex.apply(e.data); } catch (_) {}
     });
+  }
+
+  // ── toast notification ────────────────────────────────────
+  function showToast(message) {
+    let toast = document.querySelector('.toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add('visible');
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => toast.classList.remove('visible'), 2000);
+  }
+
+  // ── pin/unpin icons ────────────────────────────────────────
+  const pinIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+  const pinIconPinnedSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+  const addIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="4" x2="9" y2="14"/><line x1="4" y1="9" x2="14" y2="9"/></svg>`;
+
+  function createPinIcon(item, index) {
+    const pinIcon = document.createElement('div');
+    pinIcon.className = 'pin-icon' + (item.pinned ? ' pinned' : '');
+    pinIcon.innerHTML = item.pinned ? pinIconPinnedSvg : pinIconSvg;
+    pinIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (item.pinned) {
+        post('unpin', item.title);
+        showToast(`Unpinned '${item.title}' from Quick Launch`);
+      } else {
+        post('pin', item.title);
+        showToast(`Pinned '${item.title}' to Quick Launch`);
+      }
+    });
+    return pinIcon;
+  }
+
+  function createAddIcon(item) {
+    const addIcon = document.createElement('div');
+    addIcon.className = 'add-icon';
+    addIcon.innerHTML = addIconSvg;
+    addIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const filePath = item.filePath || item.icon;
+      if (filePath) {
+        post('addToQuickLaunch', filePath);
+        showToast(`Added '${item.title}' to Quick Launch`);
+      }
+    });
+    return addIcon;
   }
 
   // ── render ───────────────────────────────────────────────
@@ -86,7 +139,7 @@
       }
 
       const li = document.createElement("li");
-      li.className = "row" + (r.role === "calculator" ? " calculator" : "");
+      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "");
       li.setAttribute("role", "option");
       li.dataset.index = String(i);
       if (i === selected) li.classList.add("selected");
@@ -125,7 +178,16 @@
       }
       li.appendChild(text);
 
-      if (r.kind && r.role !== "calculator") {
+      // Quick Launch row: add pin/bookmark icon
+      if (r.role === "quick_launch") {
+        const quickLaunchItem = quickLaunchItems.find(item => item.title === r.title);
+        if (quickLaunchItem) {
+          li.appendChild(createPinIcon(quickLaunchItem, i));
+        }
+      } else if (r.kind === "app" && r.role !== "calculator") {
+        // App row: add "+" icon to add to Quick Launch
+        li.appendChild(createAddIcon(r));
+      } else if (r.kind && r.role !== "calculator") {
         const kind = document.createElement("div");
         kind.className = "kind";
         kind.textContent = r.kind;
@@ -367,6 +429,11 @@
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
+
+      // Store Quick Launch items if provided
+      if (Array.isArray(state.quickLaunch)) {
+        quickLaunchItems = state.quickLaunch;
+      }
 
       if (state.placeholder) {
         input.placeholder = state.placeholder;

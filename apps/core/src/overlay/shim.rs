@@ -24,7 +24,7 @@ use tao::event_loop::EventLoopProxy;
 
 use crate::overlay::host::UiCommand;
 use crate::overlay::icons::IconCache;
-use crate::overlay::model::{OverlayEvent, OverlayRow, ShimState};
+use crate::overlay::model::{OverlayEvent, OverlayRow, QuickLaunchItem, ShimState};
 
 /// A safe-to-clone handle to the WebView overlay. Cheap to clone
 /// (`Arc` inside) so callers like `runtime_loop.rs` can hold one
@@ -301,6 +301,8 @@ impl NativeOverlayShell {
             s.rows = rows.to_vec();
             s.selected = selected_index.min(s.rows.len().saturating_sub(1));
             s.placeholder_hint = None;
+            // Update quick_launch_visible based on whether we're showing Quick Launch rows
+            s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });
         self.post(UiCommand::Apply);
 
@@ -313,6 +315,31 @@ impl NativeOverlayShell {
                 *slot = Some(rows.to_vec());
             }
         }
+    }
+
+    /// Set Quick Launch items for idle state display.
+    pub fn set_quick_launch_items(&self, items: Vec<QuickLaunchItem>) {
+        self.with_state(|s| {
+            s.quick_launch_items = items;
+        });
+    }
+
+    /// Get current Quick Launch items.
+    pub fn quick_launch_items(&self) -> Vec<QuickLaunchItem> {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.quick_launch_items.clone())
+            .unwrap_or_default()
+    }
+
+    /// Check if Quick Launch is currently visible.
+    pub fn is_quick_launch_visible(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.quick_launch_visible)
+            .unwrap_or(false)
     }
 
     pub fn set_selected_index(&self, selected_index: usize) {

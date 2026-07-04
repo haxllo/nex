@@ -42,10 +42,11 @@ use crate::runtime_index::{
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, overlay_rows,
-    reconcile_suppressed_uninstall_titles, set_idle_overlay_state, set_status_row_overlay_state,
-    track_uninstall_title_suppression, PendingUninstallConfirmation, ACTION_UNINSTALL_CANCEL_ID,
-    ACTION_UNINSTALL_CONFIRM_ID, STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS,
-    STATUS_ROW_TYPE_TO_SEARCH,
+    reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
+    set_quick_launch_overlay_state, set_status_row_overlay_state,
+    track_uninstall_title_suppression, PendingUninstallConfirmation,
+    ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
+    STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_process::{
@@ -400,6 +401,8 @@ pub(crate) fn run_windows_runtime(
         event_tx: event_tx.clone(),
         hotkey_check_counter: 0,
         last_memory_log: Instant::now(),
+        quick_launch_items: Vec::new(),
+        quick_launch_loaded: false,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -509,9 +512,250 @@ struct RuntimeWorker {
     event_tx: crossbeam_channel::Sender<OverlayEvent>,
     hotkey_check_counter: u32,
     last_memory_log: Instant,
+    /// Quick Launch items for idle state display.
+    quick_launch_items: Vec<crate::overlay::model::QuickLaunchItem>,
+    /// Whether Quick Launch items have been loaded for current session.
+    quick_launch_loaded: bool,
 }
 
 impl RuntimeWorker {
+    /// Load Quick Launch items from the database and config.
+    /// Called every time the overlay shows idle state to ensure fresh data.
+    fn load_quick_launch_items(&mut self) {
+        if !self.runtime_config.quick_launch.enabled {
+            self.quick_launch_items.clear();
+            self.quick_launch_loaded = true;
+            return;
+        }
+
+        let max_items = self.runtime_config.quick_launch.max_items as usize;
+        let pinned = &self.runtime_config.quick_launch.pinned;
+        log_info(&format!("[nex] quick_launch loading pinned={:?}", pinned));
+
+        // Query the database for Quick Launch items
+        if let Ok(guard) = self.service.read() {
+            let db = guard.db_ref();
+            match crate::index_store::get_quick_launch_items(&db, pinned, max_items) {
+                Ok(items) => {
+                    self.quick_launch_items = items
+                        .into_iter()
+                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                            crate::overlay::model::QuickLaunchItem {
+                                title,
+                                path,
+                                icon_path,
+                                is_pinned,
+                            }
+                        })
+                        .collect();
+                    self.quick_launch_loaded = true;
+                    self.overlay.set_quick_launch_items(self.quick_launch_items.clone());
+                    log_info(&format!(
+                        "[nex] quick_launch loaded items={}",
+                        self.quick_launch_items.len()
+                    ));
+                }
+                Err(error) => {
+                    log_warn(&format!("[nex] quick_launch load failed: {error}"));
+                    self.quick_launch_loaded = true;
+                }
+            }
+        }
+    }
+
+    /// Load Quick Launch items from in-memory config (no disk read).
+    /// Used after pin/unpin to avoid race with config reloader.
+    fn load_quick_launch_items_from_config(&mut self) {
+        if !self.runtime_config.quick_launch.enabled {
+            self.quick_launch_items.clear();
+            return;
+        }
+
+        let max_items = self.runtime_config.quick_launch.max_items as usize;
+        // Use the in-memory pinned list (already updated)
+        let pinned = self.runtime_config.quick_launch.pinned.clone();
+
+        // Query the database for Quick Launch items
+        if let Ok(guard) = self.service.read() {
+            let db = guard.db_ref();
+            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items) {
+                Ok(items) => {
+                    self.quick_launch_items = items
+                        .into_iter()
+                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                            crate::overlay::model::QuickLaunchItem {
+                                title,
+                                path,
+                                icon_path,
+                                is_pinned,
+                            }
+                        })
+                        .collect();
+                    self.overlay.set_quick_launch_items(self.quick_launch_items.clone());
+                    log_info(&format!(
+                        "[nex] quick_launch reloaded items={} pinned={}",
+                        self.quick_launch_items.len(),
+                        pinned.len()
+                    ));
+                }
+                Err(error) => {
+                    log_warn(&format!("[nex] quick_launch reload failed: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Show Quick Launch items in idle state if available.
+    fn show_idle_or_quick_launch(&mut self) {
+        if self.runtime_config.quick_launch.enabled && !self.quick_launch_items.is_empty() {
+            crate::runtime_overlay_rows::set_quick_launch_overlay_state(
+                &self.overlay,
+                &self.quick_launch_items,
+            );
+        } else {
+            set_idle_overlay_state(&self.overlay);
+        }
+        if let Some(issue) = self.hotkey_issue_status.as_deref() {
+            self.overlay.set_status_text(issue);
+        }
+    }
+
+    /// Pin an app to Quick Launch by title.
+    fn pin_app_to_quick_launch(&mut self, title: &str) {
+        // Find the app path from search results or Quick Launch items
+        let app_path = self.current_results.iter()
+            .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("app"))
+            .map(|item| item.path.clone())
+            .or_else(|| {
+                self.quick_launch_items.iter()
+                    .find(|item| item.title.eq_ignore_ascii_case(title))
+                    .map(|item| item.path.clone())
+            });
+
+        let Some(path) = app_path else {
+            log_warn(&format!("[nex] quick_launch pin failed: app '{}' not found", title));
+            return;
+        };
+
+        // Normalize the path for comparison
+        let normalized = path.replace('/', "\\").to_ascii_lowercase();
+
+        // Add to config pinned list if not already there
+        let already_pinned = self.runtime_config.quick_launch.pinned.iter().any(|p| {
+            p.replace('/', "\\").to_ascii_lowercase() == normalized
+        });
+
+        if !already_pinned {
+            self.runtime_config.quick_launch.pinned.push(path);
+
+            // Persist to config file and prevent reloader from overwriting
+            if let Err(error) = self.save_config_and_prevent_reload() {
+                log_warn(&format!("[nex] quick_launch pin save failed: {error}"));
+            } else {
+                log_info(&format!("[nex] quick_launch pinned '{}'", title));
+                log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
+                // Reload Quick Launch items from in-memory config FIRST
+                self.load_quick_launch_items_from_config();
+                // If in Quick Launch mode (empty query), rebuild the rows
+                if self.overlay.query_text().trim().is_empty() {
+                    self.show_idle_or_quick_launch();
+                } else {
+                    // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                    self.overlay.set_status_text(&format!("Pinned '{}' to Quick Launch", title));
+                }
+            }
+        }
+    }
+
+    /// Unpin an app from Quick Launch by title.
+    fn unpin_app_from_quick_launch(&mut self, title: &str) {
+        // Find the app path
+        let app_path = self.quick_launch_items.iter()
+            .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
+            .map(|item| item.path.clone());
+
+        let Some(path) = app_path else {
+            log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found or not pinned", title));
+            return;
+        };
+
+        // Normalize the path for comparison
+        let normalized = path.replace('/', "\\").to_ascii_lowercase();
+
+        // Remove from config pinned list
+        self.runtime_config.quick_launch.pinned.retain(|p| {
+            p.replace('/', "\\").to_ascii_lowercase() != normalized
+        });
+
+        // Persist to config file and prevent reloader from overwriting
+        if let Err(error) = self.save_config_and_prevent_reload() {
+            log_warn(&format!("[nex] quick_launch unpin save failed: {error}"));
+        } else {
+            log_info(&format!("[nex] quick_launch unpinned '{}'", title));
+            log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
+            // Reload Quick Launch items from in-memory config FIRST
+            self.load_quick_launch_items_from_config();
+            // If in Quick Launch mode (empty query), rebuild the rows
+            if self.overlay.query_text().trim().is_empty() {
+                self.show_idle_or_quick_launch();
+            } else {
+                // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                self.overlay.set_status_text(&format!("Unpinned '{}' from Quick Launch", title));
+            }
+        }
+    }
+
+    /// Save config and update watcher timestamp to prevent reloader from overwriting.
+    fn save_config_and_prevent_reload(&mut self) -> Result<(), String> {
+        crate::config::save(&self.runtime_config)
+            .map_err(|e| format!("save failed: {e}"))?;
+        // Update the watcher's last_modified to the current file time
+        // so the config reloader doesn't see it as "changed" and overwrite our in-memory state.
+        if let Some(modified) = crate::runtime_index::config_file_modified_time(&self.runtime_config.config_path) {
+            self.config_watcher.last_modified = Some(modified);
+        }
+        Ok(())
+    }
+
+    /// Add an app to Quick Launch by path (from search results).
+    fn add_to_quick_launch(&mut self, path: &str) {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        // Normalize the path for comparison
+        let normalized = trimmed.replace('/', "\\").to_ascii_lowercase();
+
+        // Add to config pinned list if not already there
+        let already_pinned = self.runtime_config.quick_launch.pinned.iter().any(|p| {
+            p.replace('/', "\\").to_ascii_lowercase() == normalized
+        });
+
+        if !already_pinned {
+            self.runtime_config.quick_launch.pinned.push(trimmed.to_string());
+
+            // Persist to config file and prevent reloader from overwriting
+            if let Err(error) = self.save_config_and_prevent_reload() {
+                log_warn(&format!("[nex] quick_launch add save failed: {error}"));
+            } else {
+                log_info(&format!("[nex] quick_launch added '{}'", trimmed));
+                log_info(&format!("[nex] quick_launch pinned_list={:?}", self.runtime_config.quick_launch.pinned));
+                // Reload Quick Launch items from in-memory config FIRST
+                self.load_quick_launch_items_from_config();
+                // If in Quick Launch mode (empty query), rebuild the rows
+                if self.overlay.query_text().trim().is_empty() {
+                    self.show_idle_or_quick_launch();
+                } else {
+                    // In search mode — just push state (includes updated quickLaunch array for pin icons)
+                    self.overlay.set_status_text(&format!("Added to Quick Launch"));
+                }
+            }
+        } else {
+            log_info(&format!("[nex] quick_launch already pinned '{}'", trimmed));
+        }
+    }
+
     fn run(self) {
         // Share `self` with the closure via `Rc<RefCell<>>`. The
         // worker thread is single-threaded, so `RefCell::borrow_mut`
@@ -702,10 +946,8 @@ impl RuntimeWorker {
                             let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                         }
                         if self.overlay.query_text().trim().is_empty() {
-                            set_idle_overlay_state(&self.overlay);
-                            if let Some(issue) = self.hotkey_issue_status.as_deref() {
-                                self.overlay.set_status_text(issue);
-                            }
+                            self.load_quick_launch_items();
+                            self.show_idle_or_quick_launch();
                         }
                     }
                     HotkeyAction::Hide => {
@@ -745,10 +987,8 @@ impl RuntimeWorker {
                     let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                 }
                 if self.overlay.query_text().trim().is_empty() {
-                    set_idle_overlay_state(&self.overlay);
-                    if let Some(issue) = self.hotkey_issue_status.as_deref() {
-                        self.overlay.set_status_text(issue);
-                    }
+                    self.load_quick_launch_items();
+                    self.show_idle_or_quick_launch();
                 }
             }
             OverlayEvent::ExternalQuit => {
@@ -790,6 +1030,19 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::QueryChanged(query) => {
+                let trimmed = query.trim();
+                if trimmed.is_empty() {
+                    // Query cleared — show Quick Launch or idle state
+                    self.current_results.clear();
+                    self.selected_index = 0;
+                    self.last_query.clear();
+                    self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
+                    self.pending_uninstall_confirmation = None;
+                    // Reload Quick Launch items to ensure fresh data
+                    self.load_quick_launch_items();
+                    self.show_idle_or_quick_launch();
+                    return;
+                }
                 apply_query_change(
                     query,
                     &self.overlay,
@@ -818,12 +1071,56 @@ impl RuntimeWorker {
                     &self.runtime_config,
                     &self.background_index_refresh,
                     &self.suppressed_uninstall_titles,
+                    &self.runtime_config.quick_launch.pinned,
                     &mut self.current_results,
                     &mut self.selected_index,
                     self.last_sent_generation,
                 );
             }
             OverlayEvent::Submit => {
+                // Check if we're in Quick Launch mode (empty query, Quick Launch visible)
+                if self.overlay.query_text().trim().is_empty() && !self.quick_launch_items.is_empty() {
+                    if let Some(list_selection) = self.overlay.selected_index() {
+                        if list_selection < self.quick_launch_items.len() {
+                            let item = &self.quick_launch_items[list_selection];
+                            let path = item.path.clone();
+                            self.overlay.hide_now();
+                            self.overlay_state.on_escape();
+                            // Launch the Quick Launch item
+                            match crate::action_executor::launch_open_target(&path) {
+                                Ok(()) => {
+                                    log_info(&format!("[nex] quick_launch launched '{}'", item.title));
+                                    // Record the launch
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0);
+                                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                                    let db = guard.db_ref();
+                                    // Find the item ID by path to record launch
+                                    if let Ok(Some((id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&db, &path) {
+                                        if let Err(error) = crate::index_store::record_launch(&db, &id, now) {
+                                            log_warn(&format!("[nex] record_launch failed: {error}"));
+                                        }
+                                    }
+                                    reset_overlay_session(
+                                        &self.overlay,
+                                        &mut self.current_results,
+                                        &mut self.selected_index,
+                                    );
+                                    self.last_query.clear();
+                                    self.search_session.clear();
+                                    self.search_worker.clear_session();
+                                }
+                                Err(error) => {
+                                    self.overlay.set_status_text(&format!("Launch error: {error}"));
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 if self.current_results.is_empty() {
                     if self.overlay.query_text().trim().is_empty() {
                         set_idle_overlay_state(&self.overlay);
@@ -1014,6 +1311,15 @@ impl RuntimeWorker {
                     }
                 }
             }
+            OverlayEvent::PinApp(title) => {
+                self.pin_app_to_quick_launch(&title);
+            }
+            OverlayEvent::UnpinApp(title) => {
+                self.unpin_app_from_quick_launch(&title);
+            }
+            OverlayEvent::AddToQuickLaunch(path) => {
+                self.add_to_quick_launch(&path);
+            }
             _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
         }
     }
@@ -1118,6 +1424,7 @@ fn apply_search_results(
     _runtime_config: &Config,
     background_index_refresh: &BackgroundIndexRefresh,
     suppressed_uninstall_titles: &[String],
+    pinned_paths: &[String],
     current_results: &mut Vec<crate::model::SearchItem>,
     selected_index: &mut usize,
     last_sent_generation: u64,
@@ -1145,6 +1452,23 @@ fn apply_search_results(
     if !suppressed_uninstall_titles.is_empty() {
         filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
     }
+
+    // Sort pinned items to the top of search results
+    if !pinned_paths.is_empty() {
+        let pinned_normalized: Vec<String> = pinned_paths.iter()
+            .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+            .collect();
+        results.sort_by(|a, b| {
+            let a_pinned = pinned_normalized.iter().any(|p| {
+                a.path.replace('/', "\\").to_ascii_lowercase() == *p
+            });
+            let b_pinned = pinned_normalized.iter().any(|p| {
+                b.path.replace('/', "\\").to_ascii_lowercase() == *p
+            });
+            b_pinned.cmp(&a_pinned) // true (pinned) comes before false
+        });
+    }
+
     *current_results = results;
     *selected_index = 0;
 

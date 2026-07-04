@@ -183,6 +183,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         match event {
             Event::UserEvent(cmd) => match cmd {
                 UiCommand::WebviewReady => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                     ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
@@ -202,6 +203,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Show => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     if webview.is_none() {
                         ready = false;
                         // Mark the show as pending before building the
@@ -224,6 +226,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if !ready {
                         // WebView exists but page hasn't loaded yet
                         // (e.g. show raced with a prior cold start).
+                        // Reset and rebuild the WebView.
+                        crate::runtime::log_info("[nex] host WebView not ready, resetting");
+                        webview = None;
+                        ready = false;
+                        show_pending = true;
+                        match build_webview(&window, &state, &proxy, &event_tx) {
+                            Ok(wv) => webview = Some(wv),
+                            Err(e) => {
+                                crate::runtime::log_warn(&format!("[nex] webview rebuild failed: {e}"));
+                                return;
+                            }
+                        }
                         return;
                     }
                     position_window(&window, hwnd);
@@ -270,6 +284,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, height));
                 }
                 UiCommand::Painted => {
+                    crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
                     if show_pending {
                         show_pending = false;
                         last_show = Instant::now();
@@ -475,6 +490,21 @@ fn handle_ipc(
                 open_path(&path);
             }
         }
+        "pin" => {
+            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::PinApp(title.to_string()));
+            }
+        }
+        "unpin" => {
+            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::UnpinApp(title.to_string()));
+            }
+        }
+        "addToQuickLaunch" => {
+            if let Some(path) = value.get("v").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
+            }
+        }
         _ => {}
     }
 }
@@ -554,13 +584,20 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 OverlayRowRole::Header => "header",
                 OverlayRowRole::Status => "status",
                 OverlayRowRole::Calculator => "calculator",
+                OverlayRowRole::QuickLaunch => "quick_launch",
                 OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
             };
             let selectable = matches!(
                 r.role,
-                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator
+                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator | OverlayRowRole::QuickLaunch
             );
             let icon = if r.icon_path.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(r.icon_path.clone())
+            };
+            // Include the actual file path for addToQuickLaunch
+            let file_path = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(r.icon_path.clone())
@@ -571,6 +608,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 "subtitle": r.path,
                 "kind": r.kind,
                 "icon": icon,
+                "filePath": file_path,
                 "selectable": selectable,
                 "resultIndex": r.result_index,
             })
@@ -582,6 +620,20 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         Theme::Light => "light",
     };
 
+    // Include Quick Launch items for idle state
+    let quick_launch: Vec<serde_json::Value> = s
+        .quick_launch_items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "title": item.title,
+                "path": item.path,
+                "icon": item.icon_path,
+                "pinned": item.is_pinned,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "query": s.query,
         "rows": rows,
@@ -592,6 +644,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "hotkeyIssue": s.hotkey_issue_active,
         "theme": theme,
         "showPending": show_pending,
+        "quickLaunch": quick_launch,
+        "quickLaunchVisible": s.quick_launch_visible,
     })
     .to_string()
 }

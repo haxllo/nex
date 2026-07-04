@@ -1,0 +1,28 @@
+# Auto-detect text files and normalize line endings to LF in the repo
+* text=auto
+
+# Force LF for source code and config files
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf
+
+# Binary files — do not touch
+*.ico binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.sqlite3 binary

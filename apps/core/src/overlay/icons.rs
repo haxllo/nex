@@ -296,7 +296,131 @@ fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
+/// Extract the best quality icon from a file using `ExtractIconExW`.
+/// Tries to get the largest available icon size for sharper rendering.
+#[cfg(target_os = "windows")]
 fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DestroyIcon, ExtractIconExW, GetIconInfo, ICONINFO,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB};
+
+    // Convert shell path to file path for ExtractIconExW
+    // shell:AppsFolder\{app_id} needs special handling
+    let file_path = if shell_path.starts_with("shell:") {
+        // For shell URIs, fall back to SHGetFileInfo
+        return extract_shell_icon_fallback(shell_path);
+    } else {
+        shell_path
+    };
+
+    let wide: Vec<u16> = file_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // First call: get the number of icons
+    let icon_count = unsafe { ExtractIconExW(wide.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
+    if icon_count <= 0 {
+        return extract_shell_icon_fallback(shell_path);
+    }
+
+    // Allocate arrays for icon handles
+    let mut large_icons: Vec<isize> = vec![0; icon_count as usize];
+    let mut small_icons: Vec<isize> = vec![0; icon_count as usize];
+
+    // Second call: get the actual icon handles
+    let extracted = unsafe {
+        ExtractIconExW(
+            wide.as_ptr(),
+            0,
+            large_icons.as_mut_ptr(),
+            small_icons.as_mut_ptr(),
+            icon_count as u32,
+        )
+    };
+
+    if extracted == 0 {
+        return extract_shell_icon_fallback(shell_path);
+    }
+
+    // Find the best large icon (prefer largest)
+    let mut best_hicon: Option<isize> = None;
+    let mut best_size: i32 = 0;
+
+    for &hicon in &large_icons {
+        if hicon == 0 {
+            continue;
+        }
+        // Get icon info to check size
+        let mut info: ICONINFO = unsafe { std::mem::zeroed() };
+        if unsafe { GetIconInfo(hicon, &mut info) } != 0 {
+            // Get bitmap dimensions
+            let mut bmi: BITMAPINFO = unsafe { std::mem::zeroed() };
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            let mut header: BITMAPINFOHEADER = unsafe { std::mem::zeroed() };
+            header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+
+            // Use GetDIBits to get bitmap info
+            unsafe {
+                let hdc = windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut());
+                if !hdc.is_null() {
+                    header.biWidth = 0;
+                    header.biHeight = 0;
+                    GetDIBits(hdc, info.hbmColor, 0, 0, std::ptr::null_mut(), &mut bmi, 0);
+                    windows_sys::Win32::Graphics::Gdi::ReleaseDC(std::ptr::null_mut(), hdc);
+                }
+            }
+
+            let width = bmi.bmiHeader.biWidth;
+            let height = bmi.bmiHeader.biHeight.abs();
+            let size = width.max(height);
+
+            if size > best_size {
+                best_size = size;
+                best_hicon = Some(hicon);
+            }
+
+            // Clean up bitmap objects
+            unsafe {
+                if !info.hbmColor.is_null() {
+                    DeleteObject(info.hbmColor as _);
+                }
+                if !info.hbmMask.is_null() {
+                    DeleteObject(info.hbmMask as _);
+                }
+            }
+        }
+    }
+
+    // If we couldn't determine size, just use the first large icon
+    if best_hicon.is_none() {
+        best_hicon = large_icons.iter().find(|&&h| h != 0).copied();
+    }
+
+    let result = if let Some(hicon) = best_hicon {
+        icon_to_rgba_png(hicon as windows_sys::Win32::UI::WindowsAndMessaging::HICON)
+    } else {
+        None
+    };
+
+    // Clean up all icon handles
+    for &hicon in &large_icons {
+        if hicon != 0 {
+            unsafe { DestroyIcon(hicon); }
+        }
+    }
+    for &hicon in &small_icons {
+        if hicon != 0 {
+            unsafe { DestroyIcon(hicon); }
+        }
+    }
+
+    result
+}
+
+/// Fallback using SHGetFileInfo for shell URIs.
+#[cfg(target_os = "windows")]
+fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
     use windows_sys::Win32::UI::Shell::{
         SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW,
         SHGFI_ICON, SHGFI_LARGEICON, SHGFI_PIDL,
@@ -307,7 +431,6 @@ fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
 
     let wide: Vec<u16> = shell_path.encode_utf16().chain(std::iter::once(0)).collect();
 
-    // Parse the display name (shell URI or filesystem path) to a PIDL.
     let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
     let hr = unsafe {
         SHParseDisplayName(wide.as_ptr(), std::ptr::null_mut(), &mut pidl, 0, std::ptr::null_mut())

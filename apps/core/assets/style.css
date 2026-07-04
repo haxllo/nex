@@ -254,6 +254,59 @@ html[data-theme="light"] .row.selected .title {
   color: var(--accent);
 }
 
+/* Quick Launch row */
+.row.quick-launch {
+  /* Same base as .row */
+}
+
+.row.quick-launch .pin-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+
+.row.quick-launch:hover .pin-icon,
+.row.quick-launch.selected .pin-icon {
+  opacity: 1;
+}
+
+.row.quick-launch .pin-icon.pinned {
+  opacity: 0.7;
+}
+
+.row.quick-launch:hover .pin-icon.pinned,
+.row.quick-launch.selected .pin-icon.pinned {
+  opacity: 1;
+}
+
+/* Add icon for search results */
+.row .add-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  cursor: pointer;
+}
+
+.row:hover .add-icon,
+.row.selected .add-icon {
+  opacity: 1;
+}
+
+.row .add-icon.pinned {
+  opacity: 0.7;
+}
+
+.row:hover .add-icon.pinned,
+.row.selected .add-icon.pinned {
+  opacity: 1;
+}
+
+/* Toast notification */
 /* section header */
 .section {
   padding: 12px 12px 6px;

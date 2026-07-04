@@ -24,6 +24,7 @@
   let lastQuerySent = "";
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
+  let quickLaunchItems = []; // Quick Launch items for idle state
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
@@ -42,6 +43,59 @@
     window.chrome.webview.addEventListener("message", (e) => {
       try { nex.apply(e.data); } catch (_) {}
     });
+  }
+
+  // ── toast notification ────────────────────────────────────
+  // ── pin/unpin icons ────────────────────────────────────────
+  const pinIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+  const pinIconPinnedSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+  const addIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+
+  function createPinIcon(item, index) {
+    const pinIcon = document.createElement('div');
+    pinIcon.className = 'pin-icon' + (item.pinned ? ' pinned' : '');
+    pinIcon.innerHTML = item.pinned ? pinIconPinnedSvg : pinIconSvg;
+    pinIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (item.pinned) {
+        post('unpin', item.title);
+      } else {
+        post('pin', item.title);
+      }
+      input.focus();
+    });
+    return pinIcon;
+  }
+
+  function isItemPinned(filePath) {
+    if (!filePath) return false;
+    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    return quickLaunchItems.some(item => {
+      const itemPath = (item.path || '').replace(/\\/g, '/').toLowerCase();
+      return itemPath === normalized && item.pinned;
+    });
+  }
+
+  function createAddIcon(item) {
+    const addIcon = document.createElement('div');
+    const filePath = item.filePath || item.icon;
+    const pinned = isItemPinned(filePath);
+    addIcon.className = 'add-icon' + (pinned ? ' pinned' : '');
+    addIcon.innerHTML = pinned ? pinIconPinnedSvg : addIconSvg;
+    addIcon.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (filePath) {
+        if (pinned) {
+          post('unpin', item.title);
+        } else {
+          post('addToQuickLaunch', filePath);
+        }
+      }
+      input.focus();
+    });
+    return addIcon;
   }
 
   // ── render ───────────────────────────────────────────────
@@ -86,7 +140,7 @@
       }
 
       const li = document.createElement("li");
-      li.className = "row" + (r.role === "calculator" ? " calculator" : "");
+      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "");
       li.setAttribute("role", "option");
       li.dataset.index = String(i);
       if (i === selected) li.classList.add("selected");
@@ -125,7 +179,16 @@
       }
       li.appendChild(text);
 
-      if (r.kind && r.role !== "calculator") {
+      // Quick Launch row: add pin/bookmark icon
+      if (r.role === "quick_launch") {
+        const quickLaunchItem = quickLaunchItems.find(item => item.title === r.title);
+        if (quickLaunchItem) {
+          li.appendChild(createPinIcon(quickLaunchItem, i));
+        }
+      } else if (r.kind === "app" && r.role !== "calculator") {
+        // App row: add "+" icon to add to Quick Launch
+        li.appendChild(createAddIcon(r));
+      } else if (r.kind && r.role !== "calculator") {
         const kind = document.createElement("div");
         kind.className = "kind";
         kind.textContent = r.kind;
@@ -367,6 +430,11 @@
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
+
+      // Store Quick Launch items if provided
+      if (Array.isArray(state.quickLaunch)) {
+        quickLaunchItems = state.quickLaunch;
+      }
 
       if (state.placeholder) {
         input.placeholder = state.placeholder;

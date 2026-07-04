@@ -12,7 +12,7 @@ use crate::core_service::{CoreService, LaunchTarget};
 use crate::model::SearchItem;
 use crate::plugin_sdk::{PluginActionKind, PluginRegistry};
 use crate::query_dsl::ParsedQuery;
-use crate::runtime::log_info;
+use crate::runtime::{log_info, log_warn};
 use crate::runtime_overlay_rows::{
     uninstall_target_title_from_action_title, ACTION_UNINSTALL_CANCEL_ID,
     ACTION_UNINSTALL_CONFIRM_ID,
@@ -85,7 +85,21 @@ pub(crate) fn launch_overlay_selection(
     let mode = resolved_mode_for_query(cfg, &parsed_query);
     service
         .launch_with_query_context(LaunchTarget::Id(&selected.id), Some(query_text), Some(mode))
-        .map_err(|error| format!("launch failed: {error}"))
+        .map_err(|error| format!("launch failed: {error}"))?;
+
+    // Record the launch for Quick Launch usage tracking
+    if selected.kind.eq_ignore_ascii_case("app") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let db = service.db_ref();
+        if let Err(error) = crate::index_store::record_launch(&db, &selected.id, now) {
+            crate::runtime::log_warn(&format!("[nex] record_launch failed: {error}"));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

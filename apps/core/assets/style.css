@@ -194,8 +194,6 @@ body {
   height: 30px;
   border-radius: 7px;
   object-fit: contain;
-  image-rendering: -webkit-optimize-contrast;
-  image-rendering: crisp-edges;
 }
 .row .icon.placeholder {
   display: grid;

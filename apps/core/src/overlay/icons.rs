@@ -232,7 +232,7 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) -
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::DrawIconEx;
 
-    const ICON_SIZE: i32 = 48;
+    const ICON_SIZE: i32 = 64;
     unsafe {
         let hdc = CreateCompatibleDC(std::ptr::null_mut());
         if hdc.is_null() { return None; }

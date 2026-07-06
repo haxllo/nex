@@ -9,6 +9,8 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
 
+<img src="https://cdn.aralphayajewellery.com/UI.png" alt="UI" />
+
 </div>
 
 ## Installation

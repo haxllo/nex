@@ -7,6 +7,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
+[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
 
 <img src="https://cdn.aralphayajewellery.com/UI.png" alt="UI" />
 

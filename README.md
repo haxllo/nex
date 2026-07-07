@@ -4,7 +4,6 @@
 
 A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
 
-[![crates.io](https://img.shields.io/crates/v/nex?label=crates.io)](https://crates.io/crates/nex)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
@@ -21,16 +20,6 @@ Download the latest release for your platform from the
 [Releases page](https://github.com/haxllo/nex/releases/latest).
 
 After downloading, run the installer and follow the setup instructions.
-
----
-
-### Install with Cargo
-
-Requires Rust and Cargo installed.
-
-```bash
-cargo install nex; nex
-```
 
 ---
 
@@ -55,10 +44,14 @@ Nex is a lightweight, fast launcher that puts your workflow at your fingertips. 
 ### Key Features
 
 - **Global Hotkey** - Summon the launcher from anywhere with a customizable keyboard shortcut
-- **Fuzzy Search** - Find apps, files, and folders with intelligent matching
+- **Fuzzy Search** - Find apps, files, and folders with intelligent matching via Tantivy full-text search
+- **Everything SDK** - Optional integration with Voidtools Everything for instant file search
 - **Actions** - Execute custom commands, web searches, and system operations
+- **Calculator** - Inline arithmetic evaluation directly in the search bar
 - **Clipboard History** - Access recently copied items (optional)
-- **Plugins** - Extend functionality with custom plugins
+- **Plugins** - Extend functionality with a custom plugin SDK
+- **Auto-Updater** - Keep Nex up to date with built-in update checks
+- **File Watching** - Real-time index updates when files change on disk
 - **Game Mode** - Suppress the launcher while gaming
 
 ## Quick Start
@@ -111,17 +104,29 @@ nex --status-json     # JSON status output
 
 ```
 nex/
-├── apps/core/          # Main Rust application
+├── apps/core/              # Main Rust application
 │   ├── src/
-│   │   ├── runtime.rs  # Main entry point & event loop
-│   │   ├── search.rs   # Search indexing & querying
-│   │   ├── discovery.rs # File/app discovery
+│   │   ├── main.rs         # Binary entry point
+│   │   ├── lib.rs          # Library entry (nex_core)
+│   │   ├── runtime.rs      # Core runtime orchestration
+│   │   ├── runtime_loop.rs  # Main event loop
+│   │   ├── search.rs       # Search query DSL
+│   │   ├── tantivy_search.rs # Tantivy full-text search engine
+│   │   ├── search_worker.rs  # Async search worker thread
+│   │   ├── discovery.rs    # File/app discovery
+│   │   ├── everything_bridge.rs # Voidtools Everything integration
+│   │   ├── calculator.rs   # Inline calculator
+│   │   ├── clipboard_history.rs # Clipboard history
+│   │   ├── plugin_sdk.rs   # Plugin SDK
+│   │   ├── updater.rs      # Auto-updater
+│   │   ├── config.rs       # TOML config management
+│   │   ├── overlay/        # WebView2 overlay (tao + wry)
 │   │   └── ...
 │   └── Cargo.toml
-├── apps/assets/        # Icons & branding
-├── scripts/           # Build & packaging scripts
-├── tests/             # Integration tests
-└── docs/              # Documentation
+├── apps/assets/            # Icons & branding
+├── scripts/                # Build & packaging scripts
+├── tests/                  # Integration & perf tests
+└── docs/                   # Architecture docs & plans
 ```
 
 ## Requirements
@@ -132,14 +137,14 @@ nex/
 ## Building
 
 ```bash
-# Development build
-cargo build
+# Debug build
+cargo build --bin nex
 
 # Release build
-cargo build --release
+cargo build --release --bin nex
 
 # Run tests
-cargo test
+cargo test -p nex
 ```
 
 ## Documentation
@@ -194,4 +199,4 @@ cargo test
 
 ## License
 
-  MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.

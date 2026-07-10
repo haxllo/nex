@@ -13,9 +13,10 @@
 //! cannot steal focus reliably on its own), and resizes to hug the
 //! web content so the DWM acrylic backdrop wraps the panel exactly.
 //!
-//! Memory: the WebView is created lazily on first show and dropped a
-//! few seconds after the overlay is hidden (warm-then-release), so the
-//! heavy Chromium processes are not resident while idle.
+//! Memory: the WebView stays warm for the process lifetime so open
+//! timing is consistent. After hide, a warm-release timer clears the
+//! decoded icon cache (the main reclaimable overlay heap) while
+//! leaving the page loaded.
 //!
 //! [`run`] MUST be called on the main thread (tao, like winit, panics
 //! if the event loop is created off the main thread).
@@ -66,12 +67,13 @@ pub(crate) enum UiCommand {
     Apply,
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
-    /// Show + focus the overlay (builds the WebView if released).
+    /// Show + focus the overlay (builds the WebView if not yet created).
     Show,
     /// Hide the overlay and arm the warm-release timer.
     Hide,
-    /// Fired by the warm-release timer; drops the WebView if still
-    /// hidden and the generation still matches.
+    /// Fired by the warm-release timer; if still hidden and the
+    /// generation matches, clears the icon cache while keeping the
+    /// WebView warm for consistent re-open timing.
     Teardown(u64),
     /// The page painted after a push_state — trigger deferred show.
     Painted,
@@ -125,8 +127,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
     // Build the WebView eagerly at startup so the page is fully
-    // rendered in the background before the first show.  Subsequent
-    // re-shows after warm-release rebuild lazily (same Show path).
+    // rendered in the background before the first show.  The WebView
+    // stays resident; only the icon cache is released on idle.
     let mut webview = match build_webview(&window, &state, &proxy, &event_tx) {
         Ok(wv) => Some(wv),
         Err(e) => {
@@ -141,7 +143,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut show_pending = false;
 
     // Single warm-release timer thread. Hide arms it with (gen, delay);
-    // it sends Teardown(gen) when the deadline passes. Re-arming replaces
+    // it sends Teardown(gen) when the deadline passes. Teardown clears
+    // the icon cache only — the WebView stays warm. Re-arming replaces
     // the previous deadline, so rapid hide/show cycles don't stack
     // sleeping threads.
     let (warm_release_tx, warm_release_rx) =
@@ -273,10 +276,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Teardown(gen) => {
                     let still_hidden = !state.lock().map(|s| s.visible).unwrap_or(false);
                     if still_hidden && gen == warm_gen {
-                        webview = None;
-                        ready = false;
+                        // Keep WebView + ready so re-open is always the
+                        // warm path (consistent timing). Drop decoded
+                        // PNG icons — the bulk of reclaimable overlay
+                        // heap outside Chromium.
+                        let entries = icon_cache.len();
                         icon_cache.clear();
-                        crate::logging::info("[nex] ui warm-release: webview torn down");
+                        crate::logging::info(&format!(
+                            "[nex] ui warm-release: icon cache cleared entries={entries} (webview kept warm)"
+                        ));
                     }
                 }
                 UiCommand::Resize(h) => {

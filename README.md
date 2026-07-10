@@ -171,7 +171,7 @@ cargo test -p nex
   **Key design decisions:**
 
   - **Fire-and-forget state push.** Rust sends JSON state snapshots to the WebView via `ICoreWebView2::PostWebMessageAsJson`. No synchronous script evaluation on the critical path.
-  - **Warm-release.** The WebView is created lazily on first show and dropped ~5 seconds after hiding, so Chromium processes aren't resident while idle.
+  - **Warm-release.** The WebView stays resident for consistent open timing; ~5 seconds after hide the decoded icon cache is cleared to reclaim overlay heap.
   - **DWM acrylic backdrop.** Rounded corners and acrylic blur via `DwmSetWindowAttribute` / `DwmExtendFrameIntoClientArea`. Falls back to CSS-painted panel on older Windows versions.
   - **Cursor-monitor positioning.** Window centers horizontally on the monitor under the cursor, anchored in the upper third (Raycast/Spotlight placement).
   - **Force-foreground focus.** Uses the `AttachThreadInput` trick to steal focus from background on show — winit/tao alone cannot reliably set foreground on Windows.

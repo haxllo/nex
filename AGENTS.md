@@ -62,7 +62,7 @@ control. No GDI/GDI+/D2D — all rendering is HTML/CSS/JS.
 - Window positioning, DPI handling, acrylic backdrop in `overlay/host.rs`.
 - Hotkey listener on dedicated thread (`overlay/hotkey.rs`). System tray icon
   with context menu (`overlay/tray.rs`).
-- Single warm-release timer thread (crossbeam channel, re-arm on Hide).
+- Single warm-release timer thread (crossbeam channel, re-arm on Hide); clears icon cache only — WebView stays warm.
 - Theme detection: Windows registry `AppsUseLightTheme` (`overlay/platform.rs`).
 - Indexing progress window: separate tao + wry instance (`overlay/indexing_progress.rs`).
 - Mica backdrop via `DWMWA_SYSTEMBACKDROP_TYPE` planned but not yet implemented.

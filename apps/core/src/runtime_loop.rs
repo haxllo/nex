@@ -941,13 +941,13 @@ impl RuntimeWorker {
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
                         );
-                        self.overlay.show_and_focus();
-                        if self.runtime_config.clipboard_enabled {
-                            let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
-                        }
                         if self.overlay.query_text().trim().is_empty() {
                             self.load_quick_launch_items();
                             self.show_idle_or_quick_launch();
+                        }
+                        self.overlay.show_and_focus();
+                        if self.runtime_config.clipboard_enabled {
+                            let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                         }
                     }
                     HotkeyAction::Hide => {
@@ -981,14 +981,14 @@ impl RuntimeWorker {
                     guard.warm_search_cache();
                 }
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
+                if self.overlay.query_text().trim().is_empty() {
+                    self.load_quick_launch_items();
+                    self.show_idle_or_quick_launch();
+                }
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
                 if self.runtime_config.clipboard_enabled {
                     let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
-                }
-                if self.overlay.query_text().trim().is_empty() {
-                    self.load_quick_launch_items();
-                    self.show_idle_or_quick_launch();
                 }
             }
             OverlayEvent::ExternalQuit => {

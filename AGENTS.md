@@ -12,6 +12,8 @@ cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
+**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification.
+
 **CI order**: `vitest --run` → `cargo test -p nex` → perf gate → smoke gate.
 
 ## Running

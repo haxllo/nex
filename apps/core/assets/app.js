@@ -302,13 +302,15 @@
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
-        if (needsPainted) {
-          needsPainted = false;
-          post("painted");
-        }
         if (h !== lastH && h > 0) {
           lastH = h;
           post("resize", h);
+        }
+        // Resize first so Rust can set window size BEFORE making it
+        // visible — avoids pulse from INITIAL_HEIGHT→full-height jump.
+        if (needsPainted) {
+          needsPainted = false;
+          post("painted");
         }
       });
     });

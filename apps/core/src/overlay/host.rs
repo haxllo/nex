@@ -251,13 +251,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                 }
                 UiCommand::Hide => {
-                    // Push current state (which the shim has already
-                    // cleared to idle) before hiding, so the page is
-                    // ready-to-show on the next open.
+                    // Hide first so user never sees the cleared state
+                    // rendered (plain body with no rows).
+                    window.set_visible(false);
+                    // Push cleared state while hidden so next Show has
+                    // a fresh page ready to render.
                     if ready {
                         push_state(&webview, &state, &icon_cache, false);
                     }
-                    window.set_visible(false);
                     if let Ok(mut s) = state.lock() {
                         s.has_focus = false;
                     }

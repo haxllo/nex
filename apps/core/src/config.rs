@@ -740,7 +740,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("active_memory_target_mb = ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
     text.push('\n');
-    text.push_str("# how long (ms) the WebView stays resident after hide before teardown (valid range: 500..600000)\n");
+    text.push_str("# how long (ms) after hide before the icon cache is cleared; WebView stays warm (valid range: 500..600000)\n");
     text.push_str("ui_warm_release_ms = ");
     text.push_str(&cfg.ui_warm_release_ms.to_string());
     text.push('\n');

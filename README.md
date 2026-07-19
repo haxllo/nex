@@ -4,11 +4,12 @@
 
 A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
 
-[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)](#)
-[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
-![Stars](https://badgen.net/github/stars/haxllo/nex)
+[![Platform](https://img.shields.io/badge/Platform-Windows-green)](#)
+[![License](https://img.shields.io/github/license/haxllo/nex?color=yellow)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
 [![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
+
+![Stars](https://img.shields.io/github/stars/haxllo/nex?color=white)
 
 <img src="https://cdn.nexapp.live/UI_2x.webp" alt="UI" width="800" />
 

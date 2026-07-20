@@ -1,130 +1,293 @@
 # Changelog
 
-> **DEPRECATED ENTRIES BELOW**: The `[v2.1.0]`, `[6.4.0]`, and `[6.3]` entries are from a **previous project** (legacy SwiftFind/Nex 6.x line) before the codebase was restarted at v1.0.0 in May 2026. They are kept only for historical reference and should not be used to understand the current v1.x codebase.
->
-> **Current series (active)**: v1.0.0 → v1.1.0 → v1.1.1 → v1.3.0 (in progress, not yet released)
-
 All notable changes to Nex are documented in this file.
 
-This changelog is intentionally backfilled from the most reliable sources in the repo: tagged milestones, release notes, and shipped commit history. Older tags can be expanded later if you want a full historical pass.
+## [2.4.2] - 2026-07-10
+
+### Fixed
+
+- **Overlay flash/pulse on open** — quick launch items now load into state before `UiCommand::Show` is posted. Resize fires before painted so window appears at correct height.
+- **Opacity flash** — removed opacity 0→1 from row-in animation (translateY only).
+- **Body flash on close** — window hides before cleared state is pushed.
+- **Divider visible on idle** — `class="idle"` hides list area until rows render.
+
+## [2.4.1] - 2026-07-10
+
+### Changed
+
+- **Warm WebView** — overlay WebView stays resident for process lifetime. Warm-release timer clears decoded icon cache only, keeping page loaded for consistent ~instant re-open timing.
+- **Heap reclaim** — cleared icon cache reclaims overlay heap during idle without tearing down the WebView.
+
+## [2.4.0] - 2026-07-09
+
+### Added
+
+- **Quick Launch** — hybrid model: shows pinned items when pins exist, auto-fills from usage when no pins.
+- **Pin/unpin** — toggle from search results; input retains focus, overlay updates immediately.
+- **Pinned items sorted to top** — in all search results.
+
+### Fixed
+
+- **Icon quality** — `ExtractIconExW` now retrieves highest resolution (32px/48px/256px) instead of fixed 32px.
+- **Overlay not opening** — fixed JS regex syntax error in `isItemPinned` that blocked WebView ready signal.
+- **Config migration** — fixed nested TOML structure for quick_launch settings with legacy flat-format migration.
+
+## [2.3.1] - 2026-07-04
+
+### Performance
+
+- **Arrow key navigation** — `SelectChanged` sends only `{"selected": idx}` (~20 bytes) instead of full state snapshot (~134KB). Arrow keys now ~1ms instead of ~20ms.
+- **Icon delivery** — dual `PostWebMessageAsJson`: lightweight state JSON first, icon data JSON second. State lock hold reduced from ~5ms to ~0.1ms.
+- **Lock contention** — `push_state()` clones `ShimState` first, drops lock, then serializes outside lock.
+- **CSS compositor** — removed redundant `backdrop-filter: saturate(140%)` that doubled compositor work.
+- **Row animation** — `@keyframes row-in` only applied on initial render, preventing 20 concurrent animations per keystroke.
+- **JS debounce** — reduced from 80ms to 40ms for faster first keystroke response.
+- **Painted IPC** — `post("painted")` only sent after `show_pending = true`.
+- **Personalization cache** — 5-second TTL for SQLite personalization queries, eliminating ~1-2ms per search.
+- **Tantivy incremental sync** — writer lock held only during write phase (~1ms) instead of full scan (~100ms).
+
+### Fixed
+
+- **Shutdown hang** — 3-part root cause: COM STA deadlock resolved by switching to MTA, `FileWatcherHandle::drop` made non-blocking with `mem::forget`, `std::process::exit(0)` added as safety net.
+- **COM init per invocation** — moved `CoInitializeEx` to `thread_local!` for persistent prefetch thread.
+- **Startup unwrap hardened** — replaced 5 bare `.unwrap()` calls with `unwrap_or_else` for poisoned lock recovery.
+- **Escape handler duplicate** — fixed duplicated clear logic in search session.
+- **Indexer thread panic** — handled gracefully instead of crashing main thread.
+- **Stale pruner shutdown** — added `AtomicBool` stop signal for clean exit.
+- **File watcher shutdown** — `stop_file_watchers()` called before worker thread join.
+- **Runtime worker panic guard** — wrapped `worker.run()` in `catch_unwind`.
+- **Blocking search reads** — replaced blocking `cached_items.read()` with `try_read()`.
+- **Icon prefetch thread accumulation** — single persistent `nex-icon-prefetch` thread instead of per-call spawning.
+- **`last_touch` unbounded growth** — added `clean_orphaned_touches()` to cap LRU HashMap growth.
+
+### Architecture
+
+- **Persistent prefetch thread** — single thread with shared work slot replaces per-call thread spawning.
+- **COM MTA** — icon prefetch uses `COINIT_MULTITHREADED` instead of `COINIT_APARTMENTTHREADED` to prevent `ExitProcess` deadlock.
+- **`catch_unwind` on search worker** — prevents search panic from killing the worker thread.
+
+## [2.3.0] - 2026-06-22
+
+### Added
+
+- **Launch at startup default** — `launch_at_startup` now defaults to `true`.
+
+### Fixed
+
+- **Cargo package name drift** (#10) — workspace package renamed from `nex-launch` to `nex` so `cargo -p nex` works everywhere.
+- **Update script wrong repo** (#11) — `update-nex.ps1` defaults to `haxllo/nex`.
+- **Build-from-source installer path** (#12) — `install-nex.ps1` uses correct `cargo build -p nex --release --bin nex`.
+- **File watcher drop recovery** (#16) — consumer triggers `rebuild_index_incremental_with_report` after batch overflow.
+- **Clipboard history privacy** (#17) — clipboard history is off by default and encrypted with DPAPI.
+
+### Architecture
+
+- **Config reload semantics** (#19) — `RuntimeWorker` bumps `config_generation` counter on reload and clears search worker session immediately.
+- **Stale Iced references** (#14) — removed from overlay doc comments and architecture docs (WebView2/tao+wry is the single UI shell).
+
+## [2.2.2] - 2026-06-22
+
+### Fixed
+
+- **Nex not showing in Task Manager startup apps** — `options.background` defaulted to `true`, causing argument parser to reject CLI commands (`--set-launch-at-startup`, `--ensure-config`, `--quit`) with an invisible failure. Fixed by auto-setting `background = false` for all non-`Run` commands.
+
+## [2.2.1] - 2026-06-22
+
+### Fixed
+
+- **First hotkey after warm-release teardown now works** — when WebView rebuilds during `build_webview()`, spurious `Focused(true)`/`Focused(false)` events triggered the click-outside-to-dismiss handler. Added `!show_pending` guard to the escape condition.
+
+## [2.2.0] - 2026-06-22
+
+### Fixed
+
+- **SQLITE_BUSY launch freeze** — launch path reads from in-memory cache instead of the DB, avoiding 5-6s blocks when the background indexer holds the SQLite lock. Added WAL journal mode and busy timeout.
+- **Warm-release hotkey miss** — `show_pending` set before `build_webview` blocks spurious `Escape` from Tao's `Focused` events during WebView rebuild.
+- **Session clearing race** — drains clear channel after receiving search request so first post-hide query doesn't use stale results.
+- **Index sync staleness** — `sync_indexes_from_cache` compares backend doc counts against actual cache item count.
+- **Tantivy incremental sync misses** — iterates `max_doc` (not `num_docs`) and skips deleted docs via alive bitset.
+- **Config hot-reload stale in search worker** — config and plugin registry shared via `Arc<RwLock<>>` for immediate effect.
+- **Console flash on launch** — added `CREATE_NO_WINDOW` to plugin command and explorer.exe spawns.
+- **Diagnostics privacy** — raw config and logs are opt-in (`NEX_INCLUDE_RAW_DIAGNOSTICS=1`). Query profile logs show hash instead of readable text.
+
+### Architecture
+
+- **Removed FTS5 search backend** — Tantivy is the sole indexed search backend. Removed `fts5_search` module, `SearchBackend` config enum, and all dual-backend sync paths.
+- **Removed JSON config template** — only TOML templates are written going forward (JSON loading preserved for backward compatibility).
+- **Default hotkey changed** — from `Ctrl+Shift+Space` to `Ctrl+Space`.
+
+## [2.1.1] - 2026-06-21
+
+### Fixed
+
+- **Shutdown hang** — `OnceLock::clone()` deep copy hid thread ID from `Drop`; listener thread never posted `WM_QUIT`, blocking `handle.join()` forever. Wrapped in `Arc` to share state.
+
+## [2.1.0] - 2026-06-20
+
+### Performance
+
+- **Warm Tantivy cache on show** — pre-reads ALL Tantivy segment files + SQLite DB into OS page cache before showing overlay, cutting first-keystroke latency.
+- **Adaptive debounce** — first char instant, rapid chars coalesced at 80ms.
+- **O(1) selection via rowMap** — `scrollIntoView` only on selection change.
+- **Stale prune off critical path** — moved to background thread.
+- **`recv_timeout` jitter** — stop channel + `select!` instead of 50ms poll.
+- **Fire-and-forget state push** — replaced blocking `evaluate_script` with `PostWebMessageAsString`.
+- **`RwLock` over `Mutex`** — for `CoreService` enabling concurrent read access.
+
+### Fixed
+
+- **Everything SDK race** — fixed bridge race, DLL planting, `is_service_running` state clobber.
+- **First-show blank** — WebView now renders state before becoming visible.
+- **FTS5/Tantivy re-index** — fixed redundant re-index and progress window acrylic.
+- **FTS5 mutex deadlock** — dropped `fts5_guard` before `maybe_compact_backends`.
+- **Scrollbar flash** — fixed overlay scrollbar visibility on open.
+
+### Changed
+
+- **GUI subsystem** — no console flash at startup. Removed dead SVG icon deps.
+- **DWM drop shadow** — replaced CSS box-shadow with native `DwmExtendFrameIntoClientArea` (-1 margins).
+
+## [2.0.0] - 2026-06-18
+
+### Added
+
+- **WebView2 overlay** — replaced Iced rendering with tao + wry (WebView2). All UI is now HTML/CSS/JS.
+- **DWM drop shadow** — native window shadow via `DwmExtendFrameIntoClientArea`.
+- **FTS5 incremental sync** — with search relevance scoring.
+- **Tantivy foundation** — full-text search engine with BM25 ranking, fuzzy, prefix, phrase matching.
+- **Everything SDK** — bundled Everything64.dll with auto-detection and graceful fallback.
+- **File watcher consumer** — `delete_item_by_id` for real-time index updates.
+
+### Fixed
+
+- **Screen-tear on hover** — eliminated D2D/GDI desync by moving to GDI+-only rendering path.
+- **Winit main-thread panic** — thread-swap fix for overlay thread safety.
+
+### Architecture
+
+- **Complete Iced migration** — removed all Iced 0.14 code. Tray, icons, view, shim, legacy removal completed.
+- **Config migration** — to TOML with JSON backward compatibility.
+- **Planning docs** — stability, indexing perf, search quality phase plans added.
+
+## [1.3.0] - 2026-05-28
+
+### Changed
+
+- **GDI+-only rendering** — removed D2D+GDI hybrid; all rendering now uses GDI+. Eliminates screen-tear and panel flash.
+- **Inter font** — replaced SpaceMono with Inter across the UI.
+- **GDI+ text rendering** — ClearType hinting for blurry text fix. Pre-created font handles, `SelectObject` eliminated from draw path.
+- **Help tip** — converted from GDI to GDI+ rendering. Fixed border clipping with float-based rounded rect path (0.5px inset).
+
+### Fixed
+
+- **Footer hint rendering** — fixed degenerate-paint flash.
+- **CI test hangs** — gated web/shell launch tests behind env var. Fixed scaffold test path, package name (`nex` → `nex-cli`).
+- **CI matrix** — dropped ubuntu-latest (Nex is Windows-only).
+
+## [1.2.0] - 2026-05-26
+
+### Added
+
+- **Channel updater** — with manifest integrity verification and rollback support.
+- **Async icon painting** — icon cache invalidation and background refresh.
+
+### Performance
+
+- **Optimized icon caching** — reduced icon decode overhead on overlay show.
 
 ## [1.1.1] - 2026-05-24
 
 ### Changed
+
 - **Search is now fully async** — query processing moved to a dedicated background thread. The UI thread no longer blocks during search, keeping the overlay responsive even during heavy queries.
 
 ### Fixed
-- **Overlay no longer freezes during search** — previously, every keystroke triggered a synchronous search on the UI thread, blocking window message processing. Now handled by `SearchWorker` with stale-request draining and `PostMessageW` result notification.
+
+- **Overlay no longer freezes during search** — every keystroke previously triggered a synchronous search on the UI thread. Now handled by `SearchWorker` with stale-request draining and `PostMessageW` result notification.
 - **Thread safety for CoreService** — `Arc<Mutex<CoreService>>` ensures the SQLite connection is never accessed concurrently.
 - **Worker thread lifecycle** — `SearchWorker::Drop` signals thread exit via channel closure and joins the thread cleanly.
 
 ## [1.1.0] - 2026-05-24
 
 ### Added
-- **Everything SDK integration** — instant file search via Everything64.dll bundled with the installer. No manual DLL placement required. Nex auto-detects Everything at runtime and falls back gracefully when not available.
-- **Plugin SDK foundations** — trait-based plugin interface with WASM distribution path prepared. The `plugin_sdk.rs` module now supports manifest parsing and store protocol scaffolding for future extension discovery.
-- **Window management system** — 8 preset tile layouts (left/right half, top/bottom half, four quadrants, center, maximize, restore). Accessible via command palette or configurable hotkeys.
-- **Calculator (basic)** — inline arithmetic evaluation directly in the search bar. Supports `+`, `-`, `*`, `/`, `%`, and parenthesized expressions. Result appears as the top hit with one-tab copy.
-- **Emoji picker** — type `:` followed by a keyword to search and insert emoji. Glyphs are rendered inline with results for quick selection.
+
+- **Everything SDK integration** — instant file search via Everything64.dll bundled with the installer. Auto-detection with graceful fallback.
+- **Plugin SDK foundations** — trait-based plugin interface with WASM distribution path prepared.
+- **Window management system** — 8 preset tile layouts (left/right half, top/bottom half, four quadrants, center, maximize, restore).
+- **Calculator (basic)** — inline arithmetic evaluation supporting `+`, `-`, `*`, `/`, `%`, and parenthesized expressions.
+- **Emoji picker** — type `:` followed by a keyword to search and insert emoji.
 
 ### Changed
-- **Packaging now bundles Everything64.dll** — the `package-windows-artifact.ps1` script downloads, extracts, and includes the Everything SDK DLL automatically. TLS 1.2 is enforced for download compatibility on older Windows/PowerShell versions.
-- **Stale docs updated** — `system-architecture.md` (fixed config format from JSON→TOML), `project-charter.md` (fixed default hotkey from Alt+Space→Ctrl+Space), `requirements.md` (same hotkey fix), `windows-runtime-behavior.md` (fixed config format reference), `windows-packaging-readiness.md` (updated version placeholders), and `docs/README.md` (rewritten to reflect current product).
-- **Version bumped to 1.1.0** — Cargo.toml, build artifacts, and packaging scripts aligned.
+
+- **Packaging bundles Everything64.dll** — `package-windows-artifact.ps1` downloads and includes the Everything SDK DLL automatically.
+- **Stale docs updated** — system-architecture.md, project-charter.md, requirements.md, and others corrected to match TOML config, Ctrl+Space default.
+- **Version bumped to 1.1.0**.
 
 ### Fixed
-- **PowerShell packaging compatibility** — `Invoke-WebRequest` failed on older Windows due to TLS 1.2 not being negotiated. Fixed by explicitly setting `[Net.ServicePointManager]::SecurityProtocol`. Zip extraction and SHA256 hashing now use fallback methods for cross-version PowerShell compatibility.
-- **Everything SDK extraction** — the zip extraction now supports three fallback methods (.NET ZipFile, Expand-Archive, Shell.Application COM) to handle all PowerShell versions from 2.0 through 7+.
-- **All stale documentation references** corrected to match the current v6.4.0/v1.1.0 reality (TOML config, Ctrl+Space default, web search availability).
 
-### Known Issues
-- Calculator supports basic arithmetic only; unit conversion and scientific functions deferred to a future release.
-- Window management is command-palette-only; configurable hotkey bindings coming in v1.2.
-- Plugin SDK is still in preview — no public extension store or WASM runtime yet.
+- **PowerShell packaging compatibility** — TLS 1.2 enforced for `Invoke-WebRequest` on older Windows.
+- **Everything SDK extraction** — three fallback methods (.NET ZipFile, Expand-Archive, Shell.Application COM) for all PowerShell versions.
+- **All stale documentation references** corrected.
 
-## [6.4.0] - 2026-03-31  *(LEGACY — pre-restart, do not reference)*
-
-> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
+## [1.0.0] - 2026-05-17
 
 ### Added
-- On-demand updater entry points inside Nex.
-  - Added built-in `Check for Updates` command action.
-  - Added tray menu `Check for Updates`.
-  - Both launch the existing stable PowerShell updater without adding a background updater service.
-- Hotkey conflict recovery.
-  - Nex now stays alive when the configured global hotkey cannot be registered.
-  - Added structured `hotkey_registration_issue` diagnostics.
-  - Added tray-based `Open Config` recovery flow and visible status guidance.
-- Freshness diagnostics without heavy file watchers.
-  - Added `provider_freshness` and `stale_prune` diagnostics to logs and status output.
+
+- **Global hotkey** (Alt+Space by default) to summon launcher from anywhere.
+- **Fuzzy search** for apps, files, and folders.
+- **Custom actions and web search**.
+- **Clipboard history** (optional).
+- **Plugin support**.
+- **Game mode**.
+
+---
+
+## Legacy (pre-v1.0.0 codebase)
+
+The following entries are from the SwiftFind/Nex codebase before the v1.0.0 restart. Kept for historical reference only.
+
+### [6.4.0] - 2026-03-31
+
+### Added
+
+- On-demand updater entry points: `Check for Updates` command action and tray menu item.
+- Hotkey conflict recovery — Nex stays alive when hotkey cannot be registered.
+- Structured `hotkey_registration_issue` diagnostics with tray-based recovery flow.
+- Freshness diagnostics via `provider_freshness` and `stale_prune`.
 
 ### Changed
-- New installs now default to app-first search behavior:
-  - `show_files = false`
-  - `show_folders = false`
-- Discovery scope hardening now excludes low-value system, cache, and noise paths by default for filesystem indexing.
-- Startup diagnostics now expose lifecycle markers for overlay readiness, hotkey readiness, indexing start/completion, and cache application.
-- Broad-root indexing now tightens file/folder cache retention more aggressively to keep memory behavior predictable.
 
-## [6.3] - 2026-03-13  *(LEGACY — pre-restart, do not reference)*
+- New installs default to app-first search behavior (`show_files = false`, `show_folders = false`).
+- Discovery scope hardened — excludes low-value system, cache, and noise paths.
+- Startup diagnostics expose lifecycle markers for overlay, hotkey, and indexing readiness.
+- Broad-root indexing tightens file/folder cache retention.
 
-> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
+### [6.3] - 2026-03-13
 
 ### Added
-- Windows hybrid discovery improvements for apps, files, and folders.
-  - Added system app and Windows Search-backed discovery.
-  - Added explicit `show_files` / `show_folders` config toggles.
-- Command-palette uninstall workflow.
-  - Added uninstall actions.
-  - Added quick uninstall mode with command affordances.
-- Runtime quality-of-life features.
-  - Added live config reload for most safe settings.
-  - Added delayed query execution smoothing.
-  - Added tray-backed Game Mode toggle.
-- Installer improvements.
-  - Added startup-choice prompt during install.
-  - Added current-user vs all-users install scope support.
+
+- Windows hybrid discovery — system app and Windows Search-backed discovery.
+- `show_files` / `show_folders` config toggles.
+- Command-palette uninstall workflow with quick mode.
+- Live config reload for safe settings.
+- Delayed query execution smoothing.
+- Tray-backed Game Mode toggle.
+- Installer startup-choice prompt and current-user vs all-users scope.
 - Rebrand from `SwiftFind` to `Nex`.
-  - Product/runtime branding, installer naming, config paths, and docs were updated to the new name.
 
 ### Changed
+
 - Config format migrated to TOML with legacy JSON fallback.
 - Default hotkey changed to `Ctrl+Space`.
 - Default web search provider changed to Google.
-- App result rows were enriched with publisher/subtitle metadata and cleaner footer/result styling.
-- Installed payload was trimmed and icon rebuild tracking was hardened.
+- App result rows enriched with publisher/subtitle metadata.
 
 ### Fixed
-- Excluded documentation, samples, FAQ pages, manuals, and web shortcut noise from app discovery.
-- Suppressed stale uninstall entries and stale broken app hits more reliably.
-- Fixed duplicate config-file opening from the overlay help/config entry.
-- Fixed hotkey behavior on desktop shell surfaces and fullscreen-related edge cases.
-- Fixed installer scope duplication, shutdown behavior, and related uninstall/registry issues.
-- Fixed shell app launching for `shell:` targets via Explorer.
-- Fixed multiple Windows overlay polish issues across footer spacing, alignment, and symbol rendering.
 
-## [v2.1.0] - 2026-03-02  *(LEGACY — pre-restart, do not reference)*
-
-> ⚠️ From a previous project line. Skipped during the v1.0.0 restart.
-
-### Added
-- `--status-json` runtime diagnostics command for machine-readable support and performance reporting.
-- Index budget controls:
-  - `index_max_items_total`
-  - `index_max_items_per_root`
-  - `index_max_items_per_query_seed`
-- `Trim Memory Now` maintenance action.
-- `scripts/windows/profile-memory-and-icons.ps1` for reproducible runtime profiling.
-
-### Changed
-- Most safe config changes now hot-apply without restart.
-- Discovery provider settings now reconfigure in-process and trigger background reindexing.
-- File/folder cache compaction was improved to lower steady-state memory while keeping app items hot.
-- Config migration guidance was improved and schema advanced to version `7`.
-
-### Fixed
-- Improved runtime reliability and memory behavior for large discovery roots.
-
-## Earlier History
-
-Earlier tags exist in the repository (`v2.2`, `v2`, `v1.x`, `v0.5.0`, and sprint tags), but they are not fully expanded here yet.
+- Excluded documentation, samples, FAQ, and web shortcuts from app discovery.
+- Suppressed stale uninstall entries and broken app hits.
+- Fixed duplicate config-file opening from overlay.
+- Fixed hotkey behavior on desktop shell surfaces and fullscreen edge cases.
+- Fixed installer scope duplication and shutdown behavior.
+- Fixed shell app launching for `shell:` targets.
+- Fixed overlay polish issues (footer spacing, alignment, symbol rendering).

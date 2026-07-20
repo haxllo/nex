@@ -15,16 +15,22 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 </div>
 
-## Installation
+## Features
 
-### Binary Release (Recommended)
+- **Keyboard-first** — Global hotkey (Alt+Space) summons Nex from anywhere, instantly
+- **Fuzzy search** — Tantivy-powered full-text search across apps, files, and folders
+- **Everything SDK** — Optional Voidtools Everything integration for real-time file search
+- **Calculator** — Inline arithmetic evaluation in the search bar
+- **Clipboard history** — Recently copied items at your fingertips
+- **Actions & plugins** — Custom commands, web searches, and extensible plugin SDK
+- **Game mode** — Automatic suppression while gaming
+- **Auto-updater** — Stay current with built-in update mechanism
 
-Download the latest release for your platform from the
-[Releases page](https://github.com/haxllo/nex/releases/latest).
+## Getting Started
 
-After downloading, run the installer and follow the setup instructions.
+### Install
 
----
+Download the latest installer from the [Releases page](https://github.com/haxllo/nex/releases/latest). Run it — Nex starts in the background, ready on **Alt+Space**.
 
 ### Build from Source
 
@@ -32,174 +38,111 @@ After downloading, run the installer and follow the setup instructions.
 git clone https://github.com/haxllo/nex.git
 cd nex
 cargo build --release
+# Binary: target/release/nex.exe
 ```
 
-Binary location:
-
-```text
-target/release/nex
-```
-
-## Overview
-
-Nex is a lightweight, fast launcher that puts your workflow at your fingertips. Built in Rust for minimal memory footprint and near-instant responsiveness.
-
-### Key Features
-
-- **Global Hotkey** - Summon the launcher from anywhere with a customizable keyboard shortcut
-- **Fuzzy Search** - Find apps, files, and folders with intelligent matching via Tantivy full-text search
-- **Everything SDK** - Optional integration with Voidtools Everything for instant file search
-- **Actions** - Execute custom commands, web searches, and system operations
-- **Calculator** - Inline arithmetic evaluation directly in the search bar
-- **Clipboard History** - Access recently copied items (optional)
-- **Plugins** - Extend functionality with a custom plugin SDK
-- **Auto-Updater** - Keep Nex up to date with built-in update checks
-- **File Watching** - Real-time index updates when files change on disk
-- **Game Mode** - Suppress the launcher while gaming
-
-## Quick Start
-
-### Run
-
-```bash
-cargo run --release
-```
-
-Or run the built binary directly:
-
-```bash
-./target/release/nex.exe
-```
+**Requirements:** Windows 10/11 (64-bit), Rust 1.75+
 
 ### Configuration
 
-On first launch, Nex creates a default config at:
-```
-%APPDATA%\Nex\config.toml
-```
-
-Key settings:
+On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `hotkey` | `Alt+Space` | Global hotkey to summon launcher |
-| `max_results` | `8` | Maximum results to display |
-| `show_files` | `false` | Include files in search |
-| `show_folders` | `false` | Include folders in search |
-| `launch_at_startup` | `false` | Start with Windows |
+|---|---|---|
+| `hotkey` | `Alt+Space` | Global summon shortcut |
+| `max_results` | `8` | Results shown |
+| `show_files` | `false` | Include files |
+| `show_folders` | `false` | Include folders |
+| `launch_at_startup` | `false` | Auto-start with Windows |
 
-### CLI Commands
+## Usage
 
-```bash
-nex --status          # Check if running
-nex --quit            # Stop the launcher
-nex --restart         # Restart the launcher
-nex --status-json     # JSON status output
-```
+### Search Syntax
 
-## Search Syntax
+| Prefix | Scope |
+|---|---|
+| *(none)* | Fuzzy search all indexed items |
+| `>` | Actions |
+| `@` | Applications |
+| `:` | Files & folders |
+| `?` | Web search |
 
-- **Type normally** - Fuzzy search across all indexed items
-- **Prefix commands** - `>` for actions, `@` for apps, `:` for files/folders
-- **Web search** - Prefix with `?` to search the web
+### Commands
+
+| Command | Description |
+|---|---|
+| `nex` | Launch background hotkey runtime |
+| `nex --foreground` | Dev mode (attached terminal + stdout) |
+| `nex --status` | Check if running |
+| `nex --status-json` | Machine-readable JSON status |
+| `nex --quit` | Stop the running instance |
+| `nex --restart` | Restart the instance |
+| `nex --diagnostics-bundle` | Dump diagnostics to zip |
+| `nex --probe-index` | Check search index status |
 
 ## Project Structure
 
 ```
 nex/
-├── apps/core/              # Main Rust application
+├── apps/core/           # Main Rust application
 │   ├── src/
-│   │   ├── main.rs         # Binary entry point
-│   │   ├── lib.rs          # Library entry (nex_core)
-│   │   ├── runtime.rs      # Core runtime orchestration
-│   │   ├── runtime_loop.rs  # Main event loop
-│   │   ├── search.rs       # Search query DSL
-│   │   ├── tantivy_search.rs # Tantivy full-text search engine
-│   │   ├── search_worker.rs  # Async search worker thread
-│   │   ├── discovery.rs    # File/app discovery
-│   │   ├── everything_bridge.rs # Voidtools Everything integration
-│   │   ├── calculator.rs   # Inline calculator
-│   │   ├── clipboard_history.rs # Clipboard history
-│   │   ├── plugin_sdk.rs   # Plugin SDK
-│   │   ├── updater.rs      # Auto-updater
-│   │   ├── config.rs       # TOML config management
-│   │   ├── overlay/        # WebView2 overlay (tao + wry)
-│   │   └── ...
+│   │   ├── main.rs      # Entry point
+│   │   ├── lib.rs       # Library root (nex_core)
+│   │   ├── runtime.rs   # Core orchestration
+│   │   ├── overlay/     # WebView2 UI (tao + wry)
+│   │   ├── search.rs    # Query DSL
+│   │   ├── tantivy_search.rs # Full-text engine
+│   │   ├── everything_bridge.rs # Everything SDK
+│   │   ├── calculator.rs
+│   │   ├── clipboard_history.rs
+│   │   ├── plugin_sdk.rs
+│   │   ├── updater.rs
+│   │   └── config.rs
 │   └── Cargo.toml
-├── apps/assets/            # Icons & branding
-├── scripts/                # Build & packaging scripts
-├── tests/                  # Integration & perf tests
-└── docs/                   # Architecture docs & plans
+├── apps/assets/         # Branding assets
+├── scripts/             # Build & packaging
+├── tests/               # Integration & perf
+└── docs/                # Architecture & plans
 ```
 
-## Requirements
+## Architecture
 
-- Windows 10/11 (64-bit)
-- Rust 1.75+ (for building from source)
+Nex renders its overlay as a native Windows popup using **tao** (window management) and **wry** (WebView2 embedding). All UI is HTML/CSS/JS — no GDI or Direct2D.
 
-## Building
+| Component | File | Purpose |
+|---|---|---|
+| Host | `overlay/host.rs` | Event loop, WebView, Win32 chrome, positioning |
+| Model | `overlay/model.rs` | Event/state/theme types |
+| Icons | `overlay/icons.rs` | LRU cache, base64 PNG encoding |
+| Shim | `overlay/shim.rs` | Runtime-to-overlay API |
+| Hotkey | `overlay/hotkey.rs` | `RegisterHotKey` + message loop |
+| Tray | `overlay/tray.rs` | System tray + context menu |
+| Platform | `overlay/platform.rs` | Theme detection, IPC signaling |
+| Indexing | `overlay/indexing_progress.rs` | First-time indexing UI |
+
+**Key design decisions:**
+
+- **Fire-and-forget state** — Rust pushes JSON snapshots to WebView via `PostWebMessageAsJson`. No synchronous script evaluation on the critical path.
+- **Warm-release** — WebView stays resident for instant open. Icon cache clears ~5 seconds after hide.
+- **Acrylic backdrop** — Rounded corners + acrylic blur via DWM APIs, with CSS fallback on older Windows.
+- **Cursor-anchored positioning** — Window centers on the monitor under the cursor, upper-third placement (Raycast/Spotlight style).
+- **Force-foreground** — `AttachThreadInput` ensures reliable focus on show; winit/tao alone isn't sufficient on Windows.
+- **Instance signaling** — Registered window messages let a second process show/quit the running instance.
+- **Embedded UI** — HTML, CSS, and JS compiled into the binary via `include_str!`, served through `nexasset://` custom protocol.
+
+## Building & Testing
 
 ```bash
-# Debug build
-cargo build --bin nex
-
-# Release build
-cargo build --release --bin nex
-
-# Run tests
-cargo test -p nex
+cargo build --bin nex              # Debug
+cargo build --release --bin nex    # Release
+cargo test -p nex                  # Tests
 ```
 
 ## Documentation
 
 - [Architecture Notes](docs/README.md)
-- [Release Notes](CHANGELOG.md)
-
-## Overlay Architecture
-
-  The Nex overlay is a native Windows popup built on **tao** (window management) and **wry** (WebView2 embedding). All rendering is HTML/CSS/JS — no GDI or Direct2D.
-
-  | Component | File | Purpose |
-  |---|---|---|
-  | Host | `apps/core/src/overlay/host.rs` | Tao event loop, wry WebView, win32 chrome, positioning, focus |
-  | Model | `apps/core/src/overlay/model.rs` | `OverlayEvent`, `OverlayRow`, `ShimState`, `Theme` types |
-  | Icons | `apps/core/src/overlay/icons.rs` | LRU cache decoding app icons to base64 PNG data URIs |
-  | Shim | `apps/core/src/overlay/shim.rs` | Imperative API the runtime uses to push state to the overlay |
-  | Hotkey | `apps/core/src/overlay/hotkey.rs` | `RegisterHotKey` + `GetMessageW` listener on dedicated thread |
-  | Tray | `apps/core/src/overlay/tray.rs` | System tray icon with context menu |
-  | Platform | `apps/core/src/overlay/platform.rs` | Theme detection (Windows registry), instance signaling |
-  | Indexing Progress | `apps/core/src/overlay/indexing_progress.rs` | Secondary tao + wry instance for first-time indexing UI |
-
-  **Key design decisions:**
-
-  - **Fire-and-forget state push.** Rust sends JSON state snapshots to the WebView via `ICoreWebView2::PostWebMessageAsJson`. No synchronous script evaluation on the critical path.
-  - **Warm-release.** The WebView stays resident for consistent open timing; ~5 seconds after hide the decoded icon cache is cleared to reclaim overlay heap.
-  - **DWM acrylic backdrop.** Rounded corners and acrylic blur via `DwmSetWindowAttribute` / `DwmExtendFrameIntoClientArea`. Falls back to CSS-painted panel on older Windows versions.
-  - **Cursor-monitor positioning.** Window centers horizontally on the monitor under the cursor, anchored in the upper third (Raycast/Spotlight placement).
-  - **Force-foreground focus.** Uses the `AttachThreadInput` trick to steal focus from background on show — winit/tao alone cannot reliably set foreground on Windows.
-  - **Instance signaling.** Registered window messages (`Nex.ExternalShow.v1`, `Nex.ExternalQuit.v1`) allow a second `nex.exe` process to show or quit the running instance.
-  - **Embedded UI assets.** HTML, CSS, and JS are compiled into the binary via `include_str!` and served through a custom `nexasset://` protocol handler.
-
-## CLI Reference
-
-  | Command | Description |
-  |---|---|
-  | `nex` | Normal mode: launch background hotkey runtime (Ctrl+Space) |
-  | `nex --foreground` | Dev mode: keep terminal attached, log to stdout |
-  | `nex --background` | Explicit background mode (default) |
-  | `nex --status` | Check whether Nex is currently running |
-  | `nex --status-json` | Machine-readable JSON status snapshot |
-  | `nex --quit` | Stop the running Nex instance |
-  | `nex --restart` | Restart the running instance |
-  | `nex --diagnostics-bundle` | Dump diagnostics snapshot to a zip archive |
-  | `nex --ensure-config` | Create default config file if missing |
-  | `nex --sync-startup` | Sync the Windows startup entry |
-  | `nex --set-launch-at-startup=true` | Enable auto-start with Windows |
-  | `nex --set-launch-at-startup=false` | Disable auto-start with Windows |
-  | `nex --probe-index` | Probe search index status |
-
-  CLI commands run synchronously (print output, then exit). They never spawn a background GUI process.
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

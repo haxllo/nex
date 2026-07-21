@@ -11,7 +11,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 ![Stars](https://img.shields.io/github/stars/haxllo/nex?color=white)
 
-<img src="https://cdn.nexapp.live/UI_2x.webp" alt="UI" width="800" />
+<img src="https://cdn.nexapp.live/UI_PNG.png" alt="UI" width="800" />
 
 </div>
 

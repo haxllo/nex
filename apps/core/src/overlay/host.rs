@@ -23,7 +23,6 @@
 
 #![cfg(target_os = "windows")]
 
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -124,7 +123,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .map_err(|e| format!("failed to create overlay window: {e}"))?;
 
     let hwnd = window.hwnd() as HWND;
-    apply_window_chrome(&window, hwnd, &state);
+    apply_window_chrome(&window, &state);
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
     // Build the WebView eagerly at startup so the page is fully
@@ -695,35 +694,8 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // Win32 glue: window chrome, positioning, focus
 // ─────────────────────────────────────────────────────────────────
 
-/// Apply DWM rounded corners + acrylic backdrop + native shadow.
-fn apply_window_chrome(window: &Window, hwnd: HWND, state: &Arc<Mutex<ShimState>>) {
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
-        DWMWA_WINDOW_CORNER_PREFERENCE,
-    };
-    use windows_sys::Win32::UI::Controls::MARGINS;
-    // DWMWCP_ROUND = 2
-    let pref: i32 = 2;
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            &pref as *const i32 as *const c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
-    // Enable native DWM drop shadow (negative margins = extend frame
-    // into entire client area, which adds the shadow even on layered
-    // windows).
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    unsafe {
-        DwmExtendFrameIntoClientArea(hwnd, &margins);
-    }
+/// Apply acrylic backdrop. CSS handles border-radius + box-shadow on #panel.
+fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
     // Acrylic blur behind the (transparent) WebView. Falls back to a
     // CSS-painted panel if the OS refuses (window-vibrancy returns Err).

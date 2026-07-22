@@ -56,6 +56,7 @@ const FOCUS_GRACE_MS: u64 = 400;
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
+const NEX_PNG: &[u8] = include_bytes!("../../assets/nex.png");
 
 
 /// Commands the shim posts to the UI thread via the event-loop proxy.
@@ -381,6 +382,7 @@ fn serve_asset(
         "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
+        "/nex.png" => ("image/png", std::borrow::Cow::Borrowed(NEX_PNG)),
         _ => return not_found(),
     };
     Response::builder()

@@ -58,6 +58,7 @@ const INDEX_HTML: &str = include_str!("../../assets/index.html");
 const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 
+
 /// Commands the shim posts to the UI thread via the event-loop proxy.
 #[derive(Debug, Clone)]
 pub(crate) enum UiCommand {

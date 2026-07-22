@@ -607,7 +607,10 @@ impl RuntimeWorker {
 
     /// Show Quick Launch items in idle state if available.
     fn show_idle_or_quick_launch(&mut self) {
-        if self.runtime_config.quick_launch.enabled && !self.quick_launch_items.is_empty() {
+        if self.runtime_config.quick_launch.enabled
+            && !self.quick_launch_items.is_empty()
+            && !self.runtime_config.quick_launch.pinned.is_empty()
+        {
             crate::runtime_overlay_rows::set_quick_launch_overlay_state(
                 &self.overlay,
                 &self.quick_launch_items,

@@ -20,7 +20,7 @@
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
-  --text-dim: #a8a8b3;
+  --text-dim: #818181;
   --text-faint: #76767f;
   --sel: rgba(255, 255, 255, 0.09);
   --sel-border: rgba(255, 255, 255, 0.08);
@@ -85,7 +85,7 @@ body {
 #search-icon {
   flex: 0 0 auto;
   fill: none;
-  stroke: var(--text-faint);
+  stroke: var(--border-strong);
   stroke-width: 2;
   stroke-linecap: round;
   transition: opacity 120ms ease;
@@ -105,7 +105,7 @@ body {
 }
 
 #query::placeholder {
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-weight: 300;
 }
 
@@ -341,13 +341,6 @@ html[data-theme="light"] .row.selected .title {
   border-top: 1px solid var(--divider);
   font-size: 11px;
   color: var(--text-faint);
-}
-.footer-logo {
-  height: 20px;
-  width: auto;
-  flex: 0 0 auto;
-  margin-left: 16px;
-  opacity: 0.8;
 }
 #footer .hints {
   flex: 1;

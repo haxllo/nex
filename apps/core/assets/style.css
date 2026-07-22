@@ -343,8 +343,8 @@ html[data-theme="light"] .row.selected .title {
   color: var(--text-faint);
 }
 .footer-logo {
-  width: 32px;
-  height: 32px;
+  height: 20px;
+  width: auto;
   flex: 0 0 auto;
   margin-left: 16px;
   opacity: 0.8;

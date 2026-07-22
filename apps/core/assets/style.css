@@ -343,11 +343,11 @@ html[data-theme="light"] .row.selected .title {
   color: var(--text-faint);
 }
 .footer-logo {
-  width: 16px;
-  height: 16px;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
   margin-left: 16px;
-  opacity: 0.35;
+  opacity: 0.8;
 }
 #footer .hints {
   flex: 1;

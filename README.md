@@ -49,11 +49,11 @@ On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `hotkey` | `Alt+Space` | Global summon shortcut |
-| `max_results` | `8` | Results shown |
+| `hotkey` | `Ctrl+Space` | Global summon shortcut |
+| `max_results` | `20` | Results shown |
 | `show_files` | `false` | Include files |
 | `show_folders` | `false` | Include folders |
-| `launch_at_startup` | `false` | Auto-start with Windows |
+| `launch_at_startup` | `true` | Auto-start with Windows |
 
 ## Usage
 
@@ -62,10 +62,11 @@ On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
 | Prefix | Scope |
 |---|---|
 | *(none)* | Fuzzy search all indexed items |
-| `>` | Actions |
-| `@` | Applications |
-| `:` | Files & folders |
-| `?` | Web search |
+| `>` | Command mode (actions, web search) |
+| `@apps` | Filter to applications |
+| `@files` | Filter to files |
+| `@folders` | Filter to folders |
+| `kind:file` / `ext:md` | DSL key:value filters |
 
 ### Commands
 
@@ -101,7 +102,7 @@ nex/
 │   └── Cargo.toml
 ├── apps/assets/         # Branding assets
 ├── scripts/             # Build & packaging
-├── tests/               # Integration & perf
+├── tests/               # Performance & smoke tests
 └── docs/                # Architecture & plans
 ```
 

@@ -379,10 +379,13 @@ fn serve_asset(
     let path = request.uri().path().to_string();
 
     let (content_type, body): (&str, std::borrow::Cow<'static, [u8]>) = match path.as_str() {
-        "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
+        "/" | "/index.html" => {
+            let logo = base64_data_uri(NEX_PNG);
+            let html = INDEX_HTML.replace("{{NEX_LOGO}}", &logo);
+            ("text/html", std::borrow::Cow::Owned(html.into_bytes()))
+        }
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
-        "/nex.png" => ("image/png", std::borrow::Cow::Borrowed(NEX_PNG)),
         _ => return not_found(),
     };
     Response::builder()

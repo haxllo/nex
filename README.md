@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="apps/assets/nex.svg" alt="Nex" height="90" />
+<img src="https://cdn.nexapp.live/nex-re2.svg" alt="Nex" height="120" />
 
 A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
 

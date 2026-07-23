@@ -307,16 +307,27 @@
     }, 130);
   }
 
-  // ── height measurement (resize native window on first paint) ──
+  // ── height measurement + painted notification ──
+  // Sends resize IPC on first content paint so Rust expands the window
+  // to match the panel's content height. The panel is already rendered
+  // at full height (clipped by overflow:hidden) — no DWM acrylic flash.
+  // The first measurement (idle, ~109px) records the height but does NOT
+  // send resize — only the transition to real content triggers expansion.
   let lastH = 0;
   let needsPainted = false;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
-        if (h !== lastH && h > 0) {
+        if (h > 0 && h !== lastH) {
+          const prev = lastH;
           lastH = h;
-          post("resize", h);
+          // First measurement: skip resize only if panel is truly idle
+          // (no rows, search bar only). If content is already showing
+          // (quick launch items), send resize immediately.
+          if (prev > 0 || !bodyEl.classList.contains("idle")) {
+            post("resize", h);
+          }
         }
         if (needsPainted) {
           needsPainted = false;
@@ -462,6 +473,7 @@
       if (isShow) {
         pendingShow = true;
         needsPainted = true;
+        lastH = 0; // fresh show cycle: trigger resize on first content paint
         scrollToInstant(0);
       }
       render();

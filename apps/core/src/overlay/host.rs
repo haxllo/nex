@@ -49,7 +49,7 @@ use crate::overlay::model::Theme;
 
 const WINDOW_WIDTH: f64 = 720.0;
 const INITIAL_HEIGHT: f64 = 60.0;
-const MAX_HEIGHT: f64 = 560.0;
+const MAX_HEIGHT: f64 = 530.0;
 const FOCUS_GRACE_MS: u64 = 400;
 
 /// Embedded web UI assets (premium Raycast-dark cmdk UI).
@@ -742,7 +742,7 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     // Acrylic blur behind the (transparent) WebView. Falls back to a
     // CSS-painted panel if the OS refuses (window-vibrancy returns Err).
     let tint = if dark {
-        Some((18, 18, 20, 130))
+        Some((0, 0, 0, 230))
     } else {
         Some((245, 245, 247, 140))
     };

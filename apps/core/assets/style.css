@@ -270,7 +270,6 @@ html[data-theme="light"] .row.selected .title {
   width: 18px;
   height: 18px;
   opacity: 0;
-  transition: opacity 120ms ease;
   cursor: pointer;
 }
 
@@ -294,7 +293,6 @@ html[data-theme="light"] .row.selected .title {
   width: 18px;
   height: 18px;
   opacity: 0;
-  transition: opacity 120ms ease;
   cursor: pointer;
 }
 

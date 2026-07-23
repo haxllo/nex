@@ -312,6 +312,7 @@
         }
         if (needsPainted) {
           needsPainted = false;
+          list.scrollTop = 0; // fresh show = fresh scroll, after paint
           post("painted");
         }
       });
@@ -449,9 +450,10 @@
       // show (when Rust sends showPending=true in the state JSON).
       // Also reset scroll position — otherwise scrollTop survives
       // across hide/show and new queries start at old scroll depth.
-      if (state.showPending) {
+      const isShow = state.showPending;
+      if (isShow) {
         needsPainted = true;
-        list.scrollTop = 0;
+        list.scrollTop = 0; // pre-render: immediate, before DOM rebuild
       }
       render();
 
@@ -459,9 +461,21 @@
       // destroys the old element that had the class).
       const selEl = rowMap.get(selected);
       if (selEl) selEl.classList.add("selected");
+
+      // Reset scroll position on fresh show.  Multiple approaches
+      // because WebView2 may coalesce or defer scrollTop depending
+      // on layout timing relative to replaceChildren.
+      if (isShow) {
+        list.scrollTop = 0; // post-render: after DOM rebuilt
+        requestAnimationFrame(() => { list.scrollTop = 0; }); // post-layout
+      }
     },
 
     focus() {
+      // Called by Rust via evaluate_script after every Show + painted.
+      // Reset scroll here too — covers any case where the state-push
+      // reset was dropped (race, coalesced render, etc).
+      list.scrollTop = 0;
       input.focus();
       input.select();
     },

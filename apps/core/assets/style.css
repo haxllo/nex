@@ -176,18 +176,6 @@ body {
   cursor: pointer;
   position: relative;
 }
-#body.initial-render .row {
-  animation: row-in 150ms ease both;
-}
-
-@keyframes row-in {
-  from {
-    transform: translateY(3px);
-  }
-  to {
-    transform: none;
-  }
-}
 
 .row.selected {
   background: var(--sel);

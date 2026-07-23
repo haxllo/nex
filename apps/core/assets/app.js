@@ -231,7 +231,6 @@
     bodyEl.classList.toggle("idle", !hasRows);
     footerEl.classList.toggle("idle", !hasRows);
 
-    scrollToSelected();
     measure();
   }
 
@@ -299,7 +298,6 @@
 
   // ── height measurement (resize native window to hug content) ──
   let lastH = 0;
-  let initialRenderTimer = null;
   // Only send post("painted") on the first render after a show event.
   // Subsequent renders during typing trigger resize-only — the IPC
   // round-trip is unnecessary and adds latency during rapid input.
@@ -312,18 +310,12 @@
           lastH = h;
           post("resize", h);
         }
-        // Resize first so Rust can set window size BEFORE making it
-        // visible — avoids pulse from INITIAL_HEIGHT→full-height jump.
         if (needsPainted) {
           needsPainted = false;
           post("painted");
         }
       });
     });
-    // Remove initial-render class after the 150ms row-in animation
-    // completes so subsequent renders don't re-trigger the animation.
-    clearTimeout(initialRenderTimer);
-    initialRenderTimer = setTimeout(() => bodyEl.classList.remove("initial-render"), 160);
   }
 
   // ── keyboard ─────────────────────────────────────────────
@@ -456,10 +448,6 @@
       // so the Rust side can show + focus the window. Only set on
       // show (when Rust sends showPending=true in the state JSON).
       if (state.showPending) needsPainted = true;
-      // Add initial-render class so CSS applies the row-in animation
-      // only on the first paint after a state push. Removed after the
-      // 150ms animation completes so subsequent renders are instant.
-      bodyEl.classList.add("initial-render");
       render();
     },
 

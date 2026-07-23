@@ -39,6 +39,12 @@
     return document.documentElement.dataset.theme === "light" ? PLACEHOLDER_ICON_DARK : PLACEHOLDER_ICON_LIGHT;
   }
 
+  const WEB_ICON_LIGHT = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAActJREFUSImtlTtLXFEUhde5CFbOCEGw1FGxyOsPxGmipaOdEqb0F+QPZEidpE0gCfkHKdIp2AWxEu3EQlNGhhBnJpjCx2dx9x0vJ+e+jAsO3LP32mvd8+BsqQKABtCoUlMk2ASa9v0auLbRSeUX7iI8D+wCPaAOrPIvVizXA3aAubLiL4A/JvIGcMBBwGDfcm9tPgDWi8RXgcuUyAywFBBPsGicBBdAK0v8CfA3RT62+Iccg/fGOU7FzoFHIYMtr/izxY9yDA6N88WLbye6I0aYlLRnI8E3YFTS14JtHZX0UdKpF590zv3MPZN7AfFN+B1YfgNo52xPgrZxfZwBUSSpIWk84N2XVCvxjzXj+qhLmookTWQU9o1UxmCQkZuIJFFC5K4gktTNSNYk9UqI9CWNZeS6kaQTSWcZBqG9DRmEzqon6UeJ+v+DkyTggaQNL7ct6UDSywKNd5KeSnruxT85534NZ8Cmd4/v5alIGzwmfqgSVHnsTlKxc+BhcK3ETaTqcz2bml8Ay7kbCqwTNw+Im4kjbi4+9o2fbjhrBec1NJkjboNJy1wJGLS4bZnfgdlS4p7RArdNvwNc2XhlsSbwrLJwjuE0MF2l5gYmrTzD6bhmfAAAAABJRU5ErkJggg==";
+  const WEB_ICON_DARK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAaZJREFUSIm11b9qFGEUBfDfDkIqN4IEUmo0WPjvBUwatTSbzhBS+gS+gMFabRVUfAMLO4V0IlaiXbBILJUgupsQi6hrMXfIOH6TmV2TA4fhO/d+587dYe9lNMwEDw3zQbiL38HVUnxuHONzeIs+JrGIYYW9iPXxBrNtzZexEyb30MGHRIH3Ebsf520sNZkv4mfJ5AyuJ8wLXouc4ryHhTrzS/hRSt4I/dEBBR5GzkZJ28WFVIFXlctPQ/94QIH1yHlW0dcK02PxnMa7YIEXmMDzupYDE3iMLxV9Gp8b7h4OOvjm3/ZnsJLQq1yJ3Kr+HVkWwROJwgN0W7xgN3KrmMSpDFM1FweR1KbAdk1sKpO3c1QYZtiqCXblY6AJAxyviW1l2JR/kFSB1G+bKpD6Vn18anH//9CJ50ncqsTW5EPudoPHA1zG1Yr+BF/LwktHMCrKuCgfVOMMu82Stovzde32jD6uz5bOe7hRZ15gSf7HGcqXSUe+XFILh78Xzs0m8wKz8jVYrMxeosCC/ZX5OjoZGXP2l/4qfgXvhDaPK+MY1+F0sDX+ALpftxiqTJeOAAAAAElFTkSuQmCC";
+  function webIcon() {
+    return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
+  }
+
   function post(t, v) {
     try {
       window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
@@ -173,6 +179,13 @@
           const ph = document.createElement("div");
           ph.className = "icon placeholder";
           li.appendChild(ph);
+        }
+        // Web search row — use themed web icon
+        if (r.kind === "action" && r.title && r.title.startsWith("Search Web for")) {
+          const img = document.createElement("img");
+          img.className = "icon";
+          img.src = webIcon();
+          li.appendChild(img);
         }
       }
 

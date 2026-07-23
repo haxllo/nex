@@ -25,6 +25,7 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let quickLaunchItems = []; // Quick Launch items for idle state
+  let pendingShow = false; // show occurred, waiting for first real results
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
@@ -452,8 +453,9 @@
       // across hide/show and new queries start at old scroll depth.
       const isShow = state.showPending;
       if (isShow) {
+        pendingShow = true;
         needsPainted = true;
-        list.scrollTop = 0; // pre-render: immediate, before DOM rebuild
+        list.scrollTop = 0;
       }
       render();
 
@@ -462,12 +464,17 @@
       const selEl = rowMap.get(selected);
       if (selEl) selEl.classList.add("selected");
 
-      // Reset scroll position on fresh show.  Multiple approaches
-      // because WebView2 may coalesce or defer scrollTop depending
-      // on layout timing relative to replaceChildren.
-      if (isShow) {
-        list.scrollTop = 0; // post-render: after DOM rebuilt
-        requestAnimationFrame(() => { list.scrollTop = 0; }); // post-layout
+      // On fresh show, the Show push has empty rows (hide cleared them).
+      // Real results arrive on a later Apply push with showPending=false.
+      // The pendingShow flag bridges this gap — consumed here when the
+      // first non-empty rows arrive after a show cycle.
+      if (pendingShow && rows.length > 0) {
+        pendingShow = false;
+        list.scrollTop = 0;
+        requestAnimationFrame(() => { list.scrollTop = 0; });
+        // Also scroll the selected item into view (belt-and-suspenders).
+        const target = rowMap.get(selected);
+        if (target) target.scrollIntoView({ block: "nearest" });
       }
     },
 

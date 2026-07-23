@@ -247,6 +247,16 @@
     post("select", selected);
   }
 
+  // Helper: set scrollTop but bypass CSS scroll-behavior (smooth)
+  // so the reset is instant, while user-initiated scrolls stay smooth.
+  function scrollToInstant(y) {
+    const prev = list.style.scrollBehavior;
+    list.style.scrollBehavior = "auto";
+    list.scrollTop = y;
+    // Restore after a microtask — the scroll has already been applied.
+    requestAnimationFrame(() => { list.style.scrollBehavior = prev; });
+  }
+
   function scrollToSelected() {
     const el = rowMap.get(selected);
     if (!el) return;
@@ -455,7 +465,7 @@
       if (isShow) {
         pendingShow = true;
         needsPainted = true;
-        list.scrollTop = 0;
+        scrollToInstant(0);
       }
       render();
 
@@ -470,11 +480,9 @@
       // first non-empty rows arrive after a show cycle.
       if (pendingShow && rows.length > 0) {
         pendingShow = false;
-        list.scrollTop = 0;
-        requestAnimationFrame(() => { list.scrollTop = 0; });
-        // Also scroll the selected item into view (belt-and-suspenders).
-        const target = rowMap.get(selected);
-        if (target) target.scrollIntoView({ block: "nearest" });
+        scrollToInstant(0);
+        requestAnimationFrame(() => { scrollToInstant(0); });
+        // Scroll to top — selected item starts at index 0, already in view.
       }
     },
 
@@ -482,7 +490,7 @@
       // Called by Rust via evaluate_script after every Show + painted.
       // Reset scroll here too — covers any case where the state-push
       // reset was dropped (race, coalesced render, etc).
-      list.scrollTop = 0;
+      scrollToInstant(0);
       input.focus();
       input.select();
     },

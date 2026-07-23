@@ -153,6 +153,7 @@ body {
   max-height: 416px;
   overflow-y: auto;
   padding: 0 8px 6px;
+  scroll-behavior: smooth;
 }
 #list:empty {
   display: none;

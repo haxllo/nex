@@ -2,6 +2,61 @@
 
 All notable changes to Nex are documented in this file.
 
+## [2.7.0] - 2026-07-23
+
+### Architecture
+
+- **Rust 2024 edition** — migrated from 2021 to 2024. Reserved `gen` keyword renamed to `generation`. Explicit `unsafe {}` blocks with SAFETY comments inside all `unsafe fn` bodies.
+
+### Fixed
+
+- **Scroll-jump on typing** — `scrollToSelected()` removed from `render()`; no more auto-scroll to top on keystroke.
+- **Orphaned scroll on new show** — `pendingShow` flag set on Show, consumed by first `apply()` with non-empty rows, resets `scrollTop` to 0 once per show/hide cycle.
+- **Smooth scroll conflict** — `scrollToInstant(0)` helper disables CSS smooth scroll for programmatic resets, restores on next RAF. User scrolls stay smooth.
+- **`.selected` class lost after render** — re-applied via JS after `replaceChildren`.
+
+## [2.6.0] - 2026-07-22
+
+### Performance
+
+- **Icon pipeline** — 256px `PrivateExtractIconsW` extraction with 128px normalized square icons — crisp rendering at all display sizes.
+- **.lnk resolution** — resolve shortcut targets to extract high-res icons from the actual .exe (~95% of Start Menu shortcuts).
+- **Progressive icon delivery** — first-open results paint instantly with placeholders, real icons arrive asynchronously.
+
+### Changed
+
+- **Row height** — 52px → 46.22px, 9 clean rows visible (was 7).
+- **Icon size** — 30px → 24px, better proportion in tighter rows.
+- **Placeholder icon** — generic app icon shown while real icon loads (no more blank holes).
+- **Removed row-in animation** — no more 3px slide-up bounce on first paint.
+- **Removed inset shadow** — selected rows no longer flicker a border when hovering.
+- **Removed fade transitions** — pin/add icons snap instantly, no 120ms delay.
+- **Hidden .kind tag** — declutters rows, ready to re-enable later.
+- **Input alignment** — line-height: 1, zero padding, translateY(-1px).
+- **Background opacity** — dark mode panel 0.80 → 0.70 for better acrylic show-through.
+
+### Fixed
+
+- **Scroll-jump on typing** — removed unconditional `scrollToSelected()` in render; no more auto-scroll to top when typing.
+
+## [2.5.0] - 2026-07-14
+
+### Performance
+
+- **Variable font** — switched from single-weight Geist-Regular to InterVariable (100-900 weight range) — real font weights instead of synthetic.
+
+### Fixed
+
+- **Pinned list** — Quick Launch section hides when all items are unpinned (was auto-filling from recent apps).
+- **Footer logo aspect ratio** — fixed stretching by using `height` + `width: auto`.
+- **Custom protocol** — switched from `nexasset://` (silently ignored by WebView2 for `<img>`) to base64 served via Rust `serve_asset`.
+
+### Changed
+
+- **Typography** — font sizes reduced by 1px baseline, letter-spacing 0.5px → 0.2px, body weight 300 → 400, placeholder 200 → 300.
+- **Footer logo** — embedded via `include_bytes!`, base64-encoded at serve time — no inline base64 in HTML.
+- **Color tokens** — `--text-dim` changed to `#818181`, placeholder and search icon use `--border-strong` / `--text-dim`.
+
 ## [2.4.2] - 2026-07-10
 
 ### Fixed

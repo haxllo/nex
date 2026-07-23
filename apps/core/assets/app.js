@@ -307,20 +307,11 @@
     }, 130);
   }
 
-  // ── height measurement (resize native window to hug content) ──
-  let lastH = 0;
-  // Only send post("painted") on the first render after a show event.
-  // Subsequent renders during typing trigger resize-only — the IPC
-  // round-trip is unnecessary and adds latency during rapid input.
+  // ── painted detection (no resize — window has fixed max height) ──
   let needsPainted = false;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        const h = Math.ceil(panel.getBoundingClientRect().height);
-        if (h !== lastH && h > 0) {
-          lastH = h;
-          post("resize", h);
-        }
         if (needsPainted) {
           needsPainted = false;
           scrollToInstant(0); // fresh show = fresh scroll, after paint

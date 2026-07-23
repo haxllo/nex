@@ -449,6 +449,11 @@
       // show (when Rust sends showPending=true in the state JSON).
       if (state.showPending) needsPainted = true;
       render();
+
+      // Re-apply selected highlight after DOM rebuild (replaceChildren
+      // destroys the old element that had the class).
+      const selEl = rowMap.get(selected);
+      if (selEl) selEl.classList.add("selected");
     },
 
     focus() {

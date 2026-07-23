@@ -195,7 +195,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
                         push_state(&webview, &state, &icon_cache, true);
-                        focus_input(&webview);
                         show_pending = true;
                     }
                 }
@@ -269,7 +268,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
-                    focus_input(&webview);
                     show_pending = true;
                 }
                 UiCommand::Hide => {
@@ -321,6 +319,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         last_show = Instant::now();
                         window.set_visible(true);
                         force_foreground(hwnd);
+                        focus_input(&webview);
                     }
                 }
                 UiCommand::Quit => {

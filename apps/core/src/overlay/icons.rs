@@ -217,22 +217,33 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     normalize_to_square_png(img.into_rgba8())
 }
 
-/// Normalize arbitrary-size RGBA image into consistent square:
+/// Normalize large RGBA image down to consistent square:
 /// Lanczos-resize preserving aspect to fit within TARGET × TARGET,
 /// then center-composite onto transparent canvas. Every result row
 /// gets uniform square icon with consistent padding — Raycast look.
+///
+/// Does NOT upscale sources smaller than TARGET — those pass through
+/// at native size (CSS handles display). Upscaling small sources adds
+/// Lanczos blur without benefit for the 30px CSS display container.
 fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
-    use image::imageops::{self, FilterType};
     let target = TARGET_ICON_SIZE;
-    let img = if img.width() != target || img.height() != target {
-        imageops::resize(&img, target, target, FilterType::Lanczos3)
-    } else {
-        img
-    };
+    let (w, h) = (img.width(), img.height());
+
+    // Source already at or below target → pass through at native size.
+    // The CSS container (30px, object-fit: contain) handles display.
+    if w <= target && h <= target {
+        return rgba_to_png(img);
+    }
+
+    // Source larger than target → downscale to fit within target,
+    // center on transparent canvas (consistent padding).
+    use image::imageops::{self, FilterType};
+    // imageops::resize preserves aspect ratio (fits within target×target)
+    let resized = imageops::resize(&img, target, target, FilterType::Lanczos3);
     let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
-    let x = target.saturating_sub(img.width()) / 2;
-    let y = target.saturating_sub(img.height()) / 2;
-    imageops::overlay(&mut canvas, &img, x as i64, y as i64);
+    let x = target.saturating_sub(resized.width()) / 2;
+    let y = target.saturating_sub(resized.height()) / 2;
+    imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
     rgba_to_png(canvas)
 }
 
@@ -322,17 +333,91 @@ fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void, _size: i32) -> Option<Vec<u8>
 }
 
 #[cfg(target_os = "windows")]
+/// Resolve a .lnk shortcut to its target executable path by parsing
+/// the Shell Link binary format (MS-SHLLINK). Extracts the
+/// `LocalBasePath` from the `LinkInfo` section when available.
+/// Returns None for non-.lnk files or shortcuts without a local
+/// base path (e.g. AppUserModelID-based or network paths).
+fn resolve_lnk_target(path: &str) -> Option<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if bytes.len() < 76 { return None; }
+
+    // Validate Shell Link CLSID: {00021401-0000-0000-C000-000000000046}
+    const EXPECTED_CLSID: [u8; 16] = [
+        0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+    ];
+    if bytes[4..20] != EXPECTED_CLSID { return None; }
+
+    // Parse LinkFlags at offset 0x14 (DWORD, little-endian).
+    let link_flags = u32::from_le_bytes(bytes[0x14..0x18].try_into().ok()?);
+    let has_link_info = (link_flags & 0x02) != 0;
+    if !has_link_info { return None; }
+
+    let mut pos: usize = 76; // after fixed ShellLinkHeader
+
+    // Skip LinkTargetIDList if present (flag 0x01).
+    if (link_flags & 0x01) != 0 {
+        loop {
+            if pos + 2 > bytes.len() { return None; }
+            let cb = u16::from_le_bytes(bytes[pos..pos + 2].try_into().ok()?);
+            if cb == 0 { break; } // terminal ID
+            pos += cb as usize;
+        }
+        pos += 2; // skip the terminal ID WORD
+    }
+
+    // Now at LinkInfo structure.
+    if pos + 20 > bytes.len() { return None; }
+    let link_info_size = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?);
+    if pos + link_info_size as usize > bytes.len() { return None; }
+
+    let local_base_path_offset = u32::from_le_bytes(bytes[pos + 16..pos + 20].try_into().ok()?);
+    if local_base_path_offset == 0 { return None; }
+
+    let base_start = pos + local_base_path_offset as usize;
+    if base_start + 2 > bytes.len() { return None; }
+
+    // Read null-terminated UTF-16 string at base_start.
+    let mut end = base_start;
+    while end + 2 <= bytes.len() {
+        if bytes[end] == 0 && bytes[end + 1] == 0 { break; }
+        end += 2;
+    }
+
+    let wide = bytes[base_start..end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect::<Vec<_>>();
+    let target = String::from_utf16(&wide).ok()?;
+    if target.is_empty() { None } else { Some(target) }
+}
+
+#[cfg(target_os = "windows")]
 /// Extract the best quality icon from a file using `ExtractIconExW`.
 /// Tries to get the largest available icon size for sharper rendering.
 #[cfg(target_os = "windows")]
 fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
-    // Primary high-res path: PrivateExtractIconsW at 256×256 for
-    // .exe/.ico/.dll files with embedded large icon resources.
-    // Falls through silently if the path has no icon resource
-    // (e.g. .lnk, shell: URIs, directories).
-    if !shell_path.starts_with("shell:") {
-        if let Some(png) = private_extract_icons_png(shell_path) {
-            return Some(png);
+    // For .lnk shortcuts, resolve the target executable so we can
+    // attempt high-resolution extraction from the actual .exe.
+    let resolved_target = if shell_path.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk_target(shell_path)
+    } else {
+        None
+    };
+
+    // Primary high-res path: try on resolved .exe first, then on
+    // the original path (for direct .exe/.ico/.dll).
+    let high_res_paths = resolved_target.as_deref().into_iter().chain(std::iter::once(shell_path));
+    for path in high_res_paths {
+        if !path.starts_with("shell:") {
+            if let Some(png) = private_extract_icons_png(path) {
+                return Some(png);
+            }
         }
     }
 

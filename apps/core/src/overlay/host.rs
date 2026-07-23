@@ -167,13 +167,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
                 };
                 match result {
-                    Ok(Some((gen, delay))) => {
-                        armed = Some((Instant::now() + delay, gen));
+                    Ok(Some((generation, delay))) => {
+                        armed = Some((Instant::now() + delay, generation));
                     }
                     Ok(None) => break,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        if let Some((_, gen)) = armed.take() {
-                            let _ = warm_release_proxy.send_event(UiCommand::Teardown(gen));
+                        if let Some((_, generation)) = armed.take() {
+                            let _ = warm_release_proxy.send_event(UiCommand::Teardown(generation));
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -286,18 +286,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     show_pending = false;
                     warm_gen = warm_gen.wrapping_add(1);
-                    let gen = warm_gen;
+                    let generation = warm_gen;
                     let delay = state
                         .lock()
                         .map(|s| s.ui_warm_release_ms)
                         .unwrap_or(5_000)
                         .max(500) as u64;
                     // Re-arm the single warm-release timer thread.
-                    let _ = warm_release_arm.send(Some((gen, Duration::from_millis(delay))));
+                    let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
                 }
-                UiCommand::Teardown(gen) => {
+                UiCommand::Teardown(generation) => {
                     let still_hidden = !state.lock().map(|s| s.visible).unwrap_or(false);
-                    if still_hidden && gen == warm_gen {
+                    if still_hidden && generation == warm_gen {
                         // Keep WebView + ready so re-open is always the
                         // warm path (consistent timing). Drop decoded
                         // PNG icons — the bulk of reclaimable overlay
@@ -844,9 +844,11 @@ unsafe extern "system" fn instance_signal_subclass(
     dwrefdata: usize,
 ) -> LRESULT {
     if dwrefdata == 0 {
-        return DefSubclassProc(hwnd, msg, wparam, lparam);
+        // SAFETY: hwnd is valid window handle from subclass registration
+        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
     }
-    let ctx = &*(dwrefdata as *const InstanceSignalCtx);
+    // SAFETY: dwrefdata is a valid pointer stored by SetWindowSubclass
+    let ctx = unsafe { &*(dwrefdata as *const InstanceSignalCtx) };
     if msg != 0 {
         if msg == ctx.msg_show {
             let _ = ctx.event_tx.send(OverlayEvent::ExternalShow);
@@ -857,7 +859,8 @@ unsafe extern "system" fn instance_signal_subclass(
             return 0;
         }
     }
-    DefSubclassProc(hwnd, msg, wparam, lparam)
+    // SAFETY: hwnd is valid window handle from subclass registration
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 unsafe fn install_instance_signal_subclass(
@@ -866,8 +869,9 @@ unsafe fn install_instance_signal_subclass(
 ) {
     let show_name: Vec<u16> = "Nex.ExternalShow.v1".encode_utf16().chain(std::iter::once(0)).collect();
     let quit_name: Vec<u16> = "Nex.ExternalQuit.v1".encode_utf16().chain(std::iter::once(0)).collect();
-    let msg_show = RegisterWindowMessageW(show_name.as_ptr());
-    let msg_quit = RegisterWindowMessageW(quit_name.as_ptr());
+    // SAFETY: string pointers are NUL-terminated wide strings
+    let msg_show = unsafe { RegisterWindowMessageW(show_name.as_ptr()) };
+    let msg_quit = unsafe { RegisterWindowMessageW(quit_name.as_ptr()) };
     if msg_show == 0 || msg_quit == 0 {
         return;
     }
@@ -877,7 +881,8 @@ unsafe fn install_instance_signal_subclass(
         event_tx: event_tx.clone(),
     });
     let ptr = Box::into_raw(ctx) as usize;
-    SetWindowSubclass(hwnd, Some(instance_signal_subclass), 1, ptr);
+    // SAFETY: hwnd is valid window handle, subclass proc is valid
+    unsafe { SetWindowSubclass(hwnd, Some(instance_signal_subclass), 1, ptr) };
 }
 
 // ─────────────────────────────────────────────────────────────────

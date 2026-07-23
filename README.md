@@ -41,7 +41,7 @@ cargo build --release
 # Binary: target/release/nex.exe
 ```
 
-**Requirements:** Windows 10/11 (64-bit), Rust 1.75+
+**Requirements:** Windows 10/11 (64-bit), Rust 1.85+
 
 ### Configuration
 
@@ -136,7 +136,7 @@ Nex renders its overlay as a native Windows popup using **tao** (window manageme
 ```bash
 cargo build --bin nex              # Debug
 cargo build --release --bin nex    # Release
-cargo test -p nex                  # Tests
+cargo test -p nex                  # Tests (broken on Windows — hangs)
 ```
 
 ## Documentation

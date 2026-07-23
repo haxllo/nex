@@ -323,7 +323,7 @@
         }
         if (needsPainted) {
           needsPainted = false;
-          list.scrollTop = 0; // fresh show = fresh scroll, after paint
+          scrollToInstant(0); // fresh show = fresh scroll, after paint
           post("painted");
         }
       });

@@ -235,6 +235,15 @@ html[data-theme="light"] .row.selected .title {
   text-overflow: ellipsis;
 }
 
+/* .kind: hidden for now. Uncomment block below and delete display:none to restore.
+   Always visible at dim color — no selection toggle, no flicker.
+.row .kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: capitalize;
+}
+*/
 .row .kind {
   display: none;
 }

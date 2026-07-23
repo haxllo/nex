@@ -102,7 +102,7 @@ body {
   font-weight: 300;
   line-height: 1;
   padding: 0;
-  transform: translateY(-2px);
+  transform: translateY(-1px);
   -webkit-user-select: text;
   user-select: text;
 }

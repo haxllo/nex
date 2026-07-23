@@ -236,14 +236,7 @@ html[data-theme="light"] .row.selected .title {
 }
 
 .row .kind {
-  flex: 0 0 auto;
-  font-size: 10px;
-  color: var(--text-faint);
-  text-transform: capitalize;
-  opacity: 0;
-}
-.row.selected .kind {
-  opacity: 1;
+  display: none;
 }
 
 /* calculator row */

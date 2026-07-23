@@ -381,6 +381,7 @@ fn build_webview(
 
     WebViewBuilder::new()
         .with_transparent(true)
+        .with_background_color((0, 0, 0, 0))
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
             serve_asset(request)

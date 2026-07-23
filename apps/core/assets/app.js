@@ -447,7 +447,12 @@
       // Signal that the next render should fire post("painted")
       // so the Rust side can show + focus the window. Only set on
       // show (when Rust sends showPending=true in the state JSON).
-      if (state.showPending) needsPainted = true;
+      // Also reset scroll position — otherwise scrollTop survives
+      // across hide/show and new queries start at old scroll depth.
+      if (state.showPending) {
+        needsPainted = true;
+        list.scrollTop = 0;
+      }
       render();
 
       // Re-apply selected highlight after DOM rebuild (replaceChildren

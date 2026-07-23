@@ -49,7 +49,6 @@ use crate::overlay::model::Theme;
 
 const WINDOW_WIDTH: f64 = 720.0;
 const INITIAL_HEIGHT: f64 = 60.0;
-const MIN_HEIGHT: f64 = 56.0;
 const MAX_HEIGHT: f64 = 560.0;
 const FOCUS_GRACE_MS: u64 = 400;
 
@@ -194,6 +193,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
+                        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT));
                         push_state(&webview, &state, &icon_cache, true);
                         show_pending = true;
                     }
@@ -265,6 +265,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         return;
                     }
                     position_window(&window, hwnd);
+                    // Fixed max height — never resize during typing.
+                    // Avoids DWM acrylic re-render flash on every keystroke.
+                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT));
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -308,9 +311,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ));
                     }
                 }
-                UiCommand::Resize(h) => {
-                    let height = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
-                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, height));
+
+                UiCommand::Resize(_) => {
+                    // No-op — window has fixed max height. Resize IPC
+                    // from JS is ignored to avoid DWM acrylic flash.
                 }
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));

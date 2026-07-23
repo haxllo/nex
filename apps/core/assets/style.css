@@ -170,7 +170,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 52px;
+  height: 41px;
   padding: 0 12px;
   border-radius: var(--row-radius);
   cursor: pointer;

@@ -307,11 +307,17 @@
     }, 130);
   }
 
-  // ── painted detection (no resize — window has fixed max height) ──
+  // ── height measurement (resize native window on first paint) ──
+  let lastH = 0;
   let needsPainted = false;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        const h = Math.ceil(panel.getBoundingClientRect().height);
+        if (h !== lastH && h > 0) {
+          lastH = h;
+          post("resize", h);
+        }
         if (needsPainted) {
           needsPainted = false;
           scrollToInstant(0); // fresh show = fresh scroll, after paint

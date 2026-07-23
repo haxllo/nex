@@ -64,6 +64,12 @@ impl NativeOverlayShell {
         let icon_cache = Arc::new(IconCache::default());
         let icon_cache_for_thread = icon_cache.clone();
         let prefetch_work_for_thread = prefetch_work.clone();
+        // Hoisted above the prefetch thread spawn so the thread can
+        // notify the host once icons are decoded (progressive render).
+        // The host fills this slot with its EventLoopProxy in `run`;
+        // proxy_slot() returns the same Arc the thread holds.
+        let proxy: Arc<Mutex<Option<EventLoopProxy<UiCommand>>>> = Arc::new(Mutex::new(None));
+        let proxy_for_thread = proxy.clone();
 
         // Spawn a single persistent icon-prefetch thread. It loops,
         // draining the shared work slot and processing the latest batch.
@@ -89,6 +95,14 @@ impl NativeOverlayShell {
                     }
                 };
                 crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, &rows);
+                // Notify the host event loop that icons are now cached so
+                // it re-sends the icon data JSON; the page patches the
+                // placeholder <img> elements that painted cold (no src).
+                if let Ok(slot) = proxy_for_thread.lock() {
+                    if let Some(proxy) = slot.as_ref() {
+                        let _ = proxy.send_event(UiCommand::ApplyIcons);
+                    }
+                }
             })
             .ok();
 
@@ -97,7 +111,7 @@ impl NativeOverlayShell {
                 state: Arc::new(Mutex::new(ShimState::default())),
                 icon_cache,
                 is_running: Arc::new(AtomicBool::new(false)),
-                proxy: Arc::new(Mutex::new(None)),
+                proxy,
                 stop_tx,
                 stop_rx,
                 prefetch_work,

@@ -289,7 +289,8 @@ unsafe extern "system" fn tray_wnd_proc(
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
         return 0;
     }
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    // SAFETY: hwnd is the tray window handle, fall through to default proc
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 struct MenuSnapshot {

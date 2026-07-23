@@ -1416,8 +1416,8 @@ fn apply_query_change(
     let parsed_query = ParsedQuery::parse(trimmed, runtime_config.search_dsl_enabled);
     let query_result_limit = result_limit_for_query(max_results, &parsed_query);
 
-    let gen = search_worker.send_request(config_generation, parsed_query, query_result_limit);
-    *last_sent_generation = gen;
+    let generation = search_worker.send_request(config_generation, parsed_query, query_result_limit);
+    *last_sent_generation = generation;
 }
 
 #[cfg(target_os = "windows")]

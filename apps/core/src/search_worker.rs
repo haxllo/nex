@@ -162,14 +162,14 @@ impl SearchWorker {
         parsed_query: ParsedQuery,
         max_results: usize,
     ) -> u64 {
-        let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
+        let generation = self.next_gen.fetch_add(1, Ordering::SeqCst);
         let _ = self.request_tx.send(SearchRequest {
-            generation: gen,
+            generation,
             config_generation,
             parsed_query,
             max_results,
         });
-        gen
+        generation
     }
 
     pub(crate) fn try_recv(&self) -> Option<SearchResult> {

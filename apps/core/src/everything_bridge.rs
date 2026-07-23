@@ -305,11 +305,13 @@ unsafe fn load_functions(lib: HMODULE) -> Option<EverythingFns> {
     macro_rules! load {
         ($name:expr) => {{
             let c_name = CString::new($name).unwrap();
-            let ptr = GetProcAddress(lib, c_name.as_bytes_with_nul().as_ptr());
+            // SAFETY: lib is valid HMODULE from LoadLibraryW, function name is NUL-terminated
+            let ptr = unsafe { GetProcAddress(lib, c_name.as_bytes_with_nul().as_ptr()) };
             if ptr.is_none() {
                 return None;
             }
-            std::mem::transmute(ptr)
+            // SAFETY: ptr is a valid function pointer matching the target type
+            unsafe { std::mem::transmute(ptr) }
         }};
     }
 

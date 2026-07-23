@@ -181,15 +181,18 @@ unsafe fn create_watcher_handles(
     root: &Path,
 ) -> Result<(WatcherHandles, HANDLE), WatcherError> {
     let wide_path: Vec<u16> = root.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let directory = CreateFileW(
-        wide_path.as_ptr(),
-        FILE_LIST_DIRECTORY,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        std::ptr::null(),
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-        std::ptr::null_mut(),
-    );
+    // SAFETY: root path is valid UTF-16, handles follow Win32 error convention
+    let directory = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+            std::ptr::null_mut(),
+        )
+    };
     if directory == INVALID_HANDLE_VALUE {
         return Err(WatcherError::OpenFailed {
             path: root.to_path_buf(),
@@ -197,13 +200,15 @@ unsafe fn create_watcher_handles(
         });
     }
 
-    let event = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+    // SAFETY: null ptr for name creates unnamed event
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
     if event.is_null() {
-        CloseHandle(directory);
+        unsafe { CloseHandle(directory) };
         return Err(WatcherError::EventCreateFailed);
     }
 
-    let overlapped: OVERLAPPED = std::mem::zeroed();
+    // SAFETY: zeroed OVERLAPPED is valid init state
+    let overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     let buffer = [0u8; BUFFER_BYTES];
     Ok((
         WatcherHandles {

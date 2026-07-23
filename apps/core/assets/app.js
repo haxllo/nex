@@ -469,11 +469,6 @@
       }
       render();
 
-      // Re-apply selected highlight after DOM rebuild (replaceChildren
-      // destroys the old element that had the class).
-      const selEl = rowMap.get(selected);
-      if (selEl) selEl.classList.add("selected");
-
       // On fresh show, the Show push has empty rows (hide cleared them).
       // Real results arrive on a later Apply push with showPending=false.
       // The pendingShow flag bridges this gap — consumed here when the

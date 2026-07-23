@@ -65,6 +65,9 @@ pub(crate) enum UiCommand {
     WebviewReady,
     /// Re-push the current [`ShimState`] snapshot to the page.
     Apply,
+    /// Icons decoded in the background are now cached — re-send the
+    /// icon data JSON so the page can patch placeholder <img> elements.
+    ApplyIcons,
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -198,6 +201,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         push_state(&webview, &state, &icon_cache, false);
+                    }
+                }
+                UiCommand::ApplyIcons => {
+                    // Progressive icon delivery: the background prefetch
+                    // thread decoded icons and posted this command. Re-send
+                    // the icon data JSON so the page can patch placeholder
+                    // <img> elements that painted with no src (cold cache).
+                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        let snapshot = {
+                            let Ok(s) = state.lock() else { return };
+                            s.clone()
+                        };
+                        let icons_json = snapshot_icons_json(&snapshot, &icon_cache);
+                        if !icons_json.is_empty() {
+                            if let Some(wv) = webview.as_ref() {
+                                post_json(wv, &icons_json);
+                            }
+                        }
                     }
                 }
                 UiCommand::SelectChanged(idx) => {
@@ -663,6 +684,11 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
 /// Deduplicates by path to avoid encoding the same icon twice when
 /// multiple rows share a path (e.g. two shortcuts to the same .exe).
 /// Returns an empty string if no icons.
+///
+/// Non-blocking: only already-decoded (warm) icons are included. The
+/// background prefetch thread fills the cache and posts `ApplyIcons`
+/// to re-invoke this on the host thread, delivering newly-decoded
+/// icons as a separate `{"icons": ...}` message the page patches in.
 fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
     let mut seen = std::collections::HashSet::new();
     let icon_map: serde_json::Map<String, serde_json::Value> = s
@@ -672,7 +698,7 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
         .filter(|r| seen.insert(r.icon_path.clone()))
         .filter_map(|r| {
             let b64 = icons
-                .png_bytes(&r.icon_path)
+                .png_bytes_cached(&r.icon_path)
                 .map(|arc| base64_data_uri(arc.as_ref()))
                 .unwrap_or_default();
             if b64.is_empty() {

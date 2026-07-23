@@ -19,4 +19,4 @@ For the latest plans and roadmap, see the [Plans](./plans/) directory.
 - Everything SDK integration for instant file search
 - Clipboard history
 - Plugin SDK (preview)
-- Native Win32 overlay with animations
+- WebView2 overlay with animations

@@ -5,7 +5,7 @@
 
 ### Prerequisites
 
-- **Rust**: stable toolchain (1.75+)
+- **Rust**: stable toolchain (1.85+ — edition 2024)
 - **Windows 10/11** (64-bit) — nex is Windows-only
 - **WebView2 Runtime**: ships with Windows 11 and recent Windows 10 builds; install manually if missing
 - **MinGW-w64** (local builds): required for `stable-x86_64-pc-windows-gnu` target
@@ -89,6 +89,8 @@ All tests are run with:
 ```bash
 cargo test -p nex
 ```
+
+> **Note:** `cargo test -p nex` is currently broken on Windows — many tests hang. Use `cargo build --bin nex` for build-only verification.
 
 ### Running a Single Test
 
@@ -239,7 +241,7 @@ Modules marked `#[cfg(target_os = "windows")]` in `lib.rs`:
 ### Linting and Formatting
 
 - **No clippy or formatter enforced in CI.** The project does not gate on clippy or rustfmt.
-- Pre-existing dead-code warnings (~12) from unused overlay/misc functions — these are accepted and not cleaned up.
+- Pre-existing dead-code warnings (~17) from unused overlay/misc functions — these are accepted and not cleaned up.
 - Legacy name "SwiftFind" still appears in some environment variable and constant names (`SWIFTFIND_SUPPRESS_STDIO`, `SWIFTFIND_ALLOW_MISSING_ICON`, `swiftfind.log`). Do not rename unless explicitly instructed.
 
 ### Conventions
@@ -305,7 +307,7 @@ Outputs a zip archive with logs, config, index stats, and process info.
 
 **Port conflict:** Nex uses named pipes for IPC. If another instance is running, `--quit` it first or use `--restart`.
 
-**Dead-code warnings:** Pre-existing ~12 warnings are accepted. Do not add `#[allow(dead_code)]` to new code without a reason.
+**Dead-code warnings:** Pre-existing ~17 warnings are accepted. Do not add `#[allow(dead_code)]` to new code without a reason.
 
 ---
 

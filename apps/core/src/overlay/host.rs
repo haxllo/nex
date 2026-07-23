@@ -40,6 +40,7 @@ use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW;
 
 use crate::overlay::icons::IconCache;
@@ -723,6 +724,17 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 /// Apply acrylic backdrop. CSS handles border-radius + box-shadow on #panel.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
+    // Disable DWM transition animation (zoom-out+fade) so hide is instant.
+    let hwnd = window.hwnd() as HWND;
+    unsafe {
+        let disabled: i32 = 1;
+        DwmSetWindowAttribute(
+            hwnd,
+            3, // DWMWA_TRANSITIONS_FORCEDISABLED
+            &disabled as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
     // Acrylic blur behind the (transparent) WebView. Falls back to a
     // CSS-painted panel if the OS refuses (window-vibrancy returns Err).
     let tint = if dark {

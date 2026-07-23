@@ -30,6 +30,10 @@
   // Key: icon path (string), Value: data URI (string).
   const iconCache = new Map();
 
+  // Fallback placeholder shown while real icon loads (cold cache).
+  // 24×24 app icon, base64-encoded PNG.
+  const PLACEHOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfCzh4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke6ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC";
+
   function post(t, v) {
     try {
       window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
@@ -152,6 +156,8 @@
           img.dataset.iconPath = r.icon; // store path for patchIcons()
           if (iconCache.has(r.icon)) {
             img.src = iconCache.get(r.icon);
+          } else {
+            img.src = PLACEHOLDER_ICON; // fallback while loading
           }
           // Don't add placeholder class here — patchIcons() will set
           // src and the browser handles loading. Only onerror triggers

@@ -204,6 +204,7 @@ body {
 .row .icon.placeholder {
   display: grid;
   place-items: center;
+  background: var(--icon-bg);
 }
 
 .row .text {

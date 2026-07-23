@@ -16,6 +16,14 @@ use crate::overlay::model::OverlayRow;
 const DEFAULT_MAX_ENTRIES: usize = 96;
 const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 
+/// Target square canvas size for normalized icons. Crisp at 2-3x DPI
+/// when CSS displays at 30px. PNG is ~3-8KB each — fits the LRU budget.
+const TARGET_ICON_SIZE: u32 = 128;
+/// Extraction request size for PrivateExtractIconsW (primary high-res
+/// path). 256px is the Windows jumbo icon size; the Lanczos downscale
+/// to TARGET_ICON_SIZE (128) produces a clean, sharp result on HiDPI.
+const EXTRACT_ICON_SIZE: i32 = 256;
+
 pub struct IconCache {
     inner: Mutex<Inner>,
 }
@@ -206,7 +214,26 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     }))
     .ok()
     .and_then(|result| result.ok())?;
-    rgba_to_png(img.into_rgba8())
+    normalize_to_square_png(img.into_rgba8())
+}
+
+/// Normalize arbitrary-size RGBA image into consistent square:
+/// Lanczos-resize preserving aspect to fit within TARGET × TARGET,
+/// then center-composite onto transparent canvas. Every result row
+/// gets uniform square icon with consistent padding — Raycast look.
+fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
+    use image::imageops::{self, FilterType};
+    let target = TARGET_ICON_SIZE;
+    let img = if img.width() != target || img.height() != target {
+        imageops::resize(&img, target, target, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
+    let x = target.saturating_sub(img.width()) / 2;
+    let y = target.saturating_sub(img.height()) / 2;
+    imageops::overlay(&mut canvas, &img, x as i64, y as i64);
+    rgba_to_png(canvas)
 }
 
 fn rgba_to_png(rgba: image::RgbaImage) -> Option<Vec<u8>> {
@@ -225,14 +252,13 @@ fn rgba_to_png(rgba: image::RgbaImage) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
-fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) -> Option<Vec<u8>> {
+fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, size: i32) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, CreateDIBSection, SelectObject, DeleteObject,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::DrawIconEx;
 
-    const ICON_SIZE: i32 = 32;
     unsafe {
         let hdc = CreateCompatibleDC(std::ptr::null_mut());
         if hdc.is_null() { return None; }
@@ -240,8 +266,8 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) -
         // Create a 32-bit BGRA DIB section to render the icon into.
         let mut header: BITMAPINFOHEADER = std::mem::zeroed();
         header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        header.biWidth = ICON_SIZE;
-        header.biHeight = -ICON_SIZE; // top-down
+        header.biWidth = size;
+        header.biHeight = -size; // top-down
         header.biPlanes = 1;
         header.biBitCount = 32;
         header.biCompression = BI_RGB;
@@ -265,10 +291,10 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) -
 
         let old_bmp = SelectObject(hdc, hbmp as _);
         // Fill with transparent black.
-        let pixel_count = (ICON_SIZE * ICON_SIZE) as usize;
+        let pixel_count = (size * size) as usize;
         std::ptr::write_bytes(bits, 0, pixel_count * 4);
 
-        DrawIconEx(hdc, 0, 0, hicon, ICON_SIZE, ICON_SIZE, 0, std::ptr::null_mut(), 0x0003);
+        DrawIconEx(hdc, 0, 0, hicon, size, size, 0, std::ptr::null_mut(), 0x0003);
 
         SelectObject(hdc, old_bmp);
 
@@ -285,13 +311,13 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON) -
         DeleteObject(hbmp as _);
         DeleteDC(hdc);
 
-        let img = image::RgbaImage::from_raw(ICON_SIZE as u32, ICON_SIZE as u32, rgba)?;
-        rgba_to_png(img)
+        let img = image::RgbaImage::from_raw(size as u32, size as u32, rgba)?;
+        normalize_to_square_png(img)
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void, _size: i32) -> Option<Vec<u8>> {
     None
 }
 
@@ -300,6 +326,16 @@ fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void) -> Option<Vec<u8>> {
 /// Tries to get the largest available icon size for sharper rendering.
 #[cfg(target_os = "windows")]
 fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
+    // Primary high-res path: PrivateExtractIconsW at 256×256 for
+    // .exe/.ico/.dll files with embedded large icon resources.
+    // Falls through silently if the path has no icon resource
+    // (e.g. .lnk, shell: URIs, directories).
+    if !shell_path.starts_with("shell:") {
+        if let Some(png) = private_extract_icons_png(shell_path) {
+            return Some(png);
+        }
+    }
+
     use windows_sys::Win32::UI::Shell::ExtractIconExW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
 
@@ -343,7 +379,7 @@ fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
     let best_hicon = large_icons.iter().find(|&&h| !h.is_null()).copied();
 
     let result = if let Some(hicon) = best_hicon {
-        icon_to_rgba_png(hicon)
+        icon_to_rgba_png(hicon, 32)
     } else {
         None
     };
@@ -400,13 +436,56 @@ fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let png = icon_to_rgba_png(sfi.hIcon as windows_sys::Win32::UI::WindowsAndMessaging::HICON);
+    let png = icon_to_rgba_png(sfi.hIcon as windows_sys::Win32::UI::WindowsAndMessaging::HICON, 32);
     unsafe { DestroyIcon(sfi.hIcon); }
     png
 }
 
 #[cfg(not(target_os = "windows"))]
 fn extract_shell_icon_png(_shell_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
+/// High-resolution icon extraction using PrivateExtractIconsW.
+/// Requests a 256×256 HICON from .exe/.ico/.dll files that have
+/// large icon resources. Returns None for paths without embedded
+/// icon resources (e.g. .lnk, directories) — the caller falls back
+/// to ExtractIconExW / SHGetFileInfoW.
+///
+/// PrivateExtractIconsW can return up to the exact size we request
+/// (256) if the source has a matching icon resource, giving crisp
+/// results on HiDPI displays even after normalization to 128×128.
+#[cfg(target_os = "windows")]
+fn private_extract_icons_png(path: &str) -> Option<Vec<u8>> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hicon: HICON = std::ptr::null_mut();
+
+    let count = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW(
+            wide.as_ptr(),
+            0,               // first icon index
+            EXTRACT_ICON_SIZE,
+            EXTRACT_ICON_SIZE,
+            &mut hicon,
+            std::ptr::null_mut(),
+            1,               // request one icon
+            0,               // default flags
+        )
+    };
+
+    if count == 0 || hicon.is_null() {
+        return None;
+    }
+
+    let png = icon_to_rgba_png(hicon, EXTRACT_ICON_SIZE);
+    unsafe { DestroyIcon(hicon); }
+    png
+}
+
+#[cfg(not(target_os = "windows"))]
+fn private_extract_icons_png(_path: &str) -> Option<Vec<u8>> {
     None
 }
 

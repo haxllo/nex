@@ -1482,17 +1482,30 @@ fn apply_search_results(
         // Only show "Indexing, please wait…" on first-time indexing
         // (empty cache).  Async background refreshes on a populated
         // index are invisible — the existing cache is queryable.
-        let message = if indexing_in_progress
+        if indexing_in_progress
             && background_index_refresh.initial_cache_empty
             && !command_mode
         {
-            "Indexing, please wait..."
+            set_status_row_overlay_state(overlay, "Indexing, please wait...");
         } else if command_mode {
-            STATUS_ROW_NO_COMMAND_RESULTS
+            set_status_row_overlay_state(overlay, STATUS_ROW_NO_COMMAND_RESULTS);
         } else {
-            STATUS_ROW_NO_RESULTS
-        };
-        set_status_row_overlay_state(overlay, message);
+            let query = overlay.query_text();
+            // Reuse the existing web search action system — respects
+            // the user's configured search provider (Google, DuckDuckGo,
+            // Bing, or custom template) and proper URL encoding.
+            if let Some(search_item) = crate::action_registry::dynamic_provider_web_search_action(
+                query.trim(),
+                _runtime_config,
+            ) {
+                *current_results = vec![search_item];
+                *selected_index = 0;
+                let rows = overlay_rows(current_results, command_mode);
+                overlay.set_results(&rows, *selected_index);
+            } else {
+                set_status_row_overlay_state(overlay, STATUS_ROW_NO_RESULTS);
+            }
+        }
     } else {
         let rows = overlay_rows(current_results, command_mode);
         overlay.set_results(&rows, *selected_index);

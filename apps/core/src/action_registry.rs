@@ -152,7 +152,7 @@ pub fn provider_web_search_url(cfg: &Config, query: &str) -> Option<String> {
     Some(url)
 }
 
-fn dynamic_provider_web_search_action(query: &str, cfg: &Config) -> Option<SearchItem> {
+pub(crate) fn dynamic_provider_web_search_action(query: &str, cfg: &Config) -> Option<SearchItem> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return None;

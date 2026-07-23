@@ -31,9 +31,13 @@
   // Key: icon path (string), Value: data URI (string).
   const iconCache = new Map();
 
-  // Fallback placeholder shown while real icon loads (cold cache).
-  // 24×24 app icon, base64-encoded PNG.
-  const PLACEHOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfCzh4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke6ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC";
+  // Themed fallback shown while real icon loads (cold cache).
+  // 24×24 app icons, base64-encoded PNGs.
+  const PLACEHOLDER_ICON_LIGHT = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfC/h4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke6ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC";
+  const PLACEHOLDER_ICON_DARK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAAsSAAALEgHS3X78AAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAATlJREFUSInt1btKQ0EQBuBP4xWDCDbaWtqI4O0RRFS08AV8AvENFFEfQQu1tEpl5TPYKjY2ogjaeMMLXojFLuQQTsJJQhDBH5azZ/7d/ZmZnVmajJay/3bkGzjvHW9pRBf24oJiA+MLxxgs92ANK1jFZQMe9GEb55iDtkhM4yB6sYwTDOERnxhAIaNID3aRw3drNObxFOcPQhyf8YLXBJcFT+hER9IDGMZSnI/Gb3+CX5INE2nGM40lN210Q6sm41/gbwsUMIlFoUDvqi2u9Zq+CcW5gw2MC5U7hU2cite0XoEPoUEm990ILWK2/PB6BIqYERpbGveCLUo5uK8WvwqYx1EF7goXScNqHR5cC73sNmE7xEiaYg7rcVMtImPYV0p8b/YAZMdiFMj6XtSMvJDDhWYJEB+XX8EPVDecpJK7ij8AAAAASUVORK5CYII=";
+  function placeholderIcon() {
+    return document.documentElement.dataset.theme === "light" ? PLACEHOLDER_ICON_LIGHT : PLACEHOLDER_ICON_DARK;
+  }
 
   function post(t, v) {
     try {
@@ -158,7 +162,7 @@
           if (iconCache.has(r.icon)) {
             img.src = iconCache.get(r.icon);
           } else {
-            img.src = PLACEHOLDER_ICON; // fallback while loading
+            img.src = placeholderIcon(); // theme-aware fallback
           }
           // Don't add placeholder class here — patchIcons() will set
           // src and the browser handles loading. Only onerror triggers

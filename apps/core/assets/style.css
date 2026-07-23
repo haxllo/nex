@@ -16,7 +16,7 @@
   --font: "InterVariable", "Inter", system-ui, -apple-system, sans-serif;
 
   /* dark palette */
-  --bg: rgba(0, 0, 0, 0.80);
+  --bg: rgba(0, 0, 0, 0.70);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
@@ -100,6 +100,9 @@ body {
   font-size: 21px;
   font-family: inherit;
   font-weight: 300;
+  line-height: 1;
+  padding: 0;
+  transform: translateY(-2px);
   -webkit-user-select: text;
   user-select: text;
 }
@@ -170,7 +173,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 46px;
+  height: 46.22px;
   padding: 0 12px;
   border-radius: var(--row-radius);
   cursor: pointer;

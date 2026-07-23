@@ -144,6 +144,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut was_focused = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    let mut resized_this_cycle = false;
 
     // Single warm-release timer thread. Hide arms it with (gen, delay);
     // it sends Teardown(gen) when the deadline passes. Teardown clears
@@ -193,7 +194,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
-                        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT));
+                        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                        resized_this_cycle = false;
                         push_state(&webview, &state, &icon_cache, true);
                         show_pending = true;
                     }
@@ -265,9 +267,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         return;
                     }
                     position_window(&window, hwnd);
-                    // Fixed max height — never resize during typing.
-                    // Avoids DWM acrylic re-render flash on every keystroke.
-                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT));
+                    // Start at search-bar height — expand to max on first resize.
+                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                    resized_this_cycle = false;
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -287,6 +289,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     was_focused = false;
                     show_pending = false;
+                    resized_this_cycle = false;
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -313,8 +316,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
 
                 UiCommand::Resize(_) => {
-                    // No-op — window has fixed max height. Resize IPC
-                    // from JS is ignored to avoid DWM acrylic flash.
+                    if !resized_this_cycle {
+                        resized_this_cycle = true;
+                        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT));
+                    }
                 }
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));

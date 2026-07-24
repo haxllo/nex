@@ -240,6 +240,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
                         window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                        last_applied_height = INITIAL_HEIGHT;
+                        pending_resize = None;
                         push_state(&webview, &state, &icon_cache, true);
                         show_pending = true;
                     }
@@ -313,6 +315,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     position_window(&window, hwnd);
                     // Start at search-bar height — JS sends resize when content appears.
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                    last_applied_height = INITIAL_HEIGHT;
+                    pending_resize = None;
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -322,6 +326,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Hide first so user never sees the cleared state
                     // rendered (plain body with no rows).
                     window.set_visible(false);
+                    // Clear any pending resize so stale height doesn't
+                    // apply after next Show.
+                    pending_resize = None;
                     // Push cleared state while hidden so next Show has
                     // a fresh page ready to render.
                     if ready {

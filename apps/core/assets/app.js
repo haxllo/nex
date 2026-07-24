@@ -330,6 +330,8 @@
   // at full height (clipped by overflow:hidden) — no DWM acrylic flash.
   // The first measurement (idle, ~109px) records the height but does NOT
   // send resize — only the transition to real content triggers expansion.
+  // Resize IPC is sent immediately — the Rust-side debounce (100ms)
+  // coalesces rapid typing requests into a single frame update.
   let lastH = 0;
   let needsPainted = false;
   function measure() {
@@ -343,6 +345,8 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
+            // Rust-side debounce (100ms) coalesces rapid typing resize
+            // requests — no need for a JS-side debounce here.
             post("resize", h);
           }
         }

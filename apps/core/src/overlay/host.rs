@@ -27,9 +27,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Debounce window for live resize requests. Prevents DWM acrylic flash
-/// when rapid typing triggers frequent height measurements — only the
-/// final height after a quiet period is applied.
+/// Debounce window for live resize requests. Only applied to growth
+/// requests — shrink requests bypass debounce to avoid exposing
+/// acrylic while the native window waits for the timer to fire.
 const RESIZE_DEBOUNCE_MS: u64 = 100;
 
 use crossbeam_channel::Sender;
@@ -152,10 +152,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut last_show = Instant::now();
     let mut show_pending = false;
 
-    // Resize debounce state. UiCommand::Resize stores the target height
-    // and arms the timer; UiCommand::ApplyResize fires after the quiet
-    // period and actually calls set_inner_size. This coalesces rapid
-    // typing resize requests into a single frame update.
+    // Resize debounce state. Growth requests go through a debounce
+    // timer (UiCommand::Resize stores the target height and arms the
+    // timer; UiCommand::ApplyResize fires after the quiet period and
+    // calls set_inner_size). Shrink requests bypass debounce entirely
+    // and apply immediately to prevent acrylic exposure.
     let mut pending_resize: Option<f64> = None;
     let mut last_applied_height: f64 = INITIAL_HEIGHT;
     let (resize_debounce_tx, resize_debounce_rx) =
@@ -365,16 +366,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
 
                 UiCommand::Resize(h) => {
-                    // Coalesce rapid resize requests: store the target height
-                    // and arm the debounce timer. Only after a quiet period
-                    // (~100ms of no new resize requests) does ApplyResize
-                    // actually call set_inner_size. This prevents DWM acrylic
-                    // flash when the user is typing quickly — the window stays
-                    // at the previous height until typing pauses.
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
-                    pending_resize = Some(h);
-                    let _ = resize_debounce_arm
-                        .send(Some(Duration::from_millis(RESIZE_DEBOUNCE_MS)));
+                    if h < last_applied_height {
+                        // Shrink request: apply immediately to avoid
+                        // exposing acrylic while the debounce delays
+                        // the native window size reduction.
+                        pending_resize = None;
+                        if (h - last_applied_height).abs() > 0.5 {
+                            last_applied_height = h;
+                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                        }
+                    } else {
+                        // Growth request: debounce to coalesce rapid
+                        // resize requests and prevent DWM acrylic flash
+                        // when the user is typing quickly.
+                        pending_resize = Some(h);
+                        let _ = resize_debounce_arm
+                            .send(Some(Duration::from_millis(RESIZE_DEBOUNCE_MS)));
+                    }
                 }
                 UiCommand::ApplyResize => {
                     // Debounce timer fired — apply the pending resize if the

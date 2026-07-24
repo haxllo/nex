@@ -27,6 +27,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Debounce window for live resize requests. Only applied to growth
+/// requests — shrink requests bypass debounce to avoid exposing
+/// acrylic while the native window waits for the timer to fire.
+const RESIZE_DEBOUNCE_MS: u64 = 100;
+
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
@@ -84,6 +89,8 @@ pub(crate) enum UiCommand {
     Resize(f64),
     /// Exit the event loop (clean shutdown).
     Quit,
+    /// Debounce timer fired — apply the coalesced resize height.
+    ApplyResize,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -145,6 +152,45 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut last_show = Instant::now();
     let mut show_pending = false;
 
+    // Resize debounce state. Growth requests go through a debounce
+    // timer (UiCommand::Resize stores the target height and arms the
+    // timer; UiCommand::ApplyResize fires after the quiet period and
+    // calls set_inner_size). Shrink requests bypass debounce entirely
+    // and apply immediately to prevent acrylic exposure.
+    let mut pending_resize: Option<f64> = None;
+    let mut last_applied_height: f64 = INITIAL_HEIGHT;
+    let (resize_debounce_tx, resize_debounce_rx) =
+        crossbeam_channel::unbounded::<Option<Duration>>();
+    let resize_debounce_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-ui-resize-debounce".into())
+        .spawn(move || {
+            let mut armed: Option<Instant> = None;
+            loop {
+                let timeout = armed
+                    .map(|when| when.saturating_duration_since(Instant::now()));
+                let result = match timeout {
+                    Some(d) => resize_debounce_rx.recv_timeout(d),
+                    None => resize_debounce_rx
+                        .recv()
+                        .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected),
+                };
+                match result {
+                    Ok(Some(delay)) => {
+                        armed = Some(Instant::now() + delay);
+                    }
+                    Ok(None) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        armed = None;
+                        let _ = resize_debounce_proxy.send_event(UiCommand::ApplyResize);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .ok();
+    let resize_debounce_arm = resize_debounce_tx.clone();
+
 
     // Single warm-release timer thread. Hide arms it with (gen, delay);
     // it sends Teardown(gen) when the deadline passes. Teardown clears
@@ -195,6 +241,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
                         window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                        last_applied_height = INITIAL_HEIGHT;
+                        pending_resize = None;
                         push_state(&webview, &state, &icon_cache, true);
                         show_pending = true;
                     }
@@ -268,6 +316,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     position_window(&window, hwnd);
                     // Start at search-bar height — JS sends resize when content appears.
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                    last_applied_height = INITIAL_HEIGHT;
+                    pending_resize = None;
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -277,6 +327,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Hide first so user never sees the cleared state
                     // rendered (plain body with no rows).
                     window.set_visible(false);
+                    // Clear any pending resize so stale height doesn't
+                    // apply after next Show.
+                    pending_resize = None;
                     // Push cleared state while hidden so next Show has
                     // a fresh page ready to render.
                     if ready {
@@ -313,11 +366,36 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
 
                 UiCommand::Resize(h) => {
-                    // Follow panel height in both directions — grows for content,
-                    // shrinks when query clears. Panel is already rendered at the
-                    // target height (clipped by overflow:hidden), so no flash.
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
-                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                    if h < last_applied_height {
+                        // Shrink request: apply immediately to avoid
+                        // exposing acrylic while the debounce delays
+                        // the native window size reduction.
+                        pending_resize = None;
+                        if (h - last_applied_height).abs() > 0.5 {
+                            last_applied_height = h;
+                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                        }
+                    } else {
+                        // Growth request: debounce to coalesce rapid
+                        // resize requests and prevent DWM acrylic flash
+                        // when the user is typing quickly.
+                        pending_resize = Some(h);
+                        let _ = resize_debounce_arm
+                            .send(Some(Duration::from_millis(RESIZE_DEBOUNCE_MS)));
+                    }
+                }
+                UiCommand::ApplyResize => {
+                    // Debounce timer fired — apply the pending resize if the
+                    // height actually changed. Skip redundant set_inner_size
+                    // calls (same height as last applied) to avoid unnecessary
+                    // DWM recomposition and potential flash.
+                    if let Some(h) = pending_resize.take() {
+                        if (h - last_applied_height).abs() > 0.5 {
+                            last_applied_height = h;
+                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                        }
+                    }
                 }
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));

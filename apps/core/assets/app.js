@@ -330,8 +330,12 @@
   // at full height (clipped by overflow:hidden) — no DWM acrylic flash.
   // The first measurement (idle, ~109px) records the height but does NOT
   // send resize — only the transition to real content triggers expansion.
+  // Resize IPC is debounced (100ms) to coalesce rapid typing resize
+  // requests — combined with the Rust-side debounce, this eliminates
+  // the DWM acrylic flash during fast typing.
   let lastH = 0;
   let needsPainted = false;
+  let resizeTimer = null;
   function measure() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -343,7 +347,10 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            post("resize", h);
+            // Debounce resize IPC — coalesce rapid typing measurements.
+            // Rust side also debounces, but this reduces IPC traffic.
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => post("resize", h), 80);
           }
         }
         if (needsPainted) {

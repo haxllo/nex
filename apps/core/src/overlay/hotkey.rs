@@ -47,7 +47,7 @@ fn is_key_down(vk: u32) -> bool {
 
 /// All modifier VK codes we care about when checking for "no extra
 /// modifiers".
-const ALL_MODS: [u32; 4] = [VK_CTRL, VK_ALT, VK_SHIFT, VK_LWIN];
+const ALL_MODS: [u32; 5] = [VK_CTRL, VK_ALT, VK_SHIFT, VK_LWIN, VK_RWIN];
 
 const VK_CTRL: u32 = 0x11;
 const VK_ALT: u32 = 0x12;
@@ -87,13 +87,21 @@ unsafe extern "system" fn keyboard_hook_proc(
                 };
 
                 if is_target {
-                    // Check all required modifiers are held.
-                    let mods_ok = ctx.required_mods.iter().all(|&m| is_key_down(m));
+                    // Check required modifiers are held.
+                    // VK_LWIN and VK_RWIN are treated as equivalent.
+                    let mods_ok = ctx.required_mods.iter().all(|&m| {
+                        match m {
+                            VK_LWIN | VK_RWIN => is_key_down(VK_LWIN) || is_key_down(VK_RWIN),
+                            other => is_key_down(other),
+                        }
+                    });
 
                     // Check NO extra unexpected modifiers are held.
-                    // We allow the required mods themselves, but nothing else.
                     let extra_free = ALL_MODS.iter().all(|&m| {
-                        if ctx.required_mods.contains(&m) {
+                        if ctx.required_mods.contains(&m)
+                            || (m == VK_LWIN && ctx.required_mods.contains(&VK_RWIN))
+                            || (m == VK_RWIN && ctx.required_mods.contains(&VK_LWIN))
+                        {
                             true // required, ok to be down
                         } else {
                             !is_key_down(m)

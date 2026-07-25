@@ -932,9 +932,6 @@ impl RuntimeWorker {
                 let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
                 match action {
                     HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
-                        // Clear stale suppress flag so a subsequent hide
-                        // doesn't inject unnecessarily.
-                        crate::overlay::hotkey::consume_suppress_flag();
                         // Warm search indexes synchronously before showing the
                         // overlay.  The user can't type until the window appears
                         // (~160ms animation) and the IPC channel is live, so
@@ -958,9 +955,6 @@ impl RuntimeWorker {
                     }
                     HotkeyAction::Hide => {
                         self.overlay.hide();
-                        if crate::overlay::hotkey::consume_suppress_flag() {
-                            crate::overlay::hotkey::inject_suppress_start_menu();
-                        }
                         reset_overlay_session(
                             &self.overlay,
                             &mut self.current_results,

@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -32,9 +32,9 @@ struct HookContext {
 
 static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
 
-// Signal to the runtime that it should suppress the Start Menu.
-// Set by the hook proc, read/cleared by the runtime loop.
-static SUPPRESS_START_MENU: AtomicBool = AtomicBool::new(false);
+// Track the VK of a Win key-down that was consumed for the hotkey,
+// so the matching non-injected key-up is also consumed.
+static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -47,42 +47,6 @@ const VK_ALT: u32 = 0x12;
 const VK_SHIFT: u32 = 0x10;
 const VK_LWIN: u32 = 0x5B;
 const VK_RWIN: u32 = 0x5C;
-const VK_RESERVED: u32 = 0xCF;
-
-// ---------------------------------------------------------------------------
-// Public API for runtime loop
-// ---------------------------------------------------------------------------
-
-/// Check and clear the Start Menu suppression flag.
-/// Called from the runtime loop after handling a Win-key hotkey.
-pub(crate) fn consume_suppress_flag() -> bool {
-    SUPPRESS_START_MENU.swap(false, Ordering::SeqCst)
-}
-
-/// Inject the PowerToys-style 0xCF dummy combo to break Win-alone
-/// detection. Called from the runtime thread (not the hook thread).
-pub(crate) fn inject_suppress_start_menu() {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    };
-
-    // Spawn a detached thread so SendInput runs from a completely
-    // separate context with no hook installed on it.
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(15));
-
-        let mut inputs: [INPUT; 3] = unsafe { std::mem::zeroed() };
-        inputs[0].r#type = INPUT_KEYBOARD;
-        inputs[0].Anonymous.ki = KEYBDINPUT { wVk: VK_RESERVED as u16, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
-        inputs[1].r#type = INPUT_KEYBOARD;
-        inputs[1].Anonymous.ki = KEYBDINPUT { wVk: VK_RESERVED as u16, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
-        inputs[2].r#type = INPUT_KEYBOARD;
-        inputs[2].Anonymous.ki = KEYBDINPUT { wVk: VK_LWIN as u16, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
-
-        let sent = unsafe { SendInput(3, inputs.as_mut_ptr(), std::mem::size_of::<INPUT>() as i32) };
-        logging::info(&format!("[nex] inject_suppress_start_menu: SendInput sent={sent}/3"));
-    });
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -111,12 +75,7 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     let msg = w_param as u32;
     let is_keydown = msg == 0x0100 || msg == 0x0104;
-
-    if !is_keydown {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
-        };
-    }
+    let is_keyup = msg == 0x0101 || msg == 0x0105;
 
     let Some(ctx) = HOOK_CTX.get() else {
         return unsafe {
@@ -127,6 +86,22 @@ unsafe extern "system" fn keyboard_hook_proc(
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
+
+    // Consume the matching non-injected Win key-up so Windows doesn't
+    // open the Start Menu after the overlay takes focus.
+    if is_keyup && ctx.target_is_win && !injected {
+        let consumed = CONSUMED_WIN_VK.load(Ordering::SeqCst);
+        if consumed != 0 && vk == consumed {
+            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            return 1;
+        }
+    }
+
+    if !is_keydown {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
+        };
+    }
 
     let is_target = if ctx.target_is_win {
         vk == VK_LWIN || vk == VK_RWIN
@@ -157,7 +132,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         if mods_ok && extra_free {
             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             if ctx.target_is_win {
-                SUPPRESS_START_MENU.store(true, Ordering::SeqCst);
+                CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
             }
             return 1;
         }

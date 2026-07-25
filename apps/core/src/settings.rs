@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 
-pub const SAFE_HOTKEY_PRESETS: [&str; 6] = [
+pub const SAFE_HOTKEY_PRESETS: [&str; 8] = [
+    "Win",
     "Ctrl+Shift+Space",
     "Ctrl+Alt+Space",
     "Alt+Shift+Space",
+    "Win+Shift+F1",
+    "Win+Shift+F2",
     "Ctrl+Shift+P",
-    "Ctrl+Alt+P",
     "Ctrl+Shift+O",
 ];
 
@@ -23,8 +25,12 @@ pub fn validate_hotkey(input: &str) -> Result<String, String> {
         .filter(|part| !part.is_empty())
         .collect();
 
-    if raw_parts.len() < 2 {
-        return Err("Hotkey must include at least one modifier and one key.".to_string());
+    // Allow single-key hotkeys (e.g. "Win" alone).
+    // For standard chords (modifier+key), require at least 2 parts.
+    // For a single key, validate it's a recognized key.
+    if raw_parts.len() == 1 {
+        let key = normalize_key(raw_parts[0])?;
+        return Ok(key);
     }
 
     let key_raw = raw_parts[raw_parts.len() - 1];
@@ -77,9 +83,9 @@ fn normalize_modifier(input: &str) -> Result<&'static str, String> {
         "ctrl" | "control" => Ok("Ctrl"),
         "alt" => Ok("Alt"),
         "shift" => Ok("Shift"),
-        "win" | "windows" | "meta" => Err("Win/Meta combinations are not supported.".to_string()),
+        "win" | "windows" | "meta" => Ok("Win"),
         _ => Err(format!(
-            "Unsupported modifier '{input}'. Use Ctrl, Alt, or Shift."
+            "Unsupported modifier '{input}'. Use Ctrl, Alt, Shift, or Win."
         )),
     }
 }
@@ -93,6 +99,9 @@ fn normalize_key(input: &str) -> Result<String, String> {
     let upper = raw.to_ascii_uppercase();
     if upper == "SPACE" {
         return Ok("Space".to_string());
+    }
+    if upper == "WIN" || upper == "LWIN" || upper == "RWIN" || upper == "META" {
+        return Ok("Win".to_string());
     }
 
     if let Some(number) = upper.strip_prefix('F') {
@@ -111,7 +120,7 @@ fn normalize_key(input: &str) -> Result<String, String> {
         }
     }
 
-    Err("Key must be A-Z, 0-9, Space, or F1-F24.".to_string())
+    Err("Key must be A-Z, 0-9, Space, Win, or F1-F24.".to_string())
 }
 
 fn canonical_hotkey(modifiers: &BTreeSet<&'static str>, key: &str) -> String {
@@ -124,6 +133,9 @@ fn canonical_hotkey(modifiers: &BTreeSet<&'static str>, key: &str) -> String {
     }
     if modifiers.contains("Shift") {
         ordered.push("Shift");
+    }
+    if modifiers.contains("Win") {
+        ordered.push("Win");
     }
     ordered.push(key);
     ordered.join("+")

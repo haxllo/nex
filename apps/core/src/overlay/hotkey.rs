@@ -1,22 +1,15 @@
-//! Global hotkey registration via the Win32 `RegisterHotKey` API.
+//! Global hotkey via a low-level keyboard hook (`WH_KEYBOARD_LL`).
 //!
-//! The hotkey runs on a dedicated OS thread that calls
-//! `RegisterHotKey(NULL, id, mods, vk)` and then loops on
-//! `GetMessageW`. When the OS delivers a `WM_HOTKEY` (because the
-//! user pressed the registered chord), the thread forwards
-//! `OverlayEvent::Hotkey(id)` to the supplied event channel, which
-//! the runtime drains on the calling thread.
-//!
-//! Why a dedicated thread: `RegisterHotKey` with a `NULL` HWND
-//! delivers `WM_HOTKEY` to the thread that registered it, so the
-//! `GetMessageW` loop must run on that same thread. The tao event
-//! loop already owns the main thread for window/message dispatch,
-//! so we run the hotkey listener on a separate OS thread instead.
+//! Unlike `RegisterHotKey`, a low-level keyboard hook can intercept
+//! any key — including the Win key pressed alone — without
+//! consuming a global hotkey slot. The hook runs on a dedicated OS
+//! thread that owns the `GetMessageW` pump required by
+//! `SetWindowsHookExW`.
 
 #![cfg(target_os = "windows")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -25,8 +18,108 @@ use crossbeam_channel::Sender;
 use crate::logging;
 use crate::overlay::model::OverlayEvent;
 
-/// Owns a dedicated OS thread that holds a registered hotkey.
-/// Drop the listener to unregister and join the thread.
+// ---------------------------------------------------------------------------
+// Static global: the hook proc has no user-data parameter, so we stash
+// everything we need in a process-wide `OnceLock`.
+// ---------------------------------------------------------------------------
+
+struct HookContext {
+    sender: Sender<OverlayEvent>,
+    hotkey_id: i32,
+    target_key: u32,
+    /// When true, accept either VK_LWIN or VK_RWIN as the target key.
+    target_is_win: bool,
+    /// VK codes that must be held (from the parsed modifier list).
+    required_mods: Vec<u32>,
+}
+
+static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// Helper: async key state
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the virtual-key key is currently pressed.
+fn is_key_down(vk: u32) -> bool {
+    // The high bit of the return value is set when the key is down.
+    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
+}
+
+/// All modifier VK codes we care about when checking for "no extra
+/// modifiers".
+const ALL_MODS: [u32; 4] = [VK_CTRL, VK_ALT, VK_SHIFT, VK_LWIN];
+
+const VK_CTRL: u32 = 0x11;
+const VK_ALT: u32 = 0x12;
+const VK_SHIFT: u32 = 0x10;
+const VK_LWIN: u32 = 0x5B;
+const VK_RWIN: u32 = 0x5C;
+
+// ---------------------------------------------------------------------------
+// Hook proc (unsafe, extern "system")
+// ---------------------------------------------------------------------------
+
+/// Low-level keyboard hook procedure.
+///
+/// # Safety
+/// Called by the OS hook dispatcher. `wParam` and `lParam` carry
+/// valid message/key data per the Win32 API contract.
+unsafe extern "system" fn keyboard_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT;
+
+    if n_code >= 0 {
+        let msg = w_param as u32;
+        if msg == 0x0100 || msg == 0x0104 {
+            // WM_KEYDOWN or WM_SYSKEYDOWN
+            if let Some(ctx) = HOOK_CTX.get() {
+                // SAFETY: l_param is a valid pointer to KBDLLHOOKSTRUCT per Win32 contract
+                let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
+                let vk = kb.vkCode;
+
+                let is_target = if ctx.target_is_win {
+                    vk == VK_LWIN || vk == VK_RWIN
+                } else {
+                    vk == ctx.target_key
+                };
+
+                if is_target {
+                    // Check all required modifiers are held.
+                    let mods_ok = ctx.required_mods.iter().all(|&m| is_key_down(m));
+
+                    // Check NO extra unexpected modifiers are held.
+                    // We allow the required mods themselves, but nothing else.
+                    let extra_free = ALL_MODS.iter().all(|&m| {
+                        if ctx.required_mods.contains(&m) {
+                            true // required, ok to be down
+                        } else {
+                            !is_key_down(m)
+                        }
+                    });
+
+                    if mods_ok && extra_free {
+                        let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+                        return 1; // swallow the keystroke
+                    }
+                }
+            }
+        }
+    }
+
+    // SAFETY: n_code, w_param, l_param are valid per the hook contract.
+    // Passing null_mut() as hhk for LL hooks (no chained hook).
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) }
+}
+
+// ---------------------------------------------------------------------------
+// HotkeyListener
+// ---------------------------------------------------------------------------
+
+/// Owns a dedicated OS thread that holds a `WH_KEYBOARD_LL` hook.
+/// Drop the listener to unhook and join the thread.
 pub(crate) struct HotkeyListener {
     inner: Option<HotkeyListenerInner>,
 }
@@ -35,11 +128,11 @@ struct HotkeyListenerInner {
     should_exit: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     id: i32,
-    thread_id: Arc<std::sync::OnceLock<u32>>,
+    thread_id: Arc<OnceLock<u32>>,
 }
 
 impl HotkeyListener {
-    /// Register `hotkey_str` and start listening. `event_tx` is sent
+    /// Install `hotkey_str` and start listening. `event_tx` receives
     /// `OverlayEvent::Hotkey(id)` whenever the user presses the
     /// chord.
     pub(crate) fn start(
@@ -48,48 +141,90 @@ impl HotkeyListener {
     ) -> Result<Self, String> {
         let parsed = parse_hotkey(hotkey_str)
             .map_err(|e| format!("invalid hotkey '{hotkey_str}': {e}"))?;
-        let modifiers = modifiers_from_names(&parsed.modifiers)?;
-        let vk = vk_from_key(&parsed.key)?;
+        let required_mods = modifier_vks_from_names(&parsed.modifiers)?;
+        let target_key = vk_from_key(&parsed.key)?;
+        let target_is_win = target_key == VK_LWIN;
 
         let id: i32 = 1;
         let should_exit = Arc::new(AtomicBool::new(false));
-        let should_exit_clone = should_exit.clone();
-        let event_tx_clone = event_tx.clone();
-        let thread_id: Arc<std::sync::OnceLock<u32>> = Arc::new(std::sync::OnceLock::new());
+        let should_exit_for_thread = should_exit.clone();
+        let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
         let thread_id_for_thread = thread_id.clone();
 
-        // RegisterHotKey(NULL, ...) delivers WM_HOTKEY to the thread
-        // that called it.  GetMessageW also runs on the listener
-        // thread, so RegisterHotKey must be called inside the spawned
-        // thread — otherwise WM_HOTKEY lands on the wrong queue.
-        let (reg_tx, reg_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        let hotkey_owned = hotkey_str.to_string();
+        // Populate the global hook context. The hook proc reads it
+        // without synchronisation because it is set once before the
+        // hook is installed and never modified afterward.
+        let _ = HOOK_CTX.set(HookContext {
+            sender: event_tx,
+            hotkey_id: id,
+            target_key,
+            target_is_win,
+            required_mods,
+        });
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
         let thread = thread::Builder::new()
             .name("nex-hotkey-listener".into())
             .spawn(move || {
-                let ok = unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(
-                        std::ptr::null_mut(),
-                        id,
-                        modifiers,
-                        vk,
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    GetMessageW, SetWindowsHookExW, TranslateMessage, DispatchMessageW,
+                    MSG, WH_KEYBOARD_LL,
+                };
+
+                // Install the low-level keyboard hook on this thread.
+                // SetWindowsHookExW with WH_KEYBOARD_LL must be called
+                // from the thread whose message loop will dispatch the
+                // hook callbacks.
+                let hook_id = unsafe {
+                    SetWindowsHookExW(
+                        WH_KEYBOARD_LL as i32,
+                        Some(keyboard_hook_proc),
+                        std::ptr::null_mut(), // hMod — not needed for LL hooks
+                        0, // dwThreadId — 0 = all threads, but LL hooks always run on installing thread
                     )
                 };
-                if ok == 0 {
-                    let _ = reg_tx.send(Err(format!(
-                        "RegisterHotKey failed for '{hotkey_owned}'"
-                    )));
+
+                if hook_id.is_null() {
+                    let _ = ready_tx.send(Err("SetWindowsHookExW failed".into()));
                     return;
                 }
-                let _ = reg_tx.send(Ok(()));
-                let tid =
-                    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+
+                let tid = unsafe {
+                    windows_sys::Win32::System::Threading::GetCurrentThreadId()
+                };
                 let _ = thread_id_for_thread.set(tid);
-                run_get_message_loop(should_exit_clone, event_tx_clone, id);
+                let _ = ready_tx.send(Ok(()));
+
+                // GetMessageW loop — required to deliver hook messages.
+                let mut msg: MSG = unsafe { std::mem::zeroed() };
+                while !should_exit_for_thread.load(Ordering::SeqCst) {
+                    let status = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
+                    if status == -1 || status == 0 {
+                        break;
+                    }
+                    unsafe {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+
+                // Clean up the hook before exiting.
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
+                }
+
+                if !should_exit_for_thread.load(Ordering::SeqCst) {
+                    logging::warn("[nex] hotkey message loop exited unexpectedly");
+                }
             })
             .map_err(|e| format!("failed to spawn hotkey thread: {e}"))?;
 
-        reg_rx.recv().unwrap_or(Err("hotkey thread panicked".into()))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err("hotkey thread panicked".into()),
+        }
 
         Ok(Self {
             inner: Some(HotkeyListenerInner {
@@ -137,23 +272,15 @@ impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
-            // Wake the listener thread's GetMessageW so it can observe
-            // `should_exit` (or simply return 0) and exit. Without this
-            // the thread blocks forever on its message queue and the
-            // `handle.join()` below deadlocks the dropping thread —
-            // which is the main thread at shutdown, hanging the whole
-            // process after the overlay and tray are already gone.
-            //
-            // RegisterHotKey bound the hotkey to the listener thread,
-            // so we also unregister from that same thread before it
-            // exits (see run_get_message_loop). Posting WM_QUIT makes
-            // GetMessageW return 0, breaking the loop cleanly.
+
+            // Post WM_QUIT to wake the GetMessageW loop.
             if let Some(&tid) = inner.thread_id.get() {
                 logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
                 post_quit_to_thread(tid);
             } else {
                 logging::warn("[nex] shutdown: hotkey thread_id not available, cannot post WM_QUIT");
             }
+
             if let Some(handle) = inner.thread.take() {
                 logging::info("[nex] shutdown: joining hotkey thread");
                 let _ = handle.join();
@@ -164,43 +291,16 @@ impl Drop for HotkeyListener {
 }
 
 /// Post `WM_QUIT` to the listener thread so its `GetMessageW` returns.
-/// This is the only way to wake a thread parked in `GetMessageW` from
-/// outside; the atomic `should_exit` flag alone cannot do it.
 fn post_quit_to_thread(thread_id: u32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
-    // Returns 0 on failure; nothing useful to do — the join still
-    // proceeds, and at worst the thread lingers until process exit.
     unsafe {
         let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
     }
 }
 
-fn run_get_message_loop(
-    should_exit: Arc<AtomicBool>,
-    event_tx: Sender<OverlayEvent>,
-    id: i32,
-) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY,
-    };
-    let mut msg: MSG = unsafe { std::mem::zeroed() };
-    while !should_exit.load(Ordering::SeqCst) {
-        let status = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-        if status == -1 || status == 0 {
-            break;
-        }
-        if msg.message == WM_HOTKEY && msg.wParam == id as usize {
-            let _ = event_tx.send(OverlayEvent::Hotkey(id));
-        }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    if !should_exit.load(Ordering::SeqCst) {
-        logging::warn("[nex] hotkey message loop exited unexpectedly");
-    }
-}
+// ---------------------------------------------------------------------------
+// Hotkey string parsing
+// ---------------------------------------------------------------------------
 
 struct ParsedHotkey {
     modifiers: Vec<String>,
@@ -221,23 +321,24 @@ fn parse_hotkey(s: &str) -> Result<ParsedHotkey, String> {
     Ok(ParsedHotkey { modifiers, key })
 }
 
-fn modifiers_from_names(names: &[String]) -> Result<u32, String> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
-    };
-    let mut out = 0u32;
+/// Map modifier names to VK codes (not MOD_* flags — those were for
+/// RegisterHotKey).
+fn modifier_vks_from_names(names: &[String]) -> Result<Vec<u32>, String> {
+    let mut out = Vec::new();
     for name in names {
-        match name.to_ascii_lowercase().as_str() {
-            "alt" => out |= MOD_ALT,
-            "ctrl" | "control" => out |= MOD_CONTROL,
-            "shift" => out |= MOD_SHIFT,
-            "win" | "meta" | "super" => out |= MOD_WIN,
+        let vk = match name.to_ascii_lowercase().as_str() {
+            "alt" => VK_ALT,
+            "ctrl" | "control" => VK_CTRL,
+            "shift" => VK_SHIFT,
+            "win" | "meta" | "super" => VK_LWIN,
             other => return Err(format!("unsupported modifier: {other}")),
-        }
+        };
+        out.push(vk);
     }
     Ok(out)
 }
 
+/// Map a key name to its virtual-key code.
 fn vk_from_key(key: &str) -> Result<u32, String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9,
@@ -245,6 +346,7 @@ fn vk_from_key(key: &str) -> Result<u32, String> {
     };
     let upper = key.to_ascii_uppercase();
     let vk: u32 = match upper.as_str() {
+        "WIN" | "META" | "SUPER" => VK_LWIN,
         "SPACE" => VK_SPACE as u32,
         "F1" => VK_F1 as u32,
         "F2" => VK_F2 as u32,
@@ -264,11 +366,6 @@ fn vk_from_key(key: &str) -> Result<u32, String> {
     Ok(vk)
 }
 
-// A trivial keep-alive import to silence dead-code lints in
-// configurations where the listener never starts.
-#[allow(dead_code)]
-const _KEEP_DURATION: Duration = Duration::from_millis(50);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,11 +380,6 @@ mod tests {
     #[test]
     fn parse_ctrl_shift_f5() {
         let p = parse_hotkey("Ctrl+Shift+F5").unwrap();
-        // The parser collects modifiers via `iter().rev().skip(1)`
-        // so the first modifier in the string ends up *last* in
-        // the vec. Order does not matter for modifier dispatch
-        // (we OR them together), so this is a documentation
-        // assertion rather than a contract.
         assert_eq!(p.modifiers, vec!["Shift", "Ctrl"]);
         assert_eq!(p.key, "F5");
     }
@@ -324,5 +416,16 @@ mod tests {
     #[test]
     fn vk_single_letter() {
         assert_eq!(vk_from_key("A").unwrap(), b'A' as u32);
+    }
+
+    #[test]
+    fn vk_win_key() {
+        assert_eq!(vk_from_key("Win").unwrap(), VK_LWIN);
+    }
+
+    #[test]
+    fn modifier_vks() {
+        let mods = modifier_vks_from_names(&["Ctrl".into(), "Shift".into()]).unwrap();
+        assert_eq!(mods, vec![VK_CTRL, VK_SHIFT]);
     }
 }

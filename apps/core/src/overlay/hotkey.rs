@@ -35,6 +35,11 @@ struct HookContext {
 
 static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
 
+/// When `true`, the hook proc swallowed a key-down for the target key
+/// and should also swallow the matching key-up. Prevents the system
+/// (Explorer) from seeing a lone Win key-up and opening the Start Menu.
+static SWALLOWED_KEYDOWN: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Helper: async key state
 // ---------------------------------------------------------------------------
@@ -73,8 +78,10 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     if n_code >= 0 {
         let msg = w_param as u32;
-        if msg == 0x0100 || msg == 0x0104 {
-            // WM_KEYDOWN or WM_SYSKEYDOWN
+        let is_keydown = msg == 0x0100 || msg == 0x0104; // WM_KEYDOWN or WM_SYSKEYDOWN
+        let is_keyup = msg == 0x0101 || msg == 0x0105;   // WM_KEYUP or WM_SYSKEYUP
+
+        if is_keydown || is_keyup {
             if let Some(ctx) = HOOK_CTX.get() {
                 // SAFETY: l_param is a valid pointer to KBDLLHOOKSTRUCT per Win32 contract
                 let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
@@ -86,7 +93,15 @@ unsafe extern "system" fn keyboard_hook_proc(
                     vk == ctx.target_key
                 };
 
-                if is_target {
+                if is_keyup && is_target && SWALLOWED_KEYDOWN.load(Ordering::SeqCst) {
+                    // Key-up after a swallowed key-down: swallow it too
+                    // so Explorer doesn't see the lone Win key-up and
+                    // open the Start Menu.
+                    SWALLOWED_KEYDOWN.store(false, Ordering::SeqCst);
+                    return 1;
+                }
+
+                if is_keydown && is_target {
                     // Check required modifiers are held.
                     // VK_LWIN and VK_RWIN are treated as equivalent.
                     let mods_ok = ctx.required_mods.iter().all(|&m| {
@@ -120,7 +135,12 @@ unsafe extern "system" fn keyboard_hook_proc(
 
                     if mods_ok && extra_free {
                         let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
-                        return 1; // swallow the keystroke
+                        // Remember we swallowed the key-down so the matching
+                        // key-up is also swallowed — prevents the system
+                        // from processing a lone key-up (notably: Explorer
+                        // opening the Start Menu on Win key-up).
+                        SWALLOWED_KEYDOWN.store(true, Ordering::SeqCst);
+                        return 1;
                     }
                 }
             }

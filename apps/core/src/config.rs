@@ -271,15 +271,16 @@ impl Default for Config {
             hotkey: "Ctrl+Space".to_string(),
             launch_at_startup: true,
             hotkey_help: format!(
-                "Set `hotkey` as Modifier+Key (example: Ctrl+Space), then restart {APP_DISPLAY_NAME}."
+                "Set `hotkey` as Modifier+Key (example: Ctrl+Space or Win alone), then restart {APP_DISPLAY_NAME}."
             ),
             hotkey_recommended: vec![
+                "Win".to_string(),
                 "Ctrl+Space".to_string(),
                 "Ctrl+Shift+Space".to_string(),
                 "Ctrl+Alt+Space".to_string(),
-                "Alt+Shift+Space".to_string(),
+                "Win+Shift+F1".to_string(),
+                "Win+Shift+F2".to_string(),
                 "Ctrl+Shift+P".to_string(),
-                "Ctrl+Alt+P".to_string(),
             ],
             search_mode_default: SearchMode::All,
             search_dsl_enabled: true,
@@ -565,7 +566,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         text.push_str(&json_string(option));
         text.push('\n');
     }
-    text.push_str("# Avoid common OS-reserved shortcuts like Win+..., Alt+Tab, Ctrl+Esc.\n");
+    text.push_str("# Avoid common OS-reserved shortcuts like Alt+Tab, Ctrl+Esc. \"Win\" alone is safe.\n");
     text.push_str("hotkey = ");
     text.push_str(&json_string(&cfg.hotkey));
     text.push_str("\n\n");

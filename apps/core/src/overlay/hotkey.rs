@@ -97,12 +97,22 @@ unsafe extern "system" fn keyboard_hook_proc(
                     });
 
                     // Check NO extra unexpected modifiers are held.
+                    // The target key itself is always excluded — it's expected
+                    // to be down (it triggered the hook). For example, when
+                    // intercepting VK_LWIN alone, VK_LWIN being down should
+                    // not disqualify the match.
+                    let is_target_mod = |m: u32| -> bool {
+                        m == ctx.target_key
+                            || (ctx.target_is_win && (m == VK_LWIN || m == VK_RWIN))
+                    };
                     let extra_free = ALL_MODS.iter().all(|&m| {
-                        if ctx.required_mods.contains(&m)
+                        if is_target_mod(m) {
+                            true // this IS the triggered key, always ok
+                        } else if ctx.required_mods.contains(&m)
                             || (m == VK_LWIN && ctx.required_mods.contains(&VK_RWIN))
                             || (m == VK_RWIN && ctx.required_mods.contains(&VK_LWIN))
                         {
-                            true // required, ok to be down
+                            true // required by hotkey config
                         } else {
                             !is_key_down(m)
                         }

@@ -56,6 +56,43 @@ fn is_key_down(vk: u32) -> bool {
     unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
 }
 
+/// Send a dummy "menu mask" key so the shell treats the Win tap as
+/// Win+another-key instead of a solo Win tap. This mirrors AutoHotkey's
+/// `#MenuMaskKey vkE8` behavior and intentionally never sends Win-up.
+fn inject_menu_mask_key() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+
+    const VK_MENU_MASK: u16 = 0xE8; // Unassigned; used by AutoHotkey as a menu mask key.
+
+    let mut inputs: [INPUT; 2] = unsafe { std::mem::zeroed() };
+    inputs[0].r#type = INPUT_KEYBOARD;
+    inputs[0].Anonymous.ki = KEYBDINPUT {
+        wVk: VK_MENU_MASK,
+        wScan: 0,
+        dwFlags: 0,
+        time: 0,
+        dwExtraInfo: 0,
+    };
+    inputs[1].r#type = INPUT_KEYBOARD;
+    inputs[1].Anonymous.ki = KEYBDINPUT {
+        wVk: VK_MENU_MASK,
+        wScan: 0,
+        dwFlags: KEYEVENTF_KEYUP,
+        time: 0,
+        dwExtraInfo: 0,
+    };
+
+    let _ = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Hook proc
 // ---------------------------------------------------------------------------
@@ -130,10 +167,11 @@ unsafe extern "system" fn keyboard_hook_proc(
         });
 
         if mods_ok && extra_free {
-            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             if ctx.target_is_win {
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
+                inject_menu_mask_key();
             }
+            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             return 1;
         }
     }

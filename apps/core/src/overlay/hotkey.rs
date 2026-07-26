@@ -32,9 +32,29 @@ struct HookContext {
 
 static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
 
-// Track the VK of a Win key-down that was consumed for the hotkey,
-// so the matching non-injected key-up is also consumed.
+// Track VK of a Win key-down that was consumed by the hotkey, so the
+// matching key-up is also consumed and the menu-mask key is released.
 static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+
+// ---------------------------------------------------------------------------
+// Menu suppression strategy
+//
+// The Start Menu (Explorer / ShellExperienceHost) detects a bare Win
+// tap via raw input, which bypasses WH_KEYBOARD_LL entirely. Returning
+// 1 from our hook cannot block it.
+//
+// We use the AutoHotkey #MenuMaskKey approach but with a critical twist:
+// the mask key (unassigned VK 0xE8) is HELD DOWN for the entire Win
+// key press, not flashed momentarily. This ensures that whenever the
+// overlay hide triggers a focus change to Explorer, Explorer's raw input
+// check sees Win + 0xE8 simultaneously — never a bare Win.
+//
+//   Win keydown  → send 0xE8 DOWN (held), eat keydown, fire hotkey
+//   Win keyup    → send 0xE8 UP, eat keyup
+//
+// Non-Win hotkeys eat the target keydown as before (prevents the key
+// from reaching the focused window).
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -56,41 +76,49 @@ fn is_key_down(vk: u32) -> bool {
     unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
 }
 
-/// Send a dummy "menu mask" key so the shell treats the Win tap as
-/// Win+another-key instead of a solo Win tap. This mirrors AutoHotkey's
-/// `#MenuMaskKey vkE8` behavior and intentionally never sends Win-up.
-fn inject_menu_mask_key() {
+/// Unassigned VK used as menu-mask key. Mirrors AutoHotkey's
+/// `#MenuMaskKey vkE8` — never conflicts with real keys.
+pub(crate) const VK_MENU_MASK: u16 = 0xE8;
+
+/// Send a single key-down for the menu-mask key. The mask is HELD
+/// (no corresponding key-up) until the Win key is released. This
+/// ensures raw input consumers always see Win+mask simultaneously.
+fn send_mask_down() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// Release the menu-mask key held by [`send_mask_down`].
+fn send_mask_up() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
 
-    const VK_MENU_MASK: u16 = 0xE8; // Unassigned; used by AutoHotkey as a menu mask key.
-
-    let mut inputs: [INPUT; 2] = unsafe { std::mem::zeroed() };
-    inputs[0].r#type = INPUT_KEYBOARD;
-    inputs[0].Anonymous.ki = KEYBDINPUT {
-        wVk: VK_MENU_MASK,
-        wScan: 0,
-        dwFlags: 0,
-        time: 0,
-        dwExtraInfo: 0,
-    };
-    inputs[1].r#type = INPUT_KEYBOARD;
-    inputs[1].Anonymous.ki = KEYBDINPUT {
-        wVk: VK_MENU_MASK,
-        wScan: 0,
-        dwFlags: KEYEVENTF_KEYUP,
-        time: 0,
-        dwExtraInfo: 0,
-    };
-
-    let _ = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_mut_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
+/// Send mask key down and spin-wait for it to register with the RIT.
+/// Called from the main thread before `window.set_visible(false)` to
+/// ensure raw input consumers (Explorer) see Win+mask simultaneously
+/// when focus changes during the hide transition.
+pub(crate) fn hold_mask_before_hide() {
+    send_mask_down();
+    // Spin-wait for RIT to process the injection and update async
+    // key state. Typical wait is <10µs; we cap at ~1ms to avoid
+    // blocking the event loop if something goes wrong.
+    for _ in 0..10_000 {
+        if is_key_down(VK_MENU_MASK as u32) {
+            break;
+        }
+        std::hint::spin_loop();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -124,16 +152,17 @@ unsafe extern "system" fn keyboard_hook_proc(
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
 
-    // Consume the matching non-injected Win key-up so Windows doesn't
-    // open the Start Menu after the overlay takes focus.
-    if is_keyup && ctx.target_is_win && !injected {
-        let consumed = CONSUMED_WIN_VK.load(Ordering::SeqCst);
-        if consumed != 0 && vk == consumed {
+    // --- Win key-up: release held mask and eat so Explorer doesn't see bare Win up ---
+    if ctx.target_is_win && is_keyup && !injected {
+        let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
+        if consumed_vk != 0 && vk == consumed_vk {
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            send_mask_up();
             return 1;
         }
     }
 
+    // Only key-down triggers matter for hotkey dispatch.
     if !is_keydown {
         return unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
@@ -168,8 +197,12 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         if mods_ok && extra_free {
             if ctx.target_is_win {
+                // Press the mask key DOWN and hold it for the entire
+                // Win key duration. This way any raw input check
+                // (e.g. Explorer during overlay hide → focus change)
+                // sees Win + mask simultaneously, never a bare Win.
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
-                inject_menu_mask_key();
+                send_mask_down();
             }
             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             return 1;

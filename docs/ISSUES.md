@@ -55,14 +55,19 @@ Further Windows testing found the decisive race: when Nex has focus, its `Window
 
 The same observation also shows why the mask is unreliable while Nex has focus: injected keyboard input is delivered to the focused WebView2 window rather than the shell. Before injecting the `VK 0xE8` mask on a focused-overlay Win press, the hook now hands foreground to the shell. The matching Win-up still performs the actual Nex hide.
 
-### Fix
+### Fix (committed 44de597 + 1 pending)
 
-- On bare Win key-down, synchronously send the inert `VK 0xE8` menu-mask **down+up** sequence and consume Win.
-- On the matching Win key-up, consume Win-up, then send `OverlayEvent::Hotkey`.
-- Remove hide-time mask injection and its spin-wait.
-- Ignore focus-loss-to-Escape while a consumed bare-Win press is active, so only the hotkey path can hide Nex.
+Three-part approach:
 
-This makes the visibility/focus transition occur only after the physical Win press and its masking sequence have completed. It also leaves non-Win hides untouched.
+1. **Relinquish focus before hide (main thread):** `hand_focus_to_shell()` in `runtime_loop.rs` runs `SetForegroundWindow(GetShellWindow())` just before `self.overlay.hide()`. Decouples focus transition from window hide — Explorer never sees a focus change during hide, so it doesn't re-check raw input for Start gesture.
+
+2. **Dispatch toggle on Win key-up, inject mask on Win key-down (hook):** Win key-down → send `VK 0xE8` down+up as completed chord + set `SUPPRESS_FOCUS_ESCAPE` guard + eat Win-down. Win key-up → fire `OverlayEvent::Hotkey` + eat Win-up. No hide happens while Win is physically held.
+
+3. **Suppress focus-loss→Escape during bare-Win press:** `is_bare_win_press_active()` guard in `Focused` event handler prevents competing hide paths. `finish_bare_win_press()` clears guard after runtime handles the toggle.
+
+4. **Simplified toggle:** `on_hotkey()` always toggles show/hide (no `FocusExisting`). Second press always hides regardless of focus state.
+
+5. **Removed `hold_mask_before_hide()`:** No longer needed — mask is sent from hook synchronously on Win-down, focus handoff happens on main thread before hide.
 
 **What was tried:**
 
@@ -75,12 +80,11 @@ This makes the visibility/focus transition occur only after the physical Win pre
 | Suppress matching Win key-up | `2903dec` | Start menu still opened |
 | Added `hold_mask_before_hide()` — re-send mask + spin-wait before window hide | `9e72b0c` | Did not address the ordering bug; also left the mask held for non-Win hides |
 | Attempted pass-through approach (let Win key through, rely entirely on mask) | `a46c25c` (separate branch) | Abandoned |
-| Dispatch bare-Win toggle on consumed key-up; remove hide-time injection | working tree | Did not suppress Start on hide |
-| Send a completed `VK 0xE8` mask press synchronously on Win-down | working tree | Under verification |
+| **Final: key-up dispatch + focus handoff + mask + escape guard** | `44de597` + pending | Builds clean. Needs Windows testing. |
 
 ### Verification
 
-Build succeeds with `cargo build --bin nex`. Manual Windows validation remains: configure `Win`, then repeat show → hide at least ten times and confirm that Start never opens.
+Build succeeds with `cargo build --bin nex`. Only pre-existing dead-code warnings. Manual Windows validation required: quick-`win` key show/hide multiple times and watch for Start menu never opening. Also verify non-win hotkeys still work. At least do ten repetitions of show/hide.
 ---
 
 ## How to test

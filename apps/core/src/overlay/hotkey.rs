@@ -125,10 +125,11 @@ fn send_menu_mask_key() {
     let _ = unsafe { SendInput(inputs.len() as u32, inputs.as_mut_ptr(), std::mem::size_of::<INPUT>() as i32) };
 }
 
-/// Move keyboard focus away from the overlay before sending the menu mask.
-/// When WebView2 owns focus it can consume the injected mask, leaving the
-/// shell to observe a bare Win release.
-fn hand_focus_to_shell() {
+/// Move keyboard focus away from the overlay to the shell/desktop.
+/// Called from the runtime loop (main thread) just before hide, so the
+/// hide's window.set_visible(false) does not trigger a focus transition
+/// that could make Explorer re-check raw input for the Start menu gesture.
+pub(crate) fn hand_focus_to_shell() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, SetForegroundWindow};
 
     let shell = unsafe { GetShellWindow() };
@@ -233,9 +234,9 @@ unsafe extern "system" fn keyboard_hook_proc(
                 // held; injected events pass through due to the guard above.
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
-                if OVERLAY_HAS_FOCUS.load(Ordering::SeqCst) {
-                    hand_focus_to_shell();
-                }
+                // Mask injected synchronously from hook thread so shell
+                // sees Win+0xE8 before Win is released. Focus handoff
+                // happens in runtime_loop before hide — safer on main thread.
                 send_menu_mask_key();
                 return 1;
             }

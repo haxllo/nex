@@ -198,12 +198,15 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Win key-up: release held mask and eat so Explorer doesn't see bare Win up ---
+    // --- Win key-up: eat so Explorer doesn't see the bare Win up ---
+    // Mask is NOT released here — it stays held for the entire overlay
+    // session so the RIT never sees a bare Win key (the mask is held
+    // before the next Win press arrives).  Mask is released in the
+    // UiCommand::Hide handler after the overlay hides.
     if ctx.target_is_win && is_keyup && !injected {
         let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-            send_mask_up();
             return 1;
         }
     }

@@ -43,23 +43,17 @@ use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::WebViewExtWindows;
 use wry::{WebView, WebViewBuilder};
 
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWKEYBOARD,
+    GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExA, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-    RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WNDCLASSW,
+    GetForegroundWindow, RegisterWindowMessageW, SetWindowPos,
     WM_INPUT,
-    GW_OWNER, GWLP_HWNDPARENT, HWND_TOP, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
 };
 
 use crate::overlay::icons::IconCache;
@@ -97,9 +91,6 @@ pub(crate) enum UiCommand {
     /// generation matches, clears the icon cache while keeping the
     /// WebView warm for consistent re-open timing.
     Teardown(u64),
-    /// Posted after hide to check foreground AFTER event loop processes
-    /// the activation change (deferred from Hide handler).
-    CheckForeground,
     /// The page painted after a push_state — trigger deferred show.
     Painted,
     /// The page measured its content height (CSS px); resize to hug it.
@@ -153,50 +144,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     apply_window_chrome(&window, &state);
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
-    // Hidden focus-sink window. Before hiding the overlay we set it
-    // as the overlay's owner (GWLP_HWNDPARENT) so Windows activates
-    // our sink instead of Explorer when the overlay hides — no
-    // Explorer raw input check → no Start menu.
-    //
-    // We register our own window class with DefWindowProcW because
-    // standard classes (BUTTON, STATIC) have restrictions as top-level
-    // popups and reject activation.  DefWindowProcW handles WM_ACTIVATE
-    // and WM_SETFOCUS cleanly without interference.
-    let focus_sink = if cfg!(target_os = "windows") {
-        unsafe {
-            let wc_name = "NexFocusSinkClass\0".encode_utf16().collect::<Vec<_>>();
-            let hinst = GetModuleHandleW(std::ptr::null());
-            let wc = WNDCLASSW {
-                style: 0,
-                lpfnWndProc: Some(DefWindowProcW),
-                cbClsExtra: 0,
-                cbWndExtra: 0,
-                hInstance: hinst,
-                hIcon: std::ptr::null_mut(),
-                hCursor: std::ptr::null_mut(),
-                hbrBackground: std::ptr::null_mut(),
-                lpszMenuName: std::ptr::null(),
-                lpszClassName: wc_name.as_ptr(),
-            };
-            RegisterClassW(&wc);
-            CreateWindowExW(
-                WS_EX_TOPMOST,
-                wc_name.as_ptr(),
-                std::ptr::null(),
-                WS_POPUP | WS_VISIBLE,
-                -30000,
-                -30000,
-                1,
-                1,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                hinst,
-                std::ptr::null_mut(),
-            )
-        }
-    } else {
-        std::ptr::null_mut()
-    };
+    // Start suppression is handled by RIDEV_NOHOTKEYS via
+    // RegisterRawInputDevices instead of a focus-sink window.
 
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  The WebView
@@ -386,84 +335,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                 }
                 UiCommand::Hide => {
-                    // When a focused top-level window is hidden, Windows
-                    // activates the next window in Z-order — typically
-                    // Explorer — which then checks raw input and opens
-                    // Start if Win was recently pressed (raw input
-                    // cannot be suppressed by WH_KEYBOARD_LL).
-                    //
-                    // Approach: bring focus-sink to visible foreground,
-                    // set it as the overlay's owner, then hide the overlay.
-                    // The sink (same thread, custom DefWindowProcW class)
-                    // should accept activation and prevent Explorer from
-                    // receiving the foreground.
                     crate::overlay::hotkey::hold_mask_before_hide();
-                    if !focus_sink.is_null() {
-                        unsafe {
-                            // Move sink on-screen at a normal position so
-                            // it can accept the activation.
-                            SetWindowPos(
-                                focus_sink,
-                                HWND_TOP,
-                                0,
-                                0,
-                                100,
-                                100,
-                                SWP_SHOWWINDOW,
-                            );
-                            // Activate the sink on our thread via SetFocus
-                            // (same thread, no foreground restriction).
-                            let prev_focus = windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(focus_sink);
-                            // Also set the overlay's owner to the sink.
-                            let owner_prev = SetWindowLongPtrW(
-                                hwnd,
-                                GWLP_HWNDPARENT,
-                                focus_sink as isize,
-                            );
-                            let owner_via_gw = GetWindow(hwnd, GW_OWNER);
-                            let sink_fg = SetForegroundWindow(focus_sink);
-                            let last_err = GetLastError();
-                            crate::runtime::log_info(&format!(
-                                "[nex::debug] Hide: prev_focus={:?} owner_prev={:?} GW_OWNER={:?} SFW(sink)={} last_err={}",
-                                prev_focus, owner_prev, owner_via_gw, sink_fg, last_err,
-                            ));
-                        }
-                    }
                     // Unregister raw-input hotkey suppression so the
                     // Win key behaves normally while the overlay is hidden.
                     unregister_hotkey_suppression();
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
                     crate::overlay::hotkey::release_mask_after_hide();
-                    if !focus_sink.is_null() {
-                        let fg_after_hide = unsafe {
-                            GetForegroundWindow()
-                        };
-                        let owner_after = unsafe {
-                            GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)
-                        };
-                        let is_visible = unsafe {
-                            windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
-                        };
-                        unsafe {
-                            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
-                            // Move sink back off-screen.
-                            SetWindowPos(
-                                focus_sink,
-                                HWND_TOPMOST,
-                                -30000,
-                                -30000,
-                                1,
-                                1,
-                                SWP_NOACTIVATE,
-                            );
-                        }
-                        crate::runtime::log_info(&format!(
-                            "[nex::debug] Hide: fg={:?} owner={:?} visible={}",
-                            fg_after_hide, owner_after, is_visible,
-                        ));
-                        let _ = proxy.send_event(UiCommand::CheckForeground);
-                    }
+                    let fg_after = unsafe { GetForegroundWindow() };
+                    let is_visible = unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
+                    };
+                    let win_down = unsafe {
+                        windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5B) as u16 & 0x8000 != 0
+                    };
+                    crate::runtime::log_info(&format!(
+                        "[nex::debug] Hide: fg={:?} visible={} win_down={}",
+                        fg_after, is_visible, win_down,
+                    ));
                     // Clear any pending resize so stale height doesn't
                     // apply after next Show.
                     pending_resize = None;
@@ -533,18 +422,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
                         }
                     }
-                }
-                UiCommand::CheckForeground => {
-                    let fg = unsafe {
-                        windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
-                    };
-                    let owner = unsafe {
-                        GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT)
-                    };
-                    crate::runtime::log_info(&format!(
-                        "[nex::debug] CheckForeground: fg={:?} owner={:?}",
-                        fg, owner,
-                    ));
                 }
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
@@ -617,13 +494,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     });
 
     is_running.store(false, Ordering::SeqCst);
-
-    // Clean up focus-sink window.
-    if !focus_sink.is_null() {
-        unsafe {
-            DestroyWindow(focus_sink);
-        }
-    }
 
     Ok(())
 }

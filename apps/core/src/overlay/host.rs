@@ -99,6 +99,8 @@ pub(crate) enum UiCommand {
     Quit,
     /// Debounce timer fired — apply the coalesced resize height.
     ApplyResize,
+    /// Delayed keyboard state check (posted ~200ms after hide).
+    CheckKeyboardState(Instant),
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -335,13 +337,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                 }
                 UiCommand::Hide => {
-                    crate::overlay::hotkey::hold_mask_before_hide();
                     // Unregister raw-input hotkey suppression so the
                     // Win key behaves normally while the overlay is hidden.
                     unregister_hotkey_suppression();
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
-                    crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     let is_visible = unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
@@ -353,6 +353,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         "[nex::debug] Hide: fg={:?} visible={} win_down={}",
                         fg_after, is_visible, win_down,
                     ));
+                    // Delayed keyboard-state check: poll Win key after user
+                    // likely released it.  If still pressed, something is stuck.
+                    let proxy_delay = proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        let _ = proxy_delay.send_event(UiCommand::CheckKeyboardState(Instant::now()));
+                    });
                     // Clear any pending resize so stale height doesn't
                     // apply after next Show.
                     pending_resize = None;
@@ -422,6 +429,20 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
                         }
                     }
+                }
+                UiCommand::CheckKeyboardState(triggered) => {
+                    let elapsed = triggered.elapsed().as_millis();
+                    let win_down_now = unsafe {
+                        windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5B) as u16 & 0x8000 != 0
+                    };
+                    let fg_now = unsafe { GetForegroundWindow() };
+                    let win_down_raw_now = unsafe {
+                        windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5C) as u16 & 0x8000 != 0
+                    };
+                    crate::runtime::log_info(&format!(
+                        "[nex::debug] CheckKeyboardState(+{}ms): fg={:?} win_down={} rwin_down={}",
+                        elapsed, fg_now, win_down_now, win_down_raw_now,
+                    ));
                 }
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));

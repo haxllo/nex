@@ -324,9 +324,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                 }
                 UiCommand::Hide => {
-                    // Hide first so user never sees the cleared state
-                    // rendered (plain body with no rows).
+                    // Hold menu-mask key during the window hide so raw
+                    // input consumers (Explorer) see Win+mask if the
+                    // hide triggers a focus change. Mask was already sent
+                    // on Win key-down from the hook thread, but we re-send
+                    // + release around set_visible to close the timing race
+                    // between the hook thread's RIT injection and the
+                    // hide's focus transition on this thread.
+                    crate::overlay::hotkey::hold_mask_before_hide();
                     window.set_visible(false);
+                    crate::overlay::hotkey::release_mask_after_hide();
                     // Clear any pending resize so stale height doesn't
                     // apply after next Show.
                     pending_resize = None;

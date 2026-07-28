@@ -1634,7 +1634,7 @@ dependencies = [
  "webview2-com-sys",
  "window-vibrancy",
  "windows-core",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "winres",
  "wry",
 ]

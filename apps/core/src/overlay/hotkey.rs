@@ -57,17 +57,19 @@ pub(crate) fn finish_bare_win_press() {
 // ---------------------------------------------------------------------------
 // Menu suppression strategy
 //
-// A bare Win press is a shell gesture. `WH_KEYBOARD_LL` runs before the
-// input is posted, so consuming the event and applying a menu mask lets us
-// prevent that gesture.
+// The Start Menu detects a bare Win tap via raw input, which bypasses
+// WH_KEYBOARD_LL entirely. Returning 1 from our hook cannot block it.
 //
-// We use the AutoHotkey #MenuMaskKey approach: send a completed inert
-// VK 0xE8 key stroke while Win is held. The toggle is dispatched only after
-// Win is released: hiding on key-down can move focus to Explorer while Win
-// is still held and reintroduce the Start-menu gesture it prevents.
+// We use the AutoHotkey #MenuMaskKey approach but with a critical twist:
+// the mask key (unassigned VK 0xE8) is HELD DOWN for the entire Win
+// key press AND re-held during the hide transition. This ensures that
+// whenever the overlay hide triggers a focus change to Explorer,
+// Explorer's raw input check sees Win + 0xE8 simultaneously — never a
+// bare Win.
 //
-//   Win keydown  → send 0xE8 DOWN + UP, eat keydown
-//   Win keyup    → eat keyup, fire hotkey
+//   Win keydown  → send 0xE8 DOWN (held), eat keydown, fire hotkey
+//   Win keyup    → send 0xE8 UP, eat keyup
+//   Hide         → re-send 0xE8 DOWN, hide window, send 0xE8 UP
 //
 // Non-Win hotkeys eat the target keydown as before (prevents the key
 // from reaching the focused window).
@@ -111,31 +113,47 @@ fn is_key_down(vk: u32) -> bool {
 /// `#MenuMaskKey vkE8` — never conflicts with real keys.
 pub(crate) const VK_MENU_MASK: u16 = 0xE8;
 
-/// Send an inert key press to make the shell treat a bare Win press as a
-/// chord. The mask must be a completed press during Win-down.
-fn send_menu_mask_key() {
+/// Send a single key-down for the menu-mask key. The mask is held
+/// (no corresponding key-up) so raw input consumers see Win+mask
+/// simultaneously during the critical hide/window-hide window.
+fn send_mask_down() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// Release the menu-mask key held by [`send_mask_down`].
+fn send_mask_up() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
-    let mut inputs: [INPUT; 2] = unsafe { std::mem::zeroed() };
-    inputs[0].r#type = INPUT_KEYBOARD;
-    inputs[0].Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
-    inputs[1].r#type = INPUT_KEYBOARD;
-    inputs[1].Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
-    let _ = unsafe { SendInput(inputs.len() as u32, inputs.as_mut_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
-/// Move keyboard focus away from the overlay to the shell/desktop.
-/// Called from the runtime loop (main thread) just before hide, so the
-/// hide's window.set_visible(false) does not trigger a focus transition
-/// that could make Explorer re-check raw input for the Start menu gesture.
-pub(crate) fn hand_focus_to_shell() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, SetForegroundWindow};
-
-    let shell = unsafe { GetShellWindow() };
-    if !shell.is_null() {
-        unsafe { SetForegroundWindow(shell); }
+/// Re-send mask down and spin-wait for RIT to register it.
+/// Called from the UI thread inside UiCommand::Hide, right before
+/// window.set_visible(false), so raw input consumers see Win+mask
+/// during the hide's focus transition.
+pub(crate) fn hold_mask_before_hide() {
+    send_mask_down();
+    for _ in 0..10_000 {
+        if is_key_down(VK_MENU_MASK as u32) {
+            break;
+        }
+        std::hint::spin_loop();
     }
+}
+
+/// Release mask after hide completes.
+pub(crate) fn release_mask_after_hide() {
+    send_mask_up();
 }
 
 // ---------------------------------------------------------------------------
@@ -180,14 +198,12 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Win key-up: toggle only after the physical key is up ---
+    // --- Win key-up: release held mask and eat so Explorer doesn't see bare Win up ---
     if ctx.target_is_win && is_keyup && !injected {
         let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-            // Dispatch only after physical Win-up, so hiding cannot transfer focus
-            // to Explorer during the key press.
-            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+            send_mask_up();
             return 1;
         }
     }
@@ -230,14 +246,14 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         if mods_ok && extra_free {
             if ctx.target_is_win {
-                // This completed mask press reaches the shell while Win is
-                // held; injected events pass through due to the guard above.
+                // Hold mask key down for entire Win press. Additionally,
+                // UiCommand::Hide in host.rs re-sends mask + releases
+                // around window.set_visible(false) to guarantee mask is
+                // held during the focus transition.
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
-                // Mask injected synchronously from hook thread so shell
-                // sees Win+0xE8 before Win is released. Focus handoff
-                // happens in runtime_loop before hide — safer on main thread.
-                send_menu_mask_key();
+                send_mask_down();
+                let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
                 return 1;
             }
             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));

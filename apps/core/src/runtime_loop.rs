@@ -956,6 +956,11 @@ impl RuntimeWorker {
                         }
                     }
                     HotkeyAction::Hide => {
+                        // Relinquish focus to shell/desktop before hide
+                        // so window.set_visible(false) doesn't trigger a
+                        // focus transition. Avoids Explorer raw input check
+                        // that could open Start menu on Win hotkey.
+                        crate::overlay::hotkey::hand_focus_to_shell();
                         self.overlay.hide();
                         reset_overlay_session(
                             &self.overlay,

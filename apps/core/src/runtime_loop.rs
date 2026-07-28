@@ -919,6 +919,7 @@ impl RuntimeWorker {
                             self.overlay.set_status_text(&status_text);
                         }
                     }
+                    crate::overlay::hotkey::finish_bare_win_press();
                     return;
                 }
                 if !overlay_visible
@@ -927,6 +928,7 @@ impl RuntimeWorker {
                     log_info(
                         "[nex] hotkey ignored because game mode is active for the foreground app",
                     );
+                    crate::overlay::hotkey::finish_bare_win_press();
                     return;
                 }
                 let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
@@ -976,6 +978,7 @@ impl RuntimeWorker {
                         );
                     }
                 }
+                crate::overlay::hotkey::finish_bare_win_press();
             }
             OverlayEvent::ExternalShow => {
                 // Same sync warmup as ShowAndFocus — user can't type until

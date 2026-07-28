@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,13 +48,15 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::UI::Input::{
-    RAWINPUTDEVICE, RegisterRawInputDevices, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
+    GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWKEYBOARD,
+    RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExA, CreateWindowExW, DefWindowProcW, DestroyWindow,
     GetForegroundWindow, GetWindow, GetWindowLongPtrW,
     RegisterClassW, RegisterWindowMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WNDCLASSW,
+    WM_INPUT,
     GW_OWNER, GWLP_HWNDPARENT, HWND_TOP, HWND_TOPMOST,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
@@ -430,6 +432,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Unregister raw-input hotkey suppression so the
                     // Win key behaves normally while the overlay is hidden.
                     unregister_hotkey_suppression();
+                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
                     crate::overlay::hotkey::release_mask_after_hide();
                     if !focus_sink.is_null() {
@@ -1127,6 +1130,53 @@ unsafe extern "system" fn instance_signal_subclass(
             let _ = ctx.event_tx.send(OverlayEvent::ExternalQuit);
             return 0;
         }
+        if msg == WM_INPUT {
+            // Detect Win key via raw input.  RIDEV_NOHOTKEYS blocks
+            // WH_KEYBOARD_LL for the keyboard, so we rely on raw input
+            // to catch toggle presses while the overlay is visible.
+            let h_raw_input = lparam as windows_sys::Win32::Foundation::HANDLE;
+            let header_sz = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+            let mut raw_input: std::mem::MaybeUninit<RAWINPUT> =
+                std::mem::MaybeUninit::uninit();
+            let mut sz = std::mem::size_of::<RAWINPUT>() as u32;
+            let written = unsafe {
+                GetRawInputData(
+                    h_raw_input,
+                    RID_INPUT,
+                    raw_input.as_mut_ptr() as *mut core::ffi::c_void,
+                    &mut sz,
+                    header_sz,
+                )
+            };
+            if written > 0 {
+                // SAFETY: GetRawInputData filled the struct when written > 0.
+                let raw = unsafe { raw_input.assume_init_ref() };
+                if raw.header.dwType == 1 {
+                    // RIM_TYPEKEYBOARD
+                    let vk = unsafe { raw.data.keyboard.VKey };
+                    let flags = unsafe { raw.data.keyboard.Flags };
+                    if vk == VK_LWIN || vk == VK_RWIN {
+                        if (flags & RI_KEY_BREAK) != 0 {
+                            RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                        } else if RAW_WIN_DOWN
+                            .compare_exchange(
+                                0,
+                                vk as u32,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            )
+                            .is_ok()
+                        {
+                            crate::runtime::log_info(&format!(
+                                "[nex::debug] WM_INPUT Win key={:?} sending toggle",
+                                vk,
+                            ));
+                            let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                        }
+                    }
+                }
+            }
+        }
     }
     // SAFETY: hwnd is valid window handle from subclass registration
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
@@ -1158,6 +1208,14 @@ unsafe fn install_instance_signal_subclass(
 // Raw input helpers — suppress Win-key Start while overlay is foreground.
 // ─────────────────────────────────────────────────────────────────
 
+/// Tracks raw-input VK of held Win key so we only send one toggle per press.
+static RAW_WIN_DOWN: AtomicU32 = AtomicU32::new(0);
+
+const RID_INPUT: u32 = 0x10000003;
+const RI_KEY_BREAK: u16 = 0x0001;
+const VK_LWIN: u16 = 0x5B;
+const VK_RWIN: u16 = 0x5C;
+
 /// Register keyboard raw input with `RIDEV_NOHOTKEYS` so the system
 /// does not process the bare Win key as a Start trigger while our
 /// overlay window is the foreground window.  Returns true on success.
@@ -1165,7 +1223,7 @@ fn register_hotkey_suppression(hwnd: HWND) -> bool {
     let mut rid = RAWINPUTDEVICE {
         usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
         usUsage: 0x06,     // HID_USAGE_GENERIC_KEYBOARD
-        dwFlags: RIDEV_NOHOTKEYS,
+        dwFlags: RIDEV_NOHOTKEYS | RIDEV_INPUTSINK,
         hwndTarget: hwnd,
     };
     let ok = unsafe {

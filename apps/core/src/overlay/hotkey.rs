@@ -33,24 +33,41 @@ struct HookContext {
 static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
 
 // Track VK of a Win key-down that was consumed by the hotkey, so the
-// matching key-up is also consumed and the menu-mask key is released.
+// matching key-up is also consumed.
 static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+static OVERLAY_HAS_FOCUS: AtomicBool = AtomicBool::new(false);
+static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
+
+/// True from a consumed bare-Win key-down through its matching key-up.
+/// The overlay host uses this to avoid treating the Win press's transient
+/// focus loss as click-outside dismissal; the hotkey event owns that toggle.
+pub(crate) fn is_bare_win_press_active() -> bool {
+    SUPPRESS_FOCUS_ESCAPE.load(Ordering::SeqCst)
+}
+
+pub(crate) fn set_overlay_focus(focused: bool) {
+    OVERLAY_HAS_FOCUS.store(focused, Ordering::SeqCst);
+}
+
+/// Clears the focus-loss guard after the runtime has handled the Win toggle.
+pub(crate) fn finish_bare_win_press() {
+    SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
+}
 
 // ---------------------------------------------------------------------------
 // Menu suppression strategy
 //
-// The Start Menu (Explorer / ShellExperienceHost) detects a bare Win
-// tap via raw input, which bypasses WH_KEYBOARD_LL entirely. Returning
-// 1 from our hook cannot block it.
+// A bare Win press is a shell gesture. `WH_KEYBOARD_LL` runs before the
+// input is posted, so consuming the event and applying a menu mask lets us
+// prevent that gesture.
 //
-// We use the AutoHotkey #MenuMaskKey approach but with a critical twist:
-// the mask key (unassigned VK 0xE8) is HELD DOWN for the entire Win
-// key press, not flashed momentarily. This ensures that whenever the
-// overlay hide triggers a focus change to Explorer, Explorer's raw input
-// check sees Win + 0xE8 simultaneously — never a bare Win.
+// We use the AutoHotkey #MenuMaskKey approach: send a completed inert
+// VK 0xE8 key stroke while Win is held. The toggle is dispatched only after
+// Win is released: hiding on key-down can move focus to Explorer while Win
+// is still held and reintroduce the Start-menu gesture it prevents.
 //
-//   Win keydown  → send 0xE8 DOWN (held), eat keydown, fire hotkey
-//   Win keyup    → send 0xE8 UP, eat keyup
+//   Win keydown  → send 0xE8 DOWN + UP, eat keydown
+//   Win keyup    → eat keyup, fire hotkey
 //
 // Non-Win hotkeys eat the target keydown as before (prevents the key
 // from reaching the focused window).
@@ -68,6 +85,20 @@ const VK_SHIFT: u32 = 0x10;
 const VK_LWIN: u32 = 0x5B;
 const VK_RWIN: u32 = 0x5C;
 
+// Physical VKs — keyboards send side-specific codes, not generic ones.
+const VK_LCONTROL: u32 = 0xA2;
+const VK_RCONTROL: u32 = 0xA3;
+const VK_LMENU: u32 = 0xA4;
+const VK_RMENU: u32 = 0xA5;
+const VK_LSHIFT: u32 = 0xA0;
+const VK_RSHIFT: u32 = 0xA1;
+
+// Track modifier state via atomic flags updated from the hook proc.
+// GetAsyncKeyState reports false once the WebView consumes Ctrl-down.
+static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
+static ALT_DOWN: AtomicBool = AtomicBool::new(false);
+static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -80,44 +111,29 @@ fn is_key_down(vk: u32) -> bool {
 /// `#MenuMaskKey vkE8` — never conflicts with real keys.
 pub(crate) const VK_MENU_MASK: u16 = 0xE8;
 
-/// Send a single key-down for the menu-mask key. The mask is HELD
-/// (no corresponding key-up) until the Win key is released. This
-/// ensures raw input consumers always see Win+mask simultaneously.
-fn send_mask_down() {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT,
-    };
-    let mut input: INPUT = unsafe { std::mem::zeroed() };
-    input.r#type = INPUT_KEYBOARD;
-    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
-    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
-}
-
-/// Release the menu-mask key held by [`send_mask_down`].
-fn send_mask_up() {
+/// Send an inert key press to make the shell treat a bare Win press as a
+/// chord. The mask must be a completed press during Win-down.
+fn send_menu_mask_key() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     };
-    let mut input: INPUT = unsafe { std::mem::zeroed() };
-    input.r#type = INPUT_KEYBOARD;
-    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
-    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+    let mut inputs: [INPUT; 2] = unsafe { std::mem::zeroed() };
+    inputs[0].r#type = INPUT_KEYBOARD;
+    inputs[0].Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
+    inputs[1].r#type = INPUT_KEYBOARD;
+    inputs[1].Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(inputs.len() as u32, inputs.as_mut_ptr(), std::mem::size_of::<INPUT>() as i32) };
 }
 
-/// Send mask key down and spin-wait for it to register with the RIT.
-/// Called from the main thread before `window.set_visible(false)` to
-/// ensure raw input consumers (Explorer) see Win+mask simultaneously
-/// when focus changes during the hide transition.
-pub(crate) fn hold_mask_before_hide() {
-    send_mask_down();
-    // Spin-wait for RIT to process the injection and update async
-    // key state. Typical wait is <10µs; we cap at ~1ms to avoid
-    // blocking the event loop if something goes wrong.
-    for _ in 0..10_000 {
-        if is_key_down(VK_MENU_MASK as u32) {
-            break;
-        }
-        std::hint::spin_loop();
+/// Move keyboard focus away from the overlay before sending the menu mask.
+/// When WebView2 owns focus it can consume the injected mask, leaving the
+/// shell to observe a bare Win release.
+fn hand_focus_to_shell() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetShellWindow, SetForegroundWindow};
+
+    let shell = unsafe { GetShellWindow() };
+    if !shell.is_null() {
+        unsafe { SetForegroundWindow(shell); }
     }
 }
 
@@ -152,12 +168,25 @@ unsafe extern "system" fn keyboard_hook_proc(
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
 
-    // --- Win key-up: release held mask and eat so Explorer doesn't see bare Win up ---
+    // Track modifiers via atomics — GetAsyncKeyState lies when
+    // the WebView has focus and has consumed the Ctrl key-down.
+    if !injected {
+        match vk {
+            VK_LCONTROL | VK_RCONTROL => CTRL_DOWN.store(is_keydown, Ordering::SeqCst),
+            VK_LMENU | VK_RMENU => ALT_DOWN.store(is_keydown, Ordering::SeqCst),
+            VK_LSHIFT | VK_RSHIFT => SHIFT_DOWN.store(is_keydown, Ordering::SeqCst),
+            _ => {}
+        }
+    }
+
+    // --- Win key-up: toggle only after the physical key is up ---
     if ctx.target_is_win && is_keyup && !injected {
         let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-            send_mask_up();
+            // Dispatch only after physical Win-up, so hiding cannot transfer focus
+            // to Explorer during the key press.
+            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             return 1;
         }
     }
@@ -178,6 +207,9 @@ unsafe extern "system" fn keyboard_hook_proc(
     if is_target && !injected {
         let mods_ok = ctx.required_mods.iter().all(|&m| match m {
             VK_LWIN | VK_RWIN => is_key_down(VK_LWIN) || is_key_down(VK_RWIN),
+            VK_CTRL => CTRL_DOWN.load(Ordering::SeqCst),
+            VK_ALT => ALT_DOWN.load(Ordering::SeqCst),
+            VK_SHIFT => SHIFT_DOWN.load(Ordering::SeqCst),
             other => is_key_down(other),
         });
 
@@ -197,12 +229,15 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         if mods_ok && extra_free {
             if ctx.target_is_win {
-                // Press the mask key DOWN and hold it for the entire
-                // Win key duration. This way any raw input check
-                // (e.g. Explorer during overlay hide → focus change)
-                // sees Win + mask simultaneously, never a bare Win.
+                // This completed mask press reaches the shell while Win is
+                // held; injected events pass through due to the guard above.
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
-                send_mask_down();
+                SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
+                if OVERLAY_HAS_FOCUS.load(Ordering::SeqCst) {
+                    hand_focus_to_shell();
+                }
+                send_menu_mask_key();
+                return 1;
             }
             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             return 1;

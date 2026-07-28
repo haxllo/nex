@@ -324,13 +324,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                 }
                 UiCommand::Hide => {
-                    // Hold the menu-mask key (0xE8) so raw input consumers
-                    // see Win+mask when focus changes during hide.
-                    // The mask was already sent on Win keydown from the
-                    // hook thread, but we re-inject and spin-wait here to
-                    // close the race between RIT processing and the
-                    // window set_visible call.
-                    crate::overlay::hotkey::hold_mask_before_hide();
                     // Hide first so user never sees the cleared state
                     // rendered (plain body with no rows).
                     window.set_visible(false);
@@ -409,6 +402,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if show_pending {
                         show_pending = false;
                         last_show = Instant::now();
+                        was_focused = false;
                         window.set_visible(true);
                         force_foreground(hwnd);
                         focus_input(&webview);
@@ -433,19 +427,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 event: WindowEvent::Focused(focused),
                 ..
             } => {
+                crate::overlay::hotkey::set_overlay_focus(focused);
                 if let Ok(mut s) = state.lock() {
                     s.has_focus = focused;
                 }
                 if focused {
                     was_focused = true;
                 }
-                // Click-outside-to-dismiss: only after the window has
-                // been focused and the show-grace period has elapsed
-                // (the initial Resize / WM_ACTIVATE dance can cause
-                // transient unfocused events that we must ignore).
                 if !focused
                     && was_focused
                     && !show_pending
+                    && !crate::overlay::hotkey::is_bare_win_press_active()
                     && last_show.elapsed().as_millis() as u64 >= FOCUS_GRACE_MS
                     && state.lock().map(|s| s.visible).unwrap_or(false)
                 {
@@ -990,4 +982,3 @@ unsafe fn install_instance_signal_subclass(
 }
 
 // ─────────────────────────────────────────────────────────────────
-

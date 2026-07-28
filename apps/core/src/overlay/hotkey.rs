@@ -198,16 +198,14 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Win key-up: eat so Explorer doesn't see the bare Win up ---
-    // Mask is NOT released here — it stays held for the entire overlay
-    // session so the RIT never sees a bare Win key (the mask is held
-    // before the next Win press arrives).  Mask is released in the
-    // UiCommand::Hide handler after the overlay hides.
+    // --- Win key-up: release held mask but DO NOT eat the message ---
+    // Key-up never triggers Start, and eating it confuses the system's
+    // key-state tracking (GetAsyncKeyState stays TRUE → Win+E/D/R fire).
     if ctx.target_is_win && is_keyup && !injected {
         let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-            return 1;
+            send_mask_up();
         }
     }
 
@@ -249,10 +247,11 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         if mods_ok && extra_free {
             if ctx.target_is_win {
-                // Hold mask key down for entire Win press. Additionally,
-                // UiCommand::Hide in host.rs re-sends mask + releases
-                // around window.set_visible(false) to guarantee mask is
-                // held during the focus transition.
+                // Hold mask key down for entire Win press.
+                crate::runtime::log_info(&format!(
+                    "[nex::debug] Hook: consuming Win key-down vk={}",
+                    vk,
+                ));
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
                 send_mask_down();

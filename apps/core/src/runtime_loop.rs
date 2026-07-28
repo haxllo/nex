@@ -904,7 +904,13 @@ impl RuntimeWorker {
             OverlayEvent::Hotkey(_) => {
                 log_info("[nex] hotkey_event received");
                 let overlay_visible = self.overlay.is_visible();
+                let state_before = self.overlay_state.is_visible();
                 self.overlay_state.set_visible(overlay_visible);
+                let state_after = self.overlay_state.is_visible();
+                log_info(&format!(
+                    "[nex::debug] Hotkey: shim_visible={} overlay_state_before={} overlay_state_after={}",
+                    overlay_visible, state_before, state_after,
+                ));
                 if self.overlay.query_text().trim().starts_with('=') {
                     let query = self.overlay.query_text();
                     if let Some(expr) = query.trim().strip_prefix('=') {
@@ -932,6 +938,10 @@ impl RuntimeWorker {
                     return;
                 }
                 let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
+                log_info(&format!(
+                    "[nex::debug] Hotkey: action={:?} has_focus={}",
+                    action, self.overlay.has_focus(),
+                ));
                 match action {
                     HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
                         // Warm search indexes synchronously before showing the
@@ -1020,8 +1030,21 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::Escape => {
-                if self.overlay_state.on_escape() {
+                let before_shim = self.overlay.is_visible();
+                let before_overlay = self.overlay_state.is_visible();
+                let action = self.overlay_state.on_escape();
+                log_info(&format!(
+                    "[nex::debug] Escape: before(shim={} overlay={}) on_escape={}",
+                    before_shim, before_overlay, action,
+                ));
+                if action {
                     self.overlay.hide();
+                    let after_shim = self.overlay.is_visible();
+                    let after_overlay = self.overlay_state.is_visible();
+                    log_info(&format!(
+                        "[nex::debug] Escape: after(shim={} overlay={})",
+                        after_shim, after_overlay,
+                    ));
                     reset_overlay_session(
                         &self.overlay,
                         &mut self.current_results,

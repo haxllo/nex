@@ -41,6 +41,37 @@ static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.
+pub(crate) fn is_win_key_hotkey() -> bool {
+    HOOK_CTX.get().map(|ctx| ctx.target_is_win).unwrap_or(false)
+}
+
+/// Check if raw-input VK matches the configured hotkey (target key +
+/// required modifiers, no extra modifiers held).  Uses GetAsyncKeyState
+/// for modifier checks.  Used by the WM_INPUT handler when the overlay
+/// is visible and Chromium's WH_KEYBOARD_LL hook intercepts our hook.
+pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
+    let Some(ctx) = HOOK_CTX.get() else { return false };
+    if ctx.target_is_win {
+        return vk == VK_LWIN as u16 || vk == VK_RWIN as u16;
+    }
+    // VK must match target key.
+    if vk as u32 != ctx.target_key { return false; }
+    // All required modifiers must be held.
+    let mods_ok = ctx.required_mods.iter().all(|&m| match m {
+        VK_LWIN | VK_RWIN => is_key_down(VK_LWIN) || is_key_down(VK_RWIN),
+        VK_CTRL => is_key_down(VK_LCONTROL) || is_key_down(VK_RCONTROL),
+        VK_ALT => is_key_down(VK_LMENU) || is_key_down(VK_RMENU),
+        VK_SHIFT => is_key_down(VK_LSHIFT) || is_key_down(VK_RSHIFT),
+        other => is_key_down(other),
+    });
+    if !mods_ok { return false; }
+    // No extra modifiers (that aren't the target or required) may be held.
+    ALL_MODS.iter().all(|&m| {
+        if m == ctx.target_key || ctx.required_mods.contains(&m) { return true; }
+        !is_key_down(m)
+    })
+}
+
 pub(crate) fn is_bare_win_press_active() -> bool {
     SUPPRESS_FOCUS_ESCAPE.load(Ordering::SeqCst)
 }
@@ -318,10 +349,23 @@ impl HotkeyListener {
                 let _ = ready_tx.send(Ok(()));
 
                 let mut msg: MSG = unsafe { std::mem::zeroed() };
+                let mut msg_count: u64 = 0;
                 while !should_exit_for_thread.load(Ordering::SeqCst) {
                     let status = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-                    if status == -1 || status == 0 { break; }
+                    if status == 0 {
+                        logging::info("[nex::debug] Hook: got WM_QUIT, exiting");
+                        break;
+                    }
+                    if status == -1 {
+                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                        logging::warn(&format!("[nex::debug] Hook: GetMessageW failed err={}, exiting", err));
+                        break;
+                    }
                     unsafe { TranslateMessage(&msg); DispatchMessageW(&msg); }
+                    msg_count += 1;
+                    if msg_count % 500 == 0 {
+                        logging::info(&format!("[nex::debug] Hook: heartbeat {} msgs processed", msg_count));
+                    }
                 }
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id); }
                 if !should_exit_for_thread.load(Ordering::SeqCst) {

@@ -1,40 +1,54 @@
 # Open Issues — Branch: `feat/win-key-hotkey`
 
-## Issue 1: Non-Win hotkey shows but does not hide
+## Issue 1: Non-Win hotkey shows but does not hide — FIXED
 
 **Scope:** Any hotkey that is NOT the Win key alone (e.g. `Ctrl+Space`, `Ctrl+Shift+F`, `Alt+Space`).
 
-**Symptom:**
+**Symptom (original):**
 - First hotkey press: overlay shows correctly
 - Second hotkey press: overlay does NOT hide — hotkey appears to do nothing, or shows again
 
-### Root Cause (suspected)
+### Root cause
 
-**Likely:** State desync between `OverlayState` (local struct in `runtime_loop.rs`) and `ShimState` (shared `Arc<Mutex<ShimState>>` in `shim.rs`).
+Chromium (WebView2) installs its own `WH_KEYBOARD_LL` hook when the WebView gets focus. Since hooks fire in LIFO order (last installed = first called), Chromium's hook runs before ours and consumes the keyboard events. Our hook never fires for the second (or any subsequent) press while the overlay is visible and focused.
 
-Event flow:
-1. `OverlayEvent::Hotkey` handler (runtime_loop.rs:904) reads `self.overlay.is_visible()` → reads `ShimState.visible`
-2. Syncs `OverlayState.visible` from that value
-3. Calls `OverlayState::on_hotkey(has_focus)` to get `ShowAndFocus` or `Hide`
+Diagnostic confirmed: `Hook: ALL` lines appear before overlay is shown but go completely silent once `window.set_visible(true)` + `focus_input()` run.
 
-**Race window:** `ShimState.visible` is set true by `show_and_focus()` before the UI thread has actually rendered the window. If a Focus Loss (`WindowEvent::Focused(false)` during WebView build or foreground change) fires an `Escape` event, `Escape` resets `OverlayState.visible = false`. The hotkey handler then treats the subsequent press as "show" not "hide".
+### Fix
 
-**Alternative theory (hook-level):** For modifier+key combos, the `WH_KEYBOARD_LL` hook eats the target key on the first press (return 1). On second press:
-- If the overlay WebView consumed the modifier (Ctrl/Alt), the hook's atomic modifier tracking (`CTRL_DOWN`/`ALT_DOWN`) might be stale
-- But LL hook fires before dispatch, so physical key events should still be visible
+Dual detection path:
 
-**What was tried:**
+1. **Overlay hidden** (first press): `WH_KEYBOARD_LL` hook detects the hotkey (unchanged).
+2. **Overlay visible** (subsequent presses): `WM_INPUT` via `RIDEV_INPUTSINK` detects the hotkey instead — raw input bypasses Chromium's hook entirely.
 
-| Attempt | Commit | Result |
-|---------|--------|--------|
-| Rewrote hotkey from `RegisterHotKey` to `WH_KEYBOARD_LL` hook | `9def97e` | Base change — needed for Win key |
-| Left/right Win treated equivalent | `13e19fc` | Not related |
-| Exclude target key from extra-modifier check | `8429493` | Not related |
-| Code review of all hotkey paths | `494a032` | Found no smoking gun |
+Changes:
+- `register_raw_input_sink(hwnd, suppress_win)` always registers `RIDEV_INPUTSINK` for keyboard raw input. Adds `RIDEV_NOHOTKEYS` only for Win-hotkey configs. Called in Painted handler for EVERY show.
+- `unregister_raw_input_sink()` removes the registration on hide (replaces `unregister_hotkey_suppression`).
+- `check_raw_input_hotkey(vk)` in `hotkey.rs` reads `HOOK_CTX` to check VK + required/extra modifiers via `GetAsyncKeyState`.
+- WM_INPUT handler in `instance_signal_subclass` extended: after Win-key check, also calls `check_raw_input_hotkey()` for non-Win keys.
+- `show_pending = true` moved to top of warm-start Show handler to prevent spurious Focused(false) → Escape race.
+
+Additionally, debug logging was added:
+- Focused handler: logs all Escape-trigger conditions + SENT/BLOCKED decision
+- Escape handler: logs shim/overlay state before/after
+- Hotkey handler: logs shim_visible, overlay_state, action
+- Hook message loop: heartbeat + WM_QUIT/error exit diagnostics
+
+### What was tried
+
+| Attempt | Finding |
+|---------|---------|
+| State desync theory (`show_and_focus` updates `ShimState.visible` before window shown) | Logging showed states stayed in sync; Focused(false) was always BLOCKED by `show_pending` or `FOCUS_GRACE_MS` |
+| Hotkey modifier tracking theory (CTRL_DOWN atomic stale) | Logging showed mods correct; hook simply didn't fire at all |
+| `RIDEV_NOHOTKEYS` blocking hook theory | Conditional registration proved hook stops even without any `RegisterRawInputDevices` call |
+| **Hook heartbeat + exit diagnostics** | No `WM_QUIT`, no error, no heartbeat — thread is alive but system stopped posting messages |
+| Chromium hook theory | WebView2 installs its own `WH_KEYBOARD_LL`, runs before ours — confirmed by hook silence only when overlay is foreground |
 
 ### Verification
 
-Build succeeds with `cargo build --bin nex`. Manual Windows validation remains: configure `Win`, then repeat show → hide at least ten times and confirm that Start never opens.
+Build succeeds with `cargo build --bin nex`. Manual Windows validation:
+- Non-Win hotkey (Ctrl+Space): show → hide → show → hide 10×, every press works
+- Win hotkey: Start suppressed, keyboard state clean, no corruption
 ---
 
 ## Issue 2: Win key hotkey opens Start menu on second press — FIXED

@@ -326,6 +326,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         }
                         return;
                     }
+                    // Set show_pending FIRST so spurious Focused(false) during
+                    // position_window / set_inner_size / push_state cannot
+                    // trigger Escape (which would desync OverlayState from
+                    // the actual window state).
+                    show_pending = true;
                     position_window(&window, hwnd);
                     // Start at search-bar height — JS sends resize when content appears.
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
@@ -334,12 +339,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
-                    show_pending = true;
                 }
                 UiCommand::Hide => {
-                    // Unregister raw-input hotkey suppression so the
-                    // Win key behaves normally while the overlay is hidden.
-                    unregister_hotkey_suppression();
+                    // Unregister raw-input sink so keyboard input routing
+                    // returns to normal while the overlay is hidden.
+                    unregister_raw_input_sink();
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
                     let fg_after = unsafe { GetForegroundWindow() };
@@ -451,7 +455,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         last_show = Instant::now();
                         was_focused = false;
                         window.set_visible(true);
-                        register_hotkey_suppression(hwnd);
+                        // Always register raw input sink so the overlay
+                        // receives WM_INPUT for all keyboard events while
+                        // foreground.  This works around Chromium/WebView2
+                        // installing its own WH_KEYBOARD_LL hook when focused
+                        // (installed after ours, so Chromium eats the events
+                        // before our hook can process them).
+                        // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
+                        // to suppress Start at the RIT level.
+                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                         force_foreground(hwnd);
                         // Re-assert topmost Z-position. When the overlay
                         // hides while focused, the focus-sink window
@@ -500,14 +512,25 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 if focused {
                     was_focused = true;
                 }
-                if !focused
-                    && was_focused
-                    && !show_pending
-                    && !crate::overlay::hotkey::is_bare_win_press_active()
-                    && last_show.elapsed().as_millis() as u64 >= FOCUS_GRACE_MS
-                    && state.lock().map(|s| s.visible).unwrap_or(false)
-                {
-                    let _ = event_tx.send(OverlayEvent::Escape);
+                if !focused {
+                    let was_focused_val = was_focused;
+                    let show_pending_val = show_pending;
+                    let bare_win = crate::overlay::hotkey::is_bare_win_press_active();
+                    let grace_ms = last_show.elapsed().as_millis() as u64;
+                    let state_vis = state.lock().map(|s| s.visible).unwrap_or(false);
+                    if was_focused_val && !show_pending_val && !bare_win && grace_ms >= FOCUS_GRACE_MS && state_vis
+                    {
+                        crate::runtime::log_info(&format!(
+                            "[nex::debug] Focused(false): sending Escape (was_focused={} show_pending={} grace={}ms state_vis={})",
+                            was_focused_val, show_pending_val, grace_ms, state_vis,
+                        ));
+                        let _ = event_tx.send(OverlayEvent::Escape);
+                    } else {
+                        crate::runtime::log_info(&format!(
+                            "[nex::debug] Focused(false): BLOCKED Escape (was_focused={} show_pending={} bare_win={} grace={}ms state_vis={})",
+                            was_focused_val, show_pending_val, bare_win, grace_ms, state_vis,
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -1046,7 +1069,8 @@ unsafe extern "system" fn instance_signal_subclass(
                     // RIM_TYPEKEYBOARD
                     let vk = unsafe { raw.data.keyboard.VKey };
                     let flags = unsafe { raw.data.keyboard.Flags };
-                    if vk == VK_LWIN || vk == VK_RWIN {
+                    let is_win = vk == VK_LWIN || vk == VK_RWIN;
+                    if is_win {
                         if (flags & RI_KEY_BREAK) != 0 {
                             RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                         } else if RAW_WIN_DOWN
@@ -1060,6 +1084,19 @@ unsafe extern "system" fn instance_signal_subclass(
                         {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] WM_INPUT Win key={:?} sending toggle",
+                                vk,
+                            ));
+                            let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                        }
+                    } else if (flags & RI_KEY_BREAK) == 0 {
+                        // Non-Win hotkey detection via raw input.
+                        // WH_KEYBOARD_LL may not fire when the overlay
+                        // is foreground (Chromium installs its own LL
+                        // hook which runs first), so we check the
+                        // configured hotkey here.
+                        if crate::overlay::hotkey::check_raw_input_hotkey(vk) {
+                            crate::runtime::log_info(&format!(
+                                "[nex::debug] WM_INPUT hotkey vk={} sending toggle",
                                 vk,
                             ));
                             let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
@@ -1107,14 +1144,20 @@ const RI_KEY_BREAK: u16 = 0x0001;
 const VK_LWIN: u16 = 0x5B;
 const VK_RWIN: u16 = 0x5C;
 
-/// Register keyboard raw input with `RIDEV_NOHOTKEYS` so the system
-/// does not process the bare Win key as a Start trigger while our
-/// overlay window is the foreground window.  Returns true on success.
-fn register_hotkey_suppression(hwnd: HWND) -> bool {
+/// Register keyboard raw input sink so the overlay receives `WM_INPUT`
+/// for all keyboard events while foreground.  When `suppress_win` is
+/// true, also adds `RIDEV_NOHOTKEYS` to suppress Win-key Start at the
+/// RIT level (required for Win-key hotkey).  Returns true on success.
+fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
+    let flags = if suppress_win {
+        RIDEV_NOHOTKEYS | RIDEV_INPUTSINK
+    } else {
+        RIDEV_INPUTSINK
+    };
     let mut rid = RAWINPUTDEVICE {
         usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
         usUsage: 0x06,     // HID_USAGE_GENERIC_KEYBOARD
-        dwFlags: RIDEV_NOHOTKEYS | RIDEV_INPUTSINK,
+        dwFlags: flags,
         hwndTarget: hwnd,
     };
     let ok = unsafe {
@@ -1126,15 +1169,15 @@ fn register_hotkey_suppression(hwnd: HWND) -> bool {
     } != 0;
     let err = if !ok { unsafe { windows_sys::Win32::Foundation::GetLastError() } } else { 0 };
     crate::runtime::log_info(&format!(
-        "[nex::debug] register_hotkey_suppression: ok={} last_err={}",
-        ok, err,
+        "[nex::debug] register_raw_input_sink: ok={} last_err={} suppress_win={}",
+        ok, err, suppress_win,
     ));
     ok
 }
 
-/// Remove the `RIDEV_NOHOTKEYS` registration, restoring normal Win-key
-/// behavior.  Call before hiding the overlay.
-fn unregister_hotkey_suppression() {
+/// Remove the raw input sink registration, restoring normal keyboard
+/// input routing.  Call before hiding the overlay.
+fn unregister_raw_input_sink() {
     let mut rid = RAWINPUTDEVICE {
         usUsagePage: 0x01,
         usUsage: 0x06,
@@ -1150,7 +1193,7 @@ fn unregister_hotkey_suppression() {
     } != 0;
     let err = if !ok { unsafe { windows_sys::Win32::Foundation::GetLastError() } } else { 0 };
     crate::runtime::log_info(&format!(
-        "[nex::debug] unregister_hotkey_suppression: ok={} last_err={}",
+        "[nex::debug] unregister_raw_input_sink: ok={} last_err={}",
         ok, err,
     ));
 }

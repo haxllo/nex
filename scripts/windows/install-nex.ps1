@@ -176,8 +176,9 @@ foreach ($runbook in $runbookCandidates) {
 
 $installedExe = Join-Path $binDir "nex.exe"
 
-Write-Host "[4/5] Preparing config and startup sync..."
-& $installedExe --ensure-config
+Write-Host "[4/5] Preparing startup registration..."
+$startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$nexStartupValue = '"' + $installedExe + '" --background'
 
 $enableLaunchAtStartup = $false
 switch ($LaunchAtStartup) {
@@ -201,10 +202,11 @@ switch ($LaunchAtStartup) {
 }
 
 if ($enableLaunchAtStartup) {
-  & $installedExe --set-launch-at-startup=true
+  Set-ItemProperty -Path $startupPath -Name "Nex" -Value $nexStartupValue
+  Write-Host "  Startup registration added."
 }
 else {
-  & $installedExe --set-launch-at-startup=false
+  Remove-ItemProperty -Path $startupPath -Name "Nex" -ErrorAction SilentlyContinue
 }
 
 Write-Host "Note: launch-at-startup can be changed later in $env:APPDATA\Nex\config.toml"

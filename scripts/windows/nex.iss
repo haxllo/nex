@@ -314,26 +314,26 @@ end;
 procedure ForceStopRuntimeByPath(RuntimeExe: string);
 var
   ResultCode: Integer;
-  PowerShellExe: string;
-  EscapedRuntimeExe: string;
-  Command: string;
+  TaskKill: string;
+  ImageName: string;
 begin
   if not FileExists(RuntimeExe) then
     exit;
 
-  PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  if not FileExists(PowerShellExe) then
+  TaskKill := ExpandConstant('{sys}\taskkill.exe');
+  if not FileExists(TaskKill) then
     exit;
 
-  EscapedRuntimeExe := RuntimeExe;
-  StringChangeEx(EscapedRuntimeExe, '''', '''''', True);
-  Command :=
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command ' +
-    '"Get-CimInstance Win32_Process ' +
-    '| Where-Object { $_.ExecutablePath -eq ''' + EscapedRuntimeExe + ''' } ' +
-    '| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"';
+  ImageName := ExtractFileName(RuntimeExe);
+  Exec(TaskKill, '/IM "' + ImageName + '" /F /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
 
-  Exec(PowerShellExe, Command, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+function IsNexInstalled(): Boolean;
+var
+  RuntimeExe: string;
+begin
+  Result := TryGetRegisteredRuntimeExe(HKCU, RuntimeExe) or
+            TryGetRegisteredRuntimeExe(HKLM, RuntimeExe);
 end;
 
 procedure StopNexRuntime();
@@ -356,5 +356,9 @@ begin
   if Result <> '' then
     exit;
 
-  StopNexRuntime();
+  // Only kill running nex if there's an existing installation to replace.
+  // On fresh install there's nothing to stop — the --quit and PowerShell
+  // fallback just waste time and flash windows.
+  if IsNexInstalled() then
+    StopNexRuntime();
 end;

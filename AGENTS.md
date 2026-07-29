@@ -3,8 +3,9 @@
 ## Build & Test
 
 ```bash
-cargo build --bin nex                    # debug build
-cargo build --release --bin nex          # release build
+cargo build --bin nex                    # debug build (nex only)
+cargo build --release --bin nex --bin nex-helper  # release build (both binaries)
+cargo build --release -p nex-helper      # release build (helper only)
 cargo test -p nex                        # all unit tests (Windows)
 cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
@@ -14,7 +15,9 @@ cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 
 **Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification.
 
-**CI order**: `vitest --run` → `cargo test -p nex` → perf gate → smoke gate.
+**CI order**: `vitest --run` → `cargo build --release --bin nex --bin nex-helper` → `cargo test -p nex` → perf gate → smoke gate.
+
+**Helper binary**: `nex-helper.exe` is a separate workspace member (`apps/helper`). It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `nex.exe` and is found automatically.
 
 ## Running
 
@@ -28,6 +31,8 @@ nex                           # normal: background hotkey runtime (Ctrl+Space)
 ```
 
 Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDATA%\Nex\index.sqlite3`.
+
+**Helper**: On first run nex creates a scheduled task (`NexHelperV2`) to launch `nex-helper.exe` at High IL. This enables hotkey detection and overlay foreground when elevated windows (Task Manager, Settings) are active. The scheduled task creation triggers a one-time UAC prompt.
 
 ## Project Structure
 
@@ -77,7 +82,7 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 
 ```bash
 # 1. bump version in Cargo.toml, commit, tag
-cargo build --release --bin nex
+cargo build --release --bin nex --bin nex-helper
 
 # 2. build artifacts (zip, setup, manifest)
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable

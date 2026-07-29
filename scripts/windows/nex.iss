@@ -63,10 +63,13 @@ Name: "{autodesktop}\Nex"; Filename: "{app}\bin\nex.exe"; Parameters: "--backgro
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 Name: "startuplaunch"; Description: "Launch at startup (can be changed later in config.toml)"; GroupDescription: "Startup:"
 
+[Registry]
+; Startup registration — no process spawn needed.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nex"; ValueData: "{app}\bin\nex.exe --background"; Flags: uninsdeletevalue; Tasks: startuplaunch
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Nex"; Flags: deletevalue; Tasks: not startuplaunch
+
 [Run]
-Filename: "{app}\bin\nex.exe"; Parameters: "--ensure-config"; Flags: runhidden skipifsilent
-Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=true"; Flags: runhidden skipifsilent; Tasks: startuplaunch
-Filename: "{app}\bin\nex.exe"; Parameters: "--set-launch-at-startup=false"; Flags: runhidden skipifsilent; Tasks: not startuplaunch
+; Launch Nex after install (no config/setup processes needed — nex handles those on first run).
 Filename: "{app}\bin\nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent
 
 [UninstallRun]

@@ -647,22 +647,33 @@ fn post_quit_to_thread(thread_id: u32) {
 // Overlay-ready event (nex → helper signal for SetForegroundWindow)
 // ---------------------------------------------------------------------------
 
-/// Handle to the named event created by the elevated helper.  nex.exe
-/// sets this event after showing the overlay; the helper (High IL) wakes
-/// up and calls SetForegroundWindow on the overlay HWND, bypassing UIPI.
+/// Handle to the named event used to signal the elevated helper.  nex.exe
+/// creates this event (Medium IL mandatory label), then the helper opens
+/// it for SYNCHRONIZE (read-only wait).  After nex.exe shows the overlay
+/// it calls SetEvent; the helper wakes and calls SetForegroundWindow from
+/// High IL, bypassing UIPI.
+///
+/// nex.exe creates the event so that the mandatory label stays at Medium
+/// IL.  If the helper created it (High IL), nex.exe couldn't open it with
+/// EVENT_MODIFY_STATE due to UIPI write-up restriction.
 static OVERLAY_READY_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 
-/// Open the named event created by the helper.  Called after the named
-/// pipe is connected and the helper is confirmed running.
-fn open_overlay_event() {
-    use windows_sys::Win32::System::Threading::OpenEventW;
+/// Create the overlay-ready named event.  Called before spawning the
+/// helper so the event exists when the helper tries to open it.
+fn create_overlay_event() -> String {
+    use windows_sys::Win32::System::Threading::CreateEventW;
     let pid = std::process::id();
     let name = format!("Global\\nex-overlay-ready-{pid}");
     let wide = to_wide(&name);
-    let handle = unsafe { OpenEventW(0x0002, 0, wide.as_ptr()) }; // EVENT_MODIFY_STATE, bInheritHandle=false
+    // bManualReset=0 (auto-reset), bInitialState=0 (not signaled).
+    // Auto-reset means MsgWaitForMultipleObjects in the helper will
+    // automatically reset the event after WAIT_OBJECT_0, so the helper
+    // only needs SYNCHRONIZE access (no EVENT_MODIFY_STATE needed).
+    let handle = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, wide.as_ptr()) };
     if let Ok(mut guard) = OVERLAY_READY_EVENT.lock() {
         *guard = handle as isize;
     }
+    name
 }
 
 /// Signal the elevated helper that the overlay is now visible.  Called
@@ -694,23 +705,25 @@ fn spawn_and_connect_helper(
     required_mods: &[u32],
     hotkey_str: &str,
 ) -> Result<(isize, std::fs::File), String> {
-    // 1. Write JSON config for the helper
-    let config_path = helper_config_path();
-    write_helper_config(&config_path, target_key, target_is_win, required_mods, hotkey_str)?;
+    // 1. Create the overlay-ready event BEFORE spawning the helper so that
+    //    the mandatory label stays at Medium IL (nex.exe's integrity level).
+    //    If the helper created it (High IL), nex.exe couldn't open it with
+    //    EVENT_MODIFY_STATE due to UIPI write-up restriction.
+    let event_name = create_overlay_event();
 
-    // 2. Ensure scheduled task exists (one-time UAC if not yet created)
+    // 2. Write JSON config for the helper (includes event name)
+    let config_path = helper_config_path();
+    write_helper_config(&config_path, target_key, target_is_win, required_mods, hotkey_str, &event_name)?;
+
+    // 3. Ensure scheduled task exists (one-time UAC if not yet created)
     let helper_path = find_helper_exe()?;
     ensure_helper_task(&helper_path)?;
 
-    // 3. Run the scheduled task (no UAC)
+    // 4. Run the scheduled task (no UAC)
     run_helper_task()?;
 
-    // 4. Connect to the helper's named pipe (retry — helper may still be starting)
+    // 5. Connect to the helper's named pipe (retry — helper may still be starting)
     let pipe_file = connect_pipe(HELPER_PIPE_NAME)?;
-
-    // 5. Open the overlay-ready event created by the helper (for High IL
-    //    SetForegroundWindow bypassing UIPI).
-    open_overlay_event();
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))
@@ -749,6 +762,7 @@ fn write_helper_config(
     target_is_win: bool,
     required_mods: &[u32],
     hotkey_str: &str,
+    overlay_event_name: &str,
 ) -> Result<(), String> {
     let pid = std::process::id();
     let mod_ctrl = required_mods.contains(&0x11);
@@ -762,7 +776,7 @@ fn write_helper_config(
     }
 
     let json = format!(
-        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}"}}"#,
+        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}","event":"{}"}}"#,
         HELPER_PIPE_NAME,
         pid,
         target_key,
@@ -772,6 +786,7 @@ fn write_helper_config(
         if mod_shift { "true" } else { "false" },
         if mod_win { "true" } else { "false" },
         hotkey_str,
+        overlay_event_name,
     );
 
     std::fs::write(path, &json)

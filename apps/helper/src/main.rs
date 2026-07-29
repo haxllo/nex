@@ -623,10 +623,11 @@ fn main() {
 
     // Message loop — use MsgWaitForMultipleObjects to wait on both
     // messages and the overlay-ready event.
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_FAILED};
+    use windows_sys::Win32::System::Threading::ResetEvent;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT,
+        MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
     };
-    use windows_sys::Win32::System::Threading::{ResetEvent, WAIT_OBJECT_0, WAIT_FAILED};
 
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
@@ -716,7 +717,7 @@ fn main() {
 
     // Cleanup
     unsafe {
-        windows_sys::Win32::System::Threading::CloseHandle(overlay_ready_event);
+        CloseHandle(overlay_ready_event);
         windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
     }
     if fallback_id != 0 {

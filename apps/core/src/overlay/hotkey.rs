@@ -644,6 +644,41 @@ fn post_quit_to_thread(thread_id: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// Overlay-ready event (nex → helper signal for SetForegroundWindow)
+// ---------------------------------------------------------------------------
+
+/// Handle to the named event created by the elevated helper.  nex.exe
+/// sets this event after showing the overlay; the helper (High IL) wakes
+/// up and calls SetForegroundWindow on the overlay HWND, bypassing UIPI.
+static OVERLAY_READY_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
+
+/// Open the named event created by the helper.  Called after the named
+/// pipe is connected and the helper is confirmed running.
+fn open_overlay_event() {
+    use windows_sys::Win32::System::Threading::OpenEventW;
+    let pid = std::process::id();
+    let name = format!("Global\\nex-overlay-ready-{pid}");
+    let wide = to_wide(&name);
+    let handle = unsafe { OpenEventW(0x0002, 0, wide.as_ptr()) }; // EVENT_MODIFY_STATE, bInheritHandle=false
+    if let Ok(mut guard) = OVERLAY_READY_EVENT.lock() {
+        *guard = handle as isize;
+    }
+}
+
+/// Signal the elevated helper that the overlay is now visible.  Called
+/// from host.rs's Painted handler after force_foreground().
+pub(crate) fn signal_overlay_ready() {
+    use windows_sys::Win32::System::Threading::SetEvent;
+    let handle = match OVERLAY_READY_EVENT.lock() {
+        Ok(g) => *g,
+        _ => 0,
+    };
+    if handle != 0 {
+        unsafe { SetEvent(handle as *mut core::ffi::c_void); }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Elevated helper (scheduled task + JSON config, no UAC prompt)
 // ---------------------------------------------------------------------------
 
@@ -672,6 +707,10 @@ fn spawn_and_connect_helper(
 
     // 4. Connect to the helper's named pipe (retry — helper may still be starting)
     let pipe_file = connect_pipe(HELPER_PIPE_NAME)?;
+
+    // 5. Open the overlay-ready event created by the helper (for High IL
+    //    SetForegroundWindow bypassing UIPI).
+    open_overlay_event();
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))

@@ -70,7 +70,17 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
     }
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // Safety: AllowSetForegroundWindow(ASFW_ANY) grants the spawned process
+    // permission to SetForegroundWindow its own window. Without this, the
+    // launched program opens behind nex's overlay because the overlay still
+    // owns foreground when ShellExecuteW returns.
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
 
     let wide_target = to_wide(&target);
 
@@ -110,6 +120,11 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY;
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
     std::process::Command::new("explorer.exe")
         .arg(target)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW

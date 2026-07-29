@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[[bin]]
+name = "NexHelper"
+path = "src/main.rs"
+
 [dependencies]
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",

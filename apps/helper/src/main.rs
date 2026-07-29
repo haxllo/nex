@@ -6,8 +6,8 @@
 //! named pipe.
 //!
 //! Usage:
-//!   nex-helper.exe --config "%APPDATA%\Nex\helper-config.json"
-//!   nex-helper.exe --pipe \\.\pipe\nex-hotkey-<pid> --target-vk 0x20 --mod-ctrl --hotkey "Ctrl+Space"
+//!   NexHelper.exe --config "%APPDATA%\Nex\helper-config.json"
+//!   NexHelper.exe --pipe \\.\pipe\nex-hotkey-<pid> --target-vk 0x20 --mod-ctrl --hotkey "Ctrl+Space"
 
 #![cfg(target_os = "windows")]
 #![windows_subsystem = "windows"]
@@ -509,7 +509,7 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 /// The helper has no console (windows_subsystem = "windows"), so file logging
 /// is the only way to observe failures.
 fn debug_log(msg: &str) {
-    let path = std::env::temp_dir().join("nex-helper-debug.log");
+    let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -596,7 +596,7 @@ fn main() {
     let cfg = match parse_args() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("nex-helper: {e}");
+            eprintln!("NexHelper: {e}");
             std::process::exit(1);
         }
     };
@@ -613,7 +613,7 @@ fn main() {
         Ok(p) => p,
         Err(e) => {
             debug_log(&format!("create_named_pipe failed: {e}"));
-            eprintln!("nex-helper: {e}");
+            eprintln!("NexHelper: {e}");
             std::process::exit(1);
         }
     };
@@ -622,7 +622,7 @@ fn main() {
     // Wait for nex.exe to connect
     if let Err(e) = wait_for_client(&pipe) {
         debug_log(&format!("wait_for_client failed: {e}"));
-        eprintln!("nex-helper: {e}");
+        eprintln!("NexHelper: {e}");
         std::process::exit(1);
     }
     debug_log("client connected");
@@ -640,7 +640,7 @@ fn main() {
     if hook_id.is_null() {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         debug_log(&format!("SetWindowsHookExW failed: err={err}"));
-        eprintln!("nex-helper: SetWindowsHookExW failed");
+        eprintln!("NexHelper: SetWindowsHookExW failed");
         std::process::exit(1);
     }
     debug_log("SetWindowsHookExW succeeded");
@@ -674,7 +674,7 @@ fn main() {
         };
         if ok == 0 {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            eprintln!("nex-helper: RegisterHotKeyW failed err={err} (fallback disabled)");
+            eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
             fallback_id = 0;
         }
     }
@@ -693,7 +693,7 @@ fn main() {
     if overlay_ready_event.is_null() || overlay_ready_event as isize == -1isize {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         debug_log(&format!("OpenEventW failed: event='{}' err={err}", ctx.event_name));
-        eprintln!("nex-helper: OpenEventW failed (event='{}')", ctx.event_name);
+        eprintln!("NexHelper: OpenEventW failed (event='{}')", ctx.event_name);
         std::process::exit(1);
     }
     debug_log("OpenEventW succeeded");

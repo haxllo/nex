@@ -380,7 +380,7 @@ impl HotkeyListener {
                 logging::info("[nex] hotkey: using elevated helper for detection");
                 let pipe_event_tx = event_tx.clone();
                 let pipe_reader_thread = thread::Builder::new()
-                    .name("nex-helper-pipe-reader".into())
+                    .name("NexHelper-pipe-reader".into())
                     .spawn(move || {
                         use std::io::BufRead;
                         let reader = std::io::BufReader::new(pipe_file);
@@ -730,13 +730,13 @@ fn spawn_and_connect_helper(
     Ok((0, pipe_file))
 }
 
-/// Locate nex-helper.exe beside nex.exe.
+/// Locate NexHelper.exe beside nex.exe.
 fn find_helper_exe() -> Result<std::path::PathBuf, String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("can't get exe path: {e}"))?;
     let helper_path = exe_path.parent()
         .unwrap_or(&exe_path)
-        .join("nex-helper.exe");
+        .join("NexHelper.exe");
     if !helper_path.exists() {
         return Err(format!("helper not found: {}", helper_path.display()));
     }

@@ -54,6 +54,8 @@ struct HotkeyConfig {
     mod_alt: bool,
     mod_shift: bool,
     mod_win: bool,
+    #[allow(dead_code)]
+    event_name: String,
 }
 
 static CFG: OnceLock<HotkeyConfig> = OnceLock::new();
@@ -94,15 +96,6 @@ unsafe extern "system" {
     ) -> PipeHandle;
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
-
-    fn CreateEventW(
-        lpEventAttributes: *mut core::ffi::c_void,
-        bManualReset: i32,
-        bInitialState: i32,
-        lpName: *const u16,
-    ) -> PipeHandle;
-
-    fn ResetEvent(hEvent: PipeHandle) -> i32;
 
     fn CloseHandle(hObject: PipeHandle) -> i32;
 }
@@ -162,6 +155,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     let mod_alt = json_bool(&content, "mod_alt");
     let mod_shift = json_bool(&content, "mod_shift");
     let mod_win = json_bool(&content, "mod_win");
+    let event_name = json_str(&content, "event").unwrap_or("").to_string();
 
     if pipe_path.is_empty() {
         return Err("config: 'pipe' is required".into());
@@ -171,6 +165,9 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     }
     if target_pid == 0 {
         return Err("config: 'target_pid' is required".into());
+    }
+    if event_name.is_empty() {
+        return Err("config: 'event' is required".into());
     }
 
     Ok(HotkeyConfig {
@@ -183,6 +180,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
         mod_alt,
         mod_shift,
         mod_win,
+        event_name,
     })
 }
 
@@ -256,6 +254,7 @@ fn parse_args_cli(args: &[String]) -> Result<HotkeyConfig, String> {
         mod_alt,
         mod_shift,
         mod_win,
+        event_name: String::new(),
     })
 }
 
@@ -600,21 +599,19 @@ fn main() {
         }
     }
 
-    // Create named event for overlay-ready signal from nex.exe.
-    // nex.exe opens this event and sets it after showing the overlay.
-    // The helper (High IL) then calls SetForegroundWindow on the overlay,
-    // bypassing UIPI (both helper and Task Manager are High IL).
-    let overlay_ready_name = format!("Global\\nex-overlay-ready-{}", ctx.target_pid);
+    // Open the overlay-ready event created by nex.exe (Medium IL).
+    // The event has a Medium IL mandatory label so nex.exe can call
+    // SetEvent (write-level) without UIPI blocking.
+    // The helper opens it with SYNCHRONIZE (read-level) for waiting.
     let overlay_ready_event = unsafe {
-        CreateEventW(
-            std::ptr::null_mut(), // default security
-            1,    // bManualReset = true (must call ResetEvent)
-            0,    // bInitialState = false (not signaled initially)
-            to_wide(&overlay_ready_name).as_ptr(),
+        OpenEventW(
+            0x00100000, // SYNCHRONIZE — sufficient for MsgWaitForMultipleObjects
+            0,          // bInheritHandle = false
+            to_wide(&ctx.event_name).as_ptr(),
         )
     };
     if overlay_ready_event.is_null() || overlay_ready_event as isize == -1isize {
-        eprintln!("nex-helper: CreateEventW failed");
+        eprintln!("nex-helper: OpenEventW failed (event='{}')", ctx.event_name);
         std::process::exit(1);
     }
 
@@ -624,14 +621,14 @@ fn main() {
     // Message loop — use MsgWaitForMultipleObjects to wait on both
     // messages and the overlay-ready event.
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_FAILED};
-    use windows_sys::Win32::System::Threading::ResetEvent;
+    use windows_sys::Win32::System::Threading::OpenEventW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
     };
 
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
-    let mut handles = [overlay_ready_event, std::ptr::null_mut()];
+    let handles = [overlay_ready_event, std::ptr::null_mut()];
     let wait_forever = 0xFFFFFFFFu32;
 
     loop {
@@ -653,7 +650,7 @@ fn main() {
         if wait_result == WAIT_OBJECT_0 {
             // Overlay-ready event was signaled — nex.exe has shown the overlay,
             // now set foreground from High IL.
-            unsafe { ResetEvent(overlay_ready_event); }
+            // (Event is auto-reset, so it returns to nonsignaled automatically.)
             set_overlay_foreground();
         }
 

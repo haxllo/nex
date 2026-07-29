@@ -13,6 +13,13 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use std::ffi::OsStr;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::FromRawHandle;
+
 use crossbeam_channel::Sender;
 
 use crate::logging;
@@ -339,6 +346,10 @@ struct HotkeyListenerInner {
     should_exit: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     thread_id: Arc<OnceLock<u32>>,
+    // Helper mode fields (when elevated helper is used instead of in-process hook)
+    is_helper: bool,
+    helper_process_handle: Option<isize>,
+    pipe_reader_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HotkeyListener {
@@ -350,11 +361,53 @@ impl HotkeyListener {
         let target_is_win = target_key == VK_LWIN;
 
         let should_exit = Arc::new(AtomicBool::new(false));
-        let should_exit_for_thread = should_exit.clone();
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
-        let thread_id_for_thread = thread_id.clone();
 
-        let _ = HOOK_CTX.set(HookContext { sender: event_tx, hotkey_id: 1, target_key, target_is_win, required_mods });
+        let _ = HOOK_CTX.set(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
+
+        // --- Try elevated helper first (handles Task Manager / elevated windows) ---
+        let helper_result = spawn_and_connect_helper(
+            target_key, target_is_win, &required_mods, hotkey_str,
+        );
+
+        match helper_result {
+            Ok((helper_handle, pipe_file)) => {
+                logging::info("[nex] hotkey: using elevated helper for detection");
+                let pipe_event_tx = event_tx.clone();
+                let pipe_reader_thread = thread::Builder::new()
+                    .name("nex-helper-pipe-reader".into())
+                    .spawn(move || {
+                        use std::io::BufRead;
+                        let reader = std::io::BufReader::new(pipe_file);
+                        for line in reader.lines() {
+                            match line {
+                                Ok(l) if l == "HOTKEY" => {
+                                    let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+                                }
+                                Ok(_) => {} // ignore other lines
+                                Err(_) => break, // pipe disconnected
+                            }
+                        }
+                    })
+                    .map_err(|e| format!("failed to spawn pipe reader: {e}"))?;
+                return Ok(Self { inner: Some(HotkeyListenerInner {
+                    should_exit,
+                    thread: None,
+                    thread_id,
+                    is_helper: true,
+                    helper_process_handle: Some(helper_handle),
+                    pipe_reader_thread: Some(pipe_reader_thread),
+                })});
+            }
+            Err(e) => {
+                logging::warn(&format!("[nex] helper elevation failed: {e}"));
+                logging::info("[nex] falling back to in-process hook thread");
+            }
+        }
+
+        // --- Fallback: in-process hook thread (existing code path) ---
+        let should_exit_for_thread = should_exit.clone();
+        let thread_id_for_thread = thread_id.clone();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
@@ -372,15 +425,6 @@ impl HotkeyListener {
         type UnregisterHotKeyFn = unsafe extern "system" fn(
             hWnd: *mut core::ffi::c_void, id: i32,
         ) -> i32;
-        type GetProcAddressFn = unsafe extern "system" fn(
-            hModule: *mut core::ffi::c_void, lpProcName: *const u8,
-        ) -> *mut core::ffi::c_void;
-        type LoadLibraryAFn = unsafe extern "system" fn(
-            lpLibFileName: *const u8,
-        ) -> *mut core::ffi::c_void;
-        type GetModuleHandleAFn = unsafe extern "system" fn(
-            lpModuleName: *const u8,
-        ) -> *mut core::ffi::c_void;
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn LoadLibraryA(lpLibFileName: *const u8) -> *mut core::ffi::c_void;
@@ -510,7 +554,14 @@ impl HotkeyListener {
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err("hotkey thread panicked".into()),
         }
-        Ok(Self { inner: Some(HotkeyListenerInner { should_exit, thread: Some(thread), thread_id }) })
+        Ok(Self { inner: Some(HotkeyListenerInner {
+            should_exit,
+            thread: Some(thread),
+            thread_id,
+            is_helper: false,
+            helper_process_handle: None,
+            pipe_reader_thread: None,
+        }) })
     }
 
     pub(crate) fn thread_id(&self) -> Option<u32> {
@@ -524,8 +575,17 @@ impl HotkeyListener {
 
     pub(crate) fn is_alive(&self) -> bool {
         match &self.inner {
-            Some(inner) => !inner.should_exit.load(Ordering::SeqCst)
-                && inner.thread.as_ref().is_some_and(|t| !t.is_finished()),
+            Some(inner) => {
+                if inner.is_helper {
+                    // Helper mode: check pipe reader thread is alive
+                    !inner.should_exit.load(Ordering::SeqCst)
+                        && inner.pipe_reader_thread.as_ref().is_some_and(|t| !t.is_finished())
+                } else {
+                    // Hook mode: check hook thread is alive
+                    !inner.should_exit.load(Ordering::SeqCst)
+                        && inner.thread.as_ref().is_some_and(|t| !t.is_finished())
+                }
+            }
             None => false,
         }
     }
@@ -535,13 +595,30 @@ impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
-            if let Some(&tid) = inner.thread_id.get() {
-                logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
-                post_quit_to_thread(tid);
-            }
-            if let Some(handle) = inner.thread.take() {
-                logging::info("[nex] shutdown: joining hotkey thread");
-                let _ = handle.join();
+            if inner.is_helper {
+                // Helper mode: terminate helper process, join pipe reader thread
+                if let Some(handle) = inner.helper_process_handle.take() {
+                    logging::info("[nex] shutdown: terminating helper process");
+                    unsafe {
+                        let h = handle as *mut core::ffi::c_void;
+                        windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
+                        windows_sys::Win32::Foundation::CloseHandle(h);
+                    }
+                }
+                if let Some(handle) = inner.pipe_reader_thread.take() {
+                    logging::info("[nex] shutdown: joining pipe reader thread");
+                    let _ = handle.join();
+                }
+            } else {
+                // Hook mode: post WM_QUIT, join hook thread
+                if let Some(&tid) = inner.thread_id.get() {
+                    logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
+                    post_quit_to_thread(tid);
+                }
+                if let Some(handle) = inner.thread.take() {
+                    logging::info("[nex] shutdown: joining hotkey thread");
+                    let _ = handle.join();
+                }
             }
         }
     }
@@ -550,6 +627,193 @@ impl Drop for HotkeyListener {
 fn post_quit_to_thread(thread_id: u32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
     unsafe { let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0); }
+}
+
+// ---------------------------------------------------------------------------
+// Elevated helper (named pipe + ShellExecuteExW "runas")
+// ---------------------------------------------------------------------------
+
+/// Spawn the elevated helper process and connect to its named pipe.
+/// Returns (process handle, pipe file handle) on success.
+fn spawn_and_connect_helper(
+    target_key: u32,
+    target_is_win: bool,
+    required_mods: &[u32],
+    hotkey_str: &str,
+) -> Result<(isize, std::fs::File), String> {
+    let pid = std::process::id();
+    let pipe_name = format!(r"\\.\pipe\nex-hotkey-{pid}");
+
+    // Spawn helper with ShellExecuteExW "runas" verb
+    let helper_handle = spawn_helper(&pipe_name, target_key, target_is_win, required_mods, hotkey_str)?;
+
+    // Connect to the helper's named pipe (retry — helper may still be starting)
+    let pipe_file = connect_pipe(&pipe_name)?;
+
+    Ok((helper_handle, pipe_file))
+}
+
+/// Spawn nex-helper.exe via ShellExecuteExW with "runas" verb.
+/// Returns the process HANDLE (caller owns it, must close on drop).
+fn spawn_helper(
+    pipe_name: &str,
+    target_key: u32,
+    target_is_win: bool,
+    required_mods: &[u32],
+    hotkey_str: &str,
+) -> Result<isize, String> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("can't get exe path: {e}"))?;
+    let helper_path = exe_path.parent()
+        .unwrap_or(&exe_path)
+        .join("nex-helper.exe");
+
+    if !helper_path.exists() {
+        return Err(format!("helper not found: {}", helper_path.display()));
+    }
+
+    let args = build_helper_args(pipe_name, target_key, target_is_win, required_mods, hotkey_str);
+
+    // ShellExecuteExW with "runas" verb — triggers UAC elevation
+    let verb = to_wide("runas");
+    let file = to_wide(helper_path.to_string_lossy().as_ref());
+    let params = to_wide(&args);
+
+    #[repr(C)]
+    struct SHELLEXECUTEINFOW {
+        cb_size: u32,
+        f_mask: u32,
+        hwnd: *mut core::ffi::c_void,
+        lpVerb: *const u16,
+        lpFile: *const u16,
+        lpParameters: *const u16,
+        lpDirectory: *const u16,
+        nShow: i32,
+        hInstApp: *mut core::ffi::c_void,
+        lpIDList: *mut core::ffi::c_void,
+        lpClass: *const u16,
+        hkeyClass: *mut core::ffi::c_void,
+        dwHotKey: u32,
+        hIcon: *mut core::ffi::c_void,
+        hProcess: *mut core::ffi::c_void,
+    }
+
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x00000040;
+    const SW_HIDE: i32 = 0;
+
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cb_size = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.f_mask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = verb.as_ptr();
+    sei.lpFile = file.as_ptr();
+    sei.lpParameters = params.as_ptr();
+    sei.nShow = SW_HIDE;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteExW(lpExecInfo: *const SHELLEXECUTEINFOW) -> i32;
+    }
+
+    let ok = unsafe { ShellExecuteExW(&sei) };
+    if ok == 0 {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        return Err(format!("ShellExecuteExW failed: getlasterror={err}"));
+    }
+
+    let handle = sei.hProcess as isize;
+    if handle == 0 || handle == -1isize {
+        return Err("ShellExecuteExW returned invalid process handle".into());
+    }
+
+    Ok(handle)
+}
+
+/// Connect to an existing named pipe (client side, read-only).
+fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
+    let wide = to_wide(pipe_name);
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateFileW(
+            lpFileName: *const u16,
+            dwDesiredAccess: u32,
+            dwShareMode: u32,
+            lpSecurityAttributes: *mut core::ffi::c_void,
+            dwCreationDisposition: u32,
+            dwFlagsAndAttributes: u32,
+            hTemplateFile: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+    }
+
+    const GENERIC_READ: u32 = 0x80000000;
+    const FILE_SHARE_READ: u32 = 0x00000001;
+    const FILE_SHARE_WRITE: u32 = 0x00000002;
+    const OPEN_EXISTING: u32 = 3;
+
+    for attempt in 0..30 {
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+
+        if !handle.is_null() && handle as isize != -1 {
+            // Wrap the raw HANDLE into a File for BufReader
+            let file = unsafe {
+                std::fs::File::from_raw_handle(handle as *mut _)
+            };
+            return Ok(file);
+        }
+
+        // Retry with backoff (helper may still be starting up + UAC prompt)
+        thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+    }
+
+    Err(format!("failed to connect to pipe '{pipe_name}' after retries"))
+}
+
+/// Build CLI arguments string for nex-helper.exe.
+fn build_helper_args(
+    pipe_name: &str,
+    target_key: u32,
+    target_is_win: bool,
+    required_mods: &[u32],
+    hotkey_str: &str,
+) -> String {
+    let mut args = format!(r#"--pipe "{pipe_name}""#);
+    args.push_str(&format!(r#" --hotkey "{hotkey_str}""#));
+
+    if target_is_win {
+        args.push_str(" --target-is-win --mod-win");
+    } else {
+        args.push_str(&format!(" --target-vk 0x{:02X}", target_key));
+    }
+
+    for &m in required_mods {
+        match m {
+            0x11 => args.push_str(" --mod-ctrl"),
+            0x12 => args.push_str(" --mod-alt"),
+            0x10 => args.push_str(" --mod-shift"),
+            0x5B | 0x5C => {
+                if !target_is_win {
+                    args.push_str(" --mod-win");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    args
+}
+
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
 // ---------------------------------------------------------------------------

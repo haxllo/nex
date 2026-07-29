@@ -78,10 +78,6 @@ use crate::overlay::tray::TrayIcon;
 /// prevents double-trigger when both detection paths fire within 50ms.
 static HOTKEY_DEBOUNCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Edge-tracking state for the hotkey polling fallback thread.
-/// True when the previous poll cycle detected the hotkey as pressed.
-static HOTKEY_LAST_WAS_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
@@ -293,65 +289,6 @@ pub(crate) fn run_windows_runtime(
                 overlay.set_hotkey_issue_active(false);
                 let _ = tray_hi_tx.send(false);
                 *hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener);
-
-                // Spawn hotkey polling fallback thread.  WH_KEYBOARD_LL
-                // and WM_INPUT (RIDEV_INPUTSINK) may fail to deliver
-                // events when elevated/UWP windows (e.g. Task Manager,
-                // advanced settings) are foreground.  This thread polls
-                // GetAsyncKeyState every 30ms and sends an event on
-                // rising edge.  The existing HOTKEY_DEBOUNCE gate in
-                // the runtime loop handler deduplicates with hook/WM_INPUT.
-                let poll_event_tx = event_tx.clone();
-                let _hotkey_poller = std::thread::Builder::new()
-                    .name("nex-hotkey-poller".into())
-                    .spawn(move || {
-                        log_info("[nex::debug] Poller: thread started");
-                        // Ensure thread has a message queue so GetAsyncKeyState
-                        // returns real keyboard state.  Without a message queue,
-                        // GetAsyncKeyState returns 0 on Windows (the function
-                        // depends on the calling thread's message queue).
-                        unsafe {
-                            let mut _msg: std::mem::MaybeUninit<windows_sys::Win32::UI::WindowsAndMessaging::MSG> = std::mem::MaybeUninit::uninit();
-                            windows_sys::Win32::UI::WindowsAndMessaging::PeekMessageW(
-                                _msg.as_mut_ptr(),
-                                std::ptr::null_mut(),
-                                0, 0, 0, // PM_NOREMOVE = 0
-                            );
-                        }
-                        let mut cycle: u64 = 0;
-                        loop {
-                            cycle += 1;
-                            let pressed = crate::overlay::hotkey::is_hotkey_pressed();
-                            let was_pressed = HOTKEY_LAST_WAS_PRESSED.load(std::sync::atomic::Ordering::SeqCst);
-                            if pressed && !was_pressed {
-                                // Rising edge — send event only if debounce is free.
-                                // The runtime loop handler sets & clears the debounce.
-                                if !HOTKEY_DEBOUNCE.compare_exchange(
-                                    false, true,
-                                    std::sync::atomic::Ordering::SeqCst,
-                                    std::sync::atomic::Ordering::SeqCst,
-                                ).is_ok() {
-                                    log_info("[nex::debug] Poller: rising edge DEBOUNCED (hook/WM_INPUT beat us)");
-                                } else {
-                                    log_info("[nex::debug] Poller: rising edge, sending Hotkey event");
-                                    let _ = poll_event_tx.send(crate::overlay::model::OverlayEvent::Hotkey(1));
-                                    // Auto-reset debounce after 50ms (matches runtime_loop handler).
-                                    std::thread::spawn(|| {
-                                        std::thread::sleep(std::time::Duration::from_millis(50));
-                                        HOTKEY_DEBOUNCE.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    });
-                                }
-                            } else if !pressed && was_pressed {
-                                log_info("[nex::debug] Poller: key released");
-                            }
-                            HOTKEY_LAST_WAS_PRESSED.store(pressed, std::sync::atomic::Ordering::SeqCst);
-                            if cycle % 1000 == 0 {
-                                log_info(&format!("[nex::debug] Poller: heartbeat cycle={} pressed={}", cycle, pressed));
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(30));
-                        }
-                    })
-                    .map_err(|e| RuntimeError::Overlay(format!("hotkey poller thread: {e}")))?;
                 None
             }
             Err(error) => {

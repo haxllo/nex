@@ -5,6 +5,10 @@ fn main() {
     }
 
     let mut res = winres::WindowsResource::new();
+    res.set("FileDescription", "NexHelper");
+    res.set("InternalName", "NexHelper");
+    res.set("OriginalFilename", "NexHelper.exe");
+    res.set("ProductName", "Nex");
     // requireAdministrator so the hook sees keystrokes for elevated windows
     res.set_manifest(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

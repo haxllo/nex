@@ -37,6 +37,10 @@ const WM_NEX_WAKE: u32 = 0x8000 + 0x4E45;
 /// HOTKEY_FIRED, since RegisterHotKeyW cannot register bare-Win hotkeys.
 static HELPER_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
+/// Cached HWND of the nex overlay window ("NexOverlayWindowClass").
+/// Found once via FindWindowW on first hotkey dispatch, then reused.
+static OVERLAY_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
 struct HotkeyConfig {
     pipe_path: String,
     #[allow(dead_code)]
@@ -513,6 +517,23 @@ fn main() {
                 // AllowSetForegroundWindow is called from High IL (helper).
                 // nex.exe (Medium IL) can then call SetForegroundWindow once.
                 unsafe { AllowSetForegroundWindow(cfg.target_pid); }
+
+                // Directly SetForegroundWindow on the overlay from High IL.
+                // This bypasses UIPI entirely — FindWindowW locates the
+                // overlay by its registered class name.  The HWND is
+                // cached after first lookup.
+                let overlay_hwnd = OVERLAY_HWND.get_or_init(|| {
+                    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+                    let class: Vec<u16> = "NexOverlayWindowClass\0".encode_utf16().collect();
+                    unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) as isize }
+                });
+                if *overlay_hwnd != 0 {
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(
+                            *overlay_hwnd as *mut core::ffi::c_void,
+                        );
+                    }
+                }
             }
         }
 

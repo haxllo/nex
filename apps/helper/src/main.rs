@@ -497,11 +497,9 @@ fn main() {
             break;
         }
 
-        // Discard wake-up messages (posted by hook proc to unblock
-        // GetMessageW after setting HOTKEY_FIRED).
-        if msg.message == WM_NEX_WAKE {
-            continue;
-        }
+        // Wake-up messages are posted by hook proc to unblock GetMessageW
+        // after setting HOTKEY_FIRED.  Let them fall through so the loop
+        // body processes HOTKEY_FIRED below — do NOT `continue` here.
 
         // Grant nex.exe foreground permission before every HOTKEY dispatch,
         // so SetForegroundWindow succeeds even when Task Manager (High IL)

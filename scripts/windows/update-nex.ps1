@@ -129,7 +129,7 @@ function Get-RuntimeExecutableCandidates {
   param([string]$Root)
 
   return @(
-    (Join-Path $Root "bin\nex.exe"),
+    (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\NexHelper.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
     (Join-Path $Root "bin\swiftfind-core.exe")
@@ -145,7 +145,7 @@ function Resolve-InstalledRuntimePath {
     }
   }
 
-  return (Join-Path $Root "bin\nex.exe")
+  return (Join-Path $Root "bin\Nex.exe")
 }
 
 function Stop-Runtime {
@@ -161,7 +161,7 @@ function Stop-Runtime {
     Start-Sleep -Milliseconds 400
   }
 
-  foreach ($imageName in @("nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+  foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
     cmd /c "taskkill /IM $imageName /F /T >NUL 2>&1" | Out-Null
   }
   Start-Sleep -Milliseconds 200

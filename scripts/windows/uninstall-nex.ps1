@@ -17,7 +17,7 @@ function Resolve-InstalledRuntimePath {
   param([string]$Root)
 
   foreach ($candidate in @(
-    (Join-Path $Root "bin\nex.exe"),
+    (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
     (Join-Path $Root "bin\swiftfind-core.exe")
   )) {
@@ -26,7 +26,7 @@ function Resolve-InstalledRuntimePath {
     }
   }
 
-  return (Join-Path $Root "bin\nex.exe")
+  return (Join-Path $Root "bin\Nex.exe")
 }
 
 if (-not $InstallRoot -or $InstallRoot.Trim().Length -eq 0) {
@@ -58,7 +58,7 @@ else {
 }
 
 Write-Host "[2/5] Hard-stopping any leftover Nex process..."
-foreach ($imageName in @("nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
   taskkill /IM $imageName /F /T | Out-Null
 }
 Start-Sleep -Milliseconds 200

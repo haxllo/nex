@@ -64,7 +64,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-
 cargo build -p nex --release --quiet
 cargo build -p nex-helper --release --quiet
 
-$coreExe = "target/release/nex.exe"
+$coreExe = "target/release/Nex.exe"
 if (-not (Test-Path $coreExe)) {
   throw "Expected core executable not found at $coreExe"
 }
@@ -116,7 +116,7 @@ else {
   Write-Host "Signing skipped (unsigned artifact)." -ForegroundColor Yellow
 }
 
-Copy-Item $coreExe (Join-Path $stageDir "bin/nex.exe") -Force
+Copy-Item $coreExe (Join-Path $stageDir "bin/Nex.exe") -Force
 
 $helperExe = "target/release/NexHelper.exe"
 if (-not (Test-Path $helperExe)) {
@@ -192,7 +192,7 @@ try {
     }
   }
   if ($extracted) {
-    Write-Host "Bundled $EverythingDllName next to nex.exe" -ForegroundColor Green
+    Write-Host "Bundled $EverythingDllName next to Nex.exe" -ForegroundColor Green
     $everythingDllBundled = $true
   } else {
     Write-Host "WARNING: Could not extract $EverythingDllName from Everything-SDK.zip" -ForegroundColor Yellow
@@ -236,7 +236,7 @@ function Compute-Sha256Hash($path) {
 
 $zipHash = Compute-Sha256Hash $zipPath
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
-$exePath = Join-Path $stageDir "bin/nex.exe"
+$exePath = Join-Path $stageDir "bin/Nex.exe"
 $exeHash = Compute-Sha256Hash $exePath
 $exeSize = (Get-Item -LiteralPath $exePath).Length
 
@@ -275,7 +275,7 @@ $manifest = [ordered]@{
       sha256 = $null
     }
     core_exe = [ordered]@{
-      path = "bin/nex.exe"
+      path = "bin/Nex.exe"
       size_bytes = $exeSize
       sha256 = $exeHash
     }

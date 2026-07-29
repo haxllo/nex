@@ -7,7 +7,7 @@ use crate::overlay::{is_instance_window_present, signal_existing_instance_quit};
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "nex.exe";
+pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "Nex.exe";
 #[cfg(target_os = "windows")]
 pub(crate) const LEGACY_RUNTIME_EXE_NAMES: &[&str] = &["nex-core.exe", "swiftfind-core.exe"];
 

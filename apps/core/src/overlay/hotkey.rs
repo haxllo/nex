@@ -717,7 +717,7 @@ fn spawn_and_connect_helper(
 
     // 3. Ensure scheduled task exists (one-time UAC if not yet created)
     let helper_path = find_helper_exe()?;
-    ensure_helper_task(&helper_path)?;
+    ensure_helper_task(&helper_path, &config_path)?;
 
     // 4. Run the scheduled task (no UAC)
     run_helper_task()?;
@@ -822,6 +822,10 @@ fn run_schtasks_elevated(args: &str) -> Result<(), String> {
     sei.lpParameters = params.as_ptr();
     sei.nShow = SW_HIDE;
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetExitCodeProcess(hProcess: *mut core::ffi::c_void, lpExitCode: *mut u32) -> i32;
+    }
     #[link(name = "shell32")]
     unsafe extern "system" {
         fn ShellExecuteExW(lpExecInfo: *const SHELLEXECUTEINFOW) -> i32;
@@ -842,13 +846,25 @@ fn run_schtasks_elevated(args: &str) -> Result<(), String> {
     let h = handle as *mut core::ffi::c_void;
     unsafe {
         windows_sys::Win32::System::Threading::WaitForSingleObject(h, 30_000);
-        windows_sys::Win32::Foundation::CloseHandle(h);
+    }
+
+    // Check exit code — schtasks can start (ShellExecuteExW succeeds) but
+    // still fail (e.g. invalid arguments).  Without this check, a failed
+    // /create is treated as success and the task silently doesn't exist.
+    let mut exit_code: u32 = 0;
+    let ec_ok = unsafe { GetExitCodeProcess(h, &mut exit_code) };
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(h); }
+    if ec_ok == 0 {
+        return Err("GetExitCodeProcess failed".into());
+    }
+    if exit_code != 0 {
+        return Err(format!("schtasks exited with code {exit_code}"));
     }
     Ok(())
 }
 
 /// Create the scheduled task if it doesn't exist (one-time UAC prompt).
-fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
+fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Path) -> Result<(), String> {
     // Check if task already exists
     let query = std::process::Command::new("schtasks")
         .args(["/query", "/tn", SCHTASK_NAME])
@@ -859,21 +875,79 @@ fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
         return Ok(()); // task exists, good
     }
 
-    // Task doesn't exist — create it.
-    // Use ONCE with past date so it never auto-runs — only manual /run triggers it.
-    // Use escaped quotes (\") so CommandLineToArgvW produces the correct
-    // command line: `"C:\path\to\nex-helper.exe" --config "%APPDATA%\Nex\helper-config.json"`
-    let task_cmd = format!(
-        "\\\"{}\\\" --config \\\"%APPDATA%\\Nex\\helper-config.json\\\"",
+    // Task doesn't exist — create it via XML (avoids /tr quoting hell with UAC).
+    // XML separates <Command> and <Arguments> so no escaping issues.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>2000-01-01T00:00:00Z</Date>
+    <Author>Nex</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>2000-01-01T00:00:00Z</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <Enabled>true</Enabled>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Hidden>false</Hidden>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{}</Command>
+      <Arguments>--config {}</Arguments>
+    </Exec>
+  </Actions>
+</Task>"#,
         helper_path.display(),
+        config_path.display(),
     );
 
+    // Write XML to %APPDATA%\Nex\nex-task.xml (persistent, so user can inspect on failure)
+    let appdata = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let xml_path = appdata.join("Nex").join("nex-task.xml");
+    let _ = std::fs::create_dir_all(xml_path.parent().unwrap());
+
+    // Task Scheduler XML parser expects UTF-16LE with BOM, not UTF-8.
+    // "unable to switch the encoding" at (1,40) if encoding="UTF-8" in UTF-8 file.
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&xml_path)
+            .map_err(|e| format!("failed to create task XML {:?}: {e}", xml_path))?;
+        // Write UTF-16LE BOM
+        f.write_all(&[0xFF, 0xFE])
+            .map_err(|e| format!("failed to write XML BOM: {e}"))?;
+        // Encode XML as UTF-16LE
+        for code_unit in xml.encode_utf16() {
+            f.write_all(&code_unit.to_le_bytes())
+                .map_err(|e| format!("failed to write XML content: {e}"))?;
+        }
+    }
+
+    logging::info(&format!("[nex] task XML written to {:?}", xml_path));
     logging::info("[nex] creating scheduled task NexHelperV2 (one-time UAC)");
-    run_schtasks_elevated(&format!(
-        "/create /tn {} /tr \"{}\" /runlevel HIGHEST /sc ONCE /st 00:00 /sd 01/01/2000 /f",
+    let result = run_schtasks_elevated(&format!(
+        "/create /tn {} /xml \"{}\" /f",
         SCHTASK_NAME,
-        task_cmd,
-    ))?;
+        xml_path.display(),
+    ));
+
+    // Keep XML file on failure for debugging
+    if result.is_ok() {
+        let _ = std::fs::remove_file(&xml_path);
+    }
+
+    result?;
 
     logging::info(&format!("[nex] scheduled task {} created successfully", SCHTASK_NAME));
     Ok(())

@@ -489,9 +489,10 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
     let handle = pipe.as_raw_handle() as PipeHandle;
     // ConnectNamedPipe blocks until nex.exe connects via CreateFileW.
     let ok = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
-    // ERROR_PIPE_CONNECTED (535) means client connected before we called ConnectNamedPipe.
-    // Both 0 (success) and ERROR_PIPE_CONNECTED are acceptable.
-    if ok != 0 {
+    // ConnectNamedPipe returns nonzero on success (client connected).
+    // Returns 0 with ERROR_PIPE_CONNECTED (535) if client connected before we called it.
+    // GetLastError is STALE on success (nonzero) — do NOT check it there.
+    if ok == 0 {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         if err != 535 {
             return Err(format!("ConnectNamedPipe failed: err={err}"));
@@ -504,6 +505,21 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 // Overlay foreground helper (called from message loop on event signal)
 // ---------------------------------------------------------------------------
 
+/// Write a diagnostic line to the helper debug log.
+/// The helper has no console (windows_subsystem = "windows"), so file logging
+/// is the only way to observe failures.
+fn debug_log(msg: &str) {
+    let path = std::env::temp_dir().join("nex-helper-debug.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
+        let _ = f.flush();
+    }
+}
+
 /// Called when nex.exe signals that the overlay is now visible.
 /// Uses High IL to bring the overlay to front, bypassing UIPI.
 ///
@@ -515,10 +531,14 @@ fn set_overlay_foreground() {
     let class = to_wide("NexOverlayWindowClass\0");
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd as isize == 0 {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        debug_log(&format!("FindWindowW failed: err={err}"));
         return;
     }
+    debug_log(&format!("FindWindowW found hwnd={:x}", hwnd as isize));
 
     unsafe {
+        use windows_sys::Win32::Foundation::GetLastError;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         };
@@ -526,7 +546,8 @@ fn set_overlay_foreground() {
 
         // 1. Grant nex.exe foreground permission (backup path)
         if let Some(cfg) = CFG.get() {
-            AllowSetForegroundWindow(cfg.target_pid);
+            let ret = AllowSetForegroundWindow(cfg.target_pid);
+            debug_log(&format!("AllowSetForegroundWindow(pid={}): ret={ret}", cfg.target_pid));
         }
 
         // 2. Attach this thread to the foreground thread (both High IL) so
@@ -540,15 +561,26 @@ fn set_overlay_foreground() {
         } else {
             GetWindowThreadProcessId(fg, std::ptr::null_mut())
         };
+        debug_log(&format!(
+            "fg=0x{:x} helper_tid={} fg_tid={}",
+            fg as isize, helper_tid, fg_tid,
+        ));
+
         let should_attach = fg_tid != 0 && fg_tid != helper_tid;
         if should_attach {
-            AttachThreadInput(helper_tid, fg_tid, 1);
+            let ret = AttachThreadInput(helper_tid, fg_tid, 1);
+            debug_log(&format!("AttachThreadInput(attach): ret={ret} err={}", GetLastError()));
         }
 
-        SetForegroundWindow(hwnd);
+        let ret = SetForegroundWindow(hwnd);
+        debug_log(&format!(
+            "SetForegroundWindow: ret={ret} err={}",
+            GetLastError(),
+        ));
 
         if should_attach {
-            AttachThreadInput(helper_tid, fg_tid, 0);
+            let ret = AttachThreadInput(helper_tid, fg_tid, 0);
+            debug_log(&format!("AttachThreadInput(detach): ret={ret} err={}", GetLastError()));
         }
     }
 }
@@ -558,6 +590,9 @@ fn set_overlay_foreground() {
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Log startup immediately (before anything can fail)
+    debug_log("helper started");
+
     let cfg = match parse_args() {
         Ok(c) => c,
         Err(e) => {
@@ -566,23 +601,31 @@ fn main() {
         }
     };
 
+    debug_log(&format!("config parsed: event='{}'", cfg.event_name));
+
     let pipe_path = cfg.pipe_path.clone();
     let _ = CFG.set(cfg);
+
+    debug_log(&format!("creating named pipe: {pipe_path}"));
 
     // Create the named pipe
     let mut pipe = match create_named_pipe(&pipe_path) {
         Ok(p) => p,
         Err(e) => {
+            debug_log(&format!("create_named_pipe failed: {e}"));
             eprintln!("nex-helper: {e}");
             std::process::exit(1);
         }
     };
+    debug_log("pipe created, waiting for client");
 
     // Wait for nex.exe to connect
     if let Err(e) = wait_for_client(&pipe) {
+        debug_log(&format!("wait_for_client failed: {e}"));
         eprintln!("nex-helper: {e}");
         std::process::exit(1);
     }
+    debug_log("client connected");
 
     // Install WH_KEYBOARD_LL hook
     let hook_id = unsafe {
@@ -595,9 +638,12 @@ fn main() {
     };
 
     if hook_id.is_null() {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        debug_log(&format!("SetWindowsHookExW failed: err={err}"));
         eprintln!("nex-helper: SetWindowsHookExW failed");
         std::process::exit(1);
     }
+    debug_log("SetWindowsHookExW succeeded");
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win hotkeys only).
     let ctx = CFG.get().unwrap();
@@ -645,15 +691,42 @@ fn main() {
         )
     };
     if overlay_ready_event.is_null() || overlay_ready_event as isize == -1isize {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        debug_log(&format!("OpenEventW failed: event='{}' err={err}", ctx.event_name));
         eprintln!("nex-helper: OpenEventW failed (event='{}')", ctx.event_name);
         std::process::exit(1);
+    }
+    debug_log("OpenEventW succeeded");
+
+    // Open a handle to nex.exe with SYNCHRONIZE so we are notified when it
+    // exits.  This lets us exit cleanly when nex quits (no hanging until
+    // the next keyboard event).
+    let nex_handle = unsafe {
+        windows_sys::Win32::System::Threading::OpenProcess(
+            0x00100000,  // PROCESS_SYNCHRONIZE
+            0,           // bInheritHandle = false
+            ctx.target_pid,
+        )
+    };
+    let nex_handle_valid = !nex_handle.is_null()
+        && nex_handle as isize != -1isize
+        && nex_handle as isize != 0;
+    if nex_handle_valid {
+        debug_log("OpenProcess(SYNCHRONIZE) succeeded");
+    } else {
+        debug_log(&format!(
+            "OpenProcess(SYNCHRONIZE) failed: err={}",
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        ));
     }
 
     // Cache this thread's ID so the hook proc can wake GetMessageW.
     let _ = HELPER_THREAD_ID.set(unsafe { GetCurrentThreadId() });
 
-    // Message loop — use MsgWaitForMultipleObjects to wait on both
-    // messages and the overlay-ready event.
+    debug_log("helper entering message loop");
+
+    // Message loop — use MsgWaitForMultipleObjects to wait on messages,
+    // the overlay-ready event, and the nex process handle.
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_FAILED};
     use windows_sys::Win32::System::Threading::OpenEventW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -662,15 +735,19 @@ fn main() {
 
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
-    let handles = [overlay_ready_event, std::ptr::null_mut()];
+    let handles = [
+        overlay_ready_event,
+        if nex_handle_valid { nex_handle } else { std::ptr::null_mut() },
+    ];
+    let n_handles: u32 = if nex_handle_valid { 2 } else { 1 };
     let wait_forever = 0xFFFFFFFFu32;
 
     loop {
-        // Wait for either a message or the overlay-ready event
+        // Wait for either a message, the overlay-ready event, or nex exit
         let wait_result = unsafe {
             MsgWaitForMultipleObjects(
-                1,                                 // only wait on the event (index 0)
-                handles.as_ptr(),                  // event handle array
+                n_handles,                         // number of handles to wait on
+                handles.as_ptr(),                  // handle array
                 0,                                 // fWaitAll = false (any will do)
                 wait_forever,                      // dwMilliseconds = INFINITE
                 QS_ALLINPUT,                       // wake for any message
@@ -685,7 +762,15 @@ fn main() {
             // Overlay-ready event was signaled — nex.exe has shown the overlay,
             // now set foreground from High IL.
             // (Event is auto-reset, so it returns to nonsignaled automatically.)
+            debug_log("overlay-ready event received, calling set_overlay_foreground");
             set_overlay_foreground();
+            debug_log("set_overlay_foreground returned");
+        }
+
+        // WAIT_OBJECT_0 + 1 = nex process handle signaled (nex exited)
+        if nex_handle_valid && wait_result == WAIT_OBJECT_0 + 1 {
+            debug_log("nex process exited, shutting down");
+            break;
         }
 
         // Process all pending messages (may be zero if only event woke us)
@@ -749,6 +834,9 @@ fn main() {
     // Cleanup
     unsafe {
         CloseHandle(overlay_ready_event);
+        if nex_handle_valid {
+            CloseHandle(nex_handle);
+        }
         windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
     }
     if fallback_id != 0 {

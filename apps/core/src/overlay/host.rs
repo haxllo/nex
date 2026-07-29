@@ -349,6 +349,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::Hide => {
+                    // Re-inject the menu-mask key (0xE8) and spin-wait for the
+                    // RIT to register it, so that when RIDEV_NOHOTKEYS is
+                    // removed and the window is hidden, the newly-foreground
+                    // window never sees a bare Win key — it sees Win+0xE8.
+                    // This prevents Start from opening during the hide
+                    // transition when the Win key is still physically held.
+                    crate::overlay::hotkey::hold_mask_before_hide();
                     // Remove RIDEV_NOHOTKEYS but keep the sink registered so
                     // the overlay always receives WM_INPUT for all keyboard
                     // events regardless of foreground window.  This ensures
@@ -357,6 +364,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, false);
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
+                    crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     let is_visible = unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
@@ -974,6 +982,11 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
 /// Steal foreground focus reliably. winit/tao cannot do this on its own
 /// because Windows blocks `SetForegroundWindow` from background apps;
 /// the `AttachThreadInput` trick is the standard workaround.
+///
+/// When an elevated window (Task Manager, High IL) has foreground,
+/// `AttachThreadInput` fails silently because of UIPI — that's fine.
+/// The elevated helper process already called `AllowSetForegroundWindow`
+/// with nex.exe's PID, so `SetForegroundWindow` will succeed without it.
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
@@ -991,13 +1004,19 @@ fn force_foreground(hwnd: HWND) {
         };
         let attached = fg_tid != 0 && fg_tid != cur_tid;
         if attached {
-            AttachThreadInput(cur_tid, fg_tid, 1);
+            // May fail (return 0) when fg_tid belongs to a higher-IL
+            // process (e.g. Task Manager). This is acceptable —
+            // AllowSetForegroundWindow (called by helper) handles it.
+            let _ = AttachThreadInput(cur_tid, fg_tid, 1);
         }
         ShowWindow(hwnd, SW_SHOW);
         BringWindowToTop(hwnd);
         SetForegroundWindow(hwnd);
         SetFocus(hwnd);
         if attached {
+            // Only detach if attach succeeded (both must be attached).
+            // We can't know reliably, so just try — it's harmless if
+            // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
     }

@@ -15,7 +15,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -25,11 +25,23 @@ use std::sync::OnceLock;
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+static WIN_KEY_RELEASED: AtomicBool = AtomicBool::new(false);
+
+/// Custom message to wake GetMessageW after the hook proc sets HOTKEY_FIRED.
+/// WM_APP (0x8000) + unique magic bytes to avoid collisions.
+const WM_NEX_WAKE: u32 = 0x8000 + 0x4E45;
+
+/// Cached thread ID of the helper's message-loop thread.  The hook proc
+/// calls PostThreadMessageW with this to wake GetMessageW after setting
+/// HOTKEY_FIRED, since RegisterHotKeyW cannot register bare-Win hotkeys.
+static HELPER_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
 struct HotkeyConfig {
     pipe_path: String,
     #[allow(dead_code)]
     hotkey_desc: String,
+    target_pid: u32,
     target_vk: u32,
     target_is_win: bool,
     mod_ctrl: bool,
@@ -52,6 +64,7 @@ const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
 const VK_LWIN: u32 = 0x5B;
 const VK_RWIN: u32 = 0x5C;
+const VK_MENU_MASK: u16 = 0xE8;
 
 // ---------------------------------------------------------------------------
 // Win32 raw imports (not all available via windows-sys feature gates)
@@ -61,6 +74,8 @@ type PipeHandle = *mut core::ffi::c_void;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
+
     fn CreateNamedPipeW(
         lpName: *const u16,
         dwOpenMode: u32,
@@ -73,6 +88,18 @@ unsafe extern "system" {
     ) -> PipeHandle;
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    /// Grant nex.exe a one-time ability to call SetForegroundWindow even
+    /// when an elevated (High IL) window like Task Manager has focus.
+    /// Must be called from High IL (helper process) with nex.exe's PID.
+    fn AllowSetForegroundWindow(dwProcessId: u32) -> i32;
+
+    /// Post a message to the specified thread's message queue. Used to
+    /// wake GetMessageW from the hook proc after HOTKEY_FIRED is set.
+    fn PostThreadMessageW(idThread: u32, Msg: u32, wParam: usize, lParam: isize) -> i32;
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
@@ -89,6 +116,7 @@ fn parse_args() -> Result<HotkeyConfig, String> {
 
     let mut pipe_path = String::new();
     let mut hotkey_desc = String::from("unknown");
+    let mut target_pid: u32 = 0;
     let mut target_vk: u32 = 0;
     let mut target_is_win = false;
     let mut mod_ctrl = false;
@@ -119,6 +147,12 @@ fn parse_args() -> Result<HotkeyConfig, String> {
             "--target-is-win" => {
                 target_is_win = true;
             }
+            "--target-pid" => {
+                i += 1;
+                let val = args.get(i).ok_or("--target-pid requires a value")?;
+                target_pid = val.parse::<u32>()
+                    .map_err(|e| format!("invalid --target-pid '{val}': {e}"))?;
+            }
             "--mod-ctrl" => mod_ctrl = true,
             "--mod-alt" => mod_alt = true,
             "--mod-shift" => mod_shift = true,
@@ -134,10 +168,14 @@ fn parse_args() -> Result<HotkeyConfig, String> {
     if target_vk == 0 && !target_is_win {
         return Err("--target-vk is required (or use --target-is-win)".into());
     }
+    if target_pid == 0 {
+        return Err("--target-pid is required".into());
+    }
 
     Ok(HotkeyConfig {
         pipe_path,
         hotkey_desc,
+        target_pid,
         target_vk,
         target_is_win,
         mod_ctrl,
@@ -166,6 +204,26 @@ fn is_key_down(vk: u32) -> bool {
     }
 }
 
+fn send_mask_down() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
+fn send_mask_up() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_MENU_MASK, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
 /// Write "HOTKEY\n" to the pipe. Returns Err on failure (client disconnected).
 fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
     pipe.write_all(b"HOTKEY\n")?;
@@ -190,6 +248,7 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     let msg = w_param as u32;
     let is_keydown = msg == 0x0100 || msg == 0x0104; // WM_KEYDOWN / WM_SYSKEYDOWN
+    let is_keyup = msg == 0x0101 || msg == 0x0105;   // WM_KEYUP / WM_SYSKEYUP
 
     let Some(ctx) = CFG.get() else {
         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -197,38 +256,64 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
     let vk = kb.vkCode;
+    let injected = (kb.flags & 0x10) != 0;
 
-    // Track modifier state via atomics
-    if !is_keydown {
+    // Track modifier state via atomics — GetAsyncKeyState lies when
+    // WebView has focus and consumed the modifier key-down.
+    if !injected {
         match vk {
-            VK_LCONTROL | VK_RCONTROL => CTRL_DOWN.store(false, Ordering::SeqCst),
-            VK_LMENU | VK_RMENU => ALT_DOWN.store(false, Ordering::SeqCst),
-            VK_LSHIFT | VK_RSHIFT => SHIFT_DOWN.store(false, Ordering::SeqCst),
+            VK_LCONTROL | VK_RCONTROL => CTRL_DOWN.store(is_keydown, Ordering::SeqCst),
+            VK_LMENU | VK_RMENU => ALT_DOWN.store(is_keydown, Ordering::SeqCst),
+            VK_LSHIFT | VK_RSHIFT => SHIFT_DOWN.store(is_keydown, Ordering::SeqCst),
             _ => {}
+        }
+    }
+
+    // --- Win key-up: release held mask but DO NOT eat the message ---
+    // Key-up never triggers Start, and eating it confuses the system's
+    // key-state tracking (GetAsyncKeyState stays TRUE → Win+E/D/R fire).
+    if ctx.target_is_win && is_keyup && !injected {
+        let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
+        if consumed_vk != 0 && vk == consumed_vk {
+            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+            send_mask_up();
         }
         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
     }
 
-    // Track modifier state (key-down)
-    match vk {
-        VK_LCONTROL | VK_RCONTROL => CTRL_DOWN.store(true, Ordering::SeqCst),
-        VK_LMENU | VK_RMENU => ALT_DOWN.store(true, Ordering::SeqCst),
-        VK_LSHIFT | VK_RSHIFT => SHIFT_DOWN.store(true, Ordering::SeqCst),
-        _ => {}
+    // Only key-down triggers matter for hotkey dispatch.
+    if !is_keydown {
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
     }
 
-    // Check for hotkey match
     let is_target = if ctx.target_is_win {
         vk == VK_LWIN || vk == VK_RWIN
     } else {
         vk == ctx.target_vk
     };
 
-    if is_target && check_modifiers(ctx) {
+    if is_target && !injected && check_modifiers(ctx) {
         HOTKEY_FIRED.store(true, Ordering::SeqCst);
+
+        // Wake the helper's message loop so it observes HOTKEY_FIRED and
+        // sends the event over the pipe.  For non-Win hotkeys, the
+        // RegisterHotKeyW fallback posts WM_HOTKEY which already wakes
+        // GetMessageW — but posting unconditionally is harmless.
+        if let Some(tid) = HELPER_THREAD_ID.get() {
+            unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
+        }
+
+        if ctx.target_is_win {
+            // Hold mask key down for entire Win press.
+            CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
+            send_mask_down();
+            return 1;
+        }
+        // Non-Win hotkey: eat key-down (prevents key from reaching focused window).
+        return 1;
     }
 
-    // Never eat the event — nex.exe's hook handles suppression
     unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) }
 }
 
@@ -386,6 +471,9 @@ fn main() {
         }
     }
 
+    // Cache this thread's ID so the hook proc can wake GetMessageW.
+    let _ = HELPER_THREAD_ID.set(unsafe { GetCurrentThreadId() });
+
     // Message loop
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
@@ -409,24 +497,58 @@ fn main() {
             break;
         }
 
+        // Discard wake-up messages (posted by hook proc to unblock
+        // GetMessageW after setting HOTKEY_FIRED).
+        if msg.message == WM_NEX_WAKE {
+            continue;
+        }
+
+        // Grant nex.exe foreground permission before every HOTKEY dispatch,
+        // so SetForegroundWindow succeeds even when Task Manager (High IL)
+        // is the foreground window.
+        let will_send_hotkey =
+            (msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id)
+            || HOTKEY_FIRED.load(Ordering::SeqCst);
+
+        if will_send_hotkey {
+            if let Some(cfg) = CFG.get() {
+                // AllowSetForegroundWindow is called from High IL (helper).
+                // nex.exe (Medium IL) can then call SetForegroundWindow once.
+                unsafe { AllowSetForegroundWindow(cfg.target_pid); }
+            }
+        }
+
         // Check for WM_HOTKEY (RegisterHotKeyW fallback)
         if msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id {
-            let _ = write_hotkey(&mut pipe);
+            if write_hotkey(&mut pipe).is_err() {
+                break; // nex.exe disconnected
+            }
         }
 
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {
-            let _ = write_hotkey(&mut pipe);
+            if let Some(cfg) = CFG.get() {
+                if cfg.target_is_win && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0 {
+                    if pipe.write_all(b"SUPPRESS_ON\n").is_err() {
+                        break; // nex.exe disconnected
+                    }
+                }
+            }
+            if write_hotkey(&mut pipe).is_err() {
+                break; // nex.exe disconnected
+            }
+        }
+
+        // Check if Win key was released (send SUPPRESS_OFF to nex.exe)
+        if WIN_KEY_RELEASED.swap(false, Ordering::SeqCst) {
+            if pipe.write_all(b"SUPPRESS_OFF\n").is_err() {
+                break; // nex.exe disconnected
+            }
         }
 
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
             windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-        }
-
-        // If pipe write fails (nex.exe disconnected), exit
-        if pipe.metadata().is_err() {
-            break;
         }
     }
 

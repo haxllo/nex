@@ -152,7 +152,7 @@ mod tests {
     fn updater_candidates_prefer_installed_layout_before_repo_fallback() {
         let root =
             std::env::temp_dir().join(format!("nex-updater-installed-{}", std::process::id()));
-        let exe_path = root.join("bin/nex.exe");
+        let exe_path = root.join("bin/Nex.exe");
         let cwd = root.clone();
 
         let candidates = updater_script_candidates(&exe_path, &cwd);
@@ -165,7 +165,7 @@ mod tests {
     fn updater_candidates_include_repo_style_script_lookup() {
         let root = std::env::temp_dir().join(format!("nex-updater-repo-{}", std::process::id()));
         let repo = root.join("repo");
-        let exe_path = repo.join("target/debug/nex.exe");
+        let exe_path = repo.join("target/debug/Nex.exe");
         let cwd = repo.join("apps/core");
 
         let candidates = updater_script_candidates(&exe_path, &cwd);
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn updater_candidates_are_deduplicated() {
         let repo = std::env::temp_dir().join(format!("nex-updater-dedupe-{}", std::process::id()));
-        let exe_path = repo.join("target/debug/nex.exe");
+        let exe_path = repo.join("target/debug/Nex.exe");
         let cwd = repo.join("target/debug");
 
         let candidates = updater_script_candidates(&exe_path, &cwd);

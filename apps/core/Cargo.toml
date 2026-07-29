@@ -1,6 +1,6 @@
 [package]
 name = "nex"
-version = "2.9.0"
+version = "2.9.1"
 edition = "2024"
 authors = ["haxllo"]
 description = "A keyboard-first launcher for Windows"
@@ -15,7 +15,7 @@ name = "nex_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nex"
+name = "Nex"
 path = "src/main.rs"
 
 [dependencies]

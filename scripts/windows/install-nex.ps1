@@ -59,14 +59,14 @@ if ($SkipBuild) {
 if (-not $SourceExe -or $SourceExe.Trim().Length -eq 0) {
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   $candidates = @(
-    (Join-Path $scriptDir "..\bin\nex.exe"),              # packaged zip layout
-    (Join-Path $scriptDir "..\..\target\release\nex.exe"), # repo layout
+    (Join-Path $scriptDir "..\bin\Nex.exe"),              # packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\Nex.exe"), # repo layout
     (Join-Path $scriptDir "..\bin\NexHelper.exe"),         # packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\NexHelper.exe"), # repo layout
     (Join-Path $scriptDir "..\bin\nex-core.exe"),          # legacy packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\nex-core.exe"), # legacy repo layout
-    (Join-Path (Get-Location) "bin\nex.exe"),
-    (Join-Path (Get-Location) "target\release\nex.exe"),
+    (Join-Path (Get-Location) "bin\Nex.exe"),
+    (Join-Path (Get-Location) "target\release\Nex.exe"),
     (Join-Path (Get-Location) "bin\NexHelper.exe"),
     (Join-Path (Get-Location) "target\release\NexHelper.exe"),
     (Join-Path (Get-Location) "bin\nex-core.exe"),
@@ -87,10 +87,10 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   Write-Host "[1/5] Building release binary from source..." -ForegroundColor Yellow
   Push-Location $repoRoot
   try {
-    cargo build -p nex --release --quiet --bin nex
+    cargo build -p nex --release --quiet --bin Nex
     cargo build -p nex-helper --release --quiet --bin NexHelper
     $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
-      "target\release\nex.exe",
+      "target\release\Nex.exe",
       "target\release\NexHelper.exe",
       "target\release\nex-core.exe"
     )
@@ -109,10 +109,10 @@ Could not find the Nex runtime executable to install.
 
 For end users:
 - Extract the release zip and run this script from that extracted folder.
-- The zip should contain bin\nex.exe.
+- The zip should contain bin\Nex.exe.
 
 For developers:
-- Re-run with -BuildFromSource, or pass -SourceExe "<full path to nex.exe>".
+- Re-run with -BuildFromSource, or pass -SourceExe "<full path to Nex.exe>".
 "@
 }
 
@@ -126,7 +126,7 @@ New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
 Write-Host "[3/5] Copying runtime files..."
-Copy-Item $SourceExe (Join-Path $binDir "nex.exe") -Force
+Copy-Item $SourceExe (Join-Path $binDir "Nex.exe") -Force
 
 $helperSourceDir = Split-Path -Parent $SourceExe
 $helperExe = Join-Path $helperSourceDir "NexHelper.exe"
@@ -174,7 +174,7 @@ foreach ($runbook in $runbookCandidates) {
   }
 }
 
-$installedExe = Join-Path $binDir "nex.exe"
+$installedExe = Join-Path $binDir "Nex.exe"
 
 Write-Host "[4/5] Preparing startup registration..."
 $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"

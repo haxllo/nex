@@ -85,6 +85,34 @@ pub(crate) fn finish_bare_win_press() {
     SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
 }
 
+/// Check if the configured hotkey is currently pressed using
+/// GetAsyncKeyState.  Works regardless of foreground window or thread
+/// context.  Used by the polling fallback thread (runtime_loop) when
+/// WH_KEYBOARD_LL and WM_INPUT both fail to fire (e.g. Task Manager /
+/// elevated UWP windows have focus).
+pub(crate) fn is_hotkey_pressed() -> bool {
+    let Some(ctx) = HOOK_CTX.get() else { return false };
+    if ctx.target_is_win {
+        return is_key_down(VK_LWIN) || is_key_down(VK_RWIN);
+    }
+    // Target key must be down.
+    if !is_key_down(ctx.target_key) { return false; }
+    // All required modifiers must be held.
+    if !ctx.required_mods.iter().all(|&m| match m {
+        VK_LWIN | VK_RWIN => is_key_down(VK_LWIN) || is_key_down(VK_RWIN),
+        VK_CTRL => is_key_down(VK_LCONTROL) || is_key_down(VK_RCONTROL),
+        VK_ALT => is_key_down(VK_LMENU) || is_key_down(VK_RMENU),
+        VK_SHIFT => is_key_down(VK_LSHIFT) || is_key_down(VK_RSHIFT),
+        other => is_key_down(other),
+    }) { return false; }
+    // No extra (non-target, non-required) modifiers may be held.
+    ALL_MODS.iter().all(|&m| {
+        if m == ctx.target_key || ctx.required_mods.contains(&m) { return true; }
+        if ctx.target_is_win && (m == VK_LWIN || m == VK_RWIN) { return true; }
+        !is_key_down(m)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Menu suppression strategy
 //
@@ -330,6 +358,54 @@ impl HotkeyListener {
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
+        // RegisterHotKeyW / UnregisterHotKey / LoadLibraryA / GetProcAddress
+        // are not directly available in windows-sys 0.61.2's API-sets layout.
+        // Load via raw extern "system" + user32 import.
+        const WM_HOTKEY: u32 = 0x0312u32;
+        const MOD_ALT: u32 = 0x0001;
+        const MOD_CONTROL: u32 = 0x0002;
+        const MOD_SHIFT: u32 = 0x0004;
+        const MOD_WIN: u32 = 0x0008;
+        type RegisterHotKeyFn = unsafe extern "system" fn(
+            hWnd: *mut core::ffi::c_void, id: i32, fsModifiers: u32, vk: u32,
+        ) -> i32;
+        type UnregisterHotKeyFn = unsafe extern "system" fn(
+            hWnd: *mut core::ffi::c_void, id: i32,
+        ) -> i32;
+        type GetProcAddressFn = unsafe extern "system" fn(
+            hModule: *mut core::ffi::c_void, lpProcName: *const u8,
+        ) -> *mut core::ffi::c_void;
+        type LoadLibraryAFn = unsafe extern "system" fn(
+            lpLibFileName: *const u8,
+        ) -> *mut core::ffi::c_void;
+        type GetModuleHandleAFn = unsafe extern "system" fn(
+            lpModuleName: *const u8,
+        ) -> *mut core::ffi::c_void;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryA(lpLibFileName: *const u8) -> *mut core::ffi::c_void;
+            fn GetProcAddress(hModule: *mut core::ffi::c_void, lpProcName: *const u8) -> *mut core::ffi::c_void;
+            fn GetModuleHandleA(lpModuleName: *const u8) -> *mut core::ffi::c_void;
+        }
+        let register_hotkey: Option<RegisterHotKeyFn> = unsafe {
+            let lib = LoadLibraryA("user32.dll\0".as_ptr());
+            if lib.is_null() { None } else {
+                let ptr = GetProcAddress(lib, "RegisterHotKeyW\0".as_ptr());
+                if ptr.is_null() { None } else {
+                    Some(std::mem::transmute::<_, RegisterHotKeyFn>(ptr))
+                }
+            }
+        };
+        let unregister_hotkey: Option<UnregisterHotKeyFn> = unsafe {
+            let lib = GetModuleHandleA("user32.dll\0".as_ptr());
+            if lib.is_null() { None } else {
+                let ptr = GetProcAddress(lib, "UnregisterHotKey\0".as_ptr());
+                if ptr.is_null() { None } else {
+                    Some(std::mem::transmute::<_, UnregisterHotKeyFn>(ptr))
+                }
+            }
+        };
+
         let thread = thread::Builder::new()
             .name("nex-hotkey-listener".into())
             .spawn(move || {
@@ -348,6 +424,46 @@ impl HotkeyListener {
                 let _ = thread_id_for_thread.set(tid);
                 let _ = ready_tx.send(Ok(()));
 
+                // Register system-level hotkey fallback via RegisterHotKeyW.
+                // Unlike WH_KEYBOARD_LL + WM_INPUT, RegisterHotKeyW delivers
+                // WM_HOTKEY to this thread's message queue regardless of
+                // foreground window or integrity level.  This ensures the
+                // hotkey works even when elevated/UWP windows (Task Manager,
+                // advanced settings) are foreground.
+                // Only registered for non-Win hotkeys (Win key cannot be
+                // registered via RegisterHotKeyW).
+                let mut fallback_id: u32 = 0;
+                let ctx = HOOK_CTX.get().unwrap();
+                if !ctx.target_is_win {
+                    let mod_map: &[(u32, u32)] = &[
+                        (0x11, 0x0002), // VK_CTRL  → MOD_CONTROL
+                        (0x12, 0x0001), // VK_ALT   → MOD_ALT
+                        (0x10, 0x0004), // VK_SHIFT → MOD_SHIFT
+                        (0x5B, 0x0008), // VK_LWIN  → MOD_WIN
+                        (0x5C, 0x0008), // VK_RWIN  → MOD_WIN
+                    ];
+                    let mut mods: u32 = 0;
+                    for &(vk, flag) in mod_map {
+                        if ctx.required_mods.contains(&vk) { mods |= flag; }
+                    }
+                    // Generate a unique hotkey ID that won't collide.
+                    fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
+                    let ok = match register_hotkey {
+                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
+                        None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
+                    };
+                    if ok == 0 {
+                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                        logging::warn(&format!(
+                            "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
+                            err,
+                        ));
+                        fallback_id = 0;
+                    } else {
+                        logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
+                    }
+                }
+
                 let mut msg: MSG = unsafe { std::mem::zeroed() };
                 let mut msg_count: u64 = 0;
                 while !should_exit_for_thread.load(Ordering::SeqCst) {
@@ -361,10 +477,25 @@ impl HotkeyListener {
                         logging::warn(&format!("[nex::debug] Hook: GetMessageW failed err={}, exiting", err));
                         break;
                     }
+                    // Check for WM_HOTKEY before dispatching (WM_HOTKEY has
+                    // no window proc — it's posted to the thread message queue).
+                    if msg.message == WM_HOTKEY && fallback_id != 0 {
+                        let hk_id = msg.wParam as u32;
+                        if hk_id == fallback_id {
+                            logging::info("[nex::debug] Hook: WM_HOTKEY fallback fired, sending toggle");
+                            let Some(ref ctx) = HOOK_CTX.get() else { continue; };
+                            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+                        }
+                    }
                     unsafe { TranslateMessage(&msg); DispatchMessageW(&msg); }
                     msg_count += 1;
                     if msg_count % 500 == 0 {
                         logging::info(&format!("[nex::debug] Hook: heartbeat {} msgs processed", msg_count));
+                    }
+                }
+                if fallback_id != 0 {
+                    if let Some(f) = unregister_hotkey {
+                        unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
                     }
                 }
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id); }

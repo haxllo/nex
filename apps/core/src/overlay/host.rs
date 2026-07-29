@@ -146,6 +146,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     apply_window_chrome(&window, &state);
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
+    // Register raw input sink permanently at startup so the overlay
+    // receives WM_INPUT for keyboard events regardless of which window
+    // is foreground.  This ensures hotkey detection works even when
+    // Task Manager, advanced settings, or other native Windows windows
+    // have focus (the WH_KEYBOARD_LL hook thread may not receive events
+    // for elevated/UWP windows).
+    register_raw_input_sink(hwnd, false);
+
     // Start suppression is handled by RIDEV_NOHOTKEYS via
     // RegisterRawInputDevices instead of a focus-sink window.
 
@@ -341,9 +349,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::Hide => {
-                    // Unregister raw-input sink so keyboard input routing
-                    // returns to normal while the overlay is hidden.
-                    unregister_raw_input_sink();
+                    // Remove RIDEV_NOHOTKEYS but keep the sink registered so
+                    // the overlay always receives WM_INPUT for all keyboard
+                    // events regardless of foreground window.  This ensures
+                    // the hotkey is detected even when Task Manager, advanced
+                    // settings, or other elevated/UWP windows have focus.
+                    register_raw_input_sink(hwnd, false);
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
                     let fg_after = unsafe { GetForegroundWindow() };
@@ -1071,22 +1082,29 @@ unsafe extern "system" fn instance_signal_subclass(
                     let flags = unsafe { raw.data.keyboard.Flags };
                     let is_win = vk == VK_LWIN || vk == VK_RWIN;
                     if is_win {
+                        if crate::overlay::hotkey::is_win_key_hotkey() {
+                            if (flags & RI_KEY_BREAK) != 0 {
+                                RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                            } else if RAW_WIN_DOWN
+                                .compare_exchange(
+                                    0,
+                                    vk as u32,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                crate::runtime::log_info(&format!(
+                                    "[nex::debug] WM_INPUT Win key={:?} sending toggle",
+                                    vk,
+                                ));
+                                let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                            }
+                        }
+                        // Always track Win key-up for mask key cleanup
+                        // even when the hotkey is not a Win key hotkey.
                         if (flags & RI_KEY_BREAK) != 0 {
                             RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-                        } else if RAW_WIN_DOWN
-                            .compare_exchange(
-                                0,
-                                vk as u32,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            )
-                            .is_ok()
-                        {
-                            crate::runtime::log_info(&format!(
-                                "[nex::debug] WM_INPUT Win key={:?} sending toggle",
-                                vk,
-                            ));
-                            let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
                         }
                     } else if (flags & RI_KEY_BREAK) == 0 {
                         // Non-Win hotkey detection via raw input.

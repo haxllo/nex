@@ -114,8 +114,6 @@ unsafe extern "system" {
     /// Find the overlay window by class name (High IL, no UIPI issue).
     fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> PipeHandle;
 
-    /// Set ForegroundWindow from High IL — bypasses UIPI.
-    fn SetForegroundWindow(hWnd: PipeHandle) -> i32;
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;

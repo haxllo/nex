@@ -607,13 +607,16 @@ impl Drop for HotkeyListener {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
             if inner.is_helper {
-                // Helper mode: terminate helper process, join pipe reader thread
+                // Helper mode: terminate helper process (if directly spawned),
+                // then join pipe reader thread.
                 if let Some(handle) = inner.helper_process_handle.take() {
-                    logging::info("[nex] shutdown: terminating helper process");
-                    unsafe {
-                        let h = handle as *mut core::ffi::c_void;
-                        windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
-                        windows_sys::Win32::Foundation::CloseHandle(h);
+                    if handle != 0 {
+                        logging::info("[nex] shutdown: terminating helper process");
+                        unsafe {
+                            let h = handle as *mut core::ffi::c_void;
+                            windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
+                            windows_sys::Win32::Foundation::CloseHandle(h);
+                        }
                     }
                 }
                 if let Some(handle) = inner.pipe_reader_thread.take() {
@@ -641,54 +644,131 @@ fn post_quit_to_thread(thread_id: u32) {
 }
 
 // ---------------------------------------------------------------------------
-// Elevated helper (named pipe + ShellExecuteExW "runas")
+// Elevated helper (scheduled task + JSON config, no UAC prompt)
 // ---------------------------------------------------------------------------
 
-/// Spawn the elevated helper process and connect to its named pipe.
-/// Returns (process handle, pipe file handle) on success.
+/// Well-known pipe name (PID-independent, single nex instance).
+const HELPER_PIPE_NAME: &str = r"\\.\pipe\nex-hotkey";
+
+/// Spawn the elevated helper via scheduled task and connect to its pipe.
+/// Returns (process_handle=0, pipe_file) — task-spawned helpers can't be
+/// terminated by nex (helper exits on pipe break automatically).
 fn spawn_and_connect_helper(
     target_key: u32,
     target_is_win: bool,
     required_mods: &[u32],
     hotkey_str: &str,
 ) -> Result<(isize, std::fs::File), String> {
-    let pid = std::process::id();
-    let pipe_name = format!(r"\\.\pipe\nex-hotkey-{pid}");
+    // 1. Write JSON config for the helper
+    let config_path = helper_config_path();
+    write_helper_config(&config_path, target_key, target_is_win, required_mods, hotkey_str)?;
 
-    // Spawn helper with ShellExecuteExW "runas" verb
-    let helper_handle = spawn_helper(&pipe_name, target_key, target_is_win, required_mods, hotkey_str)?;
+    // 2. Ensure scheduled task exists (one-time UAC if not yet created)
+    let helper_path = find_helper_exe()?;
+    ensure_helper_task(&helper_path)?;
 
-    // Connect to the helper's named pipe (retry — helper may still be starting)
-    let pipe_file = connect_pipe(&pipe_name)?;
+    // 3. Run the scheduled task (no UAC)
+    run_helper_task()?;
 
-    Ok((helper_handle, pipe_file))
+    // 4. Connect to the helper's named pipe (retry — helper may still be starting)
+    let pipe_file = connect_pipe(HELPER_PIPE_NAME)?;
+
+    // Process handle = 0 (scheduled task, not directly manageable)
+    Ok((0, pipe_file))
 }
 
-/// Spawn nex-helper.exe via ShellExecuteExW with "runas" verb.
-/// Returns the process HANDLE (caller owns it, must close on drop).
-fn spawn_helper(
-    pipe_name: &str,
-    target_key: u32,
-    target_is_win: bool,
-    required_mods: &[u32],
-    hotkey_str: &str,
-) -> Result<isize, String> {
+/// Locate nex-helper.exe beside nex.exe.
+fn find_helper_exe() -> Result<std::path::PathBuf, String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("can't get exe path: {e}"))?;
     let helper_path = exe_path.parent()
         .unwrap_or(&exe_path)
         .join("nex-helper.exe");
-
     if !helper_path.exists() {
         return Err(format!("helper not found: {}", helper_path.display()));
     }
+    Ok(helper_path)
+}
 
-    let args = build_helper_args(pipe_name, target_key, target_is_win, required_mods, hotkey_str);
+/// Path to the helper config JSON file in `%APPDATA%\Nex\`.
+fn helper_config_path() -> std::path::PathBuf {
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            // fallback
+            let home = std::env::var("USERPROFILE")
+                .unwrap_or_else(|_| "C:\\Users\\Default".into());
+            std::path::PathBuf::from(home).join("AppData").join("Roaming")
+        });
+    base.join("Nex").join("helper-config.json")
+}
 
-    // ShellExecuteExW with "runas" verb — triggers UAC elevation
+/// Write JSON config file that the helper reads at startup.
+fn write_helper_config(
+    path: &std::path::Path,
+    target_key: u32,
+    target_is_win: bool,
+    required_mods: &[u32],
+    hotkey_str: &str,
+) -> Result<(), String> {
+    let pid = std::process::id();
+    let mod_ctrl = required_mods.contains(&0x11);
+    let mod_alt = required_mods.contains(&0x12);
+    let mod_shift = required_mods.contains(&0x10);
+    let mod_win = required_mods.contains(&0x5B) || required_mods.contains(&0x5C);
+
+    // Ensure directory exists
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let json = format!(
+        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}"}}"#,
+        HELPER_PIPE_NAME,
+        pid,
+        target_key,
+        if target_is_win { "true" } else { "false" },
+        if mod_ctrl { "true" } else { "false" },
+        if mod_alt { "true" } else { "false" },
+        if mod_shift { "true" } else { "false" },
+        if mod_win { "true" } else { "false" },
+        hotkey_str,
+    );
+
+    std::fs::write(path, &json)
+        .map_err(|e| format!("failed to write helper config '{:?}': {e}", path))
+}
+
+const SCHTASK_NAME: &str = "NexHelper";
+
+/// Create the scheduled task if it doesn't exist (one-time UAC prompt).
+fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
+    // Check if task already exists
+    let query = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", SCHTASK_NAME])
+        .output()
+        .map_err(|e| format!("schtasks /query failed: {e}"))?;
+
+    if query.status.success() {
+        return Ok(()); // task exists
+    }
+
+    // Task doesn't exist — create it.
+    // The task runs nex-helper.exe with --config pointing to our JSON file.
+    // %APPDATA% is expanded by the task scheduler at runtime.
+    let task_cmd = format!(
+        r#""{}" --config "%APPDATA%\Nex\helper-config.json""#,
+        helper_path.display(),
+    );
+
+    // `schtasks /create` needs elevation — use `runas` for this one-time creation
     let verb = to_wide("runas");
-    let file = to_wide(helper_path.to_string_lossy().as_ref());
-    let params = to_wide(&args);
+    let file = to_wide("schtasks");
+    let params = to_wide(&format!(
+        "/create /tn {} /tr \"{}\" /runlevel HIGHEST /sc ONLOGON /f",
+        SCHTASK_NAME,
+        task_cmd,
+    ));
 
     #[repr(C)]
     struct SHELLEXECUTEINFOW {
@@ -709,12 +789,10 @@ fn spawn_helper(
         hProcess: *mut core::ffi::c_void,
     }
 
-    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x00000040;
     const SW_HIDE: i32 = 0;
 
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     sei.cb_size = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    sei.f_mask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = verb.as_ptr();
     sei.lpFile = file.as_ptr();
     sei.lpParameters = params.as_ptr();
@@ -725,18 +803,43 @@ fn spawn_helper(
         fn ShellExecuteExW(lpExecInfo: *const SHELLEXECUTEINFOW) -> i32;
     }
 
+    logging::info("[nex] creating scheduled task NexHelper (one-time UAC)");
     let ok = unsafe { ShellExecuteExW(&sei) };
     if ok == 0 {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        return Err(format!("ShellExecuteExW failed: getlasterror={err}"));
+        return Err(format!("failed to create scheduled task: getlasterror={err}"));
     }
 
-    let handle = sei.hProcess as isize;
-    if handle == 0 || handle == -1isize {
-        return Err("ShellExecuteExW returned invalid process handle".into());
+    // Brief wait for the task creation to complete
+    thread::sleep(Duration::from_millis(500));
+
+    // Verify task was created
+    let verify = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", SCHTASK_NAME, "/fo", "LIST"])
+        .output()
+        .map_err(|e| format!("schtasks /query after create failed: {e}"))?;
+
+    if !verify.status.success() {
+        return Err("scheduled task creation appeared to succeed but /query failed after create".into());
     }
 
-    Ok(handle)
+    logging::info("[nex] scheduled task NexHelper created successfully");
+    Ok(())
+}
+
+/// Run the scheduled task (no UAC).
+fn run_helper_task() -> Result<(), String> {
+    let output = std::process::Command::new("schtasks")
+        .args(["/run", "/tn", SCHTASK_NAME])
+        .output()
+        .map_err(|e| format!("schtasks /run failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("schtasks /run failed: {stderr}"));
+    }
+
+    Ok(())
 }
 
 /// Connect to an existing named pipe (client side, read-only).
@@ -761,7 +864,7 @@ fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
     const FILE_SHARE_WRITE: u32 = 0x00000002;
     const OPEN_EXISTING: u32 = 3;
 
-    for attempt in 0..30 {
+    for attempt in 0..40 {
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -782,47 +885,11 @@ fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
             return Ok(file);
         }
 
-        // Retry with backoff (helper may still be starting up + UAC prompt)
-        thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+        // Retry with backoff (helper may still be starting)
+        thread::sleep(Duration::from_millis(150 * (attempt as u64 + 1)));
     }
 
     Err(format!("failed to connect to pipe '{pipe_name}' after retries"))
-}
-
-/// Build CLI arguments string for nex-helper.exe.
-fn build_helper_args(
-    pipe_name: &str,
-    target_key: u32,
-    target_is_win: bool,
-    required_mods: &[u32],
-    hotkey_str: &str,
-) -> String {
-    let pid = std::process::id();
-    let mut args = format!(r#"--pipe "{pipe_name}""#);
-    args.push_str(&format!(r#" --target-pid {pid}"#));
-    args.push_str(&format!(r#" --hotkey "{hotkey_str}""#));
-
-    if target_is_win {
-        args.push_str(" --target-is-win --mod-win");
-    } else {
-        args.push_str(&format!(" --target-vk 0x{:02X}", target_key));
-    }
-
-    for &m in required_mods {
-        match m {
-            0x11 => args.push_str(" --mod-ctrl"),
-            0x12 => args.push_str(" --mod-alt"),
-            0x10 => args.push_str(" --mod-shift"),
-            0x5B | 0x5C => {
-                if !target_is_win {
-                    args.push_str(" --mod-win");
-                }
-            }
-            _ => {}
-        }
-    }
-
-    args
 }
 
 fn to_wide(s: &str) -> Vec<u16> {

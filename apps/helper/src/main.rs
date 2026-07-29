@@ -6,6 +6,7 @@
 //! named pipe.
 //!
 //! Usage:
+//!   nex-helper.exe --config "%APPDATA%\Nex\helper-config.json"
 //!   nex-helper.exe --pipe \\.\pipe\nex-hotkey-<pid> --target-vk 0x20 --mod-ctrl --hotkey "Ctrl+Space"
 
 #![cfg(target_os = "windows")]
@@ -113,12 +114,63 @@ const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
 // ---------------------------------------------------------------------------
-// CLI argument parsing
+// Config source: CLI args or JSON config file
 // ---------------------------------------------------------------------------
 
+/// Parse config from either `--config <file>` (JSON file) or individual CLI args.
 fn parse_args() -> Result<HotkeyConfig, String> {
     let args: Vec<String> = std::env::args().collect();
 
+    // Check for --config first
+    if let Some(pos) = args.iter().position(|a| a == "--config") {
+        if let Some(path) = args.get(pos + 1) {
+            return parse_config_file(path);
+        }
+    }
+
+    // Fall back to individual CLI args
+    parse_args_cli(&args)
+}
+
+fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read config '{path}': {e}"))?;
+
+    let pipe_path = json_str(&content, "pipe")?.to_string();
+    let hotkey_desc = json_str(&content, "hotkey").unwrap_or("unknown").to_string();
+    let target_pid = json_u32(&content, "target_pid")?;
+    let target_vk = json_u32(&content, "target_vk")?;
+    let target_is_win = json_bool(&content, "target_is_win");
+    let mod_ctrl = json_bool(&content, "mod_ctrl");
+    let mod_alt = json_bool(&content, "mod_alt");
+    let mod_shift = json_bool(&content, "mod_shift");
+    let mod_win = json_bool(&content, "mod_win");
+
+    if pipe_path.is_empty() {
+        return Err("config: 'pipe' is required".into());
+    }
+    if target_vk == 0 && !target_is_win {
+        return Err("config: 'target_vk' required (or target_is_win)".into());
+    }
+    if target_pid == 0 {
+        return Err("config: 'target_pid' is required".into());
+    }
+
+    Ok(HotkeyConfig {
+        pipe_path,
+        hotkey_desc,
+        target_pid,
+        target_vk,
+        target_is_win,
+        mod_ctrl,
+        mod_alt,
+        mod_shift,
+        mod_win,
+    })
+}
+
+/// Parse config from individual `--pipe`, `--target-vk`, etc CLI args.
+fn parse_args_cli(args: &[String]) -> Result<HotkeyConfig, String> {
     let mut pipe_path = String::new();
     let mut hotkey_desc = String::from("unknown");
     let mut target_pid: u32 = 0;
@@ -188,6 +240,44 @@ fn parse_args() -> Result<HotkeyConfig, String> {
         mod_shift,
         mod_win,
     })
+}
+
+/// Simple manual JSON helpers (no serde dependency needed).
+/// Expected format: `"key": value` where strings are `"..."` and numbers are bare.
+fn json_str<'a>(s: &'a str, key: &str) -> Result<&'a str, String> {
+    let pattern = format!("\"{key}\":");
+    let Some(start) = s.find(&pattern) else {
+        return Err(format!("config: key '{key}' not found"));
+    };
+    let after = &s[start + pattern.len()..];
+    let trimmed = after.trim_start();
+    if !trimmed.starts_with('"') {
+        return Err(format!("config: key '{key}' value is not a string"));
+    }
+    let inner = &trimmed[1..];
+    let end = inner.find('"').ok_or(format!("config: key '{key}' unterminated string"))?;
+    Ok(&inner[..end])
+}
+
+fn json_u32(s: &str, key: &str) -> Result<u32, String> {
+    let pattern = format!("\"{key}\":");
+    let Some(start) = s.find(&pattern) else {
+        return Err(format!("config: key '{key}' not found"));
+    };
+    let after = s[start + pattern.len()..].trim_start();
+    let end = after.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(after.len());
+    after[..end].parse::<u32>()
+        .map_err(|e| format!("config: key '{key}' invalid u32: {e}"))
+}
+
+fn json_bool(s: &str, key: &str) -> bool {
+    let pattern = format!("\"{key}\":");
+    s.find(&pattern)
+        .and_then(|start| {
+            let after = s[start + pattern.len()..].trim_start().to_lowercase();
+            if after.starts_with("true") { Some(true) } else { None }
+        })
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

@@ -865,15 +865,30 @@ fn run_schtasks_elevated(args: &str) -> Result<(), String> {
 }
 
 /// Create the scheduled task if it doesn't exist (one-time UAC prompt).
+/// Recreates if the binary path changed (e.g. after rename).
 fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Path) -> Result<(), String> {
-    // Check if task already exists
-    let query = std::process::Command::new("schtasks")
-        .args(["/query", "/tn", SCHTASK_NAME])
-        .output()
-        .map_err(|e| format!("schtasks /query failed: {e}"))?;
+    let path_str = helper_path.display().to_string();
 
-    if query.status.success() {
-        return Ok(()); // task exists, good
+    // Check if task already exists with matching command path
+    let ps_check = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-ScheduledTask -TaskName '{}').Actions.Execute", SCHTASK_NAME),
+        ])
+        .output()
+        .map_err(|e| format!("powershell task query failed: {e}"))?;
+
+    if ps_check.status.success() {
+        let actual = String::from_utf8_lossy(&ps_check.stdout).trim().to_string();
+        if actual == path_str {
+            return Ok(()); // task exists with correct path
+        }
+        logging::info(&format!(
+            "[nex] helper path changed (was '{}'), recreating task",
+            actual,
+        ));
     }
 
     // Task doesn't exist — create it via XML (avoids /tr quoting hell with UAC).

@@ -51,12 +51,12 @@ Press `Ctrl+Space` to summon the overlay (configurable in config.toml).
 | Command | Description |
 |---|---|
 | `cargo build --bin nex` | Debug build (nex only) |
-| `cargo build --release --bin nex --bin nex-helper` | Release build (both binaries) |
+| `cargo build --release --bin nex --bin NexHelper` | Release build (both binaries) |
 | `cargo build --release -p nex-helper` | Release build (helper only) |
 | `cargo build -p nex` | Debug build (package-scoped, equivalent) |
 | `cargo check -p nex` | Type-check without producing a binary |
 
-**`nex-helper.exe`** is a separate workspace member (`apps/helper`) that runs elevated (High IL) via a scheduled task. It handles hotkey detection when elevated/UWP windows (Task Manager, Settings, etc.) are foreground, and sets the overlay foreground from High IL to bypass UIPI.
+**`NexHelper.exe`** is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task, handles hotkey detection when elevated/UWP windows (Task Manager, Settings, etc.) are foreground, and sets the overlay foreground from High IL to bypass UIPI.
 
 The release build enables `windows_subsystem = "windows"` via `#![cfg_attr]`, suppressing the console window. Debug builds keep the console attached for development convenience.
 
@@ -75,7 +75,7 @@ nex --diagnostics-bundle      # Dump diagnostics to a zip archive
 nex                           # Normal: background hotkey runtime
 ```
 
-**Helper**: On first run, nex creates a scheduled task (`NexHelperV2`) to launch `nex-helper.exe` at High IL (one-time UAC prompt). This enables:
+**Helper**: On first run, nex creates a scheduled task (`NexHelperV2`) to launch `NexHelper.exe` at High IL (one-time UAC prompt). This enables:
 - Hotkey detection when elevated/UWP windows (Task Manager, Settings) are foreground
 - `SetForegroundWindow` from High IL to bypass UIPI, bringing overlay above elevated windows
 

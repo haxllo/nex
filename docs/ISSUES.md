@@ -134,3 +134,37 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | `apps/core/src/overlay_state.rs` | Toggle logic (show/hide/focus) |
 | `apps/core/src/overlay/shim.rs` | `is_visible()`, `has_focus()`, `show_and_focus()`, `hide()` |
 | `docs/win-key-hotkey-research-report.md` | Research on Win-key hotkey suppression techniques |
+
+---
+
+## Issue 3: Installer post-install launch flashes briefly — UNRESOLVED
+
+**Scope:** Inno Setup installer's "Launch Nex" checkbox at end of install.
+
+**Symptom:**
+- After install completes, clicking the launch checkbox starts nex.exe
+- Brief visual flash appears before nex settles
+- SUBSYSTEM confirmed WINDOWS (2) — not a console window
+- All CLI spawns eliminated from installer (registry, taskkill, `IsNexInstalled` guard)
+
+**Root cause:** Unknown.
+
+**Hypotheses:**
+
+| # | Theory | Status |
+|---|--------|--------|
+| 1 | WebView2 overlay window renders before HTML/CSS/JS is ready — framebuffer shows white/transparent acrylic briefly | Untested |
+| 2 | Inno Setup `Shellexec` creates a brief window flash during process creation | Untested |
+| 3 | nex.exe initializes with console-attached behavior from Inno Setup's process inheritance | Untested |
+
+**What was tried:**
+
+| Attempt | Result |
+|---------|--------|
+| Removed all `[Run]` sections that spawn nex.exe | Other flashes eliminated, launch checkbox still flashes |
+| Replaced PowerShell `Get-CimInstance + Stop-Process` with `taskkill /IM /F` | Removed one flash source |
+| Replaced `nex --set-launch-at-startup=true` with direct `[Registry]` writes | Removed another flash source |
+| Guarded `StopNexRuntime()` behind `IsNexInstalled()` | No more unnecessary spawned processes on fresh install |
+| Verified `cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")` | Binary subsystem = 2 (GUI) — not a console |
+
+**Mitigation in place:** `[Run]` launch checkbox is user-optional (they can uncheck and launch manually). Brief flash is cosmetic only — nex runs correctly afterwards.

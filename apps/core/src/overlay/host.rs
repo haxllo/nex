@@ -87,6 +87,8 @@ pub(crate) enum UiCommand {
     Show,
     /// Hide the overlay and arm the warm-release timer.
     Hide,
+    /// Hide and signal completion (used for synchronous hide-before-launch).
+    HideSync(std::sync::mpsc::Sender<()>),
     /// Fired by the warm-release timer; if still hidden and the
     /// generation matches, clears the icon cache while keeping the
     /// WebView warm for consistent re-open timing.
@@ -405,6 +407,31 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .max(500) as u64;
                     // Re-arm the single warm-release timer thread.
                     let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
+                }
+                UiCommand::HideSync(ack) => {
+                    crate::overlay::hotkey::hold_mask_before_hide();
+                    register_raw_input_sink(hwnd, false);
+                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                    window.set_visible(false);
+                    crate::overlay::hotkey::release_mask_after_hide();
+                    pending_resize = None;
+                    if ready {
+                        push_state(&webview, &state, &icon_cache, false);
+                    }
+                    if let Ok(mut s) = state.lock() {
+                        s.has_focus = false;
+                    }
+                    was_focused = false;
+                    show_pending = false;
+                    warm_gen = warm_gen.wrapping_add(1);
+                    let generation = warm_gen;
+                    let delay = state
+                        .lock()
+                        .map(|s| s.ui_warm_release_ms)
+                        .unwrap_or(5_000)
+                        .max(500) as u64;
+                    let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
+                    let _ = ack.send(());
                 }
                 UiCommand::Teardown(generation) => {
                     let still_hidden = !state.lock().map(|s| s.visible).unwrap_or(false);

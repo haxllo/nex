@@ -232,6 +232,16 @@ impl NativeOverlayShell {
         self.post(UiCommand::Hide);
     }
 
+    pub fn hide_sync(&self) {
+        self.with_state(|s| {
+            s.visible = false;
+            s.has_focus = false;
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.post(UiCommand::HideSync(tx));
+        let _ = rx.recv_timeout(Duration::from_millis(500));
+    }
+
     pub fn query_text(&self) -> String {
         self.inner
             .state

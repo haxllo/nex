@@ -94,6 +94,17 @@ unsafe extern "system" {
     ) -> PipeHandle;
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
+
+    fn CreateEventW(
+        lpEventAttributes: *mut core::ffi::c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> PipeHandle;
+
+    fn ResetEvent(hEvent: PipeHandle) -> i32;
+
+    fn CloseHandle(hObject: PipeHandle) -> i32;
 }
 
 #[link(name = "user32")]
@@ -106,6 +117,12 @@ unsafe extern "system" {
     /// Post a message to the specified thread's message queue. Used to
     /// wake GetMessageW from the hook proc after HOTKEY_FIRED is set.
     fn PostThreadMessageW(idThread: u32, Msg: u32, wParam: usize, lParam: isize) -> i32;
+
+    /// Find the overlay window by class name (High IL, no UIPI issue).
+    fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> PipeHandle;
+
+    /// Set ForegroundWindow from High IL — bypasses UIPI.
+    fn SetForegroundWindow(hWnd: PipeHandle) -> i32;
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
@@ -487,6 +504,23 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Overlay foreground helper (called from message loop on event signal)
+// ---------------------------------------------------------------------------
+
+/// Called when nex.exe signals that the overlay is now visible.
+/// Uses High IL to call SetForegroundWindow on the overlay, bypassing UIPI.
+fn set_overlay_foreground() {
+    let class = to_wide("NexOverlayWindowClass\0");
+    let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+    if hwnd as isize == 0 {
+        return;
+    }
+    unsafe {
+        SetForegroundWindow(hwnd);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -566,63 +600,96 @@ fn main() {
         }
     }
 
+    // Create named event for overlay-ready signal from nex.exe.
+    // nex.exe opens this event and sets it after showing the overlay.
+    // The helper (High IL) then calls SetForegroundWindow on the overlay,
+    // bypassing UIPI (both helper and Task Manager are High IL).
+    let overlay_ready_name = format!("Global\\nex-overlay-ready-{}", ctx.target_pid);
+    let overlay_ready_event = unsafe {
+        CreateEventW(
+            std::ptr::null_mut(), // default security
+            1,    // bManualReset = true (must call ResetEvent)
+            0,    // bInitialState = false (not signaled initially)
+            to_wide(&overlay_ready_name).as_ptr(),
+        )
+    };
+    if overlay_ready_event.is_null() || overlay_ready_event as isize == -1isize {
+        eprintln!("nex-helper: CreateEventW failed");
+        std::process::exit(1);
+    }
+
     // Cache this thread's ID so the hook proc can wake GetMessageW.
     let _ = HELPER_THREAD_ID.set(unsafe { GetCurrentThreadId() });
 
-    // Message loop
+    // Message loop — use MsgWaitForMultipleObjects to wait on both
+    // messages and the overlay-ready event.
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT,
+    };
+    use windows_sys::Win32::System::Threading::{ResetEvent, WAIT_OBJECT_0, WAIT_FAILED};
+
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
+    let mut handles = [overlay_ready_event, std::ptr::null_mut()];
+    let wait_forever = 0xFFFFFFFFu32;
 
     loop {
-        let status = unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(
-                &mut msg,
-                std::ptr::null_mut(),
-                0,
-                0,
+        // Wait for either a message or the overlay-ready event
+        let wait_result = unsafe {
+            MsgWaitForMultipleObjects(
+                1,                                 // only wait on the event (index 0)
+                handles.as_ptr(),                  // event handle array
+                0,                                 // fWaitAll = false (any will do)
+                wait_forever,                      // dwMilliseconds = INFINITE
+                QS_ALLINPUT,                       // wake for any message
             )
         };
 
-        if status == 0 {
-            // WM_QUIT
-            break;
-        }
-        if status == -1 {
-            // Error
+        if wait_result == WAIT_FAILED {
             break;
         }
 
-        // Wake-up messages are posted by hook proc to unblock GetMessageW
-        // after setting HOTKEY_FIRED.  Let them fall through so the loop
-        // body processes HOTKEY_FIRED below — do NOT `continue` here.
+        if wait_result == WAIT_OBJECT_0 {
+            // Overlay-ready event was signaled — nex.exe has shown the overlay,
+            // now set foreground from High IL.
+            unsafe { ResetEvent(overlay_ready_event); }
+            set_overlay_foreground();
+        }
 
-        // Grant nex.exe foreground permission before every HOTKEY dispatch,
-        // so SetForegroundWindow succeeds even when Task Manager (High IL)
-        // is the foreground window.
-        let will_send_hotkey =
-            (msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id)
-            || HOTKEY_FIRED.load(Ordering::SeqCst);
+        // Process all pending messages (may be zero if only event woke us)
+        let mut got_quit = false;
+        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            if msg.message == WM_QUIT {
+                got_quit = true;
+                break;
+            }
+            // Grant nex.exe foreground permission before every HOTKEY dispatch.
+            let will_send_hotkey =
+                (msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id)
+                || HOTKEY_FIRED.load(Ordering::SeqCst);
 
-        if will_send_hotkey {
-            if let Some(cfg) = CFG.get() {
-                // AllowSetForegroundWindow is called from High IL (helper).
-                // nex.exe (Medium IL) can then call SetForegroundWindow once.
-                unsafe { AllowSetForegroundWindow(cfg.target_pid); }
+            if will_send_hotkey {
+                if let Some(cfg) = CFG.get() {
+                    unsafe { AllowSetForegroundWindow(cfg.target_pid); }
+                }
+            }
 
-                // NOTE: We do NOT call SetForegroundWindow here — the
-                // overlay window is hidden (.with_visible(false)) and
-                // SetForegroundWindow on a hidden window always fails.
-                // AllowSetForegroundWindow above is sufficient; nex.exe
-                // calls SetForegroundWindow in its force_foreground after
-                // making the window visible.
+            // Process WM_HOTKEY (RegisterHotKeyW fallback)
+            if msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id {
+                if write_hotkey(&mut pipe).is_err() {
+                    got_quit = true;
+                    break; // nex.exe disconnected
+                }
+            }
+
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+                windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
             }
         }
 
-        // Check for WM_HOTKEY (RegisterHotKeyW fallback)
-        if msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id {
-            if write_hotkey(&mut pipe).is_err() {
-                break; // nex.exe disconnected
-            }
+        if got_quit {
+            break;
         }
 
         // Check if hook proc fired
@@ -645,15 +712,11 @@ fn main() {
                 break; // nex.exe disconnected
             }
         }
-
-        unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
-            windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-        }
     }
 
     // Cleanup
     unsafe {
+        windows_sys::Win32::System::Threading::CloseHandle(overlay_ready_event);
         windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
     }
     if fallback_id != 0 {

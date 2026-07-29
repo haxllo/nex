@@ -484,6 +484,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                         force_foreground(hwnd);
+                        // Signal the elevated helper to call SetForegroundWindow
+                        // from High IL (bypasses UIPI for Task Manager scenario).
+                        crate::overlay::hotkey::signal_overlay_ready();
                         // Re-assert topmost Z-position. When the overlay
                         // hides while focused, the focus-sink window
                         // (activated before hide to prevent Explorer

@@ -58,10 +58,13 @@ else {
 }
 
 Write-Host "[2/5] Hard-stopping any leftover Nex process..."
-foreach ($imageName in @("nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
+foreach ($imageName in @("nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
   taskkill /IM $imageName /F /T | Out-Null
 }
 Start-Sleep -Milliseconds 200
+
+Write-Host "[2.5/5] Removing elevated helper scheduled task..."
+schtasks /delete /tn NexHelperV2 /f 2>&1 | Out-Null
 
 Write-Host "[3/5] Removing startup registration..."
 reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Nex /f | Out-Null

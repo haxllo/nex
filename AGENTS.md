@@ -82,7 +82,7 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 
 ```bash
 # 1. bump version in Cargo.toml, commit, tag
-cargo build --release --bin nex --bin nex-helper
+cargo build --release --bin nex --bin NexHelper
 
 # 2. build artifacts (zip, setup, manifest)
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable

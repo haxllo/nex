@@ -46,6 +46,7 @@ SetupIconFile={#SetupIconPath}
 
 [Files]
 Source: "{#StageDir}\bin\nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#StageDir}\bin\NexHelper.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
@@ -76,6 +77,8 @@ Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden
 ; Remove per-user startup registration even if config still had launch_at_startup=true.
 Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Nex /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-startup"
 Filename: "{cmd}"; Parameters: "/C reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-legacy-startup"
+; Remove the elevated helper scheduled task.
+Filename: "{cmd}"; Parameters: "/C schtasks /delete /tn NexHelperV2 /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-remove-helper-task"
 ; Remove machine-wide startup registration when present (all-users installs).
 Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v Nex /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-startup-machine"
 Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-legacy-startup-machine"
@@ -333,6 +336,7 @@ end;
 procedure StopNexRuntime();
 begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex.exe'));
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\NexHelper.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex-core.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;

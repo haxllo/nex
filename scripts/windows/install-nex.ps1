@@ -61,10 +61,14 @@ if (-not $SourceExe -or $SourceExe.Trim().Length -eq 0) {
   $candidates = @(
     (Join-Path $scriptDir "..\bin\nex.exe"),              # packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\nex.exe"), # repo layout
+    (Join-Path $scriptDir "..\bin\NexHelper.exe"),         # packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\NexHelper.exe"), # repo layout
     (Join-Path $scriptDir "..\bin\nex-core.exe"),          # legacy packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\nex-core.exe"), # legacy repo layout
     (Join-Path (Get-Location) "bin\nex.exe"),
     (Join-Path (Get-Location) "target\release\nex.exe"),
+    (Join-Path (Get-Location) "bin\NexHelper.exe"),
+    (Join-Path (Get-Location) "target\release\NexHelper.exe"),
     (Join-Path (Get-Location) "bin\nex-core.exe"),
     (Join-Path (Get-Location) "target\release\nex-core.exe")
   )
@@ -84,8 +88,10 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   Push-Location $repoRoot
   try {
     cargo build -p nex --release --quiet --bin nex
+    cargo build -p nex-helper --release --quiet --bin NexHelper
     $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
       "target\release\nex.exe",
+      "target\release\NexHelper.exe",
       "target\release\nex-core.exe"
     )
     if ($built -and (Test-Path $built)) {
@@ -121,6 +127,14 @@ New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
 Write-Host "[3/5] Copying runtime files..."
 Copy-Item $SourceExe (Join-Path $binDir "nex.exe") -Force
+
+$helperSourceDir = Split-Path -Parent $SourceExe
+$helperExe = Join-Path $helperSourceDir "NexHelper.exe"
+if (Test-Path $helperExe) {
+  Copy-Item $helperExe (Join-Path $binDir "NexHelper.exe") -Force
+  Write-Host "  Bundled NexHelper.exe"
+}
+
 foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {
   $legacyPath = Join-Path $binDir $legacyName
   if (Test-Path -LiteralPath $legacyPath) {

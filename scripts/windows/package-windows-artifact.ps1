@@ -62,6 +62,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "docs") | Out-Nul
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-Null
 
 cargo build -p nex --release --quiet
+cargo build -p nex-helper --release --quiet
 
 $coreExe = "target/release/nex.exe"
 if (-not (Test-Path $coreExe)) {
@@ -116,6 +117,12 @@ else {
 }
 
 Copy-Item $coreExe (Join-Path $stageDir "bin/nex.exe") -Force
+
+$helperExe = "target/release/NexHelper.exe"
+if (-not (Test-Path $helperExe)) {
+  throw "Expected helper executable not found at $helperExe"
+}
+Copy-Item $helperExe (Join-Path $stageDir "bin/NexHelper.exe") -Force
 
 # -----------------------------------------------------------------------
 # Download and bundle Everything SDK DLL

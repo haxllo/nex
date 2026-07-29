@@ -92,6 +92,11 @@ pub(crate) fn finish_bare_win_press() {
     SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
 }
 
+/// Set by the elevated helper's pipe reader on Win key hotkey detection.
+pub(crate) fn set_suppress_focus_escape(suppress: bool) {
+    SUPPRESS_FOCUS_ESCAPE.store(suppress, Ordering::SeqCst);
+}
+
 /// Check if the configured hotkey is currently pressed using
 /// GetAsyncKeyState.  Works regardless of foreground window or thread
 /// context.  Used by the polling fallback thread (runtime_loop) when
@@ -383,6 +388,12 @@ impl HotkeyListener {
                             match line {
                                 Ok(l) if l == "HOTKEY" => {
                                     let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+                                }
+                                Ok(l) if l == "SUPPRESS_ON" => {
+                                    crate::overlay::hotkey::set_suppress_focus_escape(true);
+                                }
+                                Ok(l) if l == "SUPPRESS_OFF" => {
+                                    crate::overlay::hotkey::set_suppress_focus_escape(false);
                                 }
                                 Ok(_) => {} // ignore other lines
                                 Err(_) => break, // pipe disconnected
@@ -786,7 +797,9 @@ fn build_helper_args(
     required_mods: &[u32],
     hotkey_str: &str,
 ) -> String {
+    let pid = std::process::id();
     let mut args = format!(r#"--pipe "{pipe_name}""#);
+    args.push_str(&format!(r#" --target-pid {pid}"#));
     args.push_str(&format!(r#" --hotkey "{hotkey_str}""#));
 
     if target_is_win {

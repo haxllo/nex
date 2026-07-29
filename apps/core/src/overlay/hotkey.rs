@@ -607,8 +607,11 @@ impl Drop for HotkeyListener {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
             if inner.is_helper {
-                // Helper mode: terminate helper process (if directly spawned),
-                // then join pipe reader thread.
+                // Helper mode: drop pipe reader thread without joining.
+                // The thread is blocked on BufReader::lines() reading from
+                // the named pipe.  Joining would deadlock — the helper
+                // keeps the pipe open and never sends EOF.  We detach
+                // instead; ExitProcess kills all threads when main exits.
                 if let Some(handle) = inner.helper_process_handle.take() {
                     if handle != 0 {
                         logging::info("[nex] shutdown: terminating helper process");
@@ -619,10 +622,8 @@ impl Drop for HotkeyListener {
                         }
                     }
                 }
-                if let Some(handle) = inner.pipe_reader_thread.take() {
-                    logging::info("[nex] shutdown: joining pipe reader thread");
-                    let _ = handle.join();
-                }
+                // Drop JoinHandle without joining (detaches the thread).
+                drop(inner.pipe_reader_thread.take());
             } else {
                 // Hook mode: post WM_QUIT, join hook thread
                 if let Some(&tid) = inner.thread_id.get() {

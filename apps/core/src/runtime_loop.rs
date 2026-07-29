@@ -1130,7 +1130,7 @@ impl RuntimeWorker {
                         if list_selection < self.quick_launch_items.len() {
                             let item = &self.quick_launch_items[list_selection];
                             let path = item.path.clone();
-                            self.overlay.hide_now();
+                            self.overlay.hide_sync();
                             self.overlay_state.on_escape();
                             // Launch the Quick Launch item
                             match crate::action_executor::launch_open_target(&path) {
@@ -1328,6 +1328,8 @@ impl RuntimeWorker {
                     return;
                 }
 
+                self.overlay.hide_sync();
+                self.overlay_state.on_escape();
                 match launch_overlay_selection(
                     &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                     &self.runtime_config,
@@ -1338,8 +1340,6 @@ impl RuntimeWorker {
                 ) {
                     Ok(()) => {
                         self.overlay.set_status_text("");
-                        self.overlay.hide_now();
-                        self.overlay_state.on_escape();
                         reset_overlay_session(
                             &self.overlay,
                             &mut self.current_results,

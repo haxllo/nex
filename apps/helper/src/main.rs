@@ -507,15 +507,51 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Called when nex.exe signals that the overlay is now visible.
-/// Uses High IL to call SetForegroundWindow on the overlay, bypassing UIPI.
+/// Uses High IL to bring the overlay to front, bypassing UIPI.
+///
+/// Strategy (from most reliable to fallback):
+/// 1. Attach to the current foreground thread (same High IL, no UIPI),
+///    then call SetForegroundWindow so the system grants the call.
+/// 2. Also grant nex.exe foreground permission as a backup.
 fn set_overlay_foreground() {
     let class = to_wide("NexOverlayWindowClass\0");
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd as isize == 0 {
         return;
     }
+
     unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+        };
+        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
+        // 1. Grant nex.exe foreground permission (backup path)
+        if let Some(cfg) = CFG.get() {
+            AllowSetForegroundWindow(cfg.target_pid);
+        }
+
+        // 2. Attach this thread to the foreground thread (both High IL) so
+        //    SetForegroundWindow succeeds.  This mirrors nex.exe's
+        //    force_foreground() trick but runs at High IL where
+        //    AttachThreadInput is not blocked by UIPI.
+        let fg = GetForegroundWindow();
+        let helper_tid = GetCurrentThreadId();
+        let fg_tid = if fg as isize == 0 {
+            0
+        } else {
+            GetWindowThreadProcessId(fg, std::ptr::null_mut())
+        };
+        let should_attach = fg_tid != 0 && fg_tid != helper_tid;
+        if should_attach {
+            AttachThreadInput(helper_tid, fg_tid, 1);
+        }
+
         SetForegroundWindow(hwnd);
+
+        if should_attach {
+            AttachThreadInput(helper_tid, fg_tid, 0);
+        }
     }
 }
 

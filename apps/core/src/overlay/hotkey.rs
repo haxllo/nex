@@ -739,60 +739,30 @@ fn write_helper_config(
         .map_err(|e| format!("failed to write helper config '{:?}': {e}", path))
 }
 
-const SCHTASK_NAME: &str = "NexHelper";
+const SCHTASK_NAME: &str = "NexHelperV2";
 
-/// Create the scheduled task if it doesn't exist (one-time UAC prompt).
-fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
-    // Check if task already exists
-    let query = std::process::Command::new("schtasks")
-        .args(["/query", "/tn", SCHTASK_NAME])
-        .output()
-        .map_err(|e| format!("schtasks /query failed: {e}"))?;
-
-    if query.status.success() {
-        return Ok(()); // task exists
-    }
-
-    // Task doesn't exist — create it.
-    // The task runs nex-helper.exe with --config pointing to our JSON file.
-    // %APPDATA% is expanded by the task scheduler at runtime.
-    let task_cmd = format!(
-        r#""{}" --config "%APPDATA%\Nex\helper-config.json""#,
-        helper_path.display(),
-    );
-
-    // `schtasks /create` needs elevation — use `runas` for this one-time creation
+/// Run `schtasks` with `runas` verb (elevated), wait for completion,
+/// return error if exit code != 0.
+fn run_schtasks_elevated(args: &str) -> Result<(), String> {
     let verb = to_wide("runas");
     let file = to_wide("schtasks");
-    let params = to_wide(&format!(
-        "/create /tn {} /tr \"{}\" /runlevel HIGHEST /sc ONLOGON /f",
-        SCHTASK_NAME,
-        task_cmd,
-    ));
+    let params = to_wide(args);
 
     #[repr(C)]
     struct SHELLEXECUTEINFOW {
-        cb_size: u32,
-        f_mask: u32,
-        hwnd: *mut core::ffi::c_void,
-        lpVerb: *const u16,
-        lpFile: *const u16,
-        lpParameters: *const u16,
-        lpDirectory: *const u16,
-        nShow: i32,
-        hInstApp: *mut core::ffi::c_void,
-        lpIDList: *mut core::ffi::c_void,
-        lpClass: *const u16,
-        hkeyClass: *mut core::ffi::c_void,
-        dwHotKey: u32,
-        hIcon: *mut core::ffi::c_void,
-        hProcess: *mut core::ffi::c_void,
+        cb_size: u32, f_mask: u32, hwnd: *mut core::ffi::c_void,
+        lpVerb: *const u16, lpFile: *const u16, lpParameters: *const u16,
+        lpDirectory: *const u16, nShow: i32, hInstApp: *mut core::ffi::c_void,
+        lpIDList: *mut core::ffi::c_void, lpClass: *const u16,
+        hkeyClass: *mut core::ffi::c_void, dwHotKey: u32,
+        hIcon: *mut core::ffi::c_void, hProcess: *mut core::ffi::c_void,
     }
-
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x00000040;
     const SW_HIDE: i32 = 0;
 
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     sei.cb_size = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.f_mask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = verb.as_ptr();
     sei.lpFile = file.as_ptr();
     sei.lpParameters = params.as_ptr();
@@ -803,27 +773,55 @@ fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
         fn ShellExecuteExW(lpExecInfo: *const SHELLEXECUTEINFOW) -> i32;
     }
 
-    logging::info("[nex] creating scheduled task NexHelper (one-time UAC)");
     let ok = unsafe { ShellExecuteExW(&sei) };
     if ok == 0 {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        return Err(format!("failed to create scheduled task: getlasterror={err}"));
+        return Err(format!("ShellExecuteExW failed: getlasterror={err}"));
     }
 
-    // Brief wait for the task creation to complete
-    thread::sleep(Duration::from_millis(500));
+    let handle = sei.hProcess as isize;
+    if handle == 0 || handle == -1isize {
+        return Err("ShellExecuteExW returned invalid process handle".into());
+    }
 
-    // Verify task was created
-    let verify = std::process::Command::new("schtasks")
-        .args(["/query", "/tn", SCHTASK_NAME, "/fo", "LIST"])
+    // Wait for schtasks.exe to finish
+    let h = handle as *mut core::ffi::c_void;
+    unsafe {
+        windows_sys::Win32::System::Threading::WaitForSingleObject(h, 30_000);
+        windows_sys::Win32::Foundation::CloseHandle(h);
+    }
+    Ok(())
+}
+
+/// Create the scheduled task if it doesn't exist (one-time UAC prompt).
+fn ensure_helper_task(helper_path: &std::path::Path) -> Result<(), String> {
+    // Check if task already exists
+    let query = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", SCHTASK_NAME])
         .output()
-        .map_err(|e| format!("schtasks /query after create failed: {e}"))?;
+        .map_err(|e| format!("schtasks /query failed: {e}"))?;
 
-    if !verify.status.success() {
-        return Err("scheduled task creation appeared to succeed but /query failed after create".into());
+    if query.status.success() {
+        return Ok(()); // task exists, good
     }
 
-    logging::info("[nex] scheduled task NexHelper created successfully");
+    // Task doesn't exist — create it.
+    // Use ONCE with past date so it never auto-runs — only manual /run triggers it.
+    // Use escaped quotes (\") so CommandLineToArgvW produces the correct
+    // command line: `"C:\path\to\nex-helper.exe" --config "%APPDATA%\Nex\helper-config.json"`
+    let task_cmd = format!(
+        "\\\"{}\\\" --config \\\"%APPDATA%\\Nex\\helper-config.json\\\"",
+        helper_path.display(),
+    );
+
+    logging::info("[nex] creating scheduled task NexHelperV2 (one-time UAC)");
+    run_schtasks_elevated(&format!(
+        "/create /tn {} /tr \"{}\" /runlevel HIGHEST /sc ONCE /st 00:00 /sd 01/01/2000 /f",
+        SCHTASK_NAME,
+        task_cmd,
+    ))?;
+
+    logging::info(&format!("[nex] scheduled task {} created successfully", SCHTASK_NAME));
     Ok(())
 }
 

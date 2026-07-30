@@ -247,8 +247,24 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 |-------|------|
 | 1. Fix Win key issues | ✅ Done (Issue 2 — RIDEV_NOHOTKEYS + key-up passthrough; Issue 7 — chord detection) |
 | 2. Dynamic hotkey re-registration | ✅ Done (Issue 4 — feature impl; Issue 10 — stability fixes: 11 bugs resolved) |
-| 3. Default config change | `hotkey = "Win"` in template |
-| 4. Onboarding | First-run prompt: "Set Win key as Nex hotkey (replaces Start Menu)?" |
+
+**Infrastructure (done):**
+- [x] Win key fires on key-up (no Start menu)
+- [x] Win+ chords pass through natively
+- [x] Elevated window support (helper)
+- [x] Dynamic hotkey re-registration
+
+**To ship as default:**
+- [ ] Change default hotkey in `config.rs` template from `Ctrl+Space` → `Win`
+- [ ] First-run overlay explains "Win key opens Nex"
+- [ ] In-app hotkey picker (UI in overlay to change without editing config)
+- [ ] File/folder creation from Nex (Issue 5)
+- [ ] Config migration path for existing users
+- [ ] Edge-case hardening (fast double-press, sleep/wake, session lock)
+
+**Future (nice to have):**
+- [ ] Start Menu-style app launcher tabs/categories
+- [ ] System tray → full Start replacement settings
 
 ---
 
@@ -420,3 +436,24 @@ Build succeeds. Manual testing:
 - Rapid config saves don't create duplicate events or zombie threads
 - Win ↔ Ctrl+Space transitions work both ways
 - Helper restarts with correct config after re-registration
+
+---
+
+## Issue 11: Shutdown/restart/lock not possible when Win key replaces Start Menu — FEATURE
+
+**Scope:** Users who configure Win key as Nex hotkey lose the Start Menu's power menu (shutdown, restart, sleep, lock, sign out).
+
+**Symptom:** Win key opens Nex instead of Start Menu. User has no obvious way to shutdown/restart/lock/sleep without the Start power button. Win+X (Quick Link) → U → U (shutdown) still works as a workaround, but is not discoverable.
+
+**Goal:** Provide power management actions from within Nex so users don't need the Start Menu.
+
+**Possible approaches:**
+
+| Approach | Description |
+|----------|-------------|
+| 1. Search commands | Type "shutdown", "restart", "lock", "sleep" in Nex → execute the action (with confirmation for destructive ones) |
+| 2. Overlay power button | Small power icon in the overlay footer/tray area |
+| 3. System tray submenu | Right-click tray icon → Shutdown / Restart / Lock / Sleep |
+| 4. Custom hotkey chord | e.g. Win+X within Nex opens a power menu |
+
+**Why:** Core gap for Win-key-as-default — users must not lose the ability to shutdown/restart their machine. Without this, Win key default is a downgrade.

@@ -9,7 +9,7 @@
 #![cfg(target_os = "windows")]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -29,6 +29,7 @@ use crate::overlay::model::OverlayEvent;
 // Static globals
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct HookContext {
     sender: Sender<OverlayEvent>,
     hotkey_id: i32,
@@ -37,7 +38,7 @@ struct HookContext {
     required_mods: Vec<u32>,
 }
 
-static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
+static HOOK_CTX: Mutex<Option<HookContext>> = Mutex::new(None);
 
 // Track VK of a Win key-down that was consumed by the hotkey, so the
 // matching key-up is also consumed.
@@ -50,7 +51,7 @@ static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.
 pub(crate) fn is_win_key_hotkey() -> bool {
-    HOOK_CTX.get().map(|ctx| ctx.target_is_win).unwrap_or(false)
+    HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|ctx| ctx.target_is_win)).unwrap_or(false)
 }
 
 /// Check if raw-input VK matches the configured hotkey (target key +
@@ -72,7 +73,10 @@ fn win_chord_held_via_async() -> bool {
 }
 
 pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
-    let Some(ctx) = HOOK_CTX.get() else { return false };
+    let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
+        Some(ctx) => ctx,
+        None => return false,
+    };
     if ctx.target_is_win {
         if !(vk == VK_LWIN as u16 || vk == VK_RWIN as u16) { return false; }
         // If any non-modifier key is also held, it's a Win chord — pass through.
@@ -121,7 +125,10 @@ pub(crate) fn set_suppress_focus_escape(suppress: bool) {
 /// WH_KEYBOARD_LL and WM_INPUT both fail to fire (e.g. Task Manager /
 /// elevated UWP windows have focus).
 pub(crate) fn is_hotkey_pressed() -> bool {
-    let Some(ctx) = HOOK_CTX.get() else { return false };
+    let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
+        Some(ctx) => ctx,
+        None => return false,
+    };
     if ctx.target_is_win {
         if !(is_key_down(VK_LWIN) || is_key_down(VK_RWIN)) { return false; }
         // If any non-modifier key is held alongside Win, it's a chord.
@@ -270,10 +277,11 @@ unsafe extern "system" fn keyboard_hook_proc(
     let is_keydown = msg == 0x0100 || msg == 0x0104;
     let is_keyup = msg == 0x0101 || msg == 0x0105;
 
-    let Some(ctx) = HOOK_CTX.get() else {
-        return unsafe {
+    let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
+        Some(ctx) => ctx,
+        None => return unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
-        };
+        },
     };
 
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
@@ -422,7 +430,7 @@ impl HotkeyListener {
         let should_exit = Arc::new(AtomicBool::new(false));
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
 
-        let _ = HOOK_CTX.set(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
+        *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
 
         // --- Try elevated helper first (handles Task Manager / elevated windows) ---
         let helper_result = spawn_and_connect_helper(
@@ -542,7 +550,8 @@ impl HotkeyListener {
                 // Only registered for non-Win hotkeys (Win key cannot be
                 // registered via RegisterHotKeyW).
                 let mut fallback_id: u32 = 0;
-                let ctx = HOOK_CTX.get().unwrap();
+                let ctx_ref = HOOK_CTX.lock().unwrap();
+                let ctx = ctx_ref.as_ref().unwrap();
                 if !ctx.target_is_win {
                     let mod_map: &[(u32, u32)] = &[
                         (0x11, 0x0002), // VK_CTRL  → MOD_CONTROL
@@ -592,7 +601,10 @@ impl HotkeyListener {
                         let hk_id = msg.wParam as u32;
                         if hk_id == fallback_id {
                             logging::info("[nex::debug] Hook: WM_HOTKEY fallback fired, sending toggle");
-                            let Some(ref ctx) = HOOK_CTX.get() else { continue; };
+                            let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
+                                Some(ctx) => ctx,
+                                None => continue,
+                            };
                             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
                         }
                     }
@@ -661,12 +673,20 @@ impl Drop for HotkeyListener {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
             if inner.is_helper {
-                // Helper mode: drop pipe reader thread without joining.
-                // The thread is blocked on BufReader::lines() reading from
-                // the named pipe.  Joining would deadlock — the helper
-                // keeps the pipe open and never sends EOF.  We detach
-                // instead; ExitProcess kills all threads when main exits.
-                if let Some(handle) = inner.helper_process_handle.take() {
+                // Helper mode: terminate helper process then drop
+                // (detach) the pipe reader thread.
+                //
+                // The pipe reader blocks on BufReader::lines() reading
+                // from the named pipe.  Terminating the helper closes
+                // its pipe end, making the next read fail -> the reader
+                // loop breaks and the thread exits on its own.
+                //
+                // For direct-spawn mode (helper_process_handle != 0) we
+                // use TerminateProcess.  For scheduled-task mode the
+                // handle is 0 (no direct process ownership), so we kill
+                // by process name — safe because nex is single-instance
+                // so killing any NexHelper.exe belongs to us.
+                let had_handle = if let Some(handle) = inner.helper_process_handle.take() {
                     if handle != 0 {
                         logging::info("[nex] shutdown: terminating helper process");
                         unsafe {
@@ -674,7 +694,18 @@ impl Drop for HotkeyListener {
                             windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
                             windows_sys::Win32::Foundation::CloseHandle(h);
                         }
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
+                };
+                if !had_handle {
+                    logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/IM", "NexHelper.exe"])
+                        .output();
                 }
                 // Drop JoinHandle without joining (detaches the thread).
                 drop(inner.pipe_reader_thread.take());

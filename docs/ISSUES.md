@@ -271,15 +271,16 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | Hook win key-down | Mark `CONSUMED_WIN_VK`, send mask, **don't eat** — message passes through normally |
 | Chord detection | Non-modifier key-down (E, D, R, etc.) while `CONSUMED_WIN_VK` set → clears `CONSUMED_WIN_VK`, releases mask, passes through |
 | Hook win key-up | If `CONSUMED_WIN_VK` still matches (no chord) → fire hotkey. If chord cleared it → no-op. |
-| WM_INPUT handler | Checks `OVERLAY_VISIBLE` atomic — only fires toggle when overlay is visible (second press to hide). First press exclusively handled by hook on key-up. |
-| Second press (overlay visible) | WM_INPUT handler fires on Win key-down immediately via `GetAsyncKeyState`. Win+E hides overlay + opens Explorer. |
+| Helper hook proc | Mirrors nex hook proc — key-down: mark+mask+pass through, chord clears `CONSUMED_WIN_VK`, key-up: fire hotkey if no chord. Applied in commit b20245d. |
+| WM_INPUT handler | Ignores Win key entirely — raw input only tracks `RAW_WIN_DOWN` for mask key cleanup. Both show and hide handled by hook/helper on key-up. |
+| Second press (overlay visible) | Hook/helper fires on Win key-up, same as first press. Win+E passes through (chord detection clears `CONSUMED_WIN_VK`), Explorer opens + overlay stays visible until bare Win release. |
 
 **Key decisions:**
 - **No timer thread** — hotkey fires on key-up, not a delayed timer. Eliminates race between timer and chord detection entirely.
 - **No key-down eat** — Win passes through the hook, so `GetAsyncKeyState` stays accurate and Win+ chords work natively.
 - **First press via hook, second via WM_INPUT** — separate detection paths with `OVERLAY_VISIBLE` as gate.
 
-**Trade-off accepted:** Nex opens on Win key-up, not key-down. For a quick tap (~50-150ms between press and release) this is imperceptible. For a held Win, Nex opens on release — users learn to tap.
+**Trade-off accepted:** Nex toggles on Win key-up for both show and hide. For a quick tap (~50-150ms between press and release) this is imperceptible. For a held Win, overlay toggles on release — users learn to tap.
 
 **What was tried (chronological):**
 
@@ -290,6 +291,7 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | `any_non_mod_held()` + `win_chord_held_via_async()` | Check if any non-mod key physically held | Misses chord because Win-down processed first, chord key not yet pressed |
 | Timer thread (120ms) | Spawn thread on Win-down, fire hotkey after 120ms if no chord | Race: timer fires hotkey before chord key-down arrives → flash + inconsistency |
 | **Key-up only + chord detection** | Win-down: mark+sink, Win-up: fire if no chord | **FIXED** — no races, no timer, no flash |
+| **Helper key-up mismatch (regression)** | Helper fired on key-down + WM_INPUT fired on key-down → second press hid on key-down then re-showed on key-up (Issue 7 regression 2026-07-30) | **Fixed** — removed WM_INPUT Win toggle, updated helper to key-up approach |
 
 ---
 

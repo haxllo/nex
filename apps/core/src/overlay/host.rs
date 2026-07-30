@@ -1166,21 +1166,12 @@ unsafe extern "system" fn instance_signal_subclass(
                                 )
                                 .is_ok()
                             {
-                                // Only toggle when overlay is visible (hide).
-                                // First press goes through the WH_KEYBOARD_LL hook
-                                // which fires on Win key-up (no chord).
-                                if !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
-                                    crate::runtime::log_info(&format!(
-                                        "[nex::debug] WM_INPUT Win key={:?} ignoring (overlay hidden, hook handles)",
-                                        vk,
-                                    ));
-                                } else {
-                                    crate::runtime::log_info(&format!(
-                                        "[nex::debug] WM_INPUT Win key={:?} sending toggle",
-                                        vk,
-                                    ));
-                                    let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
-                                }
+                                // Ignore Win key in WM_INPUT — hook/helper fires
+                                // on key-up for both show and hide.
+                                crate::runtime::log_info(&format!(
+                                    "[nex::debug] WM_INPUT Win key={:?} ignoring (hook/helper fires on key-up)",
+                                    vk,
+                                ));
                             }
                         }
                         // Always track Win key-up for mask key cleanup

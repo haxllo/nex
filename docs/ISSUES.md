@@ -168,3 +168,212 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | Verified `cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")` | Binary subsystem = 2 (GUI) — not a console |
 
 **Mitigation in place:** `[Run]` launch checkbox is user-optional (they can uncheck and launch manually). Brief flash is cosmetic only — nex runs correctly afterwards.
+
+---
+
+## Issue 4: Changing hotkey in config requires restart — FEATURE
+
+**Scope:** Runtime config hotkey change without restarting nex.
+
+**Symptom:**
+- Edit `config.toml` → change `hotkey = "Ctrl+Space"` to something else
+- Save file
+- Nex polls config every 500ms, detects hotkey changed
+- Logs: `"config hotkey changed (... -> ...), restart required to apply"`
+- Shows status message: "Restart required to apply hotkey changes"
+- Old hotkey still active until nex restarts
+
+**Root cause:** `HotkeyListener` registers the hotkey once at startup via `RegisterHotKey` / `WH_KEYBOARD_LL`. Config reload path (`runtime_index.rs:284`) detects the change but never re-registers the listener with the new hotkey string.
+
+**What exists:**
+| Component | Detail |
+|-----------|--------|
+| `CONFIG_RELOAD_POLL_INTERVAL` | 500ms poll |
+| `RuntimeConfigWatcher` | mtime-based change detection |
+| `hotkey_changed` flag | Detected but ignored (log + notify only) |
+| Hotkey crash recovery | `runtime_loop.rs:797-823` — restarts listener with new config if thread died |
+
+**What's needed:**
+- When config hotkey changes, unregister old hotkey and re-register with new value
+- No restart required
+- On failure, fall back to restart-required notification (current behavior)
+
+**Related files:**
+| File | Role |
+|------|------|
+| `apps/core/src/runtime_index.rs` | Config reload logic (line 284: hotkey_changed) |
+| `apps/core/src/runtime_loop.rs` | Hotkey listener lifecycle (line 797-823) |
+| `apps/core/src/overlay/hotkey.rs` | Hotkey registration/parsing |
+| `apps/core/src/config.rs` | Config defaults + schema |
+
+---
+
+## Issue 5: Create files/folders from Nex — FEATURE
+
+**Scope:** File system operations from the overlay (like macOS Finder's "New File" / "New Folder").
+
+**Goal:** User types "new file" or "new folder" in Nex → creates item in current/active directory or specified path.
+
+**Use cases:**
+- `new file ~/Desktop/report.md` → creates empty file
+- `new folder projects/nex` → creates directory
+- Template support: `new file index.html` → creates from a default HTML template
+
+**Why:** Core gap vs Start Menu / Spotlight — being able to create files without touching mouse is a major productivity win.
+
+---
+
+## Issue 6: Win key as default hotkey (replace Start Menu) — FEATURE
+
+**Scope:** Default config change + UX to make `Win` the default hotkey instead of `Ctrl+Space`.
+
+**Goal:** Nex becomes the Start Menu replacement — Win key opens Nex, not Start.
+
+**What's needed:**
+- Change default config `hotkey` from `"Ctrl+Space"` to `"Win"` 
+- Ensure Win-key start suppression works reliably (Issue 2 fix covers this)
+- Migration path: existing users keep their current config, new installs get `Win`
+- Potential: detect if user hasn't changed hotkey and suggest migrating
+
+**Why:** The Win key is the most accessible keyboard shortcut. Ctrl+Space conflicts with IDEs (VS Code, IntelliJ). Making Win the default makes Nex a true Start Menu replacement.
+
+**Roadmap to win key default:**
+
+| Phase | What |
+|-------|------|
+| 1. Fix Win key issues | ✅ Done (Issue 2 — RIDEV_NOHOTKEYS + key-up passthrough; Issue 7 — chord detection) |
+| 2. Dynamic hotkey re-registration | ⏳ Issue 4 — changing config hotkey without restart |
+| 3. Default config change | `hotkey = "Win"` in template |
+| 4. Onboarding | First-run prompt: "Set Win key as Nex hotkey (replaces Start Menu)?" |
+
+---
+
+## Issue 7: Win key hotkey blocks all Win+ shortcuts — FIXED
+
+**Scope:** Hotkey configured as `Win` alone.
+
+**Symptom (original):**
+- Pressing `Win+E` (Explorer) → Nex opens instead of Explorer
+- Pressing `Win+D` (Show Desktop) → Nex opens instead
+- Pressing `Win+R` (Run), `Win+I` (Settings), etc. → all captured by Nex
+- Win key cannot function as both Nex hotkey AND Windows modifier simultaneously
+
+**Root cause:** Two independent problems:
+1. **Hook proc ate Win key-down** — chord key (E, D, etc.) never arrived at the target window because the hook consumed the Win press.
+2. **WM_INPUT handler fired on first press** — the raw input sink toggled the overlay on Win key-down, racing with the hook.
+
+### Fix
+
+**Strategy:** Fire hotkey only on Win key-up. Never eat Win key-down. Use chord detection on key-down to classify the press.
+
+| Component | Mechanism |
+|-----------|-----------|
+| Hook win key-down | Mark `CONSUMED_WIN_VK`, send mask, **don't eat** — message passes through normally |
+| Chord detection | Non-modifier key-down (E, D, R, etc.) while `CONSUMED_WIN_VK` set → clears `CONSUMED_WIN_VK`, releases mask, passes through |
+| Hook win key-up | If `CONSUMED_WIN_VK` still matches (no chord) → fire hotkey. If chord cleared it → no-op. |
+| WM_INPUT handler | Checks `OVERLAY_VISIBLE` atomic — only fires toggle when overlay is visible (second press to hide). First press exclusively handled by hook on key-up. |
+| Second press (overlay visible) | WM_INPUT handler fires on Win key-down immediately via `GetAsyncKeyState`. Win+E hides overlay + opens Explorer. |
+
+**Key decisions:**
+- **No timer thread** — hotkey fires on key-up, not a delayed timer. Eliminates race between timer and chord detection entirely.
+- **No key-down eat** — Win passes through the hook, so `GetAsyncKeyState` stays accurate and Win+ chords work natively.
+- **First press via hook, second via WM_INPUT** — separate detection paths with `OVERLAY_VISIBLE` as gate.
+
+**Trade-off accepted:** Nex opens on Win key-up, not key-down. For a quick tap (~50-150ms between press and release) this is imperceptible. For a held Win, Nex opens on release — users learn to tap.
+
+**What was tried (chronological):**
+
+| Attempt | Approach | Result |
+|---------|----------|--------|
+| Eat Win-down, check `GetAsyncKeyState` for chord | Captured Win, polled chord keys | `GetAsyncKeyState` returns true for next key BEFORE it arrives in hook queue — unreliable |
+| Bitfield tracking (KS0/KS1/KS2) | Mark key state on each hook event | Same timing issue — chord key's bit arrives same cycle as Win |
+| `any_non_mod_held()` + `win_chord_held_via_async()` | Check if any non-mod key physically held | Misses chord because Win-down processed first, chord key not yet pressed |
+| Timer thread (120ms) | Spawn thread on Win-down, fire hotkey after 120ms if no chord | Race: timer fires hotkey before chord key-down arrives → flash + inconsistency |
+| **Key-up only + chord detection** | Win-down: mark+sink, Win-up: fire if no chord | **FIXED** — no races, no timer, no flash |
+
+---
+
+## Issue 8: Test suite is broken and incomplete — UNRESOLVED
+
+**Scope:** All test files in `apps/core/tests/` and inline `#[cfg(test)]` modules.
+
+### Symptoms
+
+- `cargo test -p nex` fails to run (rlib metadata errors)
+- 12 tests broken (1 compile fail, 11 runtime fails)
+- 19 modules have zero test coverage
+- Tests haven't kept up with WebView2 migration and Win-key hotkey changes
+
+### Broken Tests (12)
+
+**Compile failure (1 file):**
+| File | Tests | Cause |
+|------|-------|-------|
+| `config_test.rs` | 11 (all fail) | `SearchBackend::Tantivy` and `.search_backend` field removed from Config |
+
+**Runtime failures (11 tests):**
+| File | Tests | Cause |
+|------|-------|-------|
+| `core_service_test.rs` | 2 | Missing temp file panic, `use_count` not ≥1 |
+| `search_test.rs` | 3 | Dedup logic changed — app vs file, missing chrome id |
+| `settings_test.rs` | 2 | Win hotkey now allowed (asserts reversed) |
+| `overlay_state.rs` | 1 | Hide vs FocusExisting logic changed |
+| `runtime.rs` | 2 | Message format + validation changed |
+| `overlay/platform.rs` | 1 | Another Nex instance found |
+| `discovery_test.rs` | 1 | tempdir timing (flaky, intermittent) |
+
+### Zero-Coverage Modules (19)
+
+| Module | Visibility | Notes |
+|--------|------------|-------|
+| `console_signal` | `pub(crate)` | Windows-only |
+| `hotkey` | `pub` | Only 1 parse test in `hotkey_test.rs` |
+| `model` | `pub` | Data types only |
+| `overlay/host` | `pub(crate)` | Windows-only — overlay Show/Hide/positioning |
+| `overlay/model` | `pub(crate)` | Windows-only — data types |
+| `overlay/shim` | `pub(crate)` | Windows-only — imperative overlay API |
+| `overlay/tray` | `pub(crate)` | Windows-only — system tray |
+| `overlay/indexing_progress` | `pub(crate)` | Windows-only — progress window |
+| `runtime_actions` | `pub(crate)` | Launch dispatch |
+| `runtime_commands` | `pub(crate)` | Status/memory commands |
+| `runtime_hotkey` | `pub(crate)` | Hotkey registration |
+| `runtime_index` | `pub(crate)` | Config reload, index rebuild |
+| `runtime_loop` | `pub(crate)` | Main event loop — most complex |
+| `runtime_overlay_rows` | `pub(crate)` | Row rendering |
+| `runtime_process` | `pub(crate)` | Process finding |
+| `runtime_search_session` | `pub(crate)` | Search session state |
+| `search_worker` | `pub(crate)` | Search dispatch |
+
+### Notes
+
+- Windows-only modules are hard to test without a window station (Wry/WebView2)
+- 12 passing integration test files + 136 passing inline tests still work
+- `hotkey_runtime_test.rs`, `startup_test.rs`, `windows_runtime_smoke_test.rs` have cfg-gated tests
+- Perf test `warm_query_p95_under_15ms` still passes
+
+---
+
+## Issue 9: Quick Launch items cause visible delay on open — FIXED
+
+**Scope:** Overlay show performance with pinned Quick Launch items.
+
+**Symptom:**
+- No pinned items: overlay appears instantly, search bar ready immediately
+- With pinned items: search bar appears first, then ~100-300ms later the quick launch list appears below
+- Visual "pop-in" — the list appears after the search bar, feels sluggish
+
+**Root cause found — investigation uncovered two bottlenecks:**
+
+| # | Bottleneck | Location | Delay |
+|---|------------|----------|-------|
+| 1 | **Resize debounce (primary)** — Show sets window to 60px (search bar). JS signals resize with full height. Growth goes through 100ms debounce. Window stays at 60px for 100ms → search bar visible first, items "pop in" after. | `host.rs:470` (resize handler) | ~100ms |
+| 2 | **DB pre-read (secondary)** — `warm_search_cache()` reads entire SQLite DB (10-30MB) via `std::fs::read` on every show. Blocks `show_and_focus()`. | `core_service.rs:974` | 20-100ms |
+
+### Fix
+
+| Fix | Change | Gain |
+|-----|--------|------|
+| 1. Bypass resize debounce on first show | `host.rs`: `first_resize_after_show` flag set on Show, checked in Resize handler — initial growth applies immediately | ~100ms eliminated |
+| 2. Remove `std::fs::read(&db_path)` | `core_service.rs`: deleted the full-DB read; Tantivy warmup + lock warmup retained | ~20-100ms eliminated |
+
+**Result:** Content appears in a single frame — no staggered "search bar first, items later" pop-in.

@@ -32,6 +32,11 @@ use std::time::{Duration, Instant};
 /// acrylic while the native window waits for the timer to fire.
 const RESIZE_DEBOUNCE_MS: u64 = 100;
 
+/// Tracks whether the overlay window is currently visible.
+/// Used by the WM_INPUT handler to decide whether to toggle the overlay
+/// on Win key-down (only toggle when visible; hook handles first press).
+pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
@@ -366,6 +371,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, false);
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
+                    OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     let is_visible = unsafe {
@@ -413,6 +419,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, false);
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     window.set_visible(false);
+                    OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
@@ -501,6 +508,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         last_show = Instant::now();
                         was_focused = false;
                         window.set_visible(true);
+                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Always register raw input sink so the overlay
                         // receives WM_INPUT for all keyboard events while
                         // foreground.  This works around Chromium/WebView2
@@ -1143,11 +1151,21 @@ unsafe extern "system" fn instance_signal_subclass(
                                 )
                                 .is_ok()
                             {
-                                crate::runtime::log_info(&format!(
-                                    "[nex::debug] WM_INPUT Win key={:?} sending toggle",
-                                    vk,
-                                ));
-                                let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                                // Only toggle when overlay is visible (hide).
+                                // First press goes through the WH_KEYBOARD_LL hook
+                                // which fires on Win key-up (no chord).
+                                if !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+                                    crate::runtime::log_info(&format!(
+                                        "[nex::debug] WM_INPUT Win key={:?} ignoring (overlay hidden, hook handles)",
+                                        vk,
+                                    ));
+                                } else {
+                                    crate::runtime::log_info(&format!(
+                                        "[nex::debug] WM_INPUT Win key={:?} sending toggle",
+                                        vk,
+                                    ));
+                                    let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                                }
                             }
                         }
                         // Always track Win key-up for mask key cleanup

@@ -42,6 +42,7 @@ static HOOK_CTX: OnceLock<HookContext> = OnceLock::new();
 // Track VK of a Win key-down that was consumed by the hotkey, so the
 // matching key-up is also consumed.
 static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+
 static OVERLAY_HAS_FOCUS: AtomicBool = AtomicBool::new(false);
 static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
 
@@ -56,10 +57,27 @@ pub(crate) fn is_win_key_hotkey() -> bool {
 /// required modifiers, no extra modifiers held).  Uses GetAsyncKeyState
 /// for modifier checks.  Used by the WM_INPUT handler when the overlay
 /// is visible and Chromium's WH_KEYBOARD_LL hook intercepts our hook.
+/// Check if any common Win+ chord key is physically held (E, D, R, etc.).
+/// Used on non-hook threads where KS0/KS1/KS2 are not accessible.
+fn win_chord_held_via_async() -> bool {
+    // Check common Win+ shortcuts: A-Z, 0-9, Tab, Space, Escape, F1-F24, etc.
+    for vk in 0x30..=0x39 { if is_key_down(vk) { return true; } } // 0-9
+    for vk in 0x41..=0x5A { if is_key_down(vk) { return true; } } // A-Z
+    for vk in 0x70..=0x87 { if is_key_down(vk) { return true; } } // F1-F24
+    if is_key_down(0x09) { return true; } // Tab
+    if is_key_down(0x20) { return true; } // Space
+    if is_key_down(0x13) { return true; } // Pause
+    if is_key_down(0x2D) { return true; } // Insert
+    false
+}
+
 pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
     let Some(ctx) = HOOK_CTX.get() else { return false };
     if ctx.target_is_win {
-        return vk == VK_LWIN as u16 || vk == VK_RWIN as u16;
+        if !(vk == VK_LWIN as u16 || vk == VK_RWIN as u16) { return false; }
+        // If any non-modifier key is also held, it's a Win chord — pass through.
+        if win_chord_held_via_async() { return false; }
+        return true;
     }
     // VK must match target key.
     if vk as u32 != ctx.target_key { return false; }
@@ -105,7 +123,10 @@ pub(crate) fn set_suppress_focus_escape(suppress: bool) {
 pub(crate) fn is_hotkey_pressed() -> bool {
     let Some(ctx) = HOOK_CTX.get() else { return false };
     if ctx.target_is_win {
-        return is_key_down(VK_LWIN) || is_key_down(VK_RWIN);
+        if !(is_key_down(VK_LWIN) || is_key_down(VK_RWIN)) { return false; }
+        // If any non-modifier key is held alongside Win, it's a chord.
+        if win_chord_held_via_async() { return false; }
+        return true;
     }
     // Target key must be down.
     if !is_key_down(ctx.target_key) { return false; }
@@ -171,6 +192,7 @@ const VK_RSHIFT: u32 = 0xA1;
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -258,7 +280,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
 
-    // Track modifiers via atomics — GetAsyncKeyState lies when
+    // Track key state via atomics — GetAsyncKeyState lies when
     // the WebView has focus and has consumed the Ctrl key-down.
     if !injected {
         match vk {
@@ -269,14 +291,39 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Win key-up: release held mask but DO NOT eat the message ---
-    // Key-up never triggers Start, and eating it confuses the system's
-    // key-state tracking (GetAsyncKeyState stays TRUE → Win+E/D/R fire).
-    if ctx.target_is_win && is_keyup && !injected {
-        let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
-        if consumed_vk != 0 && vk == consumed_vk {
-            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+    // --- Chord detection: non-mod key pressed while Win held ---
+    // Clear CONSUMED_WIN_VK so the matching Win key-up won't fire
+    // the hotkey — this makes Win+E/D/R pass through cleanly.
+    if ctx.target_is_win && !injected && is_keydown
+        && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
+        && vk != VK_LWIN && vk != VK_RWIN
+    {
+        let is_mod = vk == VK_LCONTROL || vk == VK_RCONTROL
+            || vk == VK_LMENU || vk == VK_RMENU
+            || vk == VK_LSHIFT || vk == VK_RSHIFT
+            || vk == VK_CTRL || vk == VK_ALT || vk == VK_SHIFT;
+        if !is_mod {
+            crate::runtime::log_info(&format!(
+                "[nex::debug] Hook: chord detected vk={}, passing through",
+                vk,
+            ));
             send_mask_up();
+            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+        }
+    }
+
+    // --- Win key-up: fire hotkey only if no chord was detected ---
+    // Chord detection clears CONSUMED_WIN_VK to 0, making this a no-op.
+    // No timer thread needed — everything runs in the hook pump.
+    if ctx.target_is_win && is_keyup && !injected {
+        let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
+        if consumed_vk != 0 && vk == consumed_vk {
+            crate::runtime::log_info(&format!(
+                "[nex::debug] Hook: bare Win key-up vk={}, opening Nex",
+                vk,
+            ));
+            send_mask_up();
+            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
         }
     }
 
@@ -318,16 +365,23 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         if mods_ok && extra_free {
             if ctx.target_is_win {
-                // Hold mask key down for entire Win press.
-                crate::runtime::log_info(&format!(
-                    "[nex::debug] Hook: consuming Win key-down vk={}",
-                    vk,
-                ));
-                CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
-                SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
-                send_mask_down();
-                let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
-                return 1;
+                // First Win key-down: mark active, send mask, DON'T EAT.
+                // Hotkey fires on Win key-up (no chord) to prevent race
+                // between chord detection and hotkey dispatch.
+                if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
+                    crate::runtime::log_info(&format!(
+                        "[nex::debug] Hook: Win key-down vk={}",
+                        vk,
+                    ));
+                    CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
+                    SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
+                    send_mask_down();
+                }
+                // DO NOT EAT — pass Win through so Win+ chords work
+                return unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                        std::ptr::null_mut(), n_code, w_param, l_param)
+                };
             }
             let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
             return 1;

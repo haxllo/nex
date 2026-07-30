@@ -408,7 +408,6 @@ pub(crate) fn run_windows_runtime(
         last_memory_log: Instant::now(),
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
-        pending_hotkey_reconfig: false,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -522,10 +521,6 @@ struct RuntimeWorker {
     quick_launch_items: Vec<crate::overlay::model::QuickLaunchItem>,
     /// Whether Quick Launch items have been loaded for current session.
     quick_launch_loaded: bool,
-    /// Set when config reload detects hotkey changed — crash-recovery
-    /// section picks this up and calls `HotkeyListener::start()` with
-    /// the new config.  Avoids blocking the event loop for 120s.
-    pending_hotkey_reconfig: bool,
 }
 
 impl RuntimeWorker {
@@ -824,30 +819,6 @@ impl RuntimeWorker {
                         }
                     }
                 }
-            } else if self.pending_hotkey_reconfig {
-                self.pending_hotkey_reconfig = false;
-                log_info(&format!(
-                    "[nex] performing deferred hotkey re-registration for '{}'",
-                    self.runtime_config.hotkey,
-                ));
-                // Brief wait for old helper to fully die before spawning new one.
-                // The old listener was dropped in the config-reload path, this
-                // gives taskkill time to finish.
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                if let Ok(mut guard) = self.hotkey_listener.lock() {
-                    match HotkeyListener::start(&self.runtime_config.hotkey, self.event_tx.clone())
-                    {
-                        Ok(new_listener) => {
-                            log_info("[nex] hotkey re-registered successfully");
-                            *guard = Some(new_listener);
-                        }
-                        Err(error) => {
-                            log_warn(&format!(
-                                "[nex] hotkey re-registration failed: {error}"
-                            ));
-                        }
-                    }
-                }
             }
         }
 
@@ -877,16 +848,39 @@ impl RuntimeWorker {
             );
             if hotkey_changed {
                 log_info(&format!(
-                    "[nex] config hotkey changed, deferring re-registration for '{}'",
+                    "[nex] config hotkey changed, re-registering listener for '{}'",
                     self.runtime_config.hotkey,
                 ));
-                // Drop old listener (kills helper process) — re-registration
-                // happens in the crash-recovery section below to avoid
-                // blocking the event loop for 120s (pipe connect retries).
+                // Drop old listener (kills helper process) on the event thread.
+                // Re-registration runs on a separate thread so the event loop
+                // stays responsive during the 120s pipe-connect retry window.
                 if let Ok(mut guard) = self.hotkey_listener.lock() {
                     *guard = None;
                 }
-                self.pending_hotkey_reconfig = true;
+                let new_hotkey = self.runtime_config.hotkey.clone();
+                let event_tx = self.event_tx.clone();
+                let lh = self.hotkey_listener.clone();
+                std::thread::Builder::new()
+                    .name("nex-hotkey-reconfig".into())
+                    .spawn(move || {
+                        // Brief wait for old helper to fully die
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        match HotkeyListener::start(&new_hotkey, event_tx) {
+                            Ok(listener) => {
+                                log_info("[nex] hotkey re-registered successfully");
+                                if let Ok(mut guard) = lh.lock() {
+                                    *guard = Some(listener);
+                                }
+                            }
+                            Err(error) => {
+                                log_warn(&format!(
+                                    "[nex] hotkey re-registration failed: {error}"
+                                ));
+                            }
+                        }
+                    })
+                    .ok();
+                // Status text already set by maybe_apply_runtime_config_reload.
             }
             // Keep the search worker's config in sync so it doesn't
             // serve stale results with old show_files/show_folders etc.

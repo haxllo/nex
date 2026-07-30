@@ -27,6 +27,7 @@ static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+static CHORD_DETECTED: AtomicBool = AtomicBool::new(false);
 static WIN_KEY_RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// Custom message to wake GetMessageW after the hook proc sets HOTKEY_FIRED.
@@ -378,14 +379,37 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Win key-up: release held mask but DO NOT eat the message ---
-    // Key-up never triggers Start, and eating it confuses the system's
-    // key-state tracking (GetAsyncKeyState stays TRUE → Win+E/D/R fire).
-    if ctx.target_is_win && is_keyup && !injected {
-        let consumed_vk = CONSUMED_WIN_VK.load(Ordering::SeqCst);
-        if consumed_vk != 0 && vk == consumed_vk {
+    // --- Chord detection: non-mod key while Win held ---
+    // Clear CONSUMED_WIN_VK so the matching Win key-up won't fire
+    // the hotkey — passes Win+E/D/R through cleanly.
+    if ctx.target_is_win && !injected && is_keydown
+        && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
+        && vk != VK_LWIN && vk != VK_RWIN
+    {
+        let is_mod = vk == VK_LCONTROL || vk == VK_RCONTROL
+            || vk == VK_LMENU || vk == VK_RMENU
+            || vk == VK_LSHIFT || vk == VK_RSHIFT;
+        if !is_mod {
+            CHORD_DETECTED.store(true, Ordering::SeqCst);
+            send_mask_up();
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-            WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+        }
+    }
+
+    // --- Win key-up: fire hotkey only if no chord was detected ---
+    // Chord detection clears CONSUMED_WIN_VK before we get here.
+    if ctx.target_is_win && is_keyup && !injected {
+        let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
+        if consumed_vk != 0 && vk == consumed_vk {
+            let was_chord = CHORD_DETECTED.swap(false, Ordering::SeqCst);
+            if !was_chord {
+                // Bare Win release — fire hotkey
+                HOTKEY_FIRED.store(true, Ordering::SeqCst);
+                WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+                if let Some(tid) = HELPER_THREAD_ID.get() {
+                    unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
+                }
+            }
             send_mask_up();
         }
         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -403,23 +427,23 @@ unsafe extern "system" fn keyboard_hook_proc(
     };
 
     if is_target && !injected && check_modifiers(ctx) {
+        if ctx.target_is_win {
+            // First Win key-down: mark active, send mask, DON'T EAT.
+            // Hotkey fires on Win key-up (no chord) to prevent race
+            // between chord detection and hotkey dispatch.
+            if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
+                CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
+                CHORD_DETECTED.store(false, Ordering::SeqCst);
+                send_mask_down();
+            }
+            // DO NOT EAT — pass Win through so Win+ chords work
+            return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+        }
+        // Non-Win hotkey: eat key-down (prevents key from reaching focused window).
         HOTKEY_FIRED.store(true, Ordering::SeqCst);
-
-        // Wake the helper's message loop so it observes HOTKEY_FIRED and
-        // sends the event over the pipe.  For non-Win hotkeys, the
-        // RegisterHotKeyW fallback posts WM_HOTKEY which already wakes
-        // GetMessageW — but posting unconditionally is harmless.
         if let Some(tid) = HELPER_THREAD_ID.get() {
             unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
         }
-
-        if ctx.target_is_win {
-            // Hold mask key down for entire Win press.
-            CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
-            send_mask_down();
-            return 1;
-        }
-        // Non-Win hotkey: eat key-down (prevents key from reaching focused window).
         return 1;
     }
 
@@ -812,7 +836,7 @@ fn main() {
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {
             if let Some(cfg) = CFG.get() {
-                if cfg.target_is_win && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0 {
+                if cfg.target_is_win {
                     if pipe.write_all(b"SUPPRESS_ON\n").is_err() {
                         break; // nex.exe disconnected
                     }

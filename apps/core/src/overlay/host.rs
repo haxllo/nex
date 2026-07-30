@@ -187,6 +187,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // and apply immediately to prevent acrylic exposure.
     let mut pending_resize: Option<f64> = None;
     let mut last_applied_height: f64 = INITIAL_HEIGHT;
+    // First resize after show bypasses debounce so content appears
+    // immediately instead of showing search bar → 100ms wait → items.
+    let mut first_resize_after_show = false;
     let (resize_debounce_tx, resize_debounce_rx) =
         crossbeam_channel::unbounded::<Option<Duration>>();
     let resize_debounce_proxy = proxy.clone();
@@ -271,6 +274,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
                         last_applied_height = INITIAL_HEIGHT;
                         pending_resize = None;
+                        first_resize_after_show = true;
                         push_state(&webview, &state, &icon_cache, true);
                         show_pending = true;
                     }
@@ -351,6 +355,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
+                    first_resize_after_show = true;
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -461,6 +466,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Shrink request: apply immediately to avoid
                         // exposing acrylic while the debounce delays
                         // the native window size reduction.
+                        pending_resize = None;
+                        if (h - last_applied_height).abs() > 0.5 {
+                            last_applied_height = h;
+                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                        }
+                    } else if first_resize_after_show {
+                        // First resize after show: apply immediately to
+                        // prevent the "search bar first, items pop in
+                        // 100ms later" visual flash.
+                        first_resize_after_show = false;
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
@@ -989,7 +1004,7 @@ fn position_window(window: &Window, _hwnd: HWND) {
     let work_w = right - left;
     let work_h = bottom - top;
     let x = left + (work_w - width_phys) / 2;
-    let y = top + (work_h as f32 * 0.18) as i32;
+    let y = top + (work_h as f32 * 0.20) as i32;
     window.set_outer_position(PhysicalPosition::new(x.max(left), y.max(top)));
 }
 

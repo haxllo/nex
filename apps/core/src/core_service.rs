@@ -968,19 +968,16 @@ impl CoreService {
         Ok(Vec::new())
     }
 
-    /// Warm search indexes + SQLite page cache so the user's first
-    /// keystroke doesn't pay cold-page-fault latency.  Must be called
-    /// with the outer service lock held (read or write).
+    /// Warm search indexes so the user's first keystroke doesn't pay
+    /// cold-page-fault latency.  Must be called with the outer service
+    /// lock held (read or write).
     pub fn warm_search_cache(&self) {
-        // Warm Tantivy reader + page cache
+        // Warm Tantivy reader
         if let Ok(guard) = self.tantivy_index.lock() {
             if let Some(ref idx) = *guard {
                 idx.warmup();
             }
         }
-        // Pre-read the SQLite database file into OS page cache.
-        let db_path = self.config_snapshot().index_db_path;
-        let _ = std::fs::read(&db_path);
         // Touch the cached items inner lock to warm the cache line.
         drop(self.cached_items.read());
         drop(self.cached_app_items.read());

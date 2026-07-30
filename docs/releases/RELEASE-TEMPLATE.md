@@ -1,5 +1,7 @@
 {1-2 sentence summary of release}
 
+**Note:** Do NOT include an H1 title/version heading here. GitHub uses `--title` separately — body starts with summary text. Avoid "v{N} — {title}" duplication.
+
 ## Changelog ({N} commits since v{PREV})
 
 ### Performance

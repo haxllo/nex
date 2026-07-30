@@ -835,7 +835,7 @@ impl RuntimeWorker {
             .load(std::sync::atomic::Ordering::Acquire);
 
         if let Ok(svc) = self.service.try_write() {
-            maybe_apply_runtime_config_reload(
+            let hotkey_changed = maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
                 &mut self.runtime_config,
@@ -846,6 +846,35 @@ impl RuntimeWorker {
                 &mut self.config_watcher,
                 &mut self.background_index_refresh,
             );
+            if hotkey_changed {
+                log_info(&format!(
+                    "[nex] config hotkey changed, re-registering listener with new hotkey '{}'",
+                    self.runtime_config.hotkey,
+                ));
+                // Drop old listener (kills helper process, cleans up hook thread)
+                if let Ok(mut guard) = self.hotkey_listener.lock() {
+                    *guard = None;
+                }
+                // Brief wait for old helper to fully die before spawning new one
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                match HotkeyListener::start(
+                    &self.runtime_config.hotkey,
+                    self.event_tx.clone(),
+                ) {
+                    Ok(new_listener) => {
+                        log_info("[nex] hotkey listener re-registered successfully");
+                        if let Ok(mut guard) = self.hotkey_listener.lock() {
+                            *guard = Some(new_listener);
+                        }
+                    }
+                    Err(error) => {
+                        log_warn(&format!(
+                            "[nex] hotkey listener re-registration failed: {error}"
+                        ));
+                    }
+                }
+                // Status text already set by maybe_apply_runtime_config_reload.
+            }
             // Keep the search worker's config in sync so it doesn't
             // serve stale results with old show_files/show_folders etc.
             if let Ok(mut cfg) = self.shared_config.write() {

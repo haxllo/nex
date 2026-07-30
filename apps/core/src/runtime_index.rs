@@ -267,14 +267,14 @@ pub(crate) fn maybe_apply_runtime_config_reload(
     max_results: &mut usize,
     watcher: &mut RuntimeConfigWatcher,
     background_index_refresh: &mut BackgroundIndexRefresh,
-) {
+) -> bool {
     if watcher.last_checked.elapsed() < CONFIG_RELOAD_POLL_INTERVAL {
-        return;
+        return false;
     }
     watcher.last_checked = Instant::now();
     let modified = config_file_modified_time(watcher.path.as_path());
     if modified == watcher.last_modified {
-        return;
+        return false;
     }
     watcher.last_modified = modified;
 
@@ -309,8 +309,8 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             *pending_uninstall_confirmation = None;
 
             if hotkey_changed {
-                log_warn(&format!(
-                    "[nex] config hotkey changed ({} -> {}), restart required to apply",
+                log_info(&format!(
+                    "[nex] config hotkey changed ({} -> {}), re-registering listener",
                     previous.hotkey, runtime_config.hotkey
                 ));
             }
@@ -370,15 +370,17 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             } else if index_db_path_changed {
                 overlay.set_status_text("Restart required to apply index path changes");
             } else if hotkey_changed {
-                overlay.set_status_text("Restart required to apply hotkey changes");
+                overlay.set_status_text("Hotkey updated");
             } else {
                 overlay.set_status_text("Settings applied");
             }
+            return hotkey_changed;
         }
         Err(error) => {
             log_warn(&format!(
                 "[nex] config reload skipped due to invalid config: {error}"
             ));
+            return false;
         }
         }
     }

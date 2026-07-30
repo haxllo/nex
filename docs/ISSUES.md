@@ -171,11 +171,11 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 
 ---
 
-## Issue 4: Changing hotkey in config requires restart — FEATURE
+## Issue 4: Changing hotkey in config requires restart — FIXED
 
 **Scope:** Runtime config hotkey change without restarting nex.
 
-**Symptom:**
+**Symptom (original):**
 - Edit `config.toml` → change `hotkey = "Ctrl+Space"` to something else
 - Save file
 - Nex polls config every 500ms, detects hotkey changed
@@ -185,26 +185,30 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 
 **Root cause:** `HotkeyListener` registers the hotkey once at startup via `RegisterHotKey` / `WH_KEYBOARD_LL`. Config reload path (`runtime_index.rs:284`) detects the change but never re-registers the listener with the new hotkey string.
 
-**What exists:**
-| Component | Detail |
-|-----------|--------|
-| `CONFIG_RELOAD_POLL_INTERVAL` | 500ms poll |
-| `RuntimeConfigWatcher` | mtime-based change detection |
-| `hotkey_changed` flag | Detected but ignored (log + notify only) |
-| Hotkey crash recovery | `runtime_loop.rs:797-823` — restarts listener with new config if thread died |
+### Fix
 
-**What's needed:**
-- When config hotkey changes, unregister old hotkey and re-register with new value
-- No restart required
-- On failure, fall back to restart-required notification (current behavior)
+**Changes:**
+| Change | File | Detail |
+|--------|------|--------|
+| `HOOK_CTX` OnceLock → `Mutex<Option<HookContext>>` | `hotkey.rs` | Allows updating context on re-registration. All 5 readers updated to lock+clone pattern. |
+| Drop: kill helper in scheduled-task mode | `hotkey.rs` | Drop now uses `taskkill /F /IM NexHelper.exe` when `helper_process_handle == 0` (scheduled task mode). Previously only killed direct-spawn helper. |
+| `maybe_apply_runtime_config_reload` returns `bool` | `runtime_index.rs` | Returns `hotkey_changed` so caller can act on it. Status text changed from "Restart required" to "Hotkey updated". |
+| Re-registration in config reload path | `runtime_loop.rs` | When hotkey changes: drops old listener (kills helper), waits 300ms, spawns new listener. On failure, falls back to hook mode (existing crash recovery handles it). |
+
+**Sequence:**
+1. Config change detected → hotkey_changed = true
+2. Old `HotkeyListener` dropped → helper killed (TerminateProcess or taskkill)
+3. 300ms wait for helper to fully die
+4. New `HotkeyListener::start()` called with new hotkey → spawns new helper or falls back to hook
+5. New `HOOK_CTX` written with correct `target_is_win` flag
+6. Both nex hook proc and helper hook proc use correct logic for the new hotkey
 
 **Related files:**
 | File | Role |
 |------|------|
-| `apps/core/src/runtime_index.rs` | Config reload logic (line 284: hotkey_changed) |
-| `apps/core/src/runtime_loop.rs` | Hotkey listener lifecycle (line 797-823) |
-| `apps/core/src/overlay/hotkey.rs` | Hotkey registration/parsing |
-| `apps/core/src/config.rs` | Config defaults + schema |
+| `apps/core/src/runtime_index.rs` | Config reload logic, returns `hotkey_changed` |
+| `apps/core/src/runtime_loop.rs` | Hotkey listener lifecycle + re-registration |
+| `apps/core/src/overlay/hotkey.rs` | HOOK_CTX Mutex, Drop cleanup, start/stop |
 
 ---
 

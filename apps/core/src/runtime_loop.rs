@@ -851,35 +851,28 @@ impl RuntimeWorker {
                     "[nex] config hotkey changed, re-registering listener for '{}'",
                     self.runtime_config.hotkey,
                 ));
-                // Drop old listener (kills helper process) on the event thread.
-                // Re-registration runs on a separate thread so the event loop
-                // stays responsive during the 120s pipe-connect retry window.
+                // Drop old listener — Drop kills the helper and WAITS for
+                // it to exit (up to 2s). After this returns, the named
+                // pipe is free and the new listener's helper connects fast.
                 if let Ok(mut guard) = self.hotkey_listener.lock() {
                     *guard = None;
                 }
-                let new_hotkey = self.runtime_config.hotkey.clone();
-                let event_tx = self.event_tx.clone();
-                let lh = self.hotkey_listener.clone();
-                std::thread::Builder::new()
-                    .name("nex-hotkey-reconfig".into())
-                    .spawn(move || {
-                        // Brief wait for old helper to fully die
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                        match HotkeyListener::start(&new_hotkey, event_tx) {
-                            Ok(listener) => {
-                                log_info("[nex] hotkey re-registered successfully");
-                                if let Ok(mut guard) = lh.lock() {
-                                    *guard = Some(listener);
-                                }
-                            }
-                            Err(error) => {
-                                log_warn(&format!(
-                                    "[nex] hotkey re-registration failed: {error}"
-                                ));
-                            }
+                match HotkeyListener::start(
+                    &self.runtime_config.hotkey,
+                    self.event_tx.clone(),
+                ) {
+                    Ok(new_listener) => {
+                        log_info("[nex] hotkey re-registered successfully");
+                        if let Ok(mut guard) = self.hotkey_listener.lock() {
+                            *guard = Some(new_listener);
                         }
-                    })
-                    .ok();
+                    }
+                    Err(error) => {
+                        log_warn(&format!(
+                            "[nex] hotkey re-registration failed: {error}"
+                        ));
+                    }
+                }
                 // Status text already set by maybe_apply_runtime_config_reload.
             }
             // Keep the search worker's config in sync so it doesn't

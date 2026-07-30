@@ -78,6 +78,11 @@ use crate::overlay::tray::TrayIcon;
 /// prevents double-trigger when both detection paths fire within 50ms.
 static HOTKEY_DEBOUNCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Gate to prevent overlapping hotkey re-registration attempts.
+/// The re-registration thread sets this while it's starting a new listener,
+/// and the dead-thread recovery path skips its check while this is true.
+static RE_REGISTERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
@@ -787,6 +792,15 @@ impl RuntimeWorker {
     fn on_event(&mut self, event: OverlayEvent) {
         self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
 
+        // Diagnostic: heartbeat every 128 events (Tick or otherwise)
+        if self.hotkey_check_counter % 128 == 0 {
+            log_info(&format!(
+                "[nex::diag] worker alive counter={} event={:?}",
+                self.hotkey_check_counter,
+                event,
+            ));
+        }
+
         if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
             if let Ok(guard) = self.service.read() {
                 guard.log_memory_stats();
@@ -794,7 +808,7 @@ impl RuntimeWorker {
             self.last_memory_log = Instant::now();
         }
 
-        if self.hotkey_check_counter % 32 == 0 {
+        if self.hotkey_check_counter % 32 == 0 && !RE_REGISTERING.load(std::sync::atomic::Ordering::SeqCst) {
             let needs_restart = match self.hotkey_listener.lock() {
                 Ok(guard) => match guard.as_ref() {
                     Some(listener) => !listener.is_alive(),
@@ -804,21 +818,41 @@ impl RuntimeWorker {
             };
             if needs_restart {
                 log_warn("[nex] hotkey listener thread died; attempting restart");
+                // Drop the dead listener.
                 if let Ok(mut guard) = self.hotkey_listener.lock() {
                     *guard = None;
-                    match HotkeyListener::start(&self.runtime_config.hotkey, self.event_tx.clone())
-                    {
-                        Ok(new_listener) => {
-                            log_info("[nex] hotkey listener restarted successfully");
-                            *guard = Some(new_listener);
-                        }
-                        Err(error) => {
-                            log_warn(&format!(
-                                "[nex] hotkey listener restart failed: {error}"
-                            ));
-                        }
-                    }
                 }
+                // Spawn recovery on a separate thread so the runtime
+                // worker never blocks — same pattern as config-change
+                // re-registration.
+                let recovery_hotkey = self.runtime_config.hotkey.clone();
+                let recovery_etx = self.event_tx.clone();
+                let recovery_lh = self.hotkey_listener.clone();
+                std::thread::Builder::new()
+                    .name("nex-hotkey-recover".into())
+                    .spawn(move || {
+                        let _ = std::process::Command::new("schtasks")
+                            .args(["/end", "/tn", "NexHelperV2"])
+                            .output();
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/IM", "NexHelper.exe"])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        match HotkeyListener::start(&recovery_hotkey, recovery_etx) {
+                            Ok(listener) => {
+                                log_info("[nex] hotkey listener restarted successfully");
+                                if let Ok(mut guard) = recovery_lh.lock() {
+                                    *guard = Some(listener);
+                                }
+                            }
+                            Err(error) => {
+                                log_warn(&format!(
+                                    "[nex] hotkey listener restart failed: {error}"
+                                ));
+                            }
+                        }
+                    })
+                    .ok();
             }
         }
 
@@ -851,39 +885,61 @@ impl RuntimeWorker {
                     "[nex] config hotkey changed, re-registering listener for '{}'",
                     self.runtime_config.hotkey,
                 ));
-                // Drop old listener fast (no wait) — kills helper async.
-                if let Ok(mut guard) = self.hotkey_listener.lock() {
-                    *guard = None;
-                }
-                // Re-register on a separate thread — old helper is killed
-                // async by Drop, so the new start() may fall back to
-                // in-process hook if the old helper's pipe lingers.
-                let new_hotkey = self.runtime_config.hotkey.clone();
-                let event_tx = self.event_tx.clone();
-                let lh = self.hotkey_listener.clone();
-                std::thread::Builder::new()
-                    .name("nex-hotkey-reconfig".into())
-                    .spawn(move || {
-                        // Wait briefly for old helper to die
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/IM", "NexHelper.exe"])
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        match HotkeyListener::start(&new_hotkey, event_tx) {
-                            Ok(listener) => {
-                                log_info("[nex] hotkey re-registered successfully");
-                                if let Ok(mut guard) = lh.lock() {
-                                    *guard = Some(listener);
+                // Gate: only one re-registration at a time — drop old
+                // listener inside the gate so we don't lose it if another
+                // re-registration is already in progress.
+                if RE_REGISTERING.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+                    if let Ok(mut guard) = self.hotkey_listener.lock() {
+                        *guard = None;
+                    }
+                    // Re-register on a separate thread — old helper is killed
+                    // async by Drop, so the new start() may fall back to
+                    // in-process hook if the old helper's pipe lingers.
+                    let new_hotkey = self.runtime_config.hotkey.clone();
+                    let event_tx = self.event_tx.clone();
+                    let lh = self.hotkey_listener.clone();
+                    std::thread::Builder::new()
+                        .name("nex-hotkey-reconfig".into())
+                        .spawn(move || {
+                            // Stop the scheduled task and kill the helper
+                            // process so the new start() can write config
+                            // and re-launch a clean helper.
+                            let _ = std::process::Command::new("schtasks")
+                                .args(["/end", "/tn", "NexHelperV2"])
+                                .output();
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/F", "/IM", "NexHelper.exe"])
+                                .output();
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            // start() writes helper-config.json, relaunches
+                            // the task, and connects or falls back to
+                            // in-process hook. All on this thread — runtime
+                            // worker is never blocked.
+                            match HotkeyListener::start(&new_hotkey, event_tx) {
+                                Ok(listener) => {
+                                    log_info("[nex] hotkey re-registered successfully");
+                                    match lh.lock() {
+                                        Ok(mut guard) => {
+                                            *guard = Some(listener);
+                                            log_info("[nex::diag] re-registration: listener stored in hotkey_listener");
+                                        }
+                                        Err(e) => {
+                                            log_warn("[nex::diag] re-registration: hotkey_listener mutex poisoned, listener lost!");
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    log_warn(&format!(
+                                        "[nex] hotkey re-registration failed: {error}"
+                                    ));
                                 }
                             }
-                            Err(error) => {
-                                log_warn(&format!(
-                                    "[nex] hotkey re-registration failed: {error}"
-                                ));
-                            }
-                        }
-                    })
-                    .ok();
+                            RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
+                        })
+                        .ok();
+                } else {
+                    log_info("[nex] hotkey re-registration already in progress, skipping");
+                }
                 // Status text already set by maybe_apply_runtime_config_reload.
             }
             // Keep the search worker's config in sync so it doesn't

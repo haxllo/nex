@@ -246,7 +246,7 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | Phase | What |
 |-------|------|
 | 1. Fix Win key issues | ✅ Done (Issue 2 — RIDEV_NOHOTKEYS + key-up passthrough; Issue 7 — chord detection) |
-| 2. Dynamic hotkey re-registration | ⏳ Issue 4 — changing config hotkey without restart |
+| 2. Dynamic hotkey re-registration | ✅ Done (Issue 4 — feature impl; Issue 10 — stability fixes: 11 bugs resolved) |
 | 3. Default config change | `hotkey = "Win"` in template |
 | 4. Onboarding | First-run prompt: "Set Win key as Nex hotkey (replaces Start Menu)?" |
 
@@ -383,3 +383,40 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 | 2. Remove `std::fs::read(&db_path)` | `core_service.rs`: deleted the full-DB read; Tantivy warmup + lock warmup retained | ~20-100ms eliminated |
 
 **Result:** Content appears in a single frame — no staggered "search bar first, items later" pop-in.
+
+---
+
+## Issue 10: Dynamic hotkey change freezes or becomes unresponsive — FIXED
+
+**Scope:** Changing hotkey in `config.toml` while nex is running.
+
+**Symptom:**
+- After changing the hotkey in config, the new hotkey doesn't work
+- The old hotkey may keep working for a brief window
+- Tray icon clicks stop working
+- Process becomes "not responding" (frozen)
+
+### Bugs found and fixed
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 1 | **HOOK_CTX never cleared on Drop** — `check_raw_input_hotkey()` read the stale old config during the re-registration gap, firing spurious hotkey events for the old combo. All atomics (`CTRL_DOWN`, `ALT_DOWN`, `SHIFT_DOWN`, `CONSUMED_WIN_VK`, `SUPPRESS_FOCUS_ESCAPE`) retained values from the dead hook thread. | `hotkey.rs` | Clear `HOOK_CTX` to `None` and reset all 5 atomics **before** signalling threads in Drop |
+| 2 | **Drop blocked runtime worker on `handle.join()`** — hook-mode Drop joined the old hook thread, freezing the event loop. Windows marked the process "not responding" during the 500ms re-registration gap. | `hotkey.rs` | Detach hook thread (`drop(handle)`) instead of joining — same pattern the helper path already used |
+| 3 | **HOOK_CTX written before thread confirmed running** — `start_internal` set HOOK_CTX, then spawned the thread. If thread failed, HOOK_CTX was left orphaned with no corresponding hook. | `hotkey.rs` | Clear HOOK_CTX on spawn failure and on ready-channel error |
+| 4 | **Old hook's WM_HOTKEY fired after exit signalled** — `RegisterHotKeyW` fallback had queued WM_HOTKEY before WM_QUIT. Old thread read the new HOOK_CTX and sent stale events. | `hotkey.rs` | Skip WM_HOTKEY in the old thread when `should_exit` is set |
+| 5 | **`is_alive()` returned false during thread startup** — narrow window where `is_finished()` returned true before `thread_id` was set, causing the recovery path to drop valid listeners | `hotkey.rs` | Return `true` if `thread_id` OnceLock is empty (thread still starting) |
+| 6 | **250ms tick was a no-op** — `recv(tick) -> _ => {}` never called `on_event`, so config reload and health checks only ran when user events arrived. After old hook killed, nothing could generate events → deadlock. | `shim.rs`, `model.rs` | Added `OverlayEvent::Tick` variant; tick calls `on_event(Tick)` |
+| 7 | **Config reload infinite loop** — `config::load` writes back the file (migration/template), changing mtime. Next poll detected this as a change → reload → write → reload... | `runtime_index.rs` | Re-read `last_modified` after `config::load` to absorb self-writes |
+| 8 | **Recovery path blocked the event loop** — dead-listener recovery called `HotkeyListener::start()` inside `on_event`, which blocked for up to 1.5s on pipe connect retries | `runtime_loop.rs` | Spawn recovery on separate thread (`nex-hotkey-recover`) |
+| 9 | **Concurrent re-registration threads** — rapid config saves spawned multiple re-registration threads, creating zombie hook threads + duplicate hotkey events | `runtime_loop.rs` | `RE_REGISTERING` AtomicBool gate — only one re-registration at a time |
+| 10 | **Listener dropped before gate check** — `*guard = None` ran before `RE_REGISTERING` CAS. If gate was blocked, listener was dropped and never reinstated. | `runtime_loop.rs` | Move drop inside the gate, after CAS succeeds |
+| 11 | **Old helper at High IL intercepted keystrokes** — `start_no_helper` never wrote `helper-config.json`, so the scheduled task auto-restarted the helper with stale config. High IL hook sat above Medium IL in-process hook. | `runtime_loop.rs`, `hotkey.rs` | `schtasks /end` stops the task, `taskkill` kills the process, then `HotkeyListener::start()` writes new config and relaunches the helper cleanly |
+
+### Verification
+
+Build succeeds. Manual testing:
+- Change hotkey in config while nex is running → new hotkey works, old hotkey stops
+- Tray icon works after change
+- Rapid config saves don't create duplicate events or zombie threads
+- Win ↔ Ctrl+Space transitions work both ways
+- Helper restarts with correct config after re-registration

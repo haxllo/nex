@@ -359,6 +359,11 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 runtime_config.index_max_items_per_query_seed,
             ));
 
+            // Re-read mtime after config::load to absorb any self-writes
+            // (migration, template generation) so the next poll doesn't
+            // falsely detect a change.
+            watcher.last_modified = config_file_modified_time(watcher.path.as_path());
+
             if discovery_config_changed {
                 if discovery_reindex_queued {
                     overlay.set_status_text(

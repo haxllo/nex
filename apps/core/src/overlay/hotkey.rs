@@ -277,16 +277,24 @@ unsafe extern "system" fn keyboard_hook_proc(
     let is_keydown = msg == 0x0100 || msg == 0x0104;
     let is_keyup = msg == 0x0101 || msg == 0x0105;
 
-    let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
-        Some(ctx) => ctx,
-        None => return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
-        },
-    };
-
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
+
+    let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
+        Some(ctx) => ctx,
+        None => {
+            if is_keydown && !injected {
+                crate::runtime::log_info(&format!(
+                    "[nex::diag] Hook proc: HOOK_CTX is None, passing vk={:?} keydown={}",
+                    vk, is_keydown,
+                ));
+            }
+            return unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
+            };
+        }
+    };
 
     // Track key state via atomics — GetAsyncKeyState lies when
     // the WebView has focus and has consumed the Ctrl key-down.
@@ -347,6 +355,14 @@ unsafe extern "system" fn keyboard_hook_proc(
     } else {
         vk == ctx.target_key
     };
+
+    // Diagnostic: log target key matches
+    if is_target && !injected {
+        crate::runtime::log_info(&format!(
+            "[nex::diag] Hook: target key match vk={:?} target_is_win={} target_vk={:?}",
+            vk, ctx.target_is_win, ctx.target_key,
+        ));
+    }
 
     if is_target && !injected {
         let mods_ok = ctx.required_mods.iter().all(|&m| match m {
@@ -421,6 +437,14 @@ struct HotkeyListenerInner {
 
 impl HotkeyListener {
     pub(crate) fn start(hotkey_str: &str, event_tx: Sender<OverlayEvent>) -> Result<Self, String> {
+        Self::start_internal(hotkey_str, event_tx, true)
+    }
+
+    pub(crate) fn start_no_helper(hotkey_str: &str, event_tx: Sender<OverlayEvent>) -> Result<Self, String> {
+        Self::start_internal(hotkey_str, event_tx, false)
+    }
+
+    fn start_internal(hotkey_str: &str, event_tx: Sender<OverlayEvent>, try_helper: bool) -> Result<Self, String> {
         let parsed = parse_hotkey(hotkey_str)
             .map_err(|e| format!("invalid hotkey '{hotkey_str}': {e}"))?;
         let required_mods = modifier_vks_from_names(&parsed.modifiers)?;
@@ -432,50 +456,54 @@ impl HotkeyListener {
 
         *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
 
-        // --- Try elevated helper first (handles Task Manager / elevated windows) ---
-        let helper_result = spawn_and_connect_helper(
-            target_key, target_is_win, &required_mods, hotkey_str,
-        );
+        if try_helper {
+            // --- Try elevated helper first (handles Task Manager / elevated windows) ---
+            let helper_result = spawn_and_connect_helper(
+                target_key, target_is_win, &required_mods, hotkey_str,
+            );
 
-        match helper_result {
-            Ok((helper_handle, pipe_file)) => {
-                logging::info("[nex] hotkey: using elevated helper for detection");
-                let pipe_event_tx = event_tx.clone();
-                let pipe_reader_thread = thread::Builder::new()
-                    .name("NexHelper-pipe-reader".into())
-                    .spawn(move || {
-                        use std::io::BufRead;
-                        let reader = std::io::BufReader::new(pipe_file);
-                        for line in reader.lines() {
-                            match line {
-                                Ok(l) if l == "HOTKEY" => {
-                                    let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+            match helper_result {
+                Ok((helper_handle, pipe_file)) => {
+                    logging::info("[nex] hotkey: using elevated helper for detection");
+                    let pipe_event_tx = event_tx.clone();
+                    let pipe_reader_thread = thread::Builder::new()
+                        .name("NexHelper-pipe-reader".into())
+                        .spawn(move || {
+                            use std::io::BufRead;
+                            let reader = std::io::BufReader::new(pipe_file);
+                            for line in reader.lines() {
+                                match line {
+                                    Ok(l) if l == "HOTKEY" => {
+                                        let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+                                    }
+                                    Ok(l) if l == "SUPPRESS_ON" => {
+                                        crate::overlay::hotkey::set_suppress_focus_escape(true);
+                                    }
+                                    Ok(l) if l == "SUPPRESS_OFF" => {
+                                        crate::overlay::hotkey::set_suppress_focus_escape(false);
+                                    }
+                                    Ok(_) => {} // ignore other lines
+                                    Err(_) => break, // pipe disconnected
                                 }
-                                Ok(l) if l == "SUPPRESS_ON" => {
-                                    crate::overlay::hotkey::set_suppress_focus_escape(true);
-                                }
-                                Ok(l) if l == "SUPPRESS_OFF" => {
-                                    crate::overlay::hotkey::set_suppress_focus_escape(false);
-                                }
-                                Ok(_) => {} // ignore other lines
-                                Err(_) => break, // pipe disconnected
                             }
-                        }
-                    })
-                    .map_err(|e| format!("failed to spawn pipe reader: {e}"))?;
-                return Ok(Self { inner: Some(HotkeyListenerInner {
-                    should_exit,
-                    thread: None,
-                    thread_id,
-                    is_helper: true,
-                    helper_process_handle: Some(helper_handle),
-                    pipe_reader_thread: Some(pipe_reader_thread),
-                })});
+                        })
+                        .map_err(|e| format!("failed to spawn pipe reader: {e}"))?;
+                    return Ok(Self { inner: Some(HotkeyListenerInner {
+                        should_exit,
+                        thread: None,
+                        thread_id,
+                        is_helper: true,
+                        helper_process_handle: Some(helper_handle),
+                        pipe_reader_thread: Some(pipe_reader_thread),
+                    })});
+                }
+                Err(e) => {
+                    logging::warn(&format!("[nex] helper elevation failed: {e}"));
+                    logging::info("[nex] falling back to in-process hook thread");
+                }
             }
-            Err(e) => {
-                logging::warn(&format!("[nex] helper elevation failed: {e}"));
-                logging::info("[nex] falling back to in-process hook thread");
-            }
+        } else {
+            logging::info("[nex] hotkey: skipping helper, using in-process hook");
         }
 
         // --- Fallback: in-process hook thread (existing code path) ---
@@ -597,7 +625,10 @@ impl HotkeyListener {
                     }
                     // Check for WM_HOTKEY before dispatching (WM_HOTKEY has
                     // no window proc — it's posted to the thread message queue).
-                    if msg.message == WM_HOTKEY && fallback_id != 0 {
+                    // Skip if we're shutting down — WM_HOTKEY may be queued
+                    // before WM_QUIT, and the global HOOK_CTX may have been
+                    // overwritten by a new listener by now.
+                    if msg.message == WM_HOTKEY && fallback_id != 0 && !should_exit_for_thread.load(Ordering::SeqCst) {
                         let hk_id = msg.wParam as u32;
                         if hk_id == fallback_id {
                             logging::info("[nex::debug] Hook: WM_HOTKEY fallback fired, sending toggle");
@@ -624,12 +655,21 @@ impl HotkeyListener {
                     logging::warn("[nex] hotkey message loop exited unexpectedly");
                 }
             })
-            .map_err(|e| format!("failed to spawn hotkey thread: {e}"))?;
+            .map_err(|e| {
+                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                format!("failed to spawn hotkey thread: {e}")
+            })?;
 
         match ready_rx.recv() {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("hotkey thread panicked".into()),
+            Ok(Err(e)) => {
+                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err(e);
+            }
+            Err(_) => {
+                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err("hotkey thread panicked".into());
+            }
         }
         Ok(Self { inner: Some(HotkeyListenerInner {
             should_exit,
@@ -658,7 +698,12 @@ impl HotkeyListener {
                     !inner.should_exit.load(Ordering::SeqCst)
                         && inner.pipe_reader_thread.as_ref().is_some_and(|t| !t.is_finished())
                 } else {
-                    // Hook mode: check hook thread is alive
+                    // Hook mode: thread_id is set before the message pump
+                    // starts. If it's not set yet the thread is still in
+                    // early startup — treat as alive.
+                    if inner.thread_id.get().is_none() {
+                        return true;
+                    }
                     !inner.should_exit.load(Ordering::SeqCst)
                         && inner.thread.as_ref().is_some_and(|t| !t.is_finished())
                 }
@@ -672,6 +717,18 @@ impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
+            // Clear the global hook context BEFORE signalling threads
+            // so the hook proc immediately becomes a no-op — no stale
+            // hotkey events can fire from the dying listener.
+            if let Ok(mut hook_ctx) = HOOK_CTX.lock() {
+                *hook_ctx = None;
+            }
+            CTRL_DOWN.store(false, Ordering::SeqCst);
+            ALT_DOWN.store(false, Ordering::SeqCst);
+            SHIFT_DOWN.store(false, Ordering::SeqCst);
+            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
+
             if inner.is_helper {
                 // Helper mode: terminate helper process then drop
                 // (detach) the pipe reader thread.
@@ -710,15 +767,17 @@ impl Drop for HotkeyListener {
                 // Drop JoinHandle without joining (detaches the thread).
                 drop(inner.pipe_reader_thread.take());
             } else {
-                // Hook mode: post WM_QUIT, join hook thread
+                // Hook mode: post WM_QUIT and detach — must not join here
+                // because Drop runs on the runtime worker thread and joining
+                // would freeze the event loop (Windows marks the process
+                // "not responding").  HOOK_CTX is cleared immediately below,
+                // so the old hook proc becomes a no-op; the thread exits
+                // naturally on WM_QUIT.
                 if let Some(&tid) = inner.thread_id.get() {
                     logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
                     post_quit_to_thread(tid);
                 }
-                if let Some(handle) = inner.thread.take() {
-                    logging::info("[nex] shutdown: joining hotkey thread");
-                    let _ = handle.join();
-                }
+                drop(inner.thread.take());
             }
         }
     }
@@ -1091,7 +1150,7 @@ fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
     const FILE_SHARE_WRITE: u32 = 0x00000002;
     const OPEN_EXISTING: u32 = 3;
 
-    for attempt in 0..40 {
+    for attempt in 0..10 {
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),

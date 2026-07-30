@@ -414,7 +414,7 @@ impl NativeOverlayShell {
                     }
                 }
                 recv(stop_rx) -> _ => break,
-                recv(tick) -> _ => {},
+                recv(tick) -> _ => on_event(OverlayEvent::Tick),
             }
         }
         Ok(())

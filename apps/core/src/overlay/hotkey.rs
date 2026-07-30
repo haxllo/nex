@@ -692,9 +692,6 @@ impl Drop for HotkeyListener {
                         unsafe {
                             let h = handle as *mut core::ffi::c_void;
                             windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
-                            // Wait for process to exit so the named pipe
-                            // (same name) can be created by a new helper.
-                            windows_sys::Win32::System::Threading::WaitForSingleObject(h, 2000);
                             windows_sys::Win32::Foundation::CloseHandle(h);
                         }
                         true
@@ -709,19 +706,6 @@ impl Drop for HotkeyListener {
                     let _ = std::process::Command::new("taskkill")
                         .args(["/F", "/IM", "NexHelper.exe"])
                         .output();
-                    // Poll for helper exit (up to ~1.5s)
-                    for _ in 0..15 {
-                        let out = std::process::Command::new("tasklist")
-                            .args(["/FI", "IMAGENAME eq NexHelper.exe", "/NH"])
-                            .output();
-                        if let Ok(out) = out {
-                            let s = String::from_utf8_lossy(&out.stdout);
-                            if !s.contains("NexHelper") {
-                                break;
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
                 }
                 // Drop JoinHandle without joining (detaches the thread).
                 drop(inner.pipe_reader_thread.take());

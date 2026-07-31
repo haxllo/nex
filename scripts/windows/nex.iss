@@ -93,6 +93,9 @@ const
   LegacyNexRuntimeRelativePath = 'bin\nex-core.exe';
   LegacySwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
 
+var
+  DeleteDataCheckbox: TNewCheckBox;
+
 procedure ForceStopRuntimeByPath(RuntimeExe: string); forward;
 
 function StripWrappingQuotes(Value: string): string;
@@ -344,10 +347,33 @@ begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
+procedure InitializeUninstallWizard();
+begin
+  // Opt-in checkbox on the uninstall welcome page — user data is
+  // preserved by default.
+  DeleteDataCheckbox := TNewCheckBox.Create(WizardForm);
+  DeleteDataCheckbox.Parent := WizardForm.WelcomePage;
+  DeleteDataCheckbox.Left := ScaleX(48);
+  DeleteDataCheckbox.Top := ScaleY(196);
+  DeleteDataCheckbox.Width := WizardForm.WelcomePage.ClientWidth - ScaleX(96);
+  DeleteDataCheckbox.Height := ScaleY(17);
+  DeleteDataCheckbox.Caption := 'Also delete my settings and search index';
+  DeleteDataCheckbox.Checked := false;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
-    StopNexRuntime();
+    StopNexRuntime()
+  else if (CurUninstallStep = usPostUninstall) and DeleteDataCheckbox.Checked then
+  begin
+    // Remove per-user data only when the user opted in. The runtime was
+    // stopped during usUninstall and [UninstallRun] already ran, so
+    // nothing holds these files open. {userappdata} resolves to the
+    // account running the uninstaller.
+    DelTree(ExpandConstant('{userappdata}\Nex'), True, True, True);
+    DelTree(ExpandConstant('{userappdata}\SwiftFind'), True, True, True);
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

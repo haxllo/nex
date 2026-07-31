@@ -90,6 +90,8 @@ pub(crate) enum UiCommand {
     SelectChanged(usize),
     /// Show + focus the overlay (builds the WebView if not yet created).
     Show,
+    /// Focus the search input without showing/reshowing the overlay.
+    FocusInput,
     /// Hide the overlay and arm the warm-release timer.
     Hide,
     /// Hide and signal completion (used for synchronous hide-before-launch).
@@ -362,6 +364,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
+                }
+                UiCommand::FocusInput => {
+                    focus_input(&webview);
                 }
                 UiCommand::Hide => {
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the

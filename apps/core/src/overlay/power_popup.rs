@@ -274,7 +274,9 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     // Toggle: hide
                     hide_popup(&window, &mut visible);
                 } else {
-                    // Show at anchor
+                    // Show at anchor — set suppress BEFORE any focus work
+                    // so the synchronous WM_KILLFOCUS from SetFocus sees it.
+                    crate::overlay::hotkey::set_suppress_focus_escape(true);
                     let hwnd = anchor as HWND;
                     let scale = dpi_scale(hwnd);
                     let (x, y) = popup_position(hwnd, scale);
@@ -285,7 +287,6 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     focus_deadline = Instant::now() + Duration::from_millis(300);
                     show_time = Instant::now();
                     visible = true;
-                    crate::overlay::hotkey::set_suppress_focus_escape(true);
                 }
             }
             Event::UserEvent(PopupCmd::Hide) => {

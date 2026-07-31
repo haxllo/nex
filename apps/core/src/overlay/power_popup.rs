@@ -31,17 +31,18 @@ use wry::WebViewBuilder;
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DwmSetWindowAttribute,
     DWMWA_WINDOW_CORNER_PREFERENCE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
-use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowRect, SM_CXSCREEN,
-    SM_CYSCREEN,
+    GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    SetWindowLongPtrW, SetWindowPos, SM_CXSCREEN, SM_CYSCREEN,
+    GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    WS_BORDER, WS_DLGFRAME, WS_THICKFRAME,
 };
 
 const POPUP_WIDTH: f64 = 130.0; // matches footer #power-menu min-width
@@ -237,9 +238,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         .build(&event_loop)
         .map_err(|e| format!("failed to create power popup window: {e}"))?;
 
+    let hwnd = window.hwnd() as HWND;
+
     // Rounded corners — mirrors indexing_progress::apply_chrome.
     // No acrylic needed: the popup page is fully opaque.
-    let hwnd = window.hwnd() as HWND;
     unsafe {
         let pref: i32 = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(
@@ -250,15 +252,23 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         );
     }
 
-    // Remove any DWM frame edge around the frameless popup.
-    let mut margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
+    // Force frameless at the Win32 level — strip any border styles that
+    // survived with_decorations(false) so DWM doesn't draw a frame region.
     unsafe {
-        DwmExtendFrameIntoClientArea(hwnd, &mut margins);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as i32;
+        let new_style = style
+            & !(WS_BORDER as i32)
+            & !(WS_DLGFRAME as i32)
+            & !(WS_THICKFRAME as i32);
+        if new_style != style {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, new_style as isize);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0, 0, 0, 0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
     }
 
     let html = build_html();

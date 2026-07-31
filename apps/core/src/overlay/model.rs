@@ -49,6 +49,8 @@ pub enum OverlayEvent {
     PowerMenuShutdown,
     /// Restart requested from the power menu after in-overlay confirmation.
     PowerMenuRestart,
+    /// Toggle the separate power popup window (idle-state power button).
+    TogglePowerPopup,
     SearchResultsReady,
     /// Pin an app to Quick Launch by title.
     PinApp(String),

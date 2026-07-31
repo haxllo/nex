@@ -366,7 +366,7 @@ html[data-theme="light"] .row.selected .title {
   opacity: 0.5;
 }
 
-#footer.idle .hints {
+#footer.idle {
   display: none;
 }
 
@@ -391,7 +391,13 @@ html[data-theme="light"] .row.selected .title {
   margin-left: auto;
 }
 
-#power-btn {
+#power-wrap-top {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+#power-btn,
+#power-btn-top {
   display: grid;
   place-items: center;
   width: 28px;
@@ -404,7 +410,8 @@ html[data-theme="light"] .row.selected .title {
   transition: color 120ms ease, transform 120ms ease;
 }
 #power-btn:hover,
-#power-btn.open {
+#power-btn.open,
+#power-btn-top:hover {
   color: var(--text);
   background: transparent;
   transform: scale(1.15);

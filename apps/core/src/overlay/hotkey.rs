@@ -19,6 +19,8 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::io::FromRawHandle;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use crossbeam_channel::Sender;
 
@@ -1018,9 +1020,12 @@ fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Pa
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             &format!("(Get-ScheduledTask -TaskName '{}').Actions.Execute", SCHTASK_NAME),
         ])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash at boot
         .output()
         .map_err(|e| format!("powershell task query failed: {e}"))?;
 

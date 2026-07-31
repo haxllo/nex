@@ -52,6 +52,7 @@ static INIT_GUARD: AtomicBool = AtomicBool::new(false);
 
 enum PopupCmd {
     Show(isize), // anchor hwnd
+    Height(f64), // measured content height from JS, logical px
     Hide,        // internal: IPC handler / focus-loss asks loop to hide
     Quit,
 }
@@ -141,6 +142,12 @@ confirmPanel.addEventListener("click",function(e){
   }
 });
 document.addEventListener("keydown",function(e){if(e.key==="Escape")post("close")});
+function reportHeight(){
+  var h=Math.ceil(Math.max(document.documentElement.scrollHeight,document.body.scrollHeight));
+  post("height",h);
+}
+reportHeight();
+setTimeout(reportHeight,150); // re-measure after fonts settle (idempotent)
 </script>
 </body>
 </html>"#;
@@ -239,11 +246,12 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         .build(&window)
         .map_err(|e| format!("failed to build power popup webview: {e}"))?;
 
-    // Loop state
+    // Loop state — page paints while hidden so measured_h is set before first Show.
     let mut visible = false;
     let mut show_time = Instant::now();
     let mut wants_focus = false;
     let mut focus_deadline = Instant::now();
+    let mut measured_h = POPUP_HEIGHT;
 
     let _ = event_loop.run_return(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -277,6 +285,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
                     crate::overlay::hotkey::set_suppress_focus_escape(true);
+                    window.set_inner_size(LogicalSize::new(POPUP_WIDTH, measured_h));
                     let hwnd = anchor as HWND;
                     let scale = dpi_scale(hwnd);
                     let (x, y) = popup_position(hwnd, scale);
@@ -288,6 +297,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     show_time = Instant::now();
                     visible = true;
                 }
+            }
+            Event::UserEvent(PopupCmd::Height(h)) => {
+                measured_h = h.max(100.0).min(300.0);
+                window.set_inner_size(LogicalSize::new(POPUP_WIDTH, measured_h));
             }
             Event::UserEvent(PopupCmd::Hide) => {
                 hide_popup(&window, &mut visible);
@@ -344,6 +357,10 @@ fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_lo
         }
         "close" => {
             let _ = proxy.send_event(PopupCmd::Hide);
+        }
+        "height" => {
+            let h = value.get("v").and_then(|v| v.as_f64()).unwrap_or(POPUP_HEIGHT);
+            let _ = proxy.send_event(PopupCmd::Height(h));
         }
         _ => {}
     }

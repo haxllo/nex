@@ -75,8 +75,8 @@ const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 :root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:rgba(20,20,22,1);--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
 html[data-theme="light"]{--bg-opaque:rgba(255,255,255,1);--border:rgba(0,0,0,0.1);--text:#16161a;--text-faint:#8a8a93;--sel:rgba(0,0,0,0.06);--accent:#2f6bff;--divider:rgba(0,0,0,0.07)}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
-html,body{background:transparent;font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden;height:100%}
-#menu{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden;height:100%}
+html,body{background:transparent;font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
+#menu{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
 #confirm{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
 #menu button:hover,#confirm button:hover{background:var(--sel)}
@@ -315,6 +315,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
                     crate::overlay::hotkey::set_suppress_focus_escape(true);
                     window.set_inner_size(LogicalSize::new(size.0, size.1));
+                    log_warn(&format!("[nex::popup] Show size set inner={:?} outer={:?}", window.inner_size(), window.outer_size()));
                     let hwnd = anchor as HWND;
                     let scale = dpi_scale(hwnd);
                     let (x, y) = popup_position(hwnd, scale, size.0, size.1);
@@ -330,7 +331,9 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             }
             Event::UserEvent(PopupCmd::Resize(w, h)) => {
                 size = (w.clamp(100.0, 300.0), h.clamp(80.0, 400.0));
+                log_warn(&format!("[nex::popup] Resize -> {:.0}x{:.0} (visible={})", w, h, visible));
                 window.set_inner_size(LogicalSize::new(size.0, size.1));
+                log_warn(&format!("[nex::popup] Resize done, outer={:?} inner={:?}", window.outer_size(), window.inner_size()));
                 // Keep the right edge anchored: recompute x from the anchor.
                 if visible {
                     let hwnd = last_anchor as HWND;
@@ -443,6 +446,7 @@ fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_lo
         "size" => {
             let w = value.get("w").and_then(|v| v.as_f64()).unwrap_or(POPUP_WIDTH);
             let h = value.get("h").and_then(|v| v.as_f64()).unwrap_or(POPUP_HEIGHT);
+            log_warn(&format!("[nex::popup] IPC size w={} h={}", w, h));
             let _ = proxy.send_event(PopupCmd::Resize(w, h));
         }
         _ => {}

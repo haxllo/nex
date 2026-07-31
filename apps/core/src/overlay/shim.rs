@@ -184,13 +184,14 @@ impl NativeOverlayShell {
             .unwrap_or(false)
     }
 
-    /// Placeholder HWND accessor. The WebView shell does not expose a
-    /// native `HWND` for the SearchWorker to post messages to — the
-    /// runtime polls [`SearchWorker::try_recv`] and calls
-    /// [`NativeOverlayShell::set_results`] directly. Kept only so the
-    /// `SearchWorker::new(_, _, _, hwnd, msg)` signature is unchanged.
+    /// Returns the live overlay window handle, used as anchor for the
+    /// power popup positioning.
     pub fn hwnd(&self) -> isize {
-        0
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.hwnd)
+            .unwrap_or(0)
     }
 
     pub fn show_and_focus(&self) {

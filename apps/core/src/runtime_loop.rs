@@ -1161,14 +1161,14 @@ impl RuntimeWorker {
             }
             OverlayEvent::TrayShutdown => {
                 std::thread::spawn(move || {
-                    if let Err(error) = crate::power_actions::shell_shutdown_dialog() {
+                    if let Err(error) = crate::power_actions::confirm_and_shutdown() {
                         log_warn(&format!("[nex] tray shutdown failed: {error}"));
                     }
                 });
             }
             OverlayEvent::TrayRestart => {
                 std::thread::spawn(move || {
-                    if let Err(error) = crate::power_actions::shell_restart_dialog() {
+                    if let Err(error) = crate::power_actions::confirm_and_restart() {
                         log_warn(&format!("[nex] tray restart failed: {error}"));
                     }
                 });

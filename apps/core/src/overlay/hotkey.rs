@@ -1122,6 +1122,7 @@ fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Pa
 fn run_helper_task() -> Result<(), String> {
     let output = std::process::Command::new("schtasks")
         .args(["/run", "/tn", SCHTASK_NAME])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW — schtasks is a console binary
         .output()
         .map_err(|e| format!("schtasks /run failed: {e}"))?;
 

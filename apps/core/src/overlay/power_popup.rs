@@ -58,7 +58,7 @@ static INIT_GUARD: AtomicBool = AtomicBool::new(false);
 
 enum PopupCmd {
     Show(isize), // anchor hwnd
-    Height(f64), // measured content height from JS, logical px
+    Resize(f64, f64), // (w, h) measured content size from JS, logical px
     Hide,        // internal: IPC handler / focus-loss asks loop to hide
     Quit,
 }
@@ -80,7 +80,7 @@ html,body{background:transparent;font-family:var(--font);font-weight:400;letter-
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
 #menu button:hover,#confirm button:hover{background:var(--sel)}
 #menu hr,#confirm hr{height:1px;margin:4px 6px;border:none;background:var(--divider)}
-#confirm{display:none}
+#confirm{display:none;min-width:150px}
 #confirm .confirm-title{padding:6px 10px 2px;font-size:11px;color:var(--text-faint);white-space:nowrap}
 #confirm button.confirm-yes{color:var(--accent)}
 </style></head>
@@ -118,6 +118,7 @@ menu.addEventListener("click",function(e){
     menu.style.display="none";
     confirmPanel.style.display="block";
     confirmYes.focus();
+    reportSize();
     return;
   }
   post("action",a);
@@ -128,6 +129,7 @@ confirmPanel.addEventListener("click",function(e){
     pending=null;
     confirmPanel.style.display="none";
     menu.style.display="block";
+    reportSize();
     return;
   }
   if(b.id==="confirm-yes"&&pending){
@@ -137,12 +139,12 @@ confirmPanel.addEventListener("click",function(e){
   }
 });
 document.addEventListener("keydown",function(e){if(e.key==="Escape")post("close")});
-function reportHeight(){
-  var h=Math.ceil(Math.max(document.documentElement.scrollHeight,document.body.scrollHeight));
-  post("height",h);
+function reportSize(){
+  var el=(confirmPanel.style.display==="block")?confirmPanel:menu;
+  post("size",{w:Math.ceil(el.offsetWidth),h:Math.ceil(el.offsetHeight)});
 }
-reportHeight();
-setTimeout(reportHeight,150); // re-measure after fonts settle (idempotent)
+reportSize();
+setTimeout(reportSize,150);
 </script>
 </body>
 </html>"#;
@@ -265,12 +267,12 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         .build(&window)
         .map_err(|e| format!("failed to build power popup webview: {e}"))?;
 
-    // Loop state — page paints while hidden so measured_h is set before first Show.
+    // Loop state — page paints while hidden so size is set before first Show.
     let mut visible = false;
     let mut show_time = Instant::now();
     let mut wants_focus = false;
     let mut focus_deadline = Instant::now();
-    let mut measured_h = POPUP_HEIGHT;
+    let mut size: (f64, f64) = (POPUP_WIDTH, POPUP_HEIGHT);
     let mut last_anchor: isize = 0;
 
     let _ = event_loop.run_return(move |event, _target, control_flow| {
@@ -305,10 +307,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
                     crate::overlay::hotkey::set_suppress_focus_escape(true);
-                    window.set_inner_size(LogicalSize::new(POPUP_WIDTH, measured_h));
+                    window.set_inner_size(LogicalSize::new(size.0, size.1));
                     let hwnd = anchor as HWND;
                     let scale = dpi_scale(hwnd);
-                    let (x, y) = popup_position(hwnd, scale);
+                    let (x, y) = popup_position(hwnd, scale, size.0, size.1);
                     window.set_outer_position(PhysicalPosition::new(x, y));
                     window.set_visible(true);
                     window.set_focus();
@@ -319,9 +321,16 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     last_anchor = anchor;
                 }
             }
-            Event::UserEvent(PopupCmd::Height(h)) => {
-                measured_h = h.max(100.0).min(300.0);
-                window.set_inner_size(LogicalSize::new(POPUP_WIDTH, measured_h));
+            Event::UserEvent(PopupCmd::Resize(w, h)) => {
+                size = (w.clamp(100.0, 300.0), h.clamp(80.0, 400.0));
+                window.set_inner_size(LogicalSize::new(size.0, size.1));
+                // Keep the right edge anchored: recompute x from the anchor.
+                if visible {
+                    let hwnd = last_anchor as HWND;
+                    let scale = dpi_scale(hwnd);
+                    let (x, y) = popup_position(hwnd, scale, size.0, size.1);
+                    window.set_outer_position(PhysicalPosition::new(x, y));
+                }
             }
             Event::UserEvent(PopupCmd::Hide) => {
                 hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
@@ -423,9 +432,10 @@ fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_lo
         "close" => {
             let _ = proxy.send_event(PopupCmd::Hide);
         }
-        "height" => {
-            let h = value.get("v").and_then(|v| v.as_f64()).unwrap_or(POPUP_HEIGHT);
-            let _ = proxy.send_event(PopupCmd::Height(h));
+        "size" => {
+            let w = value.get("w").and_then(|v| v.as_f64()).unwrap_or(POPUP_WIDTH);
+            let h = value.get("h").and_then(|v| v.as_f64()).unwrap_or(POPUP_HEIGHT);
+            let _ = proxy.send_event(PopupCmd::Resize(w, h));
         }
         _ => {}
     }
@@ -457,9 +467,9 @@ fn dpi_scale(anchor_hwnd: HWND) -> f64 {
 /// x = anchor right - popup width - 8px, y = anchor top + search row
 /// (60px) + 6px gap. Clamped to the work area of the monitor containing
 /// the anchor (primary monitor as fallback).
-fn popup_position(anchor_hwnd: HWND, scale: f64) -> (i32, i32) {
-    let width = (POPUP_WIDTH * scale) as i32;
-    let height = (POPUP_HEIGHT * scale) as i32;
+fn popup_position(anchor_hwnd: HWND, scale: f64, width: f64, height: f64) -> (i32, i32) {
+    let width = (width * scale) as i32;
+    let height = (height * scale) as i32;
 
     let mut rect: RECT = unsafe { std::mem::zeroed() };
     let anchored = !anchor_hwnd.is_null() && unsafe { GetWindowRect(anchor_hwnd, &mut rect) } != 0;

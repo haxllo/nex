@@ -3,9 +3,9 @@
 //! A separate borderless, transparent, always-on-top tao window hosts a
 //! wry WebView that renders the power menu (Lock / Sleep / Shutdown /
 //! Restart / Sign Out) with an in-popup confirm step for the destructive
-//! actions. The popup is anchored to the main overlay window and closes
-//! on focus loss, Escape, or after an action fires. It runs on its own
-//! named thread so [`show_power_popup`] never blocks the caller.
+//! actions. The popup is built once at startup (hidden) and repositioned /
+//! shown instantly on each click. It runs on its own named thread so
+//! [`toggle`] never blocks the caller.
 //!
 //! All actions are forwarded over the shared `crossbeam_channel`
 //! [`Sender<OverlayEvent>`] exactly like the tray / hotkey paths.
@@ -13,6 +13,7 @@
 #![cfg(target_os = "windows")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const POPUP_WIDTH: f64 = 152.0;
 const POPUP_HEIGHT: f64 = 172.0;
 
-static POPUP_OPEN: AtomicBool = AtomicBool::new(false);
+// ── Module state ──────────────────────────────────────────────────────
+
+/// Control channel to the persistent popup thread. `None` until
+/// [`init_power_popup`] succeeds; cleared on thread exit or panic.
+static CTL: Mutex<Option<tao::event_loop::EventLoopProxy<PopupCmd>>> = Mutex::new(None);
+
+/// One-shot flag so [`init_power_popup`] is idempotent.
+static INIT_GUARD: AtomicBool = AtomicBool::new(false);
+
+enum PopupCmd {
+    Show(isize), // anchor hwnd
+    Hide,        // internal: IPC handler / focus-loss asks loop to hide
+    Quit,
+}
 
 /// Feather-style stroke icons matching the overlay's `#power-btn` SVG
 /// (`viewBox="0 0 24 24"`, `stroke="currentColor"`, `stroke-width="2"`).
@@ -131,27 +145,28 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape")post("close"
 </body>
 </html>"#;
 
-enum PopupCmd {
-    Show,
-    Close,
-}
+// ── Public API ───────────────────────────────────────────────────────
 
-/// Spawn the power popup on its own thread and return immediately.
-/// Anchors the popup to the main overlay window (`anchor_hwnd`) and
-/// forwards menu actions to `event_tx`. Never blocks or panics the
-/// caller; thread-body failures are logged.
-pub(crate) fn show_power_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) {
-    if POPUP_OPEN.swap(true, Ordering::SeqCst) {
-        log_warn("[nex] power popup already open, ignoring");
+/// Build the persistent power popup once at startup. Non-blocking:
+/// spawns a background thread that creates the tao EventLoop + WebView2
+/// (hidden). The page paints while hidden so it is ready on first click.
+/// Idempotent — safe to call multiple times.
+pub(crate) fn init_power_popup(event_tx: Sender<OverlayEvent>) {
+    if INIT_GUARD.swap(true, Ordering::SeqCst) {
         return;
     }
     let spawn_result = thread::Builder::new()
         .name("nex-power-popup".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_popup(anchor_hwnd, event_tx)
+                run_popup(event_tx)
             }));
-            POPUP_OPEN.store(false, Ordering::SeqCst);
+            // Thread going down — ensure suppress flag is clear.
+            crate::overlay::hotkey::set_suppress_focus_escape(false);
+            // Clear CTL so dead channel never lingers.
+            if let Ok(mut guard) = CTL.lock() {
+                *guard = None;
+            }
             match result {
                 Ok(Err(e)) => log_warn(&format!("[nex] power popup error: {e}")),
                 Err(_) => log_warn("[nex] power popup thread panicked"),
@@ -163,17 +178,45 @@ pub(crate) fn show_power_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent
     }
 }
 
-fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), String> {
+/// Toggle the power popup at the given anchor window.
+/// If visible → hide. If hidden → show at anchor.
+pub(crate) fn toggle(anchor_hwnd: isize) {
+    if let Ok(guard) = CTL.lock() {
+        if let Some(ref proxy) = *guard {
+            let _ = proxy.send_event(PopupCmd::Show(anchor_hwnd));
+        } else {
+            log_warn("[nex] power popup not ready, ignoring toggle");
+        }
+    }
+}
+
+/// Best-effort quit: hide popup and exit its event loop.
+pub(crate) fn quit() {
+    if let Ok(mut guard) = CTL.lock() {
+        if let Some(proxy) = guard.take() {
+            let _ = proxy.send_event(PopupCmd::Quit);
+        }
+    }
+}
+
+// ── Internal loop ────────────────────────────────────────────────────
+
+fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
     let mut builder = EventLoopBuilder::<PopupCmd>::with_user_event();
     builder.with_any_thread(true);
     let mut event_loop = builder.build();
     let proxy = event_loop.create_proxy();
 
+    // Store control channel in module state.
+    if let Ok(mut guard) = CTL.lock() {
+        *guard = Some(proxy.clone());
+    }
+
     let window = WindowBuilder::new()
         .with_title("Nex Power")
         .with_decorations(false)
         .with_transparent(true)
-        .with_visible(false) // hidden until WebView2 paints first frame
+        .with_visible(false) // hidden until first Show command
         .with_no_redirection_bitmap(true)
         .with_resizable(false)
         .with_always_on_top(true)
@@ -182,11 +225,6 @@ fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), S
         .with_window_classname("NexPowerPopupClass")
         .build(&event_loop)
         .map_err(|e| format!("failed to create power popup window: {e}"))?;
-
-    let hwnd = anchor_hwnd as HWND;
-    let scale = dpi_scale(hwnd);
-    let (x, y) = popup_position(hwnd, scale);
-    window.set_outer_position(PhysicalPosition::new(x, y));
 
     let html = build_html();
     let ipc_tx = event_tx.clone();
@@ -201,35 +239,28 @@ fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), S
         .build(&window)
         .map_err(|e| format!("failed to build power popup webview: {e}"))?;
 
-    // Delay showing so WebView2 can init & paint first frame — avoids the
-    // blank white flash (mirrors indexing_progress).
-    let proxy_show = proxy.clone();
-    thread::Builder::new()
-        .name("nex-power-popup-show".into())
-        .spawn(move || {
-            thread::sleep(Duration::from_millis(80));
-            let _ = proxy_show.send_event(PopupCmd::Show);
-        })
-        .map_err(|e| format!("failed to spawn popup show thread: {e}"))?;
-
-    let mut closed = false;
+    // Loop state
+    let mut visible = false;
     let mut show_time = Instant::now();
     let mut wants_focus = false;
     let mut focus_deadline = Instant::now();
+
     let _ = event_loop.run_return(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Poll;
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => close_popup(&window, &mut closed, control_flow),
+            } => {
+                hide_popup(&window, &mut visible);
+            }
             Event::WindowEvent {
                 event: WindowEvent::Focused(false),
                 ..
             } => {
                 // Ignore spurious WM_KILLFOCUS within 150ms of show.
-                if show_time.elapsed() > Duration::from_millis(150) {
-                    close_popup(&window, &mut closed, control_flow);
+                if visible && show_time.elapsed() > Duration::from_millis(150) {
+                    hide_popup(&window, &mut visible);
                 }
             }
             Event::WindowEvent {
@@ -238,14 +269,32 @@ fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), S
             } => {
                 wants_focus = false;
             }
-            Event::UserEvent(PopupCmd::Show) => {
-                window.set_visible(true);
-                window.set_focus();
-                show_time = Instant::now();
-                wants_focus = true;
-                focus_deadline = Instant::now() + Duration::from_millis(300);
+            Event::UserEvent(PopupCmd::Show(anchor)) => {
+                if visible {
+                    // Toggle: hide
+                    hide_popup(&window, &mut visible);
+                } else {
+                    // Show at anchor
+                    let hwnd = anchor as HWND;
+                    let scale = dpi_scale(hwnd);
+                    let (x, y) = popup_position(hwnd, scale);
+                    window.set_outer_position(PhysicalPosition::new(x, y));
+                    window.set_visible(true);
+                    window.set_focus();
+                    wants_focus = true;
+                    focus_deadline = Instant::now() + Duration::from_millis(300);
+                    show_time = Instant::now();
+                    visible = true;
+                    crate::overlay::hotkey::set_suppress_focus_escape(true);
+                }
             }
-            Event::UserEvent(PopupCmd::Close) => close_popup(&window, &mut closed, control_flow),
+            Event::UserEvent(PopupCmd::Hide) => {
+                hide_popup(&window, &mut visible);
+            }
+            Event::UserEvent(PopupCmd::Quit) => {
+                hide_popup(&window, &mut visible);
+                *control_flow = ControlFlow::Exit;
+            }
             _ => {}
         }
         // Focus retry: re-attempt set_focus each iteration until deadline.
@@ -262,11 +311,11 @@ fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), S
     Ok(())
 }
 
-fn close_popup(window: &tao::window::Window, closed: &mut bool, control_flow: &mut ControlFlow) {
-    if !*closed {
-        *closed = true;
+fn hide_popup(window: &tao::window::Window, visible: &mut bool) {
+    if *visible {
         window.set_visible(false);
-        *control_flow = ControlFlow::Exit;
+        *visible = false;
+        crate::overlay::hotkey::set_suppress_focus_escape(false);
     }
 }
 
@@ -290,10 +339,10 @@ fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_lo
             if let Some(e) = event {
                 let _ = event_tx.send(e);
             }
-            let _ = proxy.send_event(PopupCmd::Close);
+            let _ = proxy.send_event(PopupCmd::Hide);
         }
         "close" => {
-            let _ = proxy.send_event(PopupCmd::Close);
+            let _ = proxy.send_event(PopupCmd::Hide);
         }
         _ => {}
     }

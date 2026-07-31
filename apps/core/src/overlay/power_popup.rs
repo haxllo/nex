@@ -31,11 +31,13 @@ use wry::WebViewBuilder;
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
+use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN,
@@ -81,8 +83,8 @@ const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 :root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:rgba(20,20,22,1);--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
 html[data-theme="light"]{--bg-opaque:rgba(255,255,255,1);--border:rgba(0,0,0,0.1);--text:#16161a;--text-faint:#8a8a93;--sel:rgba(0,0,0,0.06);--accent:#2f6bff;--divider:rgba(0,0,0,0.07)}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
-html,body{background:transparent;font-family:var(--font);color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
-#menu,#confirm{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
+html,body{background:transparent;font-family:var(--font);color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden;height:100%}
+#menu,#confirm{width:100%;height:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
 #menu button{display:flex;align-items:center;gap:8px}
 #menu button svg,#confirm button svg{flex:none}
@@ -247,6 +249,17 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             &pref as *const i32 as *const std::ffi::c_void,
             std::mem::size_of::<i32>() as u32,
         );
+    }
+
+    // Remove any DWM frame edge around the frameless popup.
+    let mut margins = MARGINS {
+        cxLeftWidth: -1,
+        cxRightWidth: -1,
+        cyTopHeight: -1,
+        cyBottomHeight: -1,
+    };
+    unsafe {
+        DwmExtendFrameIntoClientArea(hwnd, &mut margins);
     }
 
     let html = build_html();

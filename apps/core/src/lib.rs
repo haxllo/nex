@@ -21,6 +21,8 @@ pub mod logging;
 pub mod model;
 pub mod overlay_state;
 pub mod plugin_sdk;
+#[cfg(target_os = "windows")]
+pub(crate) mod power_actions;
 pub mod query_dsl;
 pub mod runtime;
 pub(crate) mod runtime_actions;

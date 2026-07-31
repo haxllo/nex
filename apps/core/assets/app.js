@@ -16,6 +16,8 @@
   const bodyEl = $("body");
   const footerEl = $("footer");
   const help = $("help");
+  const powerBtn = $("power-btn");
+  const powerMenu = $("power-menu");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -391,6 +393,10 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
+        if (powerOpen) {
+          closePowerMenu();
+          return;
+        }
         e.preventDefault();
         post("escape");
       } else if (e.key === "Home" && e.ctrlKey) {
@@ -434,9 +440,48 @@
 
   help.addEventListener("click", () => post("openConfig"));
 
+  // ── power button dropup ──────────────────────────────────
+  let powerOpen = false;
+  powerBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    powerOpen = !powerOpen;
+    powerMenu.classList.toggle("hidden", !powerOpen);
+    powerBtn.classList.toggle("open", powerOpen);
+  });
+
+  powerMenu.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+    const action = btn.dataset.power;
+    if (action) {
+      post("powerAction", action);
+      powerOpen = false;
+      powerMenu.classList.add("hidden");
+      powerBtn.classList.remove("open");
+    }
+  });
+
+  function closePowerMenu() {
+    if (!powerOpen) return;
+    powerOpen = false;
+    if (powerMenu) powerMenu.classList.add("hidden");
+    if (powerBtn) powerBtn.classList.remove("open");
+    input.focus();
+  }
+
+  // Close the dropup when clicking anywhere outside
+  document.addEventListener("click", (e) => {
+    if (powerOpen && !powerBtn.contains(e.target) && !powerMenu.contains(e.target)) {
+      closePowerMenu();
+    }
+  });
+
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      // Close the power dropup whenever Rust pushes a fresh state
+      // (show, hide, query change, etc.)
+      closePowerMenu();
       // Icon data message: {"icons": {"path": "data:...", ...}}
       // Sent as a separate PostWebMessageAsJson after the state message.
       if (state.icons && typeof state.icons === "object" && !state.rows) {

@@ -13,11 +13,23 @@ pub(crate) const STATUS_ROW_TYPE_TO_SEARCH: &str = "Start typing to search";
 
 pub(crate) const ACTION_UNINSTALL_CONFIRM_ID: &str = "action:uninstall:confirm";
 pub(crate) const ACTION_UNINSTALL_CANCEL_ID: &str = "action:uninstall:cancel";
+pub(crate) const ACTION_POWER_CONFIRM_ID: &str = "action:power:confirm";
+pub(crate) const ACTION_POWER_CANCEL_ID: &str = "action:power:cancel";
+
+/// What kind of action the user is being asked to confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmationKind {
+    Uninstall,
+    Shutdown,
+    Restart,
+    SignOut,
+}
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Clone)]
-pub(crate) struct PendingUninstallConfirmation {
-    pub(crate) uninstall_action: SearchItem,
+pub(crate) struct PendingConfirmation {
+    pub(crate) kind: ConfirmationKind,
+    pub(crate) uninstall_action: Option<SearchItem>,
     pub(crate) previous_results: Vec<SearchItem>,
     pub(crate) previous_selected_index: usize,
     pub(crate) previous_command_mode: bool,

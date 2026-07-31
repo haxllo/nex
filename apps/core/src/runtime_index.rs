@@ -7,7 +7,7 @@ use crate::core_service::CoreService;
 use crate::plugin_sdk::PluginRegistry;
 use crate::runtime::log_info;
 use crate::runtime::log_warn;
-use crate::runtime_overlay_rows::PendingUninstallConfirmation;
+use crate::runtime_overlay_rows::PendingConfirmation;
 use crate::runtime_search_session::OverlaySearchSession;
 #[cfg(target_os = "windows")]
 use crate::overlay::NativeOverlayShell;
@@ -263,7 +263,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
     runtime_config: &mut Config,
     plugin_registry: &mut PluginRegistry,
     search_session: &mut OverlaySearchSession,
-    pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
+    pending_uninstall_confirmation: &mut Option<PendingConfirmation>,
     max_results: &mut usize,
     watcher: &mut RuntimeConfigWatcher,
     background_index_refresh: &mut BackgroundIndexRefresh,

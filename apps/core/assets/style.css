@@ -17,6 +17,7 @@
 
   /* dark palette */
   --bg: rgba(0, 0, 0, 0.70);
+  --bg-opaque: rgba(20, 20, 22, 1);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
@@ -32,6 +33,7 @@
 
 html[data-theme="light"] {
   --bg: rgba(246, 246, 248, 0.72);
+  --bg-opaque: rgba(255, 255, 255, 1);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
@@ -342,7 +344,7 @@ html[data-theme="light"] .row.selected .title {
   align-items: center;
   height: 40px;
   margin-top: 8px;
-  padding: 8px 0 0;
+  padding: 8px var(--pad-x) 0;
   border-top: 1px solid var(--divider);
   font-size: 11px;
   color: var(--text-faint);
@@ -353,7 +355,6 @@ html[data-theme="light"] .row.selected .title {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding-right: 32px;
 }
 #footer .hint {
   display: flex;
@@ -365,7 +366,7 @@ html[data-theme="light"] .row.selected .title {
   opacity: 0.5;
 }
 
-#footer.idle {
+#footer.idle .hints {
   display: none;
 }
 
@@ -381,6 +382,67 @@ html[data-theme="light"] .row.selected .title {
   font-size: 10px;
   color: var(--text-dim);
   line-height: 1;
+}
+
+/* ── power button + dropup ───────────────────────────────── */
+#power-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+#power-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 120ms ease, transform 120ms ease;
+}
+#power-btn:hover,
+#power-btn.open {
+  color: var(--text);
+  background: transparent;
+  transform: scale(1.15);
+}
+
+#power-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 130px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--bg-opaque);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  overflow: hidden;
+}
+#power-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--row-radius);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+#power-menu button:hover {
+  background: var(--sel);
+}
+#power-menu hr {
+  height: 1px;
+  margin: 4px 6px;
+  border: none;
+  background: var(--divider);
 }
 
 .hidden {

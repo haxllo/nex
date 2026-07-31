@@ -40,6 +40,11 @@ pub enum OverlayEvent {
     ExternalQuit,
     TrayToggleGameMode,
     TrayCheckForUpdates,
+    TrayLock,
+    TraySleep,
+    TrayShutdown,
+    TrayRestart,
+    TraySignOut,
     SearchResultsReady,
     /// Pin an app to Quick Launch by title.
     PinApp(String),

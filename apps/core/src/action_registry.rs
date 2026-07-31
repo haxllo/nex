@@ -10,6 +10,11 @@ pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle_
 pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
 pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
+pub const ACTION_LOCK_ID: &str = "__nex_action_lock__";
+pub const ACTION_SLEEP_ID: &str = "__nex_action_sleep__";
+pub const ACTION_SHUTDOWN_ID: &str = "__nex_action_shutdown__";
+pub const ACTION_RESTART_ID: &str = "__nex_action_restart__";
+pub const ACTION_SIGN_OUT_ID: &str = "__nex_action_sign_out__";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltInAction {
@@ -62,6 +67,36 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
             title: "Trim Memory Now",
             subtitle: "Clear overlay icon/query caches and log memory snapshot",
             keywords: &["memory", "trim", "cache", "compact"],
+        },
+        BuiltInAction {
+            id: ACTION_LOCK_ID,
+            title: "Lock",
+            subtitle: "Lock your workstation",
+            keywords: &["lock", "workstation", "secure"],
+        },
+        BuiltInAction {
+            id: ACTION_SLEEP_ID,
+            title: "Sleep",
+            subtitle: "Put your computer to sleep",
+            keywords: &["sleep", "suspend", "hibernate"],
+        },
+        BuiltInAction {
+            id: ACTION_SHUTDOWN_ID,
+            title: "Shutdown",
+            subtitle: "Power off your computer",
+            keywords: &["shutdown", "power", "off"],
+        },
+        BuiltInAction {
+            id: ACTION_RESTART_ID,
+            title: "Restart",
+            subtitle: "Restart your computer",
+            keywords: &["restart", "reboot", "reset"],
+        },
+        BuiltInAction {
+            id: ACTION_SIGN_OUT_ID,
+            title: "Sign Out",
+            subtitle: "Sign out of your account",
+            keywords: &["signout", "logout", "log out", "sign out"],
         },
     ]
 }

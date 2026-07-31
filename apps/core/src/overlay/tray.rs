@@ -28,6 +28,11 @@ const TRAY_MENU_OPEN_CONFIG: u32 = 41002;
 const TRAY_MENU_CHECK_UPDATES: u32 = 41003;
 const TRAY_MENU_GAME_MODE: u32 = 41004;
 const TRAY_MENU_QUIT: u32 = 41005;
+const TRAY_MENU_LOCK: u32 = 41006;
+const TRAY_MENU_SLEEP: u32 = 41007;
+const TRAY_MENU_SHUTDOWN: u32 = 41008;
+const TRAY_MENU_RESTART: u32 = 41009;
+const TRAY_MENU_SIGN_OUT: u32 = 41010;
 
 fn to_wide(s: &str) -> Vec<u16> {
     let mut wide: Vec<u16> = s.encode_utf16().collect();
@@ -309,6 +314,11 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
     let config_text = to_wide("Open Config");
     let updates_text = to_wide("Check for Updates");
     let game_mode_text = to_wide("Game Mode");
+    let lock_text = to_wide("Lock");
+    let sleep_text = to_wide("Sleep");
+    let shutdown_text = to_wide("Shutdown");
+    let restart_text = to_wide("Restart");
+    let sign_out_text = to_wide("Sign Out");
     let quit_text = to_wide("Quit");
 
     unsafe {
@@ -336,6 +346,28 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
                 },
             TRAY_MENU_GAME_MODE as usize,
             game_mode_text.as_ptr(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, TRAY_MENU_LOCK as usize, lock_text.as_ptr());
+        AppendMenuW(menu, MF_STRING, TRAY_MENU_SLEEP as usize, sleep_text.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            TRAY_MENU_SHUTDOWN as usize,
+            shutdown_text.as_ptr(),
+        );
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            TRAY_MENU_RESTART as usize,
+            restart_text.as_ptr(),
+        );
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            TRAY_MENU_SIGN_OUT as usize,
+            sign_out_text.as_ptr(),
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(
@@ -393,6 +425,21 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
         }
         TRAY_MENU_GAME_MODE => {
             let _ = s.event_tx.send(OverlayEvent::TrayToggleGameMode);
+        }
+        TRAY_MENU_LOCK => {
+            let _ = s.event_tx.send(OverlayEvent::TrayLock);
+        }
+        TRAY_MENU_SLEEP => {
+            let _ = s.event_tx.send(OverlayEvent::TraySleep);
+        }
+        TRAY_MENU_SHUTDOWN => {
+            let _ = s.event_tx.send(OverlayEvent::TrayShutdown);
+        }
+        TRAY_MENU_RESTART => {
+            let _ = s.event_tx.send(OverlayEvent::TrayRestart);
+        }
+        TRAY_MENU_SIGN_OUT => {
+            let _ = s.event_tx.send(OverlayEvent::TraySignOut);
         }
         TRAY_MENU_QUIT => {
             let _ = s.event_tx.send(OverlayEvent::ExternalQuit);

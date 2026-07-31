@@ -27,9 +27,11 @@ use crate::query_dsl::ParsedQuery;
 #[cfg(target_os = "windows")]
 use crate::runtime::{log_info, log_warn, RuntimeError};
 #[cfg(target_os = "windows")]
+use crate::model::SearchItem;
+#[cfg(target_os = "windows")]
 use crate::runtime_actions::{
-    execute_action_selection, launch_overlay_selection, should_suppress_failed_uninstall,
-    uninstall_confirmation_results,
+    execute_action_selection, launch_overlay_selection, power_confirmation_results,
+    should_suppress_failed_uninstall, uninstall_confirmation_results,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_hotkey::{should_suppress_hotkey_for_game_mode, toggle_game_mode_from_tray};
@@ -44,7 +46,8 @@ use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, overlay_rows,
     reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
-    track_uninstall_title_suppression, PendingUninstallConfirmation,
+    track_uninstall_title_suppression, ConfirmationKind, PendingConfirmation,
+    ACTION_POWER_CANCEL_ID, ACTION_POWER_CONFIRM_ID,
     ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
     STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
 };
@@ -396,7 +399,7 @@ pub(crate) fn run_windows_runtime(
         config_watcher,
         current_results: Vec::new(),
         suppressed_uninstall_titles: Vec::new(),
-        pending_uninstall_confirmation: None,
+        pending_confirmation: None,
         selected_index: 0,
         last_query: String::new(),
         last_sent_generation: 0,
@@ -508,7 +511,7 @@ struct RuntimeWorker {
     config_watcher: RuntimeConfigWatcher,
     current_results: Vec<crate::model::SearchItem>,
     suppressed_uninstall_titles: Vec<String>,
-    pending_uninstall_confirmation: Option<PendingUninstallConfirmation>,
+    pending_confirmation: Option<PendingConfirmation>,
     selected_index: usize,
     last_query: String,
     last_sent_generation: u64,
@@ -875,7 +878,7 @@ impl RuntimeWorker {
                 &mut self.runtime_config,
                 &mut self.plugin_registry,
                 &mut self.search_session,
-                &mut self.pending_uninstall_confirmation,
+                &mut self.pending_confirmation,
                 &mut self.max_results,
                 &mut self.config_watcher,
                 &mut self.background_index_refresh,
@@ -994,7 +997,7 @@ impl RuntimeWorker {
                 &self.runtime_config,
                 self.config_generation,
                 self.max_results,
-                &mut self.pending_uninstall_confirmation,
+                &mut self.pending_confirmation,
                 &mut self.current_results,
                 &mut self.selected_index,
                 &mut self.last_query,
@@ -1085,7 +1088,7 @@ impl RuntimeWorker {
                             &mut self.current_results,
                             &mut self.selected_index,
                         );
-                        self.pending_uninstall_confirmation = None;
+                        self.pending_confirmation = None;
                         self.last_query.clear();
                         self.last_sent_generation = 0;
                         self.search_session.clear();
@@ -1142,6 +1145,41 @@ impl RuntimeWorker {
                     }
                 }
             }
+            OverlayEvent::TrayLock => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::lock() {
+                        log_warn(&format!("[nex] tray lock failed: {error}"));
+                    }
+                });
+            }
+            OverlayEvent::TraySleep => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::sleep() {
+                        log_warn(&format!("[nex] tray sleep failed: {error}"));
+                    }
+                });
+            }
+            OverlayEvent::TrayShutdown => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::shell_shutdown_dialog() {
+                        log_warn(&format!("[nex] tray shutdown failed: {error}"));
+                    }
+                });
+            }
+            OverlayEvent::TrayRestart => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::shell_restart_dialog() {
+                        log_warn(&format!("[nex] tray restart failed: {error}"));
+                    }
+                });
+            }
+            OverlayEvent::TraySignOut => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::sign_out() {
+                        log_warn(&format!("[nex] tray sign out failed: {error}"));
+                    }
+                });
+            }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();
@@ -1163,7 +1201,7 @@ impl RuntimeWorker {
                         &mut self.current_results,
                         &mut self.selected_index,
                     );
-                    self.pending_uninstall_confirmation = None;
+                    self.pending_confirmation = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
                     self.search_session.clear();
@@ -1179,7 +1217,7 @@ impl RuntimeWorker {
                     self.selected_index = 0;
                     self.last_query.clear();
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
-                    self.pending_uninstall_confirmation = None;
+                    self.pending_confirmation = None;
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
@@ -1192,7 +1230,7 @@ impl RuntimeWorker {
                     &self.runtime_config,
                     self.config_generation,
                     self.max_results,
-                    &mut self.pending_uninstall_confirmation,
+                    &mut self.pending_confirmation,
                     &mut self.current_results,
                     &mut self.selected_index,
                     &mut self.last_query,
@@ -1289,82 +1327,129 @@ impl RuntimeWorker {
                 }
 
                 let selected = &self.current_results[self.selected_index];
-                if self.pending_uninstall_confirmation.is_some() {
+                if self.pending_confirmation.is_some() {
                     let selected_id = selected.id.clone();
-                    if selected_id == ACTION_UNINSTALL_CONFIRM_ID {
-                        let Some(pending) = self.pending_uninstall_confirmation.take() else {
+                    let is_confirm = selected_id == ACTION_UNINSTALL_CONFIRM_ID
+                        || selected_id == ACTION_POWER_CONFIRM_ID;
+                    let is_cancel = selected_id == ACTION_UNINSTALL_CANCEL_ID
+                        || selected_id == ACTION_POWER_CANCEL_ID;
+
+                    if is_confirm {
+                        let Some(pending) = self.pending_confirmation.take() else {
                             return;
                         };
-                        self.overlay.hide_now();
-                        self.overlay_state.on_escape();
-                        match execute_action_selection(
-                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
-                            &self.runtime_config,
-                            &self.plugin_registry,
-                            &pending.uninstall_action,
-                        ) {
-                            Ok(()) => {
-                                track_uninstall_title_suppression(
-                                    &mut self.suppressed_uninstall_titles,
-                                    pending.uninstall_action.title.as_str(),
-                                );
-                                self.overlay.set_status_text("");
-                                reset_overlay_session(
-                                    &self.overlay,
-                                    &mut self.current_results,
-                                    &mut self.selected_index,
-                                );
-                                self.last_query.clear();
-                                self.last_sent_generation = 0;
-                                self.search_session.clear();
-                                self.search_worker.clear_session();
-                            }
-                            Err(error) => {
-                                if should_suppress_failed_uninstall(error.as_str()) {
-                                    track_uninstall_title_suppression(
-                                        &mut self.suppressed_uninstall_titles,
-                                        pending.uninstall_action.title.as_str(),
-                                    );
-                                    self.current_results = pending.previous_results;
-                                    filter_suppressed_uninstall_results(
-                                        &mut self.current_results,
-                                        &self.suppressed_uninstall_titles,
-                                    );
-                                    self.selected_index = pending
-                                        .previous_selected_index
-                                        .min(self.current_results.len().saturating_sub(1));
-                                    if self.current_results.is_empty() {
-                                        set_status_row_overlay_state(
+                        match pending.kind {
+                            ConfirmationKind::Uninstall => {
+                                let Some(uninstall_action) = pending.uninstall_action.as_ref() else {
+                                    log_warn("[nex] confirm uninstall without pending uninstall action; ignoring");
+                                    return;
+                                };
+                                self.overlay.hide_now();
+                                self.overlay_state.on_escape();
+                                match execute_action_selection(
+                                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                                    &self.runtime_config,
+                                    &self.plugin_registry,
+                                    uninstall_action,
+                                ) {
+                                    Ok(()) => {
+                                        track_uninstall_title_suppression(
+                                            &mut self.suppressed_uninstall_titles,
+                                            uninstall_action.title.as_str(),
+                                        );
+                                        self.overlay.set_status_text("");
+                                        reset_overlay_session(
                                             &self.overlay,
-                                            if pending.previous_command_mode {
-                                                STATUS_ROW_NO_COMMAND_RESULTS
-                                            } else {
-                                                STATUS_ROW_NO_RESULTS
-                                            },
+                                            &mut self.current_results,
+                                            &mut self.selected_index,
                                         );
-                                    } else {
-                                        let rows = overlay_rows(
-                                            &self.current_results,
-                                            pending.previous_command_mode,
-                                        );
-                                        self.overlay.set_results(&rows, self.selected_index);
+                                        self.last_query.clear();
+                                        self.last_sent_generation = 0;
+                                        self.search_session.clear();
+                                        self.search_worker.clear_session();
                                     }
-                                    self.overlay.set_status_text(
-                                        "Uninstall entry is stale and was hidden",
-                                    );
-                                } else {
-                                    self.pending_uninstall_confirmation = Some(pending);
-                                    self.overlay.show_and_focus();
-                                    self.overlay
-                                        .set_status_text(&format!("Launch error: {error}"));
+                                    Err(error) => {
+                                        if should_suppress_failed_uninstall(error.as_str()) {
+                                            track_uninstall_title_suppression(
+                                                &mut self.suppressed_uninstall_titles,
+                                                uninstall_action.title.as_str(),
+                                            );
+                                            self.current_results = pending.previous_results;
+                                            filter_suppressed_uninstall_results(
+                                                &mut self.current_results,
+                                                &self.suppressed_uninstall_titles,
+                                            );
+                                            self.selected_index = pending
+                                                .previous_selected_index
+                                                .min(self.current_results.len().saturating_sub(1));
+                                            if self.current_results.is_empty() {
+                                                set_status_row_overlay_state(
+                                                    &self.overlay,
+                                                    if pending.previous_command_mode {
+                                                        STATUS_ROW_NO_COMMAND_RESULTS
+                                                    } else {
+                                                        STATUS_ROW_NO_RESULTS
+                                                    },
+                                                );
+                                            } else {
+                                                let rows = overlay_rows(
+                                                    &self.current_results,
+                                                    pending.previous_command_mode,
+                                                );
+                                                self.overlay.set_results(&rows, self.selected_index);
+                                            }
+                                            self.overlay.set_status_text(
+                                                "Uninstall entry is stale and was hidden",
+                                            );
+                                        } else {
+                                            self.pending_confirmation = Some(pending);
+                                            self.overlay.show_and_focus();
+                                            self.overlay
+                                                .set_status_text(&format!("Launch error: {error}"));
+                                        }
+                                    }
+                                }
+                            }
+                            ConfirmationKind::Shutdown | ConfirmationKind::Restart | ConfirmationKind::SignOut => {
+                                self.overlay.hide_now();
+                                self.overlay_state.on_escape();
+                                let action_id = match pending.kind {
+                                    ConfirmationKind::Shutdown => crate::action_registry::ACTION_SHUTDOWN_ID,
+                                    ConfirmationKind::Restart => crate::action_registry::ACTION_RESTART_ID,
+                                    ConfirmationKind::SignOut => crate::action_registry::ACTION_SIGN_OUT_ID,
+                                    _ => unreachable!(),
+                                };
+                                let power_item = SearchItem::new(action_id, "action", "", "");
+                                match execute_action_selection(
+                                    &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                                    &self.runtime_config,
+                                    &self.plugin_registry,
+                                    &power_item,
+                                ) {
+                                    Ok(()) => {
+                                        reset_overlay_session(
+                                            &self.overlay,
+                                            &mut self.current_results,
+                                            &mut self.selected_index,
+                                        );
+                                        self.last_query.clear();
+                                        self.last_sent_generation = 0;
+                                        self.search_session.clear();
+                                        self.search_worker.clear_session();
+                                    }
+                                    Err(_) => {
+                                        self.pending_confirmation = Some(pending);
+                                        self.overlay.show_and_focus();
+                                        self.overlay.set_status_text("Power action failed");
+                                    }
                                 }
                             }
                         }
                         return;
                     }
 
-                    if selected_id == ACTION_UNINSTALL_CANCEL_ID {
-                        let Some(pending) = self.pending_uninstall_confirmation.take() else {
+                    if is_cancel {
+                        let Some(pending) = self.pending_confirmation.take() else {
                             return;
                         };
                         self.current_results = pending.previous_results;
@@ -1391,7 +1476,7 @@ impl RuntimeWorker {
                         return;
                     }
 
-                    self.pending_uninstall_confirmation = None;
+                    self.pending_confirmation = None;
                 }
 
                 let selected_is_uninstall = selected
@@ -1403,8 +1488,9 @@ impl RuntimeWorker {
                         self.overlay.query_text().trim(),
                         self.runtime_config.search_dsl_enabled,
                     );
-                    self.pending_uninstall_confirmation = Some(PendingUninstallConfirmation {
-                        uninstall_action: selected.clone(),
+                    self.pending_confirmation = Some(PendingConfirmation {
+                        kind: ConfirmationKind::Uninstall,
+                        uninstall_action: Some(selected.clone()),
                         previous_results: self.current_results.clone(),
                         previous_selected_index: self.selected_index,
                         previous_command_mode: parsed_query.command_mode,
@@ -1414,6 +1500,68 @@ impl RuntimeWorker {
                     let rows = overlay_rows(&self.current_results, true);
                     self.overlay.set_results(&rows, self.selected_index);
                     self.overlay.set_status_text("");
+                    return;
+                }
+
+                // Power actions going through confirmation
+                let selected_id = selected.id.as_str();
+                if selected_id == crate::action_registry::ACTION_SHUTDOWN_ID
+                    || selected_id == crate::action_registry::ACTION_RESTART_ID
+                    || selected_id == crate::action_registry::ACTION_SIGN_OUT_ID
+                {
+                    let kind = match selected_id {
+                        crate::action_registry::ACTION_SHUTDOWN_ID => ConfirmationKind::Shutdown,
+                        crate::action_registry::ACTION_RESTART_ID => ConfirmationKind::Restart,
+                        crate::action_registry::ACTION_SIGN_OUT_ID => ConfirmationKind::SignOut,
+                        _ => unreachable!(),
+                    };
+                    let parsed_query = ParsedQuery::parse(
+                        self.overlay.query_text().trim(),
+                        self.runtime_config.search_dsl_enabled,
+                    );
+                    self.pending_confirmation = Some(PendingConfirmation {
+                        kind,
+                        uninstall_action: None,
+                        previous_results: self.current_results.clone(),
+                        previous_selected_index: self.selected_index,
+                        previous_command_mode: parsed_query.command_mode,
+                    });
+                    self.current_results = power_confirmation_results(kind);
+                    self.selected_index = 0;
+                    let rows = overlay_rows(&self.current_results, true);
+                    self.overlay.set_results(&rows, self.selected_index);
+                    self.overlay.set_status_text("");
+                    return;
+                }
+
+                // Lock and Sleep are non-destructive — execute immediately
+                if selected_id == crate::action_registry::ACTION_LOCK_ID
+                    || selected_id == crate::action_registry::ACTION_SLEEP_ID
+                {
+                    self.overlay.hide_now();
+                    self.overlay_state.on_escape();
+                    match execute_action_selection(
+                        &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                        &self.runtime_config,
+                        &self.plugin_registry,
+                        selected,
+                    ) {
+                        Ok(()) => {
+                            reset_overlay_session(
+                                &self.overlay,
+                                &mut self.current_results,
+                                &mut self.selected_index,
+                            );
+                            self.last_query.clear();
+                            self.last_sent_generation = 0;
+                            self.search_session.clear();
+                            self.search_worker.clear_session();
+                        }
+                        Err(error) => {
+                            self.overlay.show_and_focus();
+                            self.overlay.set_status_text(&format!("Action failed: {error}"));
+                        }
+                    }
                     return;
                 }
 
@@ -1441,7 +1589,7 @@ impl RuntimeWorker {
                             &mut self.current_results,
                             &mut self.selected_index,
                         );
-                        self.pending_uninstall_confirmation = None;
+                        self.pending_confirmation = None;
                         self.last_query.clear();
                         self.last_sent_generation = 0;
                         self.search_session.clear();
@@ -1487,13 +1635,13 @@ fn apply_query_change(
     runtime_config: &Config,
     config_generation: u64,
     max_results: usize,
-    pending_uninstall_confirmation: &mut Option<PendingUninstallConfirmation>,
+    pending_confirmation: &mut Option<PendingConfirmation>,
     current_results: &mut Vec<crate::model::SearchItem>,
     selected_index: &mut usize,
     last_query: &mut String,
     last_sent_generation: &mut u64,
 ) {
-    *pending_uninstall_confirmation = None;
+    *pending_confirmation = None;
     let mut query = query;
     if let Some(expanded) = maybe_expand_uninstall_quick_shortcut(&query, last_query.as_str()) {
         overlay.set_query_text(&expanded);
@@ -1506,7 +1654,7 @@ fn apply_query_change(
         *selected_index = 0;
         last_query.clear();
         *last_sent_generation = last_sent_generation.wrapping_add(1);
-        *pending_uninstall_confirmation = None;
+        *pending_confirmation = None;
         set_idle_overlay_state(overlay);
         return;
     }

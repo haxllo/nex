@@ -23,7 +23,7 @@ use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::platform::windows::WindowBuilderExtWindows;
+use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows};
 use tao::window::WindowBuilder;
 use wry::http::Request;
 use wry::WebViewBuilder;
@@ -148,10 +148,14 @@ pub(crate) fn show_power_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent
     let spawn_result = thread::Builder::new()
         .name("nex-power-popup".into())
         .spawn(move || {
-            let result = run_popup(anchor_hwnd, event_tx);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_popup(anchor_hwnd, event_tx)
+            }));
             POPUP_OPEN.store(false, Ordering::SeqCst);
-            if let Err(e) = result {
-                log_warn(&format!("[nex] power popup error: {e}"));
+            match result {
+                Ok(Err(e)) => log_warn(&format!("[nex] power popup error: {e}")),
+                Err(_) => log_warn("[nex] power popup thread panicked"),
+                Ok(Ok(())) => {}
             }
         });
     if let Err(e) = spawn_result {
@@ -160,7 +164,9 @@ pub(crate) fn show_power_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent
 }
 
 fn run_popup(anchor_hwnd: isize, event_tx: Sender<OverlayEvent>) -> Result<(), String> {
-    let mut event_loop = EventLoopBuilder::<PopupCmd>::with_user_event().build();
+    let mut builder = EventLoopBuilder::<PopupCmd>::with_user_event();
+    builder.with_any_thread(true);
+    let mut event_loop = builder.build();
     let proxy = event_loop.create_proxy();
 
     let window = WindowBuilder::new()

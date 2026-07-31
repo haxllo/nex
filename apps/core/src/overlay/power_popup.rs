@@ -24,12 +24,15 @@ use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows};
+use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::WindowBuilder;
 use wry::http::Request;
 use wry::WebViewBuilder;
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
@@ -232,6 +235,19 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         .with_window_classname("NexPowerPopupClass")
         .build(&event_loop)
         .map_err(|e| format!("failed to create power popup window: {e}"))?;
+
+    // Rounded corners — mirrors indexing_progress::apply_chrome.
+    // No acrylic needed: the popup page is fully opaque.
+    let hwnd = window.hwnd() as HWND;
+    unsafe {
+        let pref: i32 = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
 
     let html = build_html();
     let ipc_tx = event_tx.clone();

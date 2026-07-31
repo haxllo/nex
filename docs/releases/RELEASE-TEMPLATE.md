@@ -8,6 +8,10 @@
 
 - **{label}**: {description}
 
+### Features
+
+- **{feature}**: {description}
+
 ### Bug Fixes
 
 - **{issue}**: {fix}

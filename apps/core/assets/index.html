@@ -45,6 +45,23 @@
           <span class="dot">·</span>
           <div class="hint"><span class="kbd">esc</span><span class="lbl">Close</span></div>
         </div>
+        <div id="power-wrap">
+          <button type="button" id="power-btn" title="Power options" aria-label="Power options">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v10" />
+              <path d="M18.4 6.6a9 9 0 1 1-12.8 0" />
+            </svg>
+          </button>
+          <div id="power-menu" class="hidden">
+            <button type="button" data-power="lock">Lock</button>
+            <button type="button" data-power="sleep">Sleep</button>
+            <hr />
+            <button type="button" data-power="shutdown">Shutdown</button>
+            <button type="button" data-power="restart">Restart</button>
+            <hr />
+            <button type="button" data-power="signout">Sign Out</button>
+          </div>
+        </div>
       </footer>
     </main>
     <script src="/app.js"></script>

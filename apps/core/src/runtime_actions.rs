@@ -3,19 +3,22 @@ use std::os::windows::process::CommandExt;
 
 use crate::action_registry::{
     ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
-    ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID, ACTION_TRIM_MEMORY_ID,
-    ACTION_WEB_SEARCH_PREFIX,
+    ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID,
+    ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID,
+    ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::Config;
 use crate::core_service::{CoreService, LaunchTarget};
 use crate::model::SearchItem;
 use crate::plugin_sdk::{PluginActionKind, PluginRegistry};
+#[cfg(target_os = "windows")]
+use crate::power_actions;
 use crate::query_dsl::ParsedQuery;
 use crate::runtime::{log_info, log_warn};
 use crate::runtime_overlay_rows::{
-    uninstall_target_title_from_action_title, ACTION_UNINSTALL_CANCEL_ID,
-    ACTION_UNINSTALL_CONFIRM_ID,
+    uninstall_target_title_from_action_title, ConfirmationKind, ACTION_POWER_CONFIRM_ID,
+    ACTION_POWER_CANCEL_ID, ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
 };
 use crate::runtime_search_session::resolved_mode_for_query;
 
@@ -46,6 +49,31 @@ pub(crate) fn uninstall_confirmation_results(uninstall_action: &SearchItem) -> V
         ),
         SearchItem::new(
             ACTION_UNINSTALL_CANCEL_ID,
+            "action",
+            "Cancel",
+            "Return to previous results",
+        ),
+    ]
+}
+
+/// Build confirmation rows for power actions (Shutdown, Restart, Sign Out).
+pub(crate) fn power_confirmation_results(kind: ConfirmationKind) -> Vec<SearchItem> {
+    let (confirm_title, confirm_subtitle) = match kind {
+        ConfirmationKind::Shutdown => ("Confirm shutdown", "Power off your computer"),
+        ConfirmationKind::Restart => ("Confirm restart", "Restart your computer"),
+        ConfirmationKind::SignOut => ("Confirm sign out", "Sign out of your account"),
+        ConfirmationKind::Uninstall => unreachable!("use uninstall_confirmation_results"),
+    };
+
+    vec![
+        SearchItem::new(
+            ACTION_POWER_CONFIRM_ID,
+            "action",
+            confirm_title,
+            confirm_subtitle,
+        ),
+        SearchItem::new(
+            ACTION_POWER_CANCEL_ID,
             "action",
             "Cancel",
             "Return to previous results",
@@ -159,6 +187,26 @@ pub(crate) fn execute_action_selection(
             log_info("[nex] trim memory action invoked");
             Ok(())
         }
+        #[cfg(target_os = "windows")]
+        ACTION_LOCK_ID => power_actions::lock()
+            .map(|_| ())
+            .map_err(|error| format!("lock failed: {error}")),
+        #[cfg(target_os = "windows")]
+        ACTION_SLEEP_ID => power_actions::sleep()
+            .map(|_| ())
+            .map_err(|error| format!("sleep failed: {error}")),
+        #[cfg(target_os = "windows")]
+        ACTION_SHUTDOWN_ID => power_actions::shutdown()
+            .map(|_| ())
+            .map_err(|error| format!("shutdown failed: {error}")),
+        #[cfg(target_os = "windows")]
+        ACTION_RESTART_ID => power_actions::restart()
+            .map(|_| ())
+            .map_err(|error| format!("restart failed: {error}")),
+        #[cfg(target_os = "windows")]
+        ACTION_SIGN_OUT_ID => power_actions::sign_out()
+            .map(|_| ())
+            .map_err(|error| format!("sign out failed: {error}")),
         _ => execute_plugin_action(cfg, plugins, &selected.id),
     }
 }

@@ -782,6 +782,19 @@ fn handle_ipc(
                 let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
             }
         }
+        "powerAction" => {
+            if let Some(action) = value.get("v").and_then(|v| v.as_str()) {
+                let event = match action {
+                    "lock" => OverlayEvent::TrayLock,
+                    "sleep" => OverlayEvent::TraySleep,
+                    "shutdown" => OverlayEvent::TrayShutdown,
+                    "restart" => OverlayEvent::TrayRestart,
+                    "signout" => OverlayEvent::TraySignOut,
+                    _ => return,
+                };
+                let _ = event_tx.send(event);
+            }
+        }
         _ => {}
     }
 }

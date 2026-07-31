@@ -40,10 +40,11 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN,
+    GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowRect, SM_CXSCREEN,
+    SM_CYSCREEN,
 };
 
-const POPUP_WIDTH: f64 = 152.0;
+const POPUP_WIDTH: f64 = 130.0; // matches footer #power-menu min-width
 const POPUP_HEIGHT: f64 = 172.0;
 
 // ── Module state ──────────────────────────────────────────────────────
@@ -62,19 +63,10 @@ enum PopupCmd {
     Quit,
 }
 
-/// Feather-style stroke icons matching the overlay's `#power-btn` SVG
-/// (`viewBox="0 0 24 24"`, `stroke="currentColor"`, `stroke-width="2"`).
-/// The power icon paths are copied verbatim from `assets/index.html`.
-const ICON_POWER: &str = "<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 2v10\"/><path d=\"M18.4 6.6a9 9 0 1 1-12.8 0\"/></svg>";
-const ICON_LOCK: &str = "<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"11\" width=\"18\" height=\"11\" rx=\"2\" ry=\"2\"/><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"/></svg>";
-const ICON_MOON: &str = "<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"/></svg>";
-const ICON_RESTART: &str = "<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"23 4 23 10 17 10\"/><path d=\"M20.49 15a9 9 0 1 1-2.12-9.36L23 10\"/></svg>";
-const ICON_SIGNOUT: &str = "<svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><polyline points=\"16 17 21 12 16 7\"/><line x1=\"21\" y1=\"12\" x2=\"9\" y2=\"12\"/></svg>";
-
 /// Popup page. Visual tokens mirror `assets/style.css` `:root` (dark) and
 /// `html[data-theme="light"]` blocks; the layout mirrors the footer
-/// `#power-menu` / `#power-confirm` structure. `{theme}` and `{icon-*}`
-/// placeholders are substituted at runtime.
+/// `#power-menu` / `#power-confirm` structure. `{theme}`
+/// placeholder is substituted at runtime.
 const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 <html lang="en" data-theme="{theme}">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -83,11 +75,9 @@ const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 :root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:rgba(20,20,22,1);--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
 html[data-theme="light"]{--bg-opaque:rgba(255,255,255,1);--border:rgba(0,0,0,0.1);--text:#16161a;--text-faint:#8a8a93;--sel:rgba(0,0,0,0.06);--accent:#2f6bff;--divider:rgba(0,0,0,0.07)}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
-html,body{background:transparent;font-family:var(--font);color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden;height:100%}
+html,body{background:transparent;font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden;height:100%}
 #menu,#confirm{width:100%;height:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
-#menu button{display:flex;align-items:center;gap:8px}
-#menu button svg,#confirm button svg{flex:none}
 #menu button:hover,#confirm button:hover{background:var(--sel)}
 #menu hr,#confirm hr{height:1px;margin:4px 6px;border:none;background:var(--divider)}
 #confirm{display:none}
@@ -96,13 +86,13 @@ html,body{background:transparent;font-family:var(--font);color:var(--text);-webk
 </style></head>
 <body>
 <div id="menu">
-  <button type="button" data-power="lock">{icon-lock}Lock</button>
-  <button type="button" data-power="sleep">{icon-moon}Sleep</button>
+  <button type="button" data-power="lock">Lock</button>
+  <button type="button" data-power="sleep">Sleep</button>
   <hr/>
-  <button type="button" data-power="shutdown">{icon-power}Shutdown</button>
-  <button type="button" data-power="restart">{icon-restart}Restart</button>
+  <button type="button" data-power="shutdown">Shutdown</button>
+  <button type="button" data-power="restart">Restart</button>
   <hr/>
-  <button type="button" data-power="signout">{icon-signout}Sign Out</button>
+  <button type="button" data-power="signout">Sign Out</button>
 </div>
 <div id="confirm">
   <div class="confirm-title" id="confirm-title">Shut down now?</div>
@@ -281,6 +271,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
     let mut wants_focus = false;
     let mut focus_deadline = Instant::now();
     let mut measured_h = POPUP_HEIGHT;
+    let mut last_anchor: isize = 0;
 
     let _ = event_loop.run_return(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -289,7 +280,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                hide_popup(&window, &mut visible);
+                hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
             }
             Event::WindowEvent {
                 event: WindowEvent::Focused(false),
@@ -297,7 +288,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             } => {
                 // Ignore spurious WM_KILLFOCUS within 150ms of show.
                 if visible && show_time.elapsed() > Duration::from_millis(150) {
-                    hide_popup(&window, &mut visible);
+                    hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
                 }
             }
             Event::WindowEvent {
@@ -309,7 +300,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             Event::UserEvent(PopupCmd::Show(anchor)) => {
                 if visible {
                     // Toggle: hide
-                    hide_popup(&window, &mut visible);
+                    hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
                 } else {
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
@@ -325,6 +316,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     focus_deadline = Instant::now() + Duration::from_millis(300);
                     show_time = Instant::now();
                     visible = true;
+                    last_anchor = anchor;
                 }
             }
             Event::UserEvent(PopupCmd::Height(h)) => {
@@ -332,10 +324,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 window.set_inner_size(LogicalSize::new(POPUP_WIDTH, measured_h));
             }
             Event::UserEvent(PopupCmd::Hide) => {
-                hide_popup(&window, &mut visible);
+                hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
             }
             Event::UserEvent(PopupCmd::Quit) => {
-                hide_popup(&window, &mut visible);
+                hide_popup(&window, &mut visible, &event_tx, last_anchor, false);
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}
@@ -354,12 +346,56 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
     Ok(())
 }
 
-fn hide_popup(window: &tao::window::Window, visible: &mut bool) {
+fn hide_popup(
+    window: &tao::window::Window,
+    visible: &mut bool,
+    event_tx: &Sender<OverlayEvent>,
+    anchor: isize,
+    refocus: bool,
+) {
     if *visible {
         window.set_visible(false);
         *visible = false;
         crate::overlay::hotkey::set_suppress_focus_escape(false);
+        if refocus {
+            // The popup was dismissed by a click elsewhere: after the
+            // foreground settles, refocus the overlay search input —
+            // unless the click landed on a real app window.
+            let tx = event_tx.clone();
+            let anchor = anchor;
+            let popup_hwnd = window.hwnd() as isize;
+            std::thread::Builder::new()
+                .name("nex-popup-refocus".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(50)); // let foreground settle
+                    if should_refocus_search(anchor, popup_hwnd) {
+                        let _ = tx.send(OverlayEvent::FocusSearchInput);
+                    }
+                })
+                .ok();
+        }
     }
+}
+
+/// Decide whether the overlay search input should be refocused after the
+/// power popup hides: true when the foreground window is null, the popup
+/// itself, the anchor (overlay), or the desktop / taskbar — false when a
+/// real app window now owns focus (don't steal it back).
+fn should_refocus_search(anchor: isize, popup_hwnd: isize) -> bool {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+        return true;
+    }
+    if fg as isize == anchor || fg as isize == popup_hwnd {
+        return true;
+    }
+    let mut class_buf = [0u16; 64];
+    let len = unsafe { GetClassNameW(fg, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+    if len == 0 {
+        return false;
+    }
+    let class = String::from_utf16_lossy(&class_buf[..len as usize]);
+    matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd")
 }
 
 /// Parse one IPC message `{"t": ..., "v": ...}` and act on it.
@@ -402,11 +438,6 @@ fn build_html() -> String {
     };
     POWER_POPUP_PAGE
         .replace("{theme}", theme)
-        .replace("{icon-lock}", ICON_LOCK)
-        .replace("{icon-moon}", ICON_MOON)
-        .replace("{icon-power}", ICON_POWER)
-        .replace("{icon-restart}", ICON_RESTART)
-        .replace("{icon-signout}", ICON_SIGNOUT)
 }
 
 /// Physical-pixel DPI scale of the anchor window (1.0 = 96 DPI).

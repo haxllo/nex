@@ -51,6 +51,8 @@ pub enum OverlayEvent {
     PowerMenuRestart,
     /// Toggle the separate power popup window (idle-state power button).
     TogglePowerPopup,
+    /// Refocus the overlay search input without showing/reshowing the overlay.
+    FocusSearchInput,
     SearchResultsReady,
     /// Pin an app to Quick Launch by title.
     PinApp(String),

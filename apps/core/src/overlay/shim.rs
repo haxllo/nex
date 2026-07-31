@@ -214,6 +214,11 @@ impl NativeOverlayShell {
         self.post(UiCommand::Show);
     }
 
+    /// Focus the search input without toggling visibility.
+    pub fn focus_search_input(&self) {
+        self.post(UiCommand::FocusInput);
+    }
+
     pub fn hide(&self) {
         self.with_state(|s| {
             s.visible = false;

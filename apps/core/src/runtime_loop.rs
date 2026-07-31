@@ -236,6 +236,9 @@ pub(crate) fn run_windows_runtime(
     // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
+    // Build the persistent power popup once (hidden); toggle() repositions instantly.
+    crate::overlay::power_popup::init_power_popup(event_tx.clone());
+
     // Install a console Ctrl+C handler so `nex --foreground` can be
     // stopped from the terminal. The handler sends ExternalQuit down
     // the same channel the tray uses. Only effective when a console
@@ -1124,6 +1127,7 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::ExternalQuit => {
+                crate::overlay::power_popup::quit();
                 self.overlay.hide_now();
                 self.last_query.clear();
                 self.last_sent_generation = 0;
@@ -1196,10 +1200,10 @@ impl RuntimeWorker {
                 });
             }
             OverlayEvent::TogglePowerPopup => {
-                crate::overlay::power_popup::show_power_popup(
-                    self.overlay.hwnd(),
-                    self.event_tx.clone(),
-                );
+                crate::overlay::power_popup::toggle(self.overlay.hwnd());
+            }
+            OverlayEvent::FocusSearchInput => {
+                self.overlay.focus_search_input();
             }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();

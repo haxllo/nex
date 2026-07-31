@@ -21,6 +21,8 @@
   const powerConfirm = $("power-confirm");
   const powerConfirmTitle = $("power-confirm-title");
   const powerConfirmYes = $("power-confirm-yes");
+  const powerWrapTop = $("power-wrap-top");
+  const powerBtnTop = $("power-btn-top");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -254,6 +256,11 @@
     bodyEl.classList.toggle("idle", !hasRows);
     footerEl.classList.toggle("idle", !hasRows);
 
+    // Idle: the power button replaces the config button in the search row.
+    const idle = !hasRows;
+    help.classList.toggle("hidden", idle);
+    powerWrapTop.classList.toggle("hidden", !idle);
+
     measure();
   }
 
@@ -396,13 +403,13 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
-        if (confirmAction) {
-          closePowerConfirm();
+        if (footerPower.hasConfirm()) {
+          footerPower.closeConfirm();
           input.focus();
           return;
         }
-        if (powerOpen) {
-          closePowerMenu();
+        if (footerPower.isOpen()) {
+          footerPower.closeMenu();
           return;
         }
         e.preventDefault();
@@ -449,81 +456,87 @@
   help.addEventListener("click", () => post("openConfig"));
 
   // ── power button dropup ──────────────────────────────────
-  let powerOpen = false;
-  let confirmAction = null; // "shutdown" | "restart" | null
-  powerBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (confirmAction) {
-      // Confirm panel is showing — the power icon dismisses it.
-      closePowerConfirm();
-      input.focus();
-      return;
-    }
-    powerOpen = !powerOpen;
-    powerMenu.classList.toggle("hidden", !powerOpen);
-    powerBtn.classList.toggle("open", powerOpen);
-  });
+  // Factory wires one power button + menu + confirm panel.
+  function makePowerUi(btn, menu, confirm, title, yes) {
+    let open = false;
+    let confirmAction = null; // "shutdown" | "restart" | null
+    const api = {
+      closeMenu() {
+        open = false;
+        menu.classList.add("hidden");
+        btn.classList.remove("open");
+        input.focus();
+      },
+      closeConfirm() {
+        if (!confirmAction) return;
+        confirmAction = null;
+        confirm.classList.add("hidden");
+      },
+      isOpen() { return open; },
+      hasConfirm() { return confirmAction !== null; },
+      isConfirmTarget(el) { return confirm.contains(el); },
+      isMenuTarget(el) { return btn.contains(el) || menu.contains(el); },
+    };
 
-  powerMenu.addEventListener("click", (e) => {
-    const btn = e.target.closest("button");
-    if (!btn) return;
-    const action = btn.dataset.power;
-    if (!action) return;
-    // Destructive actions need an in-overlay confirm panel first.
-    if (action === "shutdown" || action === "restart") {
-      e.stopPropagation(); // keep this click from closing the panel we're about to open
-      openPowerConfirm(action);
-      return;
-    }
-    post("powerAction", action);
-    closePowerMenu();
-  });
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (api.hasConfirm()) {
+        // Confirm panel is showing — the power icon dismisses it.
+        api.closeConfirm();
+        input.focus();
+        return;
+      }
+      open = !open;
+      menu.classList.toggle("hidden", !open);
+      btn.classList.toggle("open", open);
+    });
 
-  // ── power confirm panel (shutdown/restart) ───────────────
-  function openPowerConfirm(action) {
-    confirmAction = action;
-    closePowerMenu();
-    const isShutdown = action === "shutdown";
-    powerConfirmTitle.textContent = isShutdown ? "Shut down now?" : "Restart now?";
-    powerConfirmYes.textContent = isShutdown ? "Shut down" : "Restart";
-    powerConfirm.classList.remove("hidden");
-  }
-
-  function closePowerConfirm() {
-    if (!confirmAction) return;
-    confirmAction = null;
-    powerConfirm.classList.add("hidden");
-  }
-
-  powerConfirm.addEventListener("click", (e) => {
-    const btn = e.target.closest("button");
-    if (!btn) return;
-    if (btn.dataset.confirm === "yes") {
-      const action = confirmAction;
-      closePowerConfirm();
+    menu.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      const action = b.dataset.power;
+      if (!action) return;
+      // Destructive actions need an in-overlay confirm panel first.
+      if (action === "shutdown" || action === "restart") {
+        e.stopPropagation(); // keep this click from closing the panel we're about to open
+        confirmAction = action;
+        api.closeMenu();
+        const isShutdown = action === "shutdown";
+        title.textContent = isShutdown ? "Shut down now?" : "Restart now?";
+        yes.textContent = isShutdown ? "Shut down" : "Restart";
+        confirm.classList.remove("hidden");
+        return;
+      }
       post("powerAction", action);
-    } else {
-      closePowerConfirm();
-      input.focus();
-    }
-  });
+      api.closeMenu();
+    });
 
-  function closePowerMenu() {
-    if (!powerOpen) return;
-    powerOpen = false;
-    if (powerMenu) powerMenu.classList.add("hidden");
-    if (powerBtn) powerBtn.classList.remove("open");
-    input.focus();
+    confirm.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.confirm === "yes") {
+        const action = confirmAction;
+        api.closeConfirm();
+        post("powerAction", action);
+      } else {
+        api.closeConfirm();
+        input.focus();
+      }
+    });
+
+    return api;
   }
+
+  const footerPower = makePowerUi(powerBtn, powerMenu, powerConfirm, powerConfirmTitle, powerConfirmYes);
+  powerBtnTop.addEventListener("click", (e) => {
+    e.stopPropagation();
+    post("powerPopup");
+  });
 
   // Close the dropup / confirm when clicking anywhere outside
   document.addEventListener("click", (e) => {
-    if (confirmAction && !powerConfirm.contains(e.target)) {
-      closePowerConfirm();
-    }
-    if (powerOpen && !powerBtn.contains(e.target) && !powerMenu.contains(e.target)) {
-      closePowerMenu();
-    }
+    if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
+    if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
   });
 
   // ── Rust → JS bridge ─────────────────────────────────────
@@ -531,8 +544,8 @@
     apply(state) {
       // Close the power dropup / confirm whenever Rust pushes a fresh state
       // (show, hide, query change, etc.)
-      closePowerMenu();
-      closePowerConfirm();
+      footerPower.closeMenu();
+      footerPower.closeConfirm();
       // Icon data message: {"icons": {"path": "data:...", ...}}
       // Sent as a separate PostWebMessageAsJson after the state message.
       if (state.icons && typeof state.icons === "object" && !state.rows) {

@@ -1195,6 +1195,12 @@ impl RuntimeWorker {
                     }
                 });
             }
+            OverlayEvent::TogglePowerPopup => {
+                crate::overlay::power_popup::show_power_popup(
+                    self.overlay.hwnd(),
+                    self.event_tx.clone(),
+                );
+            }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();

@@ -747,6 +747,9 @@ fn handle_ipc(
         "escape" => {
             let _ = event_tx.send(OverlayEvent::Escape);
         }
+        "powerPopup" => {
+            let _ = event_tx.send(OverlayEvent::TogglePowerPopup);
+        }
         "resize" => {
             if let Some(h) = value.get("v").and_then(|v| v.as_f64()) {
                 let _ = proxy.send_event(UiCommand::Resize(h));

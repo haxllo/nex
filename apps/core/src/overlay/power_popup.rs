@@ -143,6 +143,12 @@ function reportSize(){
   var el=(confirmPanel.style.display==="block")?confirmPanel:menu;
   post("size",{w:Math.ceil(el.offsetWidth),h:Math.ceil(el.offsetHeight)});
 }
+window.resetView=function(){
+  pending=null;
+  menu.style.display="block";
+  confirmPanel.style.display="none";
+  reportSize();
+};
 reportSize();
 setTimeout(reportSize,150);
 </script>
@@ -282,7 +288,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
+                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
             }
             Event::WindowEvent {
                 event: WindowEvent::Focused(false),
@@ -290,7 +296,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             } => {
                 // Ignore spurious WM_KILLFOCUS within 150ms of show.
                 if visible && show_time.elapsed() > Duration::from_millis(150) {
-                    hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
+                    hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
                 }
             }
             Event::WindowEvent {
@@ -302,7 +308,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             Event::UserEvent(PopupCmd::Show(anchor)) => {
                 if visible {
                     // Toggle: hide
-                    hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
+                    hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
                 } else {
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
@@ -333,10 +339,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 }
             }
             Event::UserEvent(PopupCmd::Hide) => {
-                hide_popup(&window, &mut visible, &event_tx, last_anchor, true);
+                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
             }
             Event::UserEvent(PopupCmd::Quit) => {
-                hide_popup(&window, &mut visible, &event_tx, last_anchor, false);
+                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, false);
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}
@@ -349,20 +355,21 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         }
     });
 
-    // `webview` is intentionally kept alive (outer binding) until the
-    // loop exits so WebView2 teardown happens after the window closes.
-    drop(webview);
+    // `webview` is moved into the run_return closure and dropped when the
+    // loop exits — WebView2 teardown happens after the window closes.
     Ok(())
 }
 
 fn hide_popup(
     window: &tao::window::Window,
+    webview: &wry::WebView,
     visible: &mut bool,
     event_tx: &Sender<OverlayEvent>,
     anchor: isize,
     refocus: bool,
 ) {
     if *visible {
+        let _ = webview.evaluate_script("window.resetView&&window.resetView()");
         window.set_visible(false);
         *visible = false;
         crate::overlay::hotkey::set_suppress_focus_escape(false);

@@ -366,6 +366,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::FocusInput => {
+                    window.set_focus();
                     focus_input(&webview);
                 }
                 UiCommand::Hide => {

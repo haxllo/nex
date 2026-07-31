@@ -1180,6 +1180,21 @@ impl RuntimeWorker {
                     }
                 });
             }
+            // Confirmed in the overlay — execute immediately.
+            OverlayEvent::PowerMenuShutdown => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::shutdown() {
+                        log_warn(&format!("[nex] power menu shutdown failed: {error}"));
+                    }
+                });
+            }
+            OverlayEvent::PowerMenuRestart => {
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::power_actions::restart() {
+                        log_warn(&format!("[nex] power menu restart failed: {error}"));
+                    }
+                });
+            }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();

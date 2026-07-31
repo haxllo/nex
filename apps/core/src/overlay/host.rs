@@ -787,8 +787,8 @@ fn handle_ipc(
                 let event = match action {
                     "lock" => OverlayEvent::TrayLock,
                     "sleep" => OverlayEvent::TraySleep,
-                    "shutdown" => OverlayEvent::TrayShutdown,
-                    "restart" => OverlayEvent::TrayRestart,
+                    "shutdown" => OverlayEvent::PowerMenuShutdown,
+                    "restart" => OverlayEvent::PowerMenuRestart,
                     "signout" => OverlayEvent::TraySignOut,
                     _ => return,
                 };

@@ -45,6 +45,10 @@ pub enum OverlayEvent {
     TrayShutdown,
     TrayRestart,
     TraySignOut,
+    /// Shutdown requested from the power menu after in-overlay confirmation.
+    PowerMenuShutdown,
+    /// Restart requested from the power menu after in-overlay confirmation.
+    PowerMenuRestart,
     SearchResultsReady,
     /// Pin an app to Quick Launch by title.
     PinApp(String),

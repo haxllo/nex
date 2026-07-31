@@ -445,6 +445,51 @@ html[data-theme="light"] .row.selected .title {
   background: var(--divider);
 }
 
+/* Confirmation panel — same visual language as the power menu */
+#power-confirm {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 150px;
+  padding: 4px;
+  border-radius: var(--radius);
+  background: var(--bg-opaque);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  overflow: hidden;
+}
+#power-confirm .confirm-title {
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+#power-confirm button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--row-radius);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+#power-confirm button:hover {
+  background: var(--sel);
+}
+#power-confirm button.confirm-yes {
+  color: var(--accent);
+}
+#power-confirm hr {
+  height: 1px;
+  margin: 4px 6px;
+  border: none;
+  background: var(--divider);
+}
+
 .hidden {
   display: none !important;
 }

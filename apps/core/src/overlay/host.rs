@@ -150,6 +150,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .map_err(|e| format!("failed to create overlay window: {e}"))?;
 
     let hwnd = window.hwnd() as HWND;
+    if let Ok(mut s) = state.lock() {
+        s.hwnd = hwnd as isize;
+    }
     apply_window_chrome(&window, &state);
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 

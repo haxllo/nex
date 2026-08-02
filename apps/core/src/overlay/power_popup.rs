@@ -47,7 +47,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_THICKFRAME,
 };
 
-const POPUP_WIDTH: f64 = 128.0; // matches footer #power-menu min-width
+const POPUP_WIDTH: f64 = 130.0; // matches menu min-width; confirm resize bumps to 150+
 const POPUP_HEIGHT: f64 = 166.0;
 
 // ── Module state ──────────────────────────────────────────────────────
@@ -75,12 +75,13 @@ const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Nex Power</title>
 <style>
+{font_face}
 :root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:#1E1E1E;--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
 html[data-theme="light"]{--bg-opaque:rgba(255,255,255,1);--border:rgba(0,0,0,0.1);--text:#16161a;--text-faint:#8a8a93;--sel:rgba(0,0,0,0.06);--accent:#2f6bff;--divider:rgba(0,0,0,0.07)}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
-html,body{background:var(--bg-opaque);font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
-#menu{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden;margin-top:-1px}
-#confirm{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden;margin-top:-1px}
+html,body{background:var(--bg-opaque);font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow:hidden}
+#menu{display:inline-block;min-width:130px;padding:4px;background:var(--bg-opaque);overflow:hidden}
+#confirm{display:inline-block;min-width:150px;padding:4px;background:var(--bg-opaque);overflow:hidden}
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
 #menu button:hover,#confirm button:hover{background:var(--sel)}
 #menu hr,#confirm hr{height:1px;margin:4px 6px;border:none;background:var(--divider)}
@@ -111,7 +112,6 @@ var confirmPanel=document.getElementById("confirm");
 var confirmTitle=document.getElementById("confirm-title");
 var confirmYes=document.getElementById("confirm-yes");
 var pending=null;
-var lastMenuH=0;
 menu.addEventListener("click",function(e){
   var b=e.target.closest("button");if(!b)return;
   var a=b.dataset.power;if(!a)return;
@@ -123,7 +123,7 @@ menu.addEventListener("click",function(e){
     menu.style.display="none";
     confirmPanel.style.display="block";
     confirmYes.focus();
-    reportSize();
+    requestAnimationFrame(function(){requestAnimationFrame(reportSize)});
     return;
   }
   post("action",a);
@@ -134,7 +134,7 @@ confirmPanel.addEventListener("click",function(e){
     pending=null;
     confirmPanel.style.display="none";
     menu.style.display="block";
-    reportSize();
+    requestAnimationFrame(function(){requestAnimationFrame(reportSize)});
     return;
   }
   if(b.id==="confirm-yes"&&pending){
@@ -146,9 +146,9 @@ confirmPanel.addEventListener("click",function(e){
 document.addEventListener("keydown",function(e){if(e.key==="Escape")post("close")});
 function reportSize(){
   var el=(confirmPanel.style.display==="block")?confirmPanel:menu;
-  if(confirmPanel.style.display!=="block")lastMenuH=Math.ceil(el.offsetHeight);
-  var h=(confirmPanel.style.display==="block")?lastMenuH:Math.ceil(el.offsetHeight);
-  post("size",{w:Math.ceil(el.offsetWidth),h:h});
+  var w=confirmPanel.style.display==="block"?150:130;
+  var h=Math.ceil(el.offsetHeight);
+  post("size",{w:w,h:h});
 }
 window.resetView=function(){
   pending=null;
@@ -344,6 +344,10 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                         true,
                     );
                 } else {
+                    // Reset to menu size before every show — the JS reportSize
+                    // IPC from the previous hide cycle is fire-and-forget and
+                    // may not complete before the window is hidden.
+                    size = (POPUP_WIDTH, POPUP_HEIGHT);
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
                     crate::overlay::hotkey::set_suppress_focus_escape(true);
@@ -506,12 +510,13 @@ fn handle_ipc(
             let _ = proxy.send_event(PopupCmd::Hide);
         }
         "size" => {
-            let w = value
-                .get("w")
+            let v = value.get("v");
+            let w = v
+                .and_then(|v| v.get("w"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(POPUP_WIDTH);
-            let h = value
-                .get("h")
+            let h = v
+                .and_then(|v| v.get("h"))
                 .and_then(|v| v.as_f64())
                 .unwrap_or(POPUP_HEIGHT);
             log_warn(&format!("[nex::popup] IPC size w={} h={}", w, h));
@@ -526,7 +531,37 @@ fn build_html() -> String {
         crate::overlay::model::Theme::Light => "light",
         crate::overlay::model::Theme::Dark => "dark",
     };
-    POWER_POPUP_PAGE.replace("{theme}", theme)
+    // Inject the @font-face block so the separate WebView loads InterVariable.
+    let font_face = extract_font_face();
+    POWER_POPUP_PAGE
+        .replace("{theme}", theme)
+        .replace("{font_face}", font_face)
+}
+
+/// Pull the @font-face declaration from the main overlay stylesheet so the
+/// popup renders with the same InterVariable font as the overlay.
+fn extract_font_face() -> &'static str {
+    let css = crate::overlay::host::STYLE_CSS;
+    let start = match css.find("@font-face") {
+        Some(p) => p,
+        None => return "",
+    };
+    let rest = &css[start..];
+    // Find the closing brace of @font-face { ... }
+    let mut depth = 0;
+    let mut end = 0;
+    for (i, c) in rest.char_indices() {
+        if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            depth -= 1;
+            if depth == 0 {
+                end = i + 1;
+                break;
+            }
+        }
+    }
+    &rest[..end]
 }
 
 /// Physical-pixel DPI scale of the anchor window (1.0 = 96 DPI).

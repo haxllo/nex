@@ -452,6 +452,8 @@ fn hide_popup(
                     std::thread::sleep(std::time::Duration::from_millis(50)); // let foreground settle
                     if should_refocus_search(anchor, popup_hwnd) {
                         let _ = tx.send(OverlayEvent::FocusSearchInput);
+                    } else {
+                        let _ = tx.send(OverlayEvent::Escape);
                     }
                 })
                 .ok();

@@ -12,41 +12,43 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use crate::overlay::model::OverlayEvent;
 use crate::runtime::log_warn;
+use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::platform::run_return::EventLoopExtRunReturn;
-use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows, WindowExtWindows};
+use tao::platform::windows::{
+    EventLoopBuilderExtWindows, WindowBuilderExtWindows, WindowExtWindows,
+};
 use tao::window::WindowBuilder;
-use wry::http::Request;
 use wry::WebViewBuilder;
+use wry::http::Request;
+
+use std::mem::size_of;
 
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-use windows_sys::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute,
-    DWMWA_WINDOW_CORNER_PREFERENCE,
-};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
+
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-    SetWindowLongPtrW, SetWindowPos, SM_CXSCREEN, SM_CYSCREEN,
-    GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WS_BORDER, WS_DLGFRAME, WS_THICKFRAME,
+    GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowRect, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_BORDER, WS_DLGFRAME,
+    WS_THICKFRAME,
 };
 
-const POPUP_WIDTH: f64 = 130.0; // matches footer #power-menu min-width
-const POPUP_HEIGHT: f64 = 172.0;
+const POPUP_WIDTH: f64 = 128.0; // matches footer #power-menu min-width
+const POPUP_HEIGHT: f64 = 166.0;
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -58,9 +60,9 @@ static CTL: Mutex<Option<tao::event_loop::EventLoopProxy<PopupCmd>>> = Mutex::ne
 static INIT_GUARD: AtomicBool = AtomicBool::new(false);
 
 enum PopupCmd {
-    Show(isize), // anchor hwnd
+    Show(isize),      // anchor hwnd
     Resize(f64, f64), // (w, h) measured content size from JS, logical px
-    Hide,        // internal: IPC handler / focus-loss asks loop to hide
+    Hide,             // internal: IPC handler / focus-loss asks loop to hide
     Quit,
 }
 
@@ -73,16 +75,16 @@ const POWER_POPUP_PAGE: &str = r#"<!DOCTYPE html>
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Nex Power</title>
 <style>
-:root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:rgba(20,20,22,1);--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
+:root{--radius:8px;--row-radius:6px;--font:"InterVariable","Inter",system-ui,-apple-system,sans-serif;--bg-opaque:#1E1E1E;--border:rgba(255,255,255,0.09);--text:#f4f4f6;--text-faint:#76767f;--sel:rgba(255,255,255,0.09);--accent:#6ea8fe;--divider:rgba(255,255,255,0.06)}
 html[data-theme="light"]{--bg-opaque:rgba(255,255,255,1);--border:rgba(0,0,0,0.1);--text:#16161a;--text-faint:#8a8a93;--sel:rgba(0,0,0,0.06);--accent:#2f6bff;--divider:rgba(0,0,0,0.07)}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none}
-html,body{background:transparent;font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
-#menu{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
-#confirm{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden}
+html,body{background:var(--bg-opaque);font-family:var(--font);font-weight:400;letter-spacing:0.2px;color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
+#menu{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden;margin-top:-1px}
+#confirm{width:100%;padding:4px;border-radius:var(--radius);background:var(--bg-opaque);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.4);overflow:hidden;margin-top:-1px}
 #menu button,#confirm button{display:block;width:100%;padding:6px 10px;border:none;border-radius:var(--row-radius);background:transparent;color:var(--text);font-family:inherit;font-size:12px;cursor:pointer;text-align:left}
 #menu button:hover,#confirm button:hover{background:var(--sel)}
 #menu hr,#confirm hr{height:1px;margin:4px 6px;border:none;background:var(--divider)}
-#confirm{display:none;min-width:150px}
+#confirm{display:none}
 #confirm .confirm-title{padding:6px 10px 2px;font-size:11px;color:var(--text-faint);white-space:nowrap}
 #confirm button.confirm-yes{color:var(--accent)}
 </style></head>
@@ -109,6 +111,7 @@ var confirmPanel=document.getElementById("confirm");
 var confirmTitle=document.getElementById("confirm-title");
 var confirmYes=document.getElementById("confirm-yes");
 var pending=null;
+var lastMenuH=0;
 menu.addEventListener("click",function(e){
   var b=e.target.closest("button");if(!b)return;
   var a=b.dataset.power;if(!a)return;
@@ -143,7 +146,9 @@ confirmPanel.addEventListener("click",function(e){
 document.addEventListener("keydown",function(e){if(e.key==="Escape")post("close")});
 function reportSize(){
   var el=(confirmPanel.style.display==="block")?confirmPanel:menu;
-  post("size",{w:Math.ceil(el.offsetWidth),h:Math.ceil(el.offsetHeight)});
+  if(confirmPanel.style.display!=="block")lastMenuH=Math.ceil(el.offsetHeight);
+  var h=(confirmPanel.style.display==="block")?lastMenuH:Math.ceil(el.offsetHeight);
+  post("size",{w:Math.ceil(el.offsetWidth),h:h});
 }
 window.resetView=function(){
   pending=null;
@@ -170,9 +175,8 @@ pub(crate) fn init_power_popup(event_tx: Sender<OverlayEvent>) {
     let spawn_result = thread::Builder::new()
         .name("nex-power-popup".into())
         .spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_popup(event_tx)
-            }));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_popup(event_tx)));
             // Thread going down — ensure suppress flag is clear.
             crate::overlay::hotkey::set_suppress_focus_escape(false);
             // Clear CTL so dead channel never lingers.
@@ -227,10 +231,8 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
     let window = WindowBuilder::new()
         .with_title("Nex Power")
         .with_decorations(false)
-        .with_transparent(true)
+        .with_transparent(false)
         .with_visible(false) // hidden until first Show command
-        .with_no_redirection_bitmap(true)
-        .with_resizable(false)
         .with_always_on_top(true)
         .with_skip_taskbar(true)
         .with_inner_size(LogicalSize::new(POPUP_WIDTH, POPUP_HEIGHT))
@@ -240,42 +242,42 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
 
     let hwnd = window.hwnd() as HWND;
 
-    // Rounded corners — mirrors indexing_progress::apply_chrome.
-    // No acrylic needed: the popup page is fully opaque.
-    unsafe {
-        let pref: i32 = 2; // DWMWCP_ROUND
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            &pref as *const i32 as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
-
     // Force frameless at the Win32 level — strip any border styles that
     // survived with_decorations(false) so DWM doesn't draw a frame region.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as i32;
-        let new_style = style
-            & !(WS_BORDER as i32)
-            & !(WS_DLGFRAME as i32)
-            & !(WS_THICKFRAME as i32);
+        let new_style =
+            style & !(WS_BORDER as i32) & !(WS_DLGFRAME as i32) & !(WS_THICKFRAME as i32);
         if new_style != style {
             SetWindowLongPtrW(hwnd, GWL_STYLE, new_style as isize);
             SetWindowPos(
                 hwnd,
                 std::ptr::null_mut(),
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
+    }
+
+    // Re-apply DWM rounded corners on the now-opaque window.
+    const DWMWCP_ROUND: u32 = 2;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &DWMWCP_ROUND as *const _ as *const _,
+            size_of::<u32>() as u32,
+        );
     }
 
     let html = build_html();
     let ipc_tx = event_tx.clone();
     let ipc_proxy = proxy.clone();
     let webview = WebViewBuilder::new()
-        .with_transparent(true)
+        .with_transparent(false)
         .with_background_color((0, 0, 0, 0))
         .with_html(html)
         .with_ipc_handler(move |req: Request<String>| {
@@ -299,7 +301,14 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
+                hide_popup(
+                    &window,
+                    &webview,
+                    &mut visible,
+                    &event_tx,
+                    last_anchor,
+                    true,
+                );
             }
             Event::WindowEvent {
                 event: WindowEvent::Focused(false),
@@ -307,7 +316,14 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             } => {
                 // Ignore spurious WM_KILLFOCUS within 150ms of show.
                 if visible && show_time.elapsed() > Duration::from_millis(150) {
-                    hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
+                    hide_popup(
+                        &window,
+                        &webview,
+                        &mut visible,
+                        &event_tx,
+                        last_anchor,
+                        true,
+                    );
                 }
             }
             Event::WindowEvent {
@@ -319,13 +335,24 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             Event::UserEvent(PopupCmd::Show(anchor)) => {
                 if visible {
                     // Toggle: hide
-                    hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
+                    hide_popup(
+                        &window,
+                        &webview,
+                        &mut visible,
+                        &event_tx,
+                        last_anchor,
+                        true,
+                    );
                 } else {
                     // Show at anchor — set suppress BEFORE any focus work
                     // so the synchronous WM_KILLFOCUS from SetFocus sees it.
                     crate::overlay::hotkey::set_suppress_focus_escape(true);
                     window.set_inner_size(LogicalSize::new(size.0, size.1));
-                    log_warn(&format!("[nex::popup] Show size set inner={:?} outer={:?}", window.inner_size(), window.outer_size()));
+                    log_warn(&format!(
+                        "[nex::popup] Show size set inner={:?} outer={:?}",
+                        window.inner_size(),
+                        window.outer_size()
+                    ));
                     let hwnd = anchor as HWND;
                     let scale = dpi_scale(hwnd);
                     let (x, y) = popup_position(hwnd, scale, size.0, size.1);
@@ -341,9 +368,16 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             }
             Event::UserEvent(PopupCmd::Resize(w, h)) => {
                 size = (w.clamp(100.0, 300.0), h.clamp(80.0, 400.0));
-                log_warn(&format!("[nex::popup] Resize -> {:.0}x{:.0} (visible={})", w, h, visible));
+                log_warn(&format!(
+                    "[nex::popup] Resize -> {:.0}x{:.0} (visible={})",
+                    w, h, visible
+                ));
                 window.set_inner_size(LogicalSize::new(size.0, size.1));
-                log_warn(&format!("[nex::popup] Resize done, outer={:?} inner={:?}", window.outer_size(), window.inner_size()));
+                log_warn(&format!(
+                    "[nex::popup] Resize done, outer={:?} inner={:?}",
+                    window.outer_size(),
+                    window.inner_size()
+                ));
                 // Keep the right edge anchored: recompute x from the anchor.
                 if visible {
                     let hwnd = last_anchor as HWND;
@@ -353,10 +387,24 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 }
             }
             Event::UserEvent(PopupCmd::Hide) => {
-                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, true);
+                hide_popup(
+                    &window,
+                    &webview,
+                    &mut visible,
+                    &event_tx,
+                    last_anchor,
+                    true,
+                );
             }
             Event::UserEvent(PopupCmd::Quit) => {
-                hide_popup(&window, &webview, &mut visible, &event_tx, last_anchor, false);
+                hide_popup(
+                    &window,
+                    &webview,
+                    &mut visible,
+                    &event_tx,
+                    last_anchor,
+                    false,
+                );
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}
@@ -429,7 +477,11 @@ fn should_refocus_search(anchor: isize, popup_hwnd: isize) -> bool {
 }
 
 /// Parse one IPC message `{"t": ..., "v": ...}` and act on it.
-fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_loop::EventLoopProxy<PopupCmd>) {
+fn handle_ipc(
+    body: &str,
+    event_tx: &Sender<OverlayEvent>,
+    proxy: &tao::event_loop::EventLoopProxy<PopupCmd>,
+) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return;
     };
@@ -454,8 +506,14 @@ fn handle_ipc(body: &str, event_tx: &Sender<OverlayEvent>, proxy: &tao::event_lo
             let _ = proxy.send_event(PopupCmd::Hide);
         }
         "size" => {
-            let w = value.get("w").and_then(|v| v.as_f64()).unwrap_or(POPUP_WIDTH);
-            let h = value.get("h").and_then(|v| v.as_f64()).unwrap_or(POPUP_HEIGHT);
+            let w = value
+                .get("w")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(POPUP_WIDTH);
+            let h = value
+                .get("h")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(POPUP_HEIGHT);
             log_warn(&format!("[nex::popup] IPC size w={} h={}", w, h));
             let _ = proxy.send_event(PopupCmd::Resize(w, h));
         }
@@ -468,8 +526,7 @@ fn build_html() -> String {
         crate::overlay::model::Theme::Light => "light",
         crate::overlay::model::Theme::Dark => "dark",
     };
-    POWER_POPUP_PAGE
-        .replace("{theme}", theme)
+    POWER_POPUP_PAGE.replace("{theme}", theme)
 }
 
 /// Physical-pixel DPI scale of the anchor window (1.0 = 96 DPI).
@@ -478,11 +535,7 @@ fn dpi_scale(anchor_hwnd: HWND) -> f64 {
         return 1.0;
     }
     let dpi = unsafe { GetDpiForWindow(anchor_hwnd) };
-    if dpi == 0 {
-        1.0
-    } else {
-        dpi as f64 / 96.0
-    }
+    if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
 }
 
 /// Position the popup next to the anchor window (physical px):

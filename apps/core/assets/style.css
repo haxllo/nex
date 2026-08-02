@@ -17,7 +17,7 @@
 
   /* dark palette */
   --bg: rgba(0, 0, 0, 0.70);
-  --bg-opaque: rgba(20, 20, 22, 1);
+  --bg-opaque: #1E1E1E;
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;

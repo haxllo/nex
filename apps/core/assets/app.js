@@ -542,12 +542,10 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      // Close the power dropup / confirm whenever Rust pushes a fresh state
-      // (show, hide, query change, etc.)
-      footerPower.closeMenu();
-      footerPower.closeConfirm();
       // Icon data message: {"icons": {"path": "data:...", ...}}
       // Sent as a separate PostWebMessageAsJson after the state message.
+      // Early return before closing footer menu — icons-only pushes must not
+      // interfere with the power dropup the user may be interacting with.
       if (state.icons && typeof state.icons === "object" && !state.rows) {
         for (const [path, dataUri] of Object.entries(state.icons)) {
           iconCache.set(path, dataUri);
@@ -555,6 +553,11 @@
         patchIcons();
         return;
       }
+
+      // Close the power dropup / confirm whenever Rust pushes a fresh state
+      // (show, hide, query change, etc.)
+      footerPower.closeMenu();
+      footerPower.closeConfirm();
 
       // Lightweight selection-only update (no rows = incremental).
       if (!Array.isArray(state.rows) && typeof state.selected === "number") {

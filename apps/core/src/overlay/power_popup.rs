@@ -41,7 +41,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetClassNameW, GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW,
+    GWL_STYLE, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_BORDER, WS_DLGFRAME,
     WS_THICKFRAME,
@@ -438,7 +438,7 @@ fn hide_popup(
     webview: &wry::WebView,
     visible: &mut bool,
     event_tx: &Sender<OverlayEvent>,
-    anchor: isize,
+    _anchor: isize,
     refocus: bool,
 ) {
     if *visible {
@@ -447,46 +447,12 @@ fn hide_popup(
         *visible = false;
         crate::overlay::hotkey::set_suppress_focus_escape(false);
         if refocus {
-            // The popup was dismissed by a click elsewhere: after the
-            // foreground settles, refocus the overlay search input —
-            // unless the click landed on a real app window.
-            let tx = event_tx.clone();
-            let anchor = anchor;
-            let popup_hwnd = window.hwnd() as isize;
-            std::thread::Builder::new()
-                .name("nex-popup-refocus".into())
-                .spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(50)); // let foreground settle
-                    if should_refocus_search(anchor, popup_hwnd) {
-                        let _ = tx.send(OverlayEvent::FocusSearchInput);
-                    } else {
-                        let _ = tx.send(OverlayEvent::Escape);
-                    }
-                })
-                .ok();
+            // Hide the overlay synchronously — the popup hides instantly
+            // (DWM animation suppressed), so hiding the overlay on the same
+            // frame keeps them visually in sync.
+            let _ = event_tx.send(OverlayEvent::Escape);
         }
     }
-}
-
-/// Decide whether the overlay search input should be refocused after the
-/// power popup hides: true when the foreground window is null, the popup
-/// itself, the anchor (overlay), or the desktop / taskbar — false when a
-/// real app window now owns focus (don't steal it back).
-fn should_refocus_search(anchor: isize, popup_hwnd: isize) -> bool {
-    let fg = unsafe { GetForegroundWindow() };
-    if fg.is_null() {
-        return true;
-    }
-    if fg as isize == anchor || fg as isize == popup_hwnd {
-        return true;
-    }
-    let mut class_buf = [0u16; 64];
-    let len = unsafe { GetClassNameW(fg, class_buf.as_mut_ptr(), class_buf.len() as i32) };
-    if len == 0 {
-        return false;
-    }
-    let class = String::from_utf16_lossy(&class_buf[..len as usize]);
-    matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd")
 }
 
 /// Parse one IPC message `{"t": ..., "v": ...}` and act on it.

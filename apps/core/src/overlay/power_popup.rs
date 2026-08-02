@@ -262,13 +262,20 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
         }
     }
 
-    // Re-apply DWM rounded corners on the now-opaque window.
+    // Re-apply DWM rounded corners and suppress show/hide animations.
     const DWMWCP_ROUND: u32 = 2;
+    const TRUE: u32 = 1;
     unsafe {
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE as u32,
             &DWMWCP_ROUND as *const _ as *const _,
+            size_of::<u32>() as u32,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            3, // DWMWA_TRANSITIONS_FORCEDISABLED
+            &TRUE as *const _ as *const _,
             size_of::<u32>() as u32,
         );
     }

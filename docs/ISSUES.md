@@ -253,6 +253,7 @@ Test Issue 2: Set hotkey to `Win` in config → press Win to show → press Win 
 - [x] Win+ chords pass through natively
 - [x] Elevated window support (helper)
 - [x] Dynamic hotkey re-registration
+- [x] Power menu (lock, sleep, shutdown, restart, sign out) — Issue 11
 
 **To ship as default:**
 - [ ] Change default hotkey in `config.rs` template from `Ctrl+Space` → `Win`
@@ -439,21 +440,26 @@ Build succeeds. Manual testing:
 
 ---
 
-## Issue 11: Shutdown/restart/lock not possible when Win key replaces Start Menu — FEATURE
+## Issue 11: Shutdown/restart/lock not possible when Win key replaces Start Menu — FIXED (v2.11.0)
 
 **Scope:** Users who configure Win key as Nex hotkey lose the Start Menu's power menu (shutdown, restart, sleep, lock, sign out).
 
-**Symptom:** Win key opens Nex instead of Start Menu. User has no obvious way to shutdown/restart/lock/sleep without the Start power button. Win+X (Quick Link) → U → U (shutdown) still works as a workaround, but is not discoverable.
+**Symptom:** Win key opens Nex instead of Start Menu. User has no obvious way to shutdown/restart/lock/sleep without the Start power button.
 
-**Goal:** Provide power management actions from within Nex so users don't need the Start Menu.
+### Fix
 
-**Possible approaches:**
+| Component | Mechanism |
+|-----------|-----------|
+| Footer power menu | Power icon in overlay footer — Lock, Sleep, Shutdown, Restart, Sign Out |
+| Idle power popup | Separate DWM-framed popup window shown in idle state (no results) |
+| In-overlay confirm panel | Shutdown/Restart require confirmation — same flow in both footer and popup |
+| System tray submenu | Right-click tray icon → Lock / Sleep / Shutdown / Restart |
+| Keyboard shortcut tray | Arrow keys + Enter for selection; click-away dismisses |
 
-| Approach | Description |
-|----------|-------------|
-| 1. Search commands | Type "shutdown", "restart", "lock", "sleep" in Nex → execute the action (with confirmation for destructive ones) |
-| 2. Overlay power button | Small power icon in the overlay footer/tray area |
-| 3. System tray submenu | Right-click tray icon → Shutdown / Restart / Lock / Sleep |
-| 4. Custom hotkey chord | e.g. Win+X within Nex opens a power menu |
+**Architecture:**
+- `power_actions.rs` — shared action dispatch (lock, sleep, shutdown, restart, sign out)
+- `power_popup.rs` — standalone tao+wry window with DWM rounded corners, own WebView
+- `tray.rs` — `TrayLock`/`TraySleep` pipe back to action dispatch
+- Destructive actions (shutdown/restart) require confirmation; non-destructive fire immediately
 
-**Why:** Core gap for Win-key-as-default — users must not lose the ability to shutdown/restart their machine. Without this, Win key default is a downgrade.
+**Why:** Core gap for Win-key-as-default — users no longer need the Start Menu for power actions.

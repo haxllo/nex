@@ -72,7 +72,7 @@ const FOCUS_GRACE_MS: u64 = 400;
 
 /// Embedded web UI assets (premium Raycast-dark cmdk UI).
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
-const STYLE_CSS: &str = include_str!("../../assets/style.css");
+pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 
 

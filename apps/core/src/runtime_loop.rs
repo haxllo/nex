@@ -556,10 +556,11 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
                             crate::overlay::model::QuickLaunchItem {
                                 title,
                                 path,
+                                subtitle,
                                 icon_path,
                                 is_pinned,
                             }
@@ -599,10 +600,11 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
                             crate::overlay::model::QuickLaunchItem {
                                 title,
                                 path,
+                                subtitle,
                                 icon_path,
                                 is_pinned,
                             }

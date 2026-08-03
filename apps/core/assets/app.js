@@ -626,15 +626,11 @@
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
     });
 
-    // Measure once, then cache dimensions (hidden class uses display:none!important).
-    if (!contextMenu._measuredW) {
-      contextMenu.style.display = "block";
-      contextMenu._measuredW = contextMenu.offsetWidth || 180;
-      contextMenu._measuredH = contextMenu.offsetHeight || contextMenu.scrollHeight || 220;
-      contextMenu.style.display = "";
-    }
-    const menuW = contextMenu._measuredW;
-    const menuH = contextMenu._measuredH;
+    // Temporarily remove hidden to measure actual layout, then position
+    el.classList.remove("hidden");
+    const menuW = el.offsetWidth || 180;
+    const menuH = el.offsetHeight || 0;
+    el.classList.add("hidden");
 
     const pad = 8;
     let left = x + pad;

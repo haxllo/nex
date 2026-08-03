@@ -57,6 +57,14 @@ pub fn launch_open_target(target: &str) -> Result<(), LaunchError> {
     launch_open(trimmed)
 }
 
+pub fn launch_as_admin(target: &str) -> Result<(), LaunchError> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err(LaunchError::EmptyPath);
+    }
+    launch_runas(trimmed)
+}
+
 #[cfg(target_os = "windows")]
 fn launch_existing_path(candidate: &Path) -> Result<(), LaunchError> {
     let target = candidate.to_string_lossy().into_owned();
@@ -116,6 +124,43 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn launch_runas(target: &str) -> Result<(), LaunchError> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide_target = to_wide(target);
+    let wide_verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide_verb.as_ptr(),
+            wide_target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result <= 32 {
+        return Err(LaunchError::LaunchFailed {
+            message: format!("ShellExecuteW runas failed for '{target}'"),
+            code: Some(result as i32),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_runas(_target: &str) -> Result<(), LaunchError> {
+    Err(LaunchError::LaunchFailed {
+        message: "runas not available on this platform".into(),
+        code: None,
+    })
 }
 
 #[cfg(target_os = "windows")]

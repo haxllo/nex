@@ -23,6 +23,7 @@
   const powerConfirmYes = $("power-confirm-yes");
   const powerWrapTop = $("power-wrap-top");
   const powerBtnTop = $("power-btn-top");
+  const contextMenu = $("context-menu");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -230,6 +231,11 @@
       li.addEventListener("click", () => {
         setSelected(i, false);
         post("submit", i);
+      });
+      li.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        setSelected(i, false);
+        showContextMenu(e.clientX, e.clientY, r);
       });
       frag.appendChild(li);
     }
@@ -587,7 +593,78 @@
   document.addEventListener("click", (e) => {
     if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
     if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
+    if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
+      hideContextMenu();
+    }
   });
+
+  // ── context menu ──────────────────────────────────────────
+  let ctxRow = null; // the row the context menu was opened on
+
+  function showContextMenu(x, y, row) {
+    ctxRow = row;
+    // Determine which actions are relevant
+    const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
+    const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
+
+    const el = contextMenu;
+    const btns = el.querySelectorAll("button");
+
+    // Show/hide buttons based on item kind
+    btns.forEach(b => {
+      const action = b.dataset.action;
+      if (action === "open") b.classList.toggle("hidden", false);
+      else if (action === "runas") b.classList.toggle("hidden", !isApp && !isFile);
+      else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
+      else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
+      else if (action === "pin") b.classList.toggle("hidden", row.kind !== "app");
+      else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
+    });
+
+    // Position: clamp to viewport edges
+    const pad = 8;
+    let left = Math.min(x, window.innerWidth - el.offsetWidth - pad);
+    let top = Math.min(y, window.innerHeight - el.offsetHeight - pad);
+    el.style.left = Math.max(pad, left) + "px";
+    el.style.top = Math.max(pad, top) + "px";
+    el.classList.remove("hidden");
+  }
+
+  function hideContextMenu() {
+    contextMenu.classList.add("hidden");
+    ctxRow = null;
+  }
+
+  contextMenu.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !ctxRow) return;
+    const action = b.dataset.action;
+    if (!action) return;
+
+    const title = ctxRow.title || "";
+    const path = ctxRow.subtitle || ctxRow.filePath || "";
+
+    if (action === "open") {
+      hideContextMenu();
+      post("submit", selected);
+    } else if (action === "pin") {
+      hideContextMenu();
+      post("pin", title);
+    } else {
+      // All other actions sent to Rust
+      hideContextMenu();
+      post("contextAction", { action, title, path });
+    }
+    input.focus();
+  });
+
+  // Close context menu on Escape
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !contextMenu.classList.contains("hidden")) {
+      hideContextMenu();
+      input.focus();
+    }
+  }, true);
 
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
@@ -608,6 +685,7 @@
       // (show, hide, query change, etc.)
       footerPower.closeMenu();
       footerPower.closeConfirm();
+      hideContextMenu();
 
       // Lightweight selection-only update (no rows = incremental).
       if (!Array.isArray(state.rows) && typeof state.selected === "number") {

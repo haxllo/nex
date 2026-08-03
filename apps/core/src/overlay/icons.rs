@@ -19,9 +19,10 @@ const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 /// Target square canvas size for normalized icons. Crisp at 2-3x DPI
 /// when CSS displays at 30px. PNG is ~3-8KB each — fits the LRU budget.
 const TARGET_ICON_SIZE: u32 = 128;
-/// Extraction request size for PrivateExtractIconsW (primary high-res
-/// path). 256px is the Windows jumbo icon size; the Lanczos downscale
-/// to TARGET_ICON_SIZE (128) produces a clean, sharp result on HiDPI.
+/// Extraction request size for IShellItemImageFactory and
+/// PrivateExtractIconsW (primary high-res paths). 256px is the
+/// Windows jumbo icon size; the Lanczos downscale to
+/// TARGET_ICON_SIZE (128) produces a clean, sharp result on HiDPI.
 const EXTRACT_ICON_SIZE: i32 = 256;
 
 pub struct IconCache {
@@ -333,11 +334,189 @@ fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void, _size: i32) -> Option<Vec<u8>
 }
 
 #[cfg(target_os = "windows")]
-/// Resolve a .lnk shortcut to its target executable path by parsing
-/// the Shell Link binary format (MS-SHLLINK). Extracts the
-/// `LocalBasePath` from the `LinkInfo` section when available.
-/// Returns None for non-.lnk files or shortcuts without a local
-/// base path (e.g. AppUserModelID-based or network paths).
+/// COM vtable for IShellItemImageFactory.
+/// GUID: {BCC18B79-BA16-442F-80C4-8A59C30C463B}
+#[repr(C)]
+struct IShellItemImageFactoryVtbl {
+    // IUnknown
+    query_interface: unsafe extern "system" fn(
+        this: *mut std::ffi::c_void,
+        riid: *const windows_sys::core::GUID,
+        ppv: *mut *mut std::ffi::c_void,
+    ) -> windows_sys::core::HRESULT,
+    add_ref: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(this: *mut std::ffi::c_void) -> u32,
+    // IShellItemImageFactory
+    get_image: unsafe extern "system" fn(
+        this: *mut std::ffi::c_void,
+        size: windows_sys::Win32::Foundation::SIZE,
+        flags: u32,
+        phbitmap: *mut windows_sys::Win32::Graphics::Gdi::HBITMAP,
+    ) -> windows_sys::core::HRESULT,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct IShellItemImageFactory {
+    lp_vtbl: *const IShellItemImageFactoryVtbl,
+}
+
+#[cfg(target_os = "windows")]
+const IID_ISHELL_ITEM_IMAGE_FACTORY: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xBCC18B79_BA16_442F_80C4_8A59C30C463B);
+
+#[cfg(target_os = "windows")]
+const SIIGBF_RESIZETOFIT: u32 = 0x00000000;
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" {
+    fn SHCreateItemFromParsingName(
+        pszPath: *const u16,
+        pbc: *const std::ffi::c_void,
+        riid: *const windows_sys::core::GUID,
+        ppv: *mut *mut std::ffi::c_void,
+    ) -> windows_sys::core::HRESULT;
+}
+
+/// Primary icon extraction: IShellItemImageFactory::GetImage (256px).
+/// Returns HBITMAP that we render into an RGBA buffer via GDI.
+/// Works for all shell types: .exe, .lnk, .ico, shell:AppsFolder\...
+#[cfg(target_os = "windows")]
+fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        DeleteObject, HBITMAP,
+    };
+
+    let wide: Vec<u16> = shell_path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let mut item: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hr = SHCreateItemFromParsingName(
+            wide.as_ptr(),
+            std::ptr::null(),
+            &IID_ISHELL_ITEM_IMAGE_FACTORY,
+            &mut item,
+        );
+        if hr < 0 || item.is_null() {
+            return None;
+        }
+        let factory = &*(item as *const IShellItemImageFactory);
+
+        let size = windows_sys::Win32::Foundation::SIZE {
+            cx: EXTRACT_ICON_SIZE,
+            cy: EXTRACT_ICON_SIZE,
+        };
+
+        let mut hbmp: HBITMAP = std::ptr::null_mut();
+        let hr = ((*factory.lp_vtbl).get_image)(item, size, SIIGBF_RESIZETOFIT, &mut hbmp);
+        ((*factory.lp_vtbl).release)(item);
+
+        if hr < 0 || hbmp.is_null() {
+            return None;
+        }
+
+        let png = hbitmap_to_rgba_png(hbmp, EXTRACT_ICON_SIZE);
+        DeleteObject(hbmp as _);
+        png
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Render an HBITMAP into an RGBA buffer via GetDIBits, then normalize to PNG.
+fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, size: i32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, SelectObject, ReleaseDC,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, GetDIBits, GetDC,
+    };
+
+    unsafe {
+        let screen_dc = GetDC(std::ptr::null_mut());
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+        if mem_dc.is_null() {
+            return None;
+        }
+
+        let old_bmp = SelectObject(mem_dc, hbmp as _);
+
+        let mut header: BITMAPINFOHEADER = std::mem::zeroed();
+        header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        header.biWidth = size;
+        header.biHeight = -size; // top-down
+        header.biPlanes = 1;
+        header.biBitCount = 32;
+        header.biCompression = BI_RGB;
+
+        let mut bmpinfo: BITMAPINFO = std::mem::zeroed();
+        bmpinfo.bmiHeader = header;
+
+        let pixel_count = (size * size) as usize;
+        let mut rgba = vec![0u8; pixel_count * 4];
+
+        let rows = GetDIBits(
+            mem_dc,
+            hbmp,
+            0,
+            size as u32,
+            rgba.as_mut_ptr() as *mut std::ffi::c_void,
+            &mut bmpinfo,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(mem_dc, old_bmp);
+        DeleteDC(mem_dc);
+
+        if rows == 0 {
+            return None;
+        }
+
+        // BGRA → RGBA swap
+        for chunk in rgba.chunks_exact_mut(4) {
+            let r = chunk[2];
+            let b = chunk[0];
+            chunk[0] = r;
+            chunk[2] = b;
+        }
+
+        let img = image::RgbaImage::from_raw(size as u32, size as u32, rgba)?;
+        normalize_to_square_png(img)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_item_image_factory_png(_shell_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+/// Extract the best quality icon from a file. Primary chain:
+/// IShellItemImageFactory → PrivateExtractIconsW → SHGetFileInfo.
+#[cfg(target_os = "windows")]
+fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
+    // 1. IShellItemImageFactory — universal, handles all shell types.
+    if let Some(png) = shell_item_image_factory_png(shell_path) {
+        return Some(png);
+    }
+
+    // 2. PrivateExtractIconsW (high-res from .exe/.ico/.dll icon resources).
+    let resolved_target = if shell_path.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk_target(shell_path)
+    } else {
+        None
+    };
+    let resource_paths = resolved_target.as_deref().into_iter().chain(std::iter::once(shell_path));
+    for path in resource_paths {
+        if !path.starts_with("shell:") {
+            if let Some(png) = private_extract_icons_png(path) {
+                return Some(png);
+            }
+        }
+    }
+
+    // 3. SHGetFileInfo — last resort fallback.
+    extract_shell_icon_fallback(shell_path)
+}
+
+#[cfg(target_os = "windows")]
 fn resolve_lnk_target(path: &str) -> Option<String> {
     use std::io::Read;
 
@@ -398,93 +577,34 @@ fn resolve_lnk_target(path: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-/// Extract the best quality icon from a file using `ExtractIconExW`.
-/// Tries to get the largest available icon size for sharper rendering.
-#[cfg(target_os = "windows")]
-fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
-    // For .lnk shortcuts, resolve the target executable so we can
-    // attempt high-resolution extraction from the actual .exe.
-    let resolved_target = if shell_path.to_ascii_lowercase().ends_with(".lnk") {
-        resolve_lnk_target(shell_path)
-    } else {
-        None
-    };
-
-    // Primary high-res path: try on resolved .exe first, then on
-    // the original path (for direct .exe/.ico/.dll).
-    let high_res_paths = resolved_target.as_deref().into_iter().chain(std::iter::once(shell_path));
-    for path in high_res_paths {
-        if !path.starts_with("shell:") {
-            if let Some(png) = private_extract_icons_png(path) {
-                return Some(png);
-            }
-        }
-    }
-
-    use windows_sys::Win32::UI::Shell::ExtractIconExW;
+fn private_extract_icons_png(path: &str) -> Option<Vec<u8>> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
 
-    // Convert shell path to file path for ExtractIconExW
-    // shell:AppsFolder\{app_id} needs special handling
-    let file_path = if shell_path.starts_with("shell:") {
-        // For shell URIs, fall back to SHGetFileInfo
-        return extract_shell_icon_fallback(shell_path);
-    } else {
-        shell_path
-    };
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hicon: HICON = std::ptr::null_mut();
 
-    let wide: Vec<u16> = file_path.encode_utf16().chain(std::iter::once(0)).collect();
-
-    // First call: get the number of icons
-    let icon_count = unsafe { ExtractIconExW(wide.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
-    if icon_count <= 0 {
-        return extract_shell_icon_fallback(shell_path);
-    }
-
-    // Allocate arrays for icon handles
-    let mut large_icons: Vec<HICON> = vec![std::ptr::null_mut(); icon_count as usize];
-    let mut small_icons: Vec<HICON> = vec![std::ptr::null_mut(); icon_count as usize];
-
-    // Second call: get the actual icon handles
-    let extracted = unsafe {
-        ExtractIconExW(
+    let count = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW(
             wide.as_ptr(),
             0,
-            large_icons.as_mut_ptr(),
-            small_icons.as_mut_ptr(),
-            icon_count as u32,
+            EXTRACT_ICON_SIZE,
+            EXTRACT_ICON_SIZE,
+            &mut hicon,
+            std::ptr::null_mut(),
+            1,
+            0,
         )
     };
 
-    if extracted == 0 {
-        return extract_shell_icon_fallback(shell_path);
+    if count == 0 || hicon.is_null() {
+        return None;
     }
 
-    // Use the first large icon (typically the highest quality)
-    let best_hicon = large_icons.iter().find(|&&h| !h.is_null()).copied();
-
-    let result = if let Some(hicon) = best_hicon {
-        icon_to_rgba_png(hicon, 64)
-    } else {
-        None
-    };
-
-    // Clean up all icon handles
-    for &hicon in &large_icons {
-        if !hicon.is_null() {
-            unsafe { DestroyIcon(hicon); }
-        }
-    }
-    for &hicon in &small_icons {
-        if !hicon.is_null() {
-            unsafe { DestroyIcon(hicon); }
-        }
-    }
-
-    result
+    let png = icon_to_rgba_png(hicon, EXTRACT_ICON_SIZE);
+    unsafe { DestroyIcon(hicon); }
+    png
 }
 
-/// Fallback using SHGetFileInfo for shell URIs.
 #[cfg(target_os = "windows")]
 fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
     use windows_sys::Win32::UI::Shell::{
@@ -524,54 +644,6 @@ fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
     let png = icon_to_rgba_png(sfi.hIcon as windows_sys::Win32::UI::WindowsAndMessaging::HICON, 64);
     unsafe { DestroyIcon(sfi.hIcon); }
     png
-}
-
-#[cfg(not(target_os = "windows"))]
-fn extract_shell_icon_png(_shell_path: &str) -> Option<Vec<u8>> {
-    None
-}
-
-/// High-resolution icon extraction using PrivateExtractIconsW.
-/// Requests a 256×256 HICON from .exe/.ico/.dll files that have
-/// large icon resources. Returns None for paths without embedded
-/// icon resources (e.g. .lnk, directories) — the caller falls back
-/// to ExtractIconExW / SHGetFileInfoW.
-///
-/// PrivateExtractIconsW can return up to the exact size we request
-/// (256) if the source has a matching icon resource, giving crisp
-/// results on HiDPI displays even after normalization to 128×128.
-#[cfg(target_os = "windows")]
-fn private_extract_icons_png(path: &str) -> Option<Vec<u8>> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
-
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut hicon: HICON = std::ptr::null_mut();
-
-    let count = unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::PrivateExtractIconsW(
-            wide.as_ptr(),
-            0,               // first icon index
-            EXTRACT_ICON_SIZE,
-            EXTRACT_ICON_SIZE,
-            &mut hicon,
-            std::ptr::null_mut(),
-            1,               // request one icon
-            0,               // default flags
-        )
-    };
-
-    if count == 0 || hicon.is_null() {
-        return None;
-    }
-
-    let png = icon_to_rgba_png(hicon, EXTRACT_ICON_SIZE);
-    unsafe { DestroyIcon(hicon); }
-    png
-}
-
-#[cfg(not(target_os = "windows"))]
-fn private_extract_icons_png(_path: &str) -> Option<Vec<u8>> {
-    None
 }
 
 pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
@@ -640,5 +712,70 @@ mod tests {
         let cache = IconCache::new(4, 0);
         let evicted = cache.trim_unused();
         assert_eq!(evicted, 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn bench_icon_extraction_paths() {
+        let target = concat!(env!("windir"), "\\System32\\notepad.exe");
+        let path = std::path::Path::new(target);
+        if !path.exists() {
+            eprintln!("SKIP: notepad.exe not found");
+            return;
+        }
+
+        // COM must be initialized for SHCreateItemFromParsingName.
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0, // COINIT_MULTITHREADED
+            );
+        }
+
+        use std::time::Instant;
+
+        // Warmup: fill COM caches.
+        let _ = shell_item_image_factory_png(target);
+        let _ = private_extract_icons_png(target);
+
+        let n = 20;
+        let mut siif_times = Vec::with_capacity(n);
+        let mut peiw_times = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            let t0 = Instant::now();
+            let r = shell_item_image_factory_png(target);
+            siif_times.push(t0.elapsed().as_micros() as f64);
+            assert!(r.is_some(), "IShellItemImageFactory should succeed for notepad.exe");
+        }
+
+        for _ in 0..n {
+            let t0 = Instant::now();
+            let r = private_extract_icons_png(target);
+            peiw_times.push(t0.elapsed().as_micros() as f64);
+            assert!(r.is_some(), "PrivateExtractIconsW should succeed for notepad.exe");
+        }
+
+        fn mean(v: &[f64]) -> f64 { v.iter().sum::<f64>() / v.len() as f64 }
+        fn p95(v: &mut [f64]) -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = ((v.len() as f64) * 0.95).round() as usize;
+            v[idx.min(v.len() - 1)]
+        }
+
+        let siif_mean = mean(&siif_times);
+        let peiw_mean = mean(&peiw_times);
+        let mut siif_sorted = siif_times.clone();
+        let mut peiw_sorted = peiw_times.clone();
+        let siif_p95 = p95(&mut siif_sorted);
+        let peiw_p95 = p95(&mut peiw_sorted);
+
+        eprintln!("── Icon extraction benchmark ({n} iterations each) ──");
+        eprintln!("IShellItemImageFactory: mean={siif_mean:.1}µs  p95={siif_p95:.1}µs");
+        eprintln!("PrivateExtractIconsW:   mean={peiw_mean:.1}µs  p95={peiw_p95:.1}µs");
+
+        // Assert both paths are in the same ballpark (within 3x of each other)
+        let ratio = siif_mean.max(peiw_mean) / siif_mean.min(peiw_mean);
+        assert!(ratio < 3.0, "IShellItemImageFactory (mean={siif_mean:.0}µs) vs PrivateExtractIconsW (mean={peiw_mean:.0}µs) differ by {ratio:.1}x — unexpected");
     }
 }

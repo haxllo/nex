@@ -301,6 +301,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 runtime_config.ui_warm_release_ms,
             );
             overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
+            overlay.set_grid_view(runtime_config.grid_view);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);
             for warning in &plugin_registry.load_warnings {
                 log_warn(&format!("[nex] plugin_warning {warning}"));

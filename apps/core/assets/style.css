@@ -160,6 +160,11 @@ body {
   padding: 0 8px 6px;
   scroll-behavior: smooth;
 }
+#list.grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 8px;
+}
 #list:empty {
   display: none;
 }
@@ -185,6 +190,15 @@ body {
   position: relative;
 }
 
+.grid-view .row {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  padding: 10px 6px 8px;
+  min-height: 0;
+}
+
 .row.selected {
   background: var(--sel);
 }
@@ -195,6 +209,11 @@ body {
   height: 24px;
   border-radius: 6px;
   object-fit: contain;
+}
+.grid-view .row .icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
 }
 .row .icon.placeholder {
   display: grid;
@@ -209,8 +228,12 @@ body {
   display: block;
   width: 20px;
   height: 20px;
-  background: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfCzh4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke6ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC") center/contain no-repeat;
+  background: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfCzh4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke7ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC") center/contain no-repeat;
   opacity: 0.4;
+}
+.grid-view .row .icon.placeholder::after {
+  width: 28px;
+  height: 28px;
 }
 
 .row .text {
@@ -220,6 +243,11 @@ body {
   flex-direction: column;
   gap: 1px;
 }
+.grid-view .row .text {
+  flex: 0 0 auto;
+  width: 100%;
+  text-align: center;
+}
 
 .row .title {
   font-size: 13px;
@@ -227,6 +255,11 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.grid-view .row .title {
+  font-size: 12px;
+  font-weight: 500;
+  max-width: 100%;
 }
 .row.selected .title {
   color: #fff;
@@ -241,6 +274,57 @@ html[data-theme="light"] .row.selected .title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.grid-view .row .subtitle {
+  font-size: 10px;
+  max-width: 100%;
+}
+
+/* Section headers span full grid width */
+.grid-view .section {
+  grid-column: 1 / -1;
+}
+.grid-view .row.calculator,
+.grid-view .row.single-row {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  height: auto;
+  padding: 0 12px;
+  text-align: left;
+}
+.grid-view .row.calculator .icon,
+.grid-view .row.single-row .icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+.grid-view .row.calculator .icon.placeholder::after,
+.grid-view .row.single-row .icon.placeholder::after {
+  width: 20px;
+  height: 20px;
+}
+.grid-view .row.calculator .text,
+.grid-view .row.single-row .text {
+  text-align: left;
+  flex: 1 1 auto;
+  width: auto;
+}
+.grid-view .row.calculator .title,
+.grid-view .row.single-row .title {
+  font-size: 13px;
+}
+.grid-view .row.calculator {
+  height: 64px;
+}
+.grid-view .row.calculator .title {
+  font-size: 21px;
+  font-weight: 400;
+}
+.grid-view .row.calculator .subtitle {
+  font-size: 12px;
+  color: var(--accent);
 }
 
 /* .kind: hidden for now. Uncomment block below and delete display:none to restore.
@@ -257,17 +341,7 @@ html[data-theme="light"] .row.selected .title {
 }
 
 /* calculator row */
-.row.calculator {
-  height: 64px;
-}
-.row.calculator .title {
-  font-size: 21px;
-  font-weight: 400;
-}
-.row.calculator .subtitle {
-  font-size: 12px;
-  color: var(--accent);
-}
+/* Already styled above via .row.calculator — no duplicate rules needed */
 
 /* Quick Launch row */
 .row.quick-launch {
@@ -317,6 +391,20 @@ html[data-theme="light"] .row.selected .title {
 .row:hover .add-icon.pinned,
 .row.selected .add-icon.pinned {
   opacity: 1;
+}
+
+/* Grid mode: pin/add icons repositioned to absolute top-right */
+.grid-view .row.quick-launch .pin-icon,
+.grid-view .row .add-icon {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+}
+.grid-view .row.quick-launch .pin-icon,
+.grid-view .row .add-icon {
+  flex: 0 0 auto;
 }
 
 /* Toast notification */

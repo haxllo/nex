@@ -305,6 +305,48 @@
     setSelected(sel[pos], true);
   }
 
+  // Grid-aware vertical navigation: jump to same column in prev/next row.
+  function moveSelectionGridDown(dy) {
+    const sel = selectableIndices();
+    if (sel.length === 0) return;
+    let pos = sel.indexOf(selected);
+    if (pos === -1) pos = 0;
+
+    // Group selectable indices into physical rows by offsetTop.
+    const rows = [];
+    const placed = new Set();
+    for (const idx of sel) {
+      if (placed.has(idx)) continue;
+      const el = rowMap.get(idx);
+      if (!el) continue;
+      const baseTop = el.offsetTop;
+      const row = [];
+      for (const otherIdx of sel) {
+        if (placed.has(otherIdx)) continue;
+        const otherEl = rowMap.get(otherIdx);
+        if (otherEl && otherEl.offsetTop === baseTop) {
+          row.push(otherIdx);
+          placed.add(otherIdx);
+        }
+      }
+      if (row.length > 0) rows.push(row);
+    }
+
+    // Find current position in the row grid.
+    let cr = -1, cc = -1;
+    for (let r = 0; r < rows.length; r++) {
+      const c = rows[r].indexOf(selected);
+      if (c !== -1) { cr = r; cc = c; break; }
+    }
+    if (cr === -1) return;
+
+    const tr = cr + dy;
+    if (tr < 0 || tr >= rows.length) return;
+    // Clamp column to target row width.
+    const tc = Math.min(cc, rows[tr].length - 1);
+    setSelected(rows[tr][tc], true);
+  }
+
   // ── icon patching ─────────────────────────────────────────
   // Called after icon data arrives. Updates <img> elements from cache.
   // Does NOT skip placeholder elements — on cold cache, render() creates
@@ -395,10 +437,18 @@
 
       if (e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "J"))) {
         e.preventDefault();
-        moveSelection(1);
+        if (list.classList.contains("grid-view")) {
+          moveSelectionGridDown(1);
+        } else {
+          moveSelection(1);
+        }
       } else if (e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
         e.preventDefault();
-        moveSelection(-1);
+        if (list.classList.contains("grid-view")) {
+          moveSelectionGridDown(-1);
+        } else {
+          moveSelection(-1);
+        }
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
@@ -566,6 +616,11 @@
       }
 
       if (state.theme) document.documentElement.dataset.theme = state.theme;
+
+      // Toggle grid/list layout based on Rust config
+      if (typeof state.gridView === "boolean") {
+        list.classList.toggle("grid-view", state.gridView);
+      }
 
       // Only overwrite the input if Rust changed it out from under us
       // (e.g. clear on hide, quick-shortcut expansion).

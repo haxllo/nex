@@ -464,7 +464,7 @@ fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
     let best_hicon = large_icons.iter().find(|&&h| !h.is_null()).copied();
 
     let result = if let Some(hicon) = best_hicon {
-        icon_to_rgba_png(hicon, 32)
+        icon_to_rgba_png(hicon, 64)
     } else {
         None
     };
@@ -521,7 +521,7 @@ fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
         return None;
     }
 
-    let png = icon_to_rgba_png(sfi.hIcon as windows_sys::Win32::UI::WindowsAndMessaging::HICON, 32);
+    let png = icon_to_rgba_png(sfi.hIcon as windows_sys::Win32::UI::WindowsAndMessaging::HICON, 64);
     unsafe { DestroyIcon(sfi.hIcon); }
     png
 }

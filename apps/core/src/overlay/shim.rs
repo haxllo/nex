@@ -293,6 +293,11 @@ impl NativeOverlayShell {
         self.with_state(|s| s.game_mode_enabled = enabled);
     }
 
+    pub fn set_grid_view(&self, enabled: bool) {
+        self.with_state(|s| s.grid_view = enabled);
+        self.post(UiCommand::Apply);
+    }
+
     pub fn set_hotkey_issue_active(&self, active: bool) {
         self.with_state(|s| s.hotkey_issue_active = active);
         self.post(UiCommand::Apply);

@@ -240,10 +240,12 @@
       frag.appendChild(li);
     }
 
+    // Hide body while swapping to prevent quick-launch rows leaking
+    // into search results for one frame as the layout recomputes.
+    bodyEl.style.visibility = "hidden";
+
     // Atomic swap — no flash between clearing and rebuilding.
     list.replaceChildren(frag);
-
-    // Rebuild row map for O(1) selection toggles.
     rowMap = new Map();
     for (const li of list.children) {
       if (li.classList.contains("row")) rowMap.set(Number(li.dataset.index), li);
@@ -259,15 +261,12 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
-    // Only show idle (quick launch) when the query is empty — otherwise
-    // we flash between quick launch and results during typing.
-    const hasResults = rows.some((r) => r.role !== "status");
-    const queryEmpty = typeof state.query === "string" ? state.query.trim() === "" : true;
-    const idle = !hasResults && queryEmpty;
-    bodyEl.classList.toggle("idle", idle);
-    footerEl.classList.toggle("idle", idle);
+    bodyEl.classList.toggle("idle", !hasRows);
+    bodyEl.style.visibility = "";
+    footerEl.classList.toggle("idle", !hasRows);
 
     // Idle: the power button replaces the config button in the search row.
+    const idle = !hasRows;
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
 
@@ -405,13 +404,18 @@
         if (h > 0 && h !== lastH) {
           const prev = lastH;
           lastH = h;
+          // First measurement: skip resize only if panel is truly idle
+          // (no rows, search bar only). If content is already showing
+          // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
+            // Rust-side debounce (100ms) coalesces rapid typing resize
+            // requests — no need for a JS-side debounce here.
             post("resize", h);
           }
         }
         if (needsPainted) {
           needsPainted = false;
-          scrollToInstant(0);
+          scrollToInstant(0); // fresh show = fresh scroll, after paint
           post("painted");
         }
       });

@@ -626,12 +626,27 @@
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
     });
 
-    // Position: clamp to viewport edges
+    // Measure once, then cache dimensions (hidden class uses display:none!important).
+    if (!contextMenu._measuredW) {
+      contextMenu.style.display = "block";
+      contextMenu._measuredW = contextMenu.offsetWidth || 180;
+      contextMenu._measuredH = contextMenu.offsetHeight || contextMenu.scrollHeight || 220;
+      contextMenu.style.display = "";
+    }
+    const menuW = contextMenu._measuredW;
+    const menuH = contextMenu._measuredH;
+
     const pad = 8;
-    let left = Math.min(x, window.innerWidth - el.offsetWidth - pad);
-    let top = Math.min(y, window.innerHeight - el.offsetHeight - pad);
-    el.style.left = Math.max(pad, left) + "px";
-    el.style.top = Math.max(pad, top) + "px";
+    let left = x + pad;
+    if (left + menuW > window.innerWidth - pad) {
+      left = x - menuW - pad;
+    }
+    let top = y + pad;
+    if (top + menuH > window.innerHeight - pad) {
+      top = y - menuH - pad;
+    }
+    el.style.left = Math.max(pad, Math.min(left, window.innerWidth - menuW - pad)) + "px";
+    el.style.top = Math.max(pad, Math.min(top, window.innerHeight - menuH - pad)) + "px";
     el.classList.remove("hidden");
   }
 

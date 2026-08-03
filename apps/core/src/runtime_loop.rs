@@ -688,18 +688,34 @@ impl RuntimeWorker {
 
     /// Unpin an app from Quick Launch by title.
     fn unpin_app_from_quick_launch(&mut self, title: &str) {
-        // Find the app path
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+
+        // First, try to find by title in quick_launch_items (idle state).
         let app_path = self.quick_launch_items.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
             .map(|item| item.path.clone());
 
-        let Some(path) = app_path else {
-            log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found or not pinned", title));
-            return;
+        // If not found, try to find by title in current_results (search mode).
+        let path_to_remove = if let Some(path) = app_path {
+            path
+        } else {
+            let from_results = self.current_results.iter()
+                .find(|item| item.title.eq_ignore_ascii_case(title))
+                .map(|item| item.path.clone());
+            match from_results {
+                Some(path) => path,
+                None => {
+                    log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found in results", title));
+                    return;
+                }
+            }
         };
 
         // Normalize the path for comparison
-        let normalized = path.replace('/', "\\").to_ascii_lowercase();
+        let normalized = path_to_remove.replace('/', "\\").to_ascii_lowercase();
 
         // Remove from config pinned list
         self.runtime_config.quick_launch.pinned.retain(|p| {

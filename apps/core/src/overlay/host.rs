@@ -195,9 +195,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // First resize after show bypasses debounce so content appears
     // immediately instead of showing search bar → 100ms wait → items.
     let mut first_resize_after_show = false;
-    // Resizes from idle height (~109px) are quick-launch→results
-    // transitions — apply immediately to avoid clipped content.
-    const IDLE_GROWTH_THRESHOLD: f64 = INITIAL_HEIGHT + 30.0;
     let (resize_debounce_tx, resize_debounce_rx) =
         crossbeam_channel::unbounded::<Option<Duration>>();
     let resize_debounce_proxy = proxy.clone();
@@ -483,10 +480,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             last_applied_height = h;
                             window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
                         }
-                    } else if first_resize_after_show || last_applied_height <= IDLE_GROWTH_THRESHOLD {
-                        // Apply immediately for initial show and for
-                        // idle→results transitions (avoid debounce delay
-                        // that makes results appear before the panel expands).
+                    } else if first_resize_after_show {
+                        // First resize after show: apply immediately to
+                        // prevent the "search bar first, items pop in
+                        // 100ms later" visual flash.
                         first_resize_after_show = false;
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {

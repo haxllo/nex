@@ -259,19 +259,11 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
-    // Only show idle (quick launch) when the query is empty — avoid
-    // a flash of quick launch items between typing and results arriving.
+    // Only show idle (quick launch) when the query is empty — otherwise
+    // we flash between quick launch and results during typing.
     const hasResults = rows.some((r) => r.role !== "status");
-    const wasIdle = bodyEl.classList.contains("idle");
-    const idle = !hasResults && (typeof state.query === "string" ? state.query.trim() === "" : true);
-
-    // When transitioning from idle to results, hide content until the
-    // resize IPC reaches Rust and the panel expands. The measure()
-    // function will reveal the body after posting the resize.
-    if (wasIdle && !idle && hasResults) {
-      bodyEl.style.visibility = "hidden";
-    }
-
+    const queryEmpty = typeof state.query === "string" ? state.query.trim() === "" : true;
+    const idle = !hasResults && queryEmpty;
     bodyEl.classList.toggle("idle", idle);
     footerEl.classList.toggle("idle", idle);
 
@@ -421,11 +413,6 @@
           needsPainted = false;
           scrollToInstant(0);
           post("painted");
-        }
-        // After height is sent (and Rust applies it), reveal the body
-        // if it was hidden waiting for the resize.
-        if (bodyEl.style.visibility === "hidden") {
-          bodyEl.style.visibility = "";
         }
       });
     });

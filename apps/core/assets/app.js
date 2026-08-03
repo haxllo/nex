@@ -33,7 +33,6 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let quickLaunchItems = []; // Quick Launch items for idle state
-  let hadQuickLaunch = false; // prev render showed QL rows
   let pendingShow = false; // show occurred, waiting for first real results
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
@@ -241,12 +240,10 @@
       frag.appendChild(li);
     }
 
-    // Hide body while swapping to prevent quick-launch rows leaking
-    // into search results for one frame as the layout recomputes.
-    bodyEl.style.visibility = "hidden";
-
     // Atomic swap — no flash between clearing and rebuilding.
     list.replaceChildren(frag);
+
+    // Rebuild row map for O(1) selection toggles.
     rowMap = new Map();
     for (const li of list.children) {
       if (li.classList.contains("row")) rowMap.set(Number(li.dataset.index), li);
@@ -262,23 +259,13 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
-    const wasIdle = bodyEl.classList.contains("idle");
     bodyEl.classList.toggle("idle", !hasRows);
-    bodyEl.style.visibility = "";
     footerEl.classList.toggle("idle", !hasRows);
 
     // Idle: the power button replaces the config button in the search row.
     const idle = !hasRows;
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
-
-    // When transitioning from QL rows to empty (first query push cleared QL
-    // but search results haven't arrived yet), capture the current panel
-    // height so measure() doesn't send a stale resize during the gap.
-    if (hadQuickLaunch && idle && rows.some(r => r.role === "status")) {
-      lastH = Math.ceil(panel.getBoundingClientRect().height);
-    }
-    hadQuickLaunch = !idle && rows.some(r => r.role === "quick_launch");
 
     measure();
   }
@@ -407,7 +394,7 @@
   // coalesces rapid typing requests into a single frame update.
   let lastH = 0;
   let needsPainted = false;
-  function measure() {
+  function measure(immediate) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
@@ -418,13 +405,10 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            if (skipResize) {
-              skipResize = false;
-              return;
-            }
             // Rust-side debounce (100ms) coalesces rapid typing resize
             // requests — no need for a JS-side debounce here.
-            post("resize", h);
+            // immediate flag skips the growth debounce on the Rust side.
+            post("resize", { v: h, immediate: !!immediate });
           }
         }
         if (needsPainted) {
@@ -519,6 +503,17 @@
     const query = inCommandMode ? ">" + raw : raw;
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
+
+    // Hide quick-launch rows instantly when typing a non-empty query.
+    // Prevents results from leaking into the QL area while the Rust
+    // state push + resize is in flight.
+    if (raw && !inCommandMode) {
+      for (const li of list.querySelectorAll(".quick-launch")) {
+        li.style.display = "none";
+      }
+      measure();
+    }
+
     const now = performance.now();
     const delay = (now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
@@ -752,6 +747,10 @@
         }
       }
 
+      // Track QL presence before overwriting rows — used to detect
+      // quick-launch → results transition for immediate resize.
+      const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
+
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
 
@@ -781,6 +780,17 @@
         scrollToInstant(0);
       }
       render();
+
+      // Quick-launch → results transition: post immediate resize so the
+      // window expands right away instead of waiting for the debounced
+      // growth path (2x rAF in measure() + 100ms Rust debounce).
+      if (prevHadQuickLaunch && rows.length > 0) {
+        const h = Math.ceil(panel.getBoundingClientRect().height);
+        if (h > 0) {
+          lastH = h;
+          post("resize", { v: h, immediate: true });
+        }
+      }
 
       // On fresh show, the Show push has empty rows (hide cleared them).
       // Real results arrive on a later Apply push with showPending=false.

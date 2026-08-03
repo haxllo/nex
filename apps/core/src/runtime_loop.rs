@@ -845,10 +845,20 @@ impl RuntimeWorker {
             "openfolder" => {
                 if path.is_empty() { return; }
                 let parent = std::path::Path::new(path).parent();
-                let folder = parent.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+                let folder = parent
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string());
+                if folder.is_empty() { return; }
+                // Use explorer /select to highlight the file/folder, works for
+                // both filesystem paths and shell: URIs.
+                let folder_arg = if folder.starts_with("shell:") {
+                    folder.clone()
+                } else {
+                    folder.to_string()
+                };
                 self.overlay.hide_sync();
                 self.overlay_state.on_escape();
-                match crate::action_executor::launch_open_target(&folder) {
+                match crate::action_executor::launch_open_target(&folder_arg) {
                     Ok(()) => {
                         log_info(&format!("[nex] opened file location: '{}'", folder));
                         reset_overlay_session(
@@ -877,10 +887,16 @@ impl RuntimeWorker {
                 if _title.is_empty() { return; }
                 let items = crate::uninstall_registry::search_uninstall_actions(_title, 5);
                 if let Some(item) = items.first() {
-                    if let Err(error) = crate::uninstall_registry::execute_uninstall_action(&item.id) {
-                        let msg = format!("Uninstall failed: {error}");
-                        log_warn(&format!("[nex] {msg}"));
-                        self.overlay.set_status_text(&msg);
+                    log_info(&format!("[nex] uninstalling '{}' via command '{}'", _title, item.id));
+                    match crate::uninstall_registry::execute_uninstall_action(&item.id) {
+                        Ok(()) => {
+                            self.overlay.set_status_text(&format!("Uninstalling '{}'...", _title));
+                        }
+                        Err(error) => {
+                            let msg = format!("Uninstall failed: {error}");
+                            log_warn(&format!("[nex] {msg}"));
+                            self.overlay.set_status_text(&msg);
+                        }
                     }
                 } else {
                     let msg = format!("No uninstall entry found for '{}'", _title);

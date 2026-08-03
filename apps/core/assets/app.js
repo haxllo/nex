@@ -261,6 +261,7 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
+    const wasIdle = bodyEl.classList.contains("idle");
     bodyEl.classList.toggle("idle", !hasRows);
     bodyEl.style.visibility = "";
     footerEl.classList.toggle("idle", !hasRows);
@@ -269,6 +270,14 @@
     const idle = !hasRows;
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
+
+    // When transitioning from idle (quick-launch) to search results, reset
+    // the height tracker so the old idle panel height doesn't leak into the
+    // first resize IPC — it gets consumed locally and the real height is
+    // sent on the next rendering frame.
+    if (wasIdle && !idle) {
+      lastH = 0;
+    }
 
     measure();
   }

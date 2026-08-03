@@ -904,11 +904,12 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
             } else {
                 serde_json::Value::String(r.icon_path.clone())
             };
-            // Include the actual file path for addToQuickLaunch and context menu
-            let file_path = if r.path.is_empty() {
+            // r.icon_path carries the real executable/filesystem path.
+            // r.path is the display subtitle (publisher name for UWP apps).
+            let file_path = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(r.path.clone())
+                serde_json::Value::String(r.icon_path.clone())
             };
             serde_json::json!({
                 "role": role,

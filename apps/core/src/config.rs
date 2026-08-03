@@ -270,7 +270,7 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             show_files: false,
             show_folders: false,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Win".to_string(),
             launch_at_startup: true,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space or Win alone), then restart {APP_DISPLAY_NAME}."
@@ -305,7 +305,7 @@ impl Default for Config {
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
             game_mode_enabled: false,
-            grid_view: false,
+            grid_view: true,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,

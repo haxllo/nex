@@ -381,7 +381,7 @@ html[data-theme="light"] .row.selected .title {
 
 .row:hover .add-icon,
 .row.selected .add-icon {
-  opacity: 1;
+  opacity: 0;
 }
 
 .row .add-icon.pinned {

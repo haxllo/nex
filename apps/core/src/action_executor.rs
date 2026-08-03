@@ -129,7 +129,11 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
 #[cfg(target_os = "windows")]
 fn launch_runas(target: &str) -> Result<(), LaunchError> {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL};
+
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
 
     let wide_target = to_wide(target);
     let wide_verb: Vec<u16> = "runas".encode_utf16().chain(std::iter::once(0)).collect();

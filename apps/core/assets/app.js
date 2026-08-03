@@ -33,6 +33,7 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let quickLaunchItems = []; // Quick Launch items for idle state
+  let hadQuickLaunch = false; // prev render showed QL rows
   let pendingShow = false; // show occurred, waiting for first real results
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
@@ -271,14 +272,15 @@
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
 
-    // When leaving idle with search results, defer measure() by one
-    // animation frame so the panel settles at its new height before
-    // we send the first resize IPC — avoids the QL → search flash.
-    if (wasIdle && !idle) {
-      requestAnimationFrame(() => measure());
-    } else {
-      measure();
+    // When transitioning from QL rows to empty (first query push cleared QL
+    // but search results haven't arrived yet), capture the current panel
+    // height so measure() doesn't send a stale resize during the gap.
+    if (hadQuickLaunch && idle && rows.some(r => r.role === "status")) {
+      lastH = Math.ceil(panel.getBoundingClientRect().height);
     }
+    hadQuickLaunch = !idle && rows.some(r => r.role === "quick_launch");
+
+    measure();
   }
 
   function setSelected(i, scroll) {

@@ -17,7 +17,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 ## Features
 
-- **Keyboard-first** — Global hotkey (Alt+Space) summons Nex from anywhere, instantly
+- **Keyboard-first** — Press the Win key to summon Nex from anywhere — replaces the Start menu
 - **Fuzzy search** — Tantivy-powered full-text search across apps, files, and folders
 - **Everything SDK** — Optional Voidtools Everything integration for real-time file search
 - **Calculator** — Inline arithmetic evaluation in the search bar
@@ -30,7 +30,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 ### Install
 
-Download the latest installer from the [Releases page](https://github.com/haxllo/nex/releases/latest). Run it — Nex starts in the background, ready on **Alt+Space**.
+Download the latest installer from the [Releases page](https://github.com/haxllo/nex/releases/latest). Run it — Nex starts in the background, ready on the **Win key**.
 
 ### Build from Source
 
@@ -49,7 +49,7 @@ On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `hotkey` | `Ctrl+Space` | Global summon shortcut |
+| `hotkey` | `Win` (Left) | Global summon shortcut — replaces Start menu |
 | `max_results` | `20` | Results shown |
 | `show_files` | `false` | Include files |
 | `show_folders` | `false` | Include folders |
@@ -68,18 +68,22 @@ On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
 | `@folders` | Filter to folders |
 | `kind:file` / `ext:md` | DSL key:value filters |
 
-### Commands
+### Using Nex (GUI app)
+
+Nex runs in the background as a system-tray app — no commands needed for day-to-day use.
+
+- **Summon** — press the Win key; type to search; Enter to launch
+- **Right-click a result** — run as admin, copy path, open folder, uninstall, pin/unpin
+- **Tray icon** — right-click for quit, restart, and quick-launch controls
+
+Power-user CLI flags (rarely needed):
 
 | Command | Description |
 |---|---|
-| `nex` | Launch background hotkey runtime |
-| `nex --foreground` | Dev mode (attached terminal + stdout) |
 | `nex --status` | Check if running |
-| `nex --status-json` | Machine-readable JSON status |
 | `nex --quit` | Stop the running instance |
 | `nex --restart` | Restart the instance |
 | `nex --diagnostics-bundle` | Dump diagnostics to zip |
-| `nex --probe-index` | Check search index status |
 
 ## Project Structure
 

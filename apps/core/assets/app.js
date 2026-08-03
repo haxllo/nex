@@ -437,10 +437,18 @@
 
       if (e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "J"))) {
         e.preventDefault();
-        moveSelectionGridDown(1);
+        if (list.classList.contains("grid-view")) {
+          moveSelectionGridDown(1);
+        } else {
+          moveSelection(1);
+        }
       } else if (e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
         e.preventDefault();
-        moveSelectionGridDown(-1);
+        if (list.classList.contains("grid-view")) {
+          moveSelectionGridDown(-1);
+        } else {
+          moveSelection(-1);
+        }
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
@@ -608,6 +616,11 @@
       }
 
       if (state.theme) document.documentElement.dataset.theme = state.theme;
+
+      // Toggle grid/list layout based on Rust config
+      if (typeof state.gridView === "boolean") {
+        list.classList.toggle("grid-view", state.gridView);
+      }
 
       // Only overwrite the input if Rust changed it out from under us
       // (e.g. clear on hide, quick-shortcut expansion).

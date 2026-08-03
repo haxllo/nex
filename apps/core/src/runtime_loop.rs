@@ -225,6 +225,7 @@ pub(crate) fn run_windows_runtime(
         runtime_config.ui_warm_release_ms,
     );
     overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
+    overlay.set_grid_view(runtime_config.grid_view);
     log_info("[nex] native overlay shell initialized (hidden)");
     log_info(&format!(
         "[nex] startup_phase phase=overlay_ready elapsed_ms={}",

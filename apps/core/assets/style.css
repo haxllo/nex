@@ -159,6 +159,8 @@ body {
   overflow-y: auto;
   padding: 0 8px 6px;
   scroll-behavior: smooth;
+}
+#list.grid-view {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
   gap: 8px;
@@ -179,13 +181,21 @@ body {
 
 .row {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 10px 6px 8px;
+  gap: 12px;
+  height: 46.22px;
+  padding: 0 12px;
   border-radius: var(--row-radius);
   cursor: pointer;
   position: relative;
+}
+
+.grid-view .row {
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  padding: 10px 6px 8px;
   min-height: 0;
 }
 
@@ -195,10 +205,15 @@ body {
 
 .row .icon {
   flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+.grid-view .row .icon {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  object-fit: contain;
 }
 .row .icon.placeholder {
   display: grid;
@@ -211,29 +226,39 @@ body {
 .row .icon.placeholder::after {
   content: "";
   display: block;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   background: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAV5JREFUSIntlbFKXEEUhr+jxhhdJGATU6bcJghi8A2CmJAttg8+gewbJM3uK2yxWlpZpcozWC9pbEJE0GaNQXdJlC/NCCOLendvtgj4N/fMOTPzzX8uzMCEFflAfQJUSuw3iIj+UFadUzvqwHK6Ur+qy7ccqJ+AbaABfCzh4DnQAr5FxDuAmVR4C+xGREfdAg6AV8BP4A/wIiL2ixDUBaCtTkfE9VTKV4DzFJ8BfeAXcAFcZrUiOgeeArO5A4CqWk/xSvouZSerU0xr+eDmH3SB6ginLKL5iOhPPTyvnB4B/zdgH3gD1IAOcPovAQPgI7AFrAJt4CWwDjSB7q3ZanfES+13uiDzdcdqW91Un5UFqG6orTtqF2ozb1FvjDa9B77cUfsBHOYOGmM4OFJn1JMst6e+HsKp0+rntGgUrao7Ke7ri2N04n6ptQQo9F6MA6ioPfXDRAAJMjuxzR/SX5si3xbNsX0KAAAAAElFTkSuQmCC") center/contain no-repeat;
   opacity: 0.4;
 }
+.grid-view .row .icon.placeholder::after {
+  width: 28px;
+  height: 28px;
+}
 
 .row .text {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-width: 0;
-  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+.grid-view .row .text {
+  flex: 0 0 auto;
+  width: 100%;
   text-align: center;
 }
 
 .row .title {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.grid-view .row .title {
+  font-size: 12px;
+  font-weight: 500;
   max-width: 100%;
 }
 .row.selected .title {
@@ -244,56 +269,60 @@ html[data-theme="light"] .row.selected .title {
 }
 
 .row .subtitle {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.grid-view .row .subtitle {
+  font-size: 10px;
   max-width: 100%;
 }
 
 /* Section headers span full grid width */
-.section {
+.grid-view .section {
   grid-column: 1 / -1;
 }
-.row.calculator,
-.row.single-row {
+.grid-view .row.calculator,
+.grid-view .row.single-row {
   grid-column: 1 / -1;
   flex-direction: row;
   align-items: center;
   gap: 12px;
+  height: auto;
   padding: 0 12px;
   text-align: left;
 }
-.row.calculator .icon,
-.row.single-row .icon {
+.grid-view .row.calculator .icon,
+.grid-view .row.single-row .icon {
   width: 24px;
   height: 24px;
   border-radius: 6px;
 }
-.row.calculator .icon.placeholder::after,
-.row.single-row .icon.placeholder::after {
+.grid-view .row.calculator .icon.placeholder::after,
+.grid-view .row.single-row .icon.placeholder::after {
   width: 20px;
   height: 20px;
 }
-.row.calculator .text,
-.row.single-row .text {
+.grid-view .row.calculator .text,
+.grid-view .row.single-row .text {
   text-align: left;
   flex: 1 1 auto;
   width: auto;
 }
-.row.calculator .title,
-.row.single-row .title {
+.grid-view .row.calculator .title,
+.grid-view .row.single-row .title {
   font-size: 13px;
 }
-.row.calculator {
+.grid-view .row.calculator {
   height: 64px;
 }
-.row.calculator .title {
+.grid-view .row.calculator .title {
   font-size: 21px;
   font-weight: 400;
 }
-.row.calculator .subtitle {
+.grid-view .row.calculator .subtitle {
   font-size: 12px;
   color: var(--accent);
 }
@@ -314,16 +343,17 @@ html[data-theme="light"] .row.selected .title {
 /* calculator row */
 /* Already styled above via .row.calculator — no duplicate rules needed */
 
-/* Quick Launch row — pin/add icons positioned top-right in grid cards */
+/* Quick Launch row */
+.row.quick-launch {
+  /* Same base as .row */
+}
+
 .row.quick-launch .pin-icon {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
   opacity: 0;
   cursor: pointer;
-  z-index: 1;
 }
 
 .row.quick-launch:hover .pin-icon,
@@ -340,16 +370,13 @@ html[data-theme="light"] .row.selected .title {
   opacity: 1;
 }
 
-/* Add icon for search results — top-right corner of grid card */
+/* Add icon for search results */
 .row .add-icon {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
   opacity: 0;
   cursor: pointer;
-  z-index: 1;
 }
 
 .row:hover .add-icon,
@@ -364,6 +391,20 @@ html[data-theme="light"] .row.selected .title {
 .row:hover .add-icon.pinned,
 .row.selected .add-icon.pinned {
   opacity: 1;
+}
+
+/* Grid mode: pin/add icons repositioned to absolute top-right */
+.grid-view .row.quick-launch .pin-icon,
+.grid-view .row .add-icon {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
+}
+.grid-view .row.quick-launch .pin-icon,
+.grid-view .row .add-icon {
+  flex: 0 0 auto;
 }
 
 /* Toast notification */

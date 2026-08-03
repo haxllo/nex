@@ -796,6 +796,88 @@ impl RuntimeWorker {
         });
     }
 
+    fn handle_context_action(&mut self, action: &str, _title: &str, path: &str) {
+        match action {
+            "runas" => {
+                let target = if !path.is_empty() { path } else { _title };
+                self.overlay.hide_sync();
+                self.overlay_state.on_escape();
+                match crate::action_executor::launch_as_admin(target) {
+                    Ok(()) => {
+                        log_info(&format!("[nex] launched as admin: '{target}'"));
+                        reset_overlay_session(
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
+                        );
+                        self.last_query.clear();
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                    }
+                    Err(error) => {
+                        self.overlay.set_status_text(&format!("Run as admin error: {error}"));
+                    }
+                }
+            }
+            "openfolder" => {
+                if path.is_empty() { return; }
+                let parent = std::path::Path::new(path).parent();
+                let folder = parent.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+                self.overlay.hide_sync();
+                self.overlay_state.on_escape();
+                match crate::action_executor::launch_open_target(&folder) {
+                    Ok(()) => {
+                        log_info(&format!("[nex] opened file location: '{}'", folder));
+                        reset_overlay_session(
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
+                        );
+                        self.last_query.clear();
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                    }
+                    Err(error) => {
+                        self.overlay.set_status_text(&format!("Open location error: {error}"));
+                    }
+                }
+            }
+            "copypath" => {
+                if path.is_empty() { return; }
+                if copy_to_clipboard(path) {
+                    self.overlay.set_status_text("Path copied to clipboard");
+                } else {
+                    self.overlay.set_status_text("Failed to copy path");
+                }
+            }
+            "uninstall" => {
+                if _title.is_empty() { return; }
+                let items = crate::uninstall_registry::search_uninstall_actions(_title, 5);
+                if let Some(item) = items.first() {
+                    if let Err(error) = crate::uninstall_registry::execute_uninstall_action(&item.id) {
+                        let msg = format!("Uninstall failed: {error}");
+                        log_warn(&format!("[nex] {msg}"));
+                        self.overlay.set_status_text(&msg);
+                    }
+                } else {
+                    let msg = format!("No uninstall entry found for '{}'", _title);
+                    log_info(&format!("[nex] {msg}"));
+                    self.overlay.set_status_text(&msg);
+                }
+            }
+            "pin" => {
+                if !path.is_empty() { self.add_to_quick_launch(path); }
+                else { self.pin_app_to_quick_launch(_title); }
+            }
+            "unpin" => {
+                self.unpin_app_from_quick_launch(_title);
+            }
+            _ => {
+                log_warn(&format!("[nex] unknown context action: {action}"));
+            }
+        }
+    }
+
     fn on_event(&mut self, event: OverlayEvent) {
         self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
 
@@ -1635,6 +1717,9 @@ impl RuntimeWorker {
             }
             OverlayEvent::AddToQuickLaunch(path) => {
                 self.add_to_quick_launch(&path);
+            }
+            OverlayEvent::ContextAction(action, title, path) => {
+                self.handle_context_action(&action, &title, &path);
             }
             _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
         }

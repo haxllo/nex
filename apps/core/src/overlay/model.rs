@@ -60,6 +60,8 @@ pub enum OverlayEvent {
     UnpinApp(String),
     /// Add an app to Quick Launch by path.
     AddToQuickLaunch(String),
+    /// Context menu action: { action, title, path }.
+    ContextAction(String, String, String),
     /// Periodic 250ms heartbeat to drive config reload and dead-listener
     /// recovery even when no user events are arriving.
     Tick,

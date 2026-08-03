@@ -807,6 +807,12 @@ fn handle_ipc(
                 let _ = event_tx.send(event);
             }
         }
+        "contextAction" => {
+            let action = value.get("v").and_then(|v| v.get("action")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let title = value.get("v").and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let path = value.get("v").and_then(|v| v.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
+        }
         _ => {}
     }
 }
@@ -898,11 +904,11 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
             } else {
                 serde_json::Value::String(r.icon_path.clone())
             };
-            // Include the actual file path for addToQuickLaunch
-            let file_path = if r.icon_path.is_empty() {
+            // Include the actual file path for addToQuickLaunch and context menu
+            let file_path = if r.path.is_empty() {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(r.icon_path.clone())
+                serde_json::Value::String(r.path.clone())
             };
             serde_json::json!({
                 "role": role,

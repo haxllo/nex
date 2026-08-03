@@ -422,26 +422,38 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "windows")]
 /// Render an HBITMAP into an RGBA buffer via GetDIBits, then normalize to PNG.
-fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, size: i32) -> Option<Vec<u8>> {
+/// Handles bitmaps returned at any size — if smaller than target, stretches via
+/// StretchBlt so UWP apps with 32×32 icon resources fill the full canvas.
+fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_size: i32) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, DeleteDC, SelectObject, ReleaseDC,
+        CreateCompatibleDC, DeleteDC, SelectObject, ReleaseDC, DeleteObject,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, GetDIBits, GetDC,
+        GetObjectW, BITMAP, StretchBlt, SRCCOPY, CreateDIBSection,
     };
 
     unsafe {
+        // Query actual bitmap dimensions.
+        let mut bm: BITMAP = std::mem::zeroed();
+        if GetObjectW(hbmp as _, std::mem::size_of::<BITMAP>() as i32, (&mut bm) as *mut _ as _) == 0 {
+            return None;
+        }
+        let src_w = bm.bmWidth;
+        let src_h = bm.bmHeight;
+
         let screen_dc = GetDC(std::ptr::null_mut());
-        let mem_dc = CreateCompatibleDC(screen_dc);
+        let src_dc = CreateCompatibleDC(screen_dc);
         ReleaseDC(std::ptr::null_mut(), screen_dc);
-        if mem_dc.is_null() {
+        if src_dc.is_null() {
             return None;
         }
 
-        let old_bmp = SelectObject(mem_dc, hbmp as _);
+        let old_src = SelectObject(src_dc, hbmp as _);
 
+        // Create a 32-bit BGRA DIB of the target size.
         let mut header: BITMAPINFOHEADER = std::mem::zeroed();
         header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        header.biWidth = size;
-        header.biHeight = -size; // top-down
+        header.biWidth = target_size;
+        header.biHeight = -target_size; // top-down
         header.biPlanes = 1;
         header.biBitCount = 32;
         header.biCompression = BI_RGB;
@@ -449,35 +461,42 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, size: i
         let mut bmpinfo: BITMAPINFO = std::mem::zeroed();
         bmpinfo.bmiHeader = header;
 
-        let pixel_count = (size * size) as usize;
-        let mut rgba = vec![0u8; pixel_count * 4];
-
-        let rows = GetDIBits(
-            mem_dc,
-            hbmp,
-            0,
-            size as u32,
-            rgba.as_mut_ptr() as *mut std::ffi::c_void,
-            &mut bmpinfo,
-            DIB_RGB_COLORS,
+        let dst_dc = CreateCompatibleDC(std::ptr::null_mut());
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let dst_bmp = CreateDIBSection(
+            dst_dc, &bmpinfo, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0,
         );
-
-        SelectObject(mem_dc, old_bmp);
-        DeleteDC(mem_dc);
-
-        if rows == 0 {
+        if dst_bmp.is_null() || bits.is_null() {
+            SelectObject(src_dc, old_src);
+            DeleteDC(src_dc);
+            DeleteDC(dst_dc);
             return None;
         }
+        let old_dst = SelectObject(dst_dc, dst_bmp as _);
 
-        // BGRA → RGBA swap
-        for chunk in rgba.chunks_exact_mut(4) {
-            let r = chunk[2];
-            let b = chunk[0];
-            chunk[0] = r;
-            chunk[2] = b;
+        // Fill with transparent black, then stretch-blit the source into it.
+        let pixel_count = (target_size * target_size) as usize;
+        std::ptr::write_bytes(bits, 0, pixel_count * 4);
+        StretchBlt(dst_dc, 0, 0, target_size, target_size, src_dc, 0, 0, src_w, src_h, SRCCOPY);
+
+        SelectObject(src_dc, old_src);
+        DeleteDC(src_dc);
+        SelectObject(dst_dc, old_dst);
+
+        // Read back the BGRA pixels, swap to RGBA.
+        let pixels = std::slice::from_raw_parts(bits as *const u8, pixel_count * 4);
+        let mut rgba = vec![0u8; pixel_count * 4];
+        for (i, chunk) in pixels.chunks_exact(4).enumerate() {
+            rgba[i * 4] = chunk[2];     // R ← B
+            rgba[i * 4 + 1] = chunk[1]; // G ← G
+            rgba[i * 4 + 2] = chunk[0]; // B ← R
+            rgba[i * 4 + 3] = chunk[3]; // A ← A
         }
 
-        let img = image::RgbaImage::from_raw(size as u32, size as u32, rgba)?;
+        DeleteObject(dst_bmp as _);
+        DeleteDC(dst_dc);
+
+        let img = image::RgbaImage::from_raw(target_size as u32, target_size as u32, rgba)?;
         normalize_to_square_png(img)
     }
 }

@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 17;
+pub const CURRENT_CONFIG_VERSION: u32 = 18;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -41,6 +41,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "plugins_enabled",
     "plugins_safe_mode",
     "game_mode_enabled",
+    "grid_view",
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
@@ -243,6 +244,7 @@ pub struct Config {
     pub plugin_paths: Vec<PathBuf>,
     pub plugins_safe_mode: bool,
     pub game_mode_enabled: bool,
+    pub grid_view: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     /// How long (ms) the WebView stays resident after the overlay is
@@ -303,6 +305,7 @@ impl Default for Config {
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
             game_mode_enabled: false,
+            grid_view: false,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
@@ -707,6 +710,12 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     } else {
         "false"
     });
+    text.push('\n');
+    text.push_str(
+        "# Grid View: display search results in a grid instead of a vertical list.\n",
+    );
+    text.push_str("grid_view = ");
+    text.push_str(if cfg.grid_view { "true" } else { "false" });
     text.push('\n');
     text.push_str("plugin_paths = ");
     text.push_str(&plugin_paths_section);
@@ -1124,6 +1133,11 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
             cfg.quick_launch = quick_launch;
             changed = true;
         }
+    }
+
+    if source_version < 18 && !raw_has_key(raw, "grid_view") {
+        cfg.grid_view = Config::default().grid_view;
+        changed = true;
     }
 
     if TEMPLATE_REQUIRED_KEYS

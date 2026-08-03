@@ -78,6 +78,7 @@ pub(crate) enum Theme {
 pub struct QuickLaunchItem {
     pub title: String,
     pub path: String,
+    pub subtitle: String,
     pub icon_path: String,
     pub is_pinned: bool,
 }

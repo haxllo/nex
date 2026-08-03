@@ -658,7 +658,7 @@
       if (pinned) {
         post("unpin", title);
       } else {
-        post("addToQuickLaunch", path || ctxRow.icon || title);
+        post("pin", title);
       }
     } else {
       // All other actions sent to Rust

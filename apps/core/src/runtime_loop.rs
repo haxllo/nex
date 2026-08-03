@@ -702,14 +702,22 @@ impl RuntimeWorker {
         let path_to_remove = if let Some(path) = app_path {
             path
         } else {
-            let from_results = self.current_results.iter()
-                .find(|item| item.title.eq_ignore_ascii_case(title))
-                .map(|item| item.path.clone());
-            match from_results {
-                Some(path) => path,
-                None => {
-                    log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found in results", title));
-                    return;
+            // Also try matching directly against entries in the config pinned list
+            let from_config = self.runtime_config.quick_launch.pinned.iter()
+                .find(|p| p.eq_ignore_ascii_case(title))
+                .cloned();
+            if let Some(path) = from_config {
+                path
+            } else {
+                let from_results = self.current_results.iter()
+                    .find(|item| item.title.eq_ignore_ascii_case(title))
+                    .map(|item| item.path.clone());
+                match from_results {
+                    Some(path) => path,
+                    None => {
+                        log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found in results", title));
+                        return;
+                    }
                 }
             }
         };

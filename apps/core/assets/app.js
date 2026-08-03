@@ -271,15 +271,14 @@
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
 
-    // When transitioning from idle (quick-launch) to search results, reset
-    // the height tracker so the old idle panel height doesn't leak into the
-    // first resize IPC — it gets consumed locally and the real height is
-    // sent on the next rendering frame.
+    // When leaving idle with search results, defer measure() by one
+    // animation frame so the panel settles at its new height before
+    // we send the first resize IPC — avoids the QL → search flash.
     if (wasIdle && !idle) {
-      lastH = 0;
+      requestAnimationFrame(() => measure());
+    } else {
+      measure();
     }
-
-    measure();
   }
 
   function setSelected(i, scroll) {
@@ -417,6 +416,10 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
+            if (skipResize) {
+              skipResize = false;
+              return;
+            }
             // Rust-side debounce (100ms) coalesces rapid typing resize
             // requests — no need for a JS-side debounce here.
             post("resize", h);

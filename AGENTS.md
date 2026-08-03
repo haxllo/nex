@@ -80,6 +80,8 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 
 ## Release
 
+**IMPORTANT**: Release workflows must be run directly by the main agent (me), NOT delegated to subagents. Use subagents only for review/verification of release output if needed.
+
 ```bash
 # 1. bump version in Cargo.toml, commit, tag
 cargo build --release --bin Nex --bin NexHelper

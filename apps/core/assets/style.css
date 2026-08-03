@@ -326,6 +326,10 @@ html[data-theme="light"] .row.selected .title {
   font-size: 12px;
   color: var(--accent);
 }
+.grid-view .row.single-row {
+  height: 46px;
+  padding: 0 12px;
+}
 
 /* .kind: hidden for now. Uncomment block below and delete display:none to restore.
    Always visible at dim color — no selection toggle, no flicker.

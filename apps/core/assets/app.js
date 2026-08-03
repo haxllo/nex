@@ -262,9 +262,24 @@
     // Only show idle (quick launch) when the query is empty — avoid
     // a flash of quick launch items between typing and results arriving.
     const hasResults = rows.some((r) => r.role !== "status");
+    const wasIdle = bodyEl.classList.contains("idle");
     const idle = !hasResults && (typeof state.query === "string" ? state.query.trim() === "" : true);
     bodyEl.classList.toggle("idle", idle);
     footerEl.classList.toggle("idle", idle);
+
+    // When transitioning from idle to results, results appear before the
+    // panel expands (resize happens via IPC). Defer showing the list by
+    // one paint frame so the resize arrives first.
+    if (wasIdle && !idle && hasResults) {
+      bodyEl.style.visibility = "hidden";
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          bodyEl.style.visibility = "";
+        });
+      });
+    } else if (!idle) {
+      bodyEl.style.visibility = "";
+    }
 
     // Idle: the power button replaces the config button in the search row.
     help.classList.toggle("hidden", idle);

@@ -280,13 +280,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         last_applied_height = INITIAL_HEIGHT;
                         pending_resize = None;
                         first_resize_after_show = true;
-                        push_state(&webview, &state, &icon_cache, true);
+                        push_state(&webview, &state, &icon_cache, true, &window, &mut last_applied_height);
                         show_pending = true;
                     }
                 }
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
-                        push_state(&webview, &state, &icon_cache, false);
+                        push_state(&webview, &state, &icon_cache, false, &window, &mut last_applied_height);
                     }
                 }
                 UiCommand::ApplyIcons => {
@@ -363,7 +363,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     first_resize_after_show = true;
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
-                    push_state(&webview, &state, &icon_cache, true);
+                    push_state(&webview, &state, &icon_cache, true, &window, &mut last_applied_height);
                 }
                 UiCommand::FocusInput => {
                     window.set_focus();
@@ -411,7 +411,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Push cleared state while hidden so next Show has
                     // a fresh page ready to render.
                     if ready {
-                        push_state(&webview, &state, &icon_cache, false);
+                        push_state(&webview, &state, &icon_cache, false, &window, &mut last_applied_height);
                     }
                     if let Ok(mut s) = state.lock() {
                         s.has_focus = false;
@@ -437,7 +437,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
-                        push_state(&webview, &state, &icon_cache, false);
+                        push_state(&webview, &state, &icon_cache, false, &window, &mut last_applied_height);
                     }
                     if let Ok(mut s) = state.lock() {
                         s.has_focus = false;
@@ -839,21 +839,33 @@ fn post_json(webview: &WebView, json: &str) {
 /// Both use `PostWebMessageAsJson` (fire-and-forget). The state lock is
 /// released before any icon encoding occurs — only the ShimState clone
 /// runs under the lock (~microseconds).
-fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>, show_pending: bool) {
+fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>, show_pending: bool, window: &Window, last_applied_height: &mut f64) {
     let Some(wv) = webview else { return };
 
-    // Phase 1: Clone state under lock (microseconds).
+    // Clone state under lock (microseconds).
     let snapshot = {
         let Ok(s) = state.lock() else { return };
         s.clone()
     };
 
-    // Phase 2: Build lightweight JSON without icons (~2KB).
+    // Pre-size the window from the known row count so results render
+    // into an already-expanded panel. No IPC round-trip, no frames, no debounce.
+    // search row 60 + divider 7 + footer 48 + list padding 16
+    let visible_rows = snapshot.rows.iter().filter(|r| !matches!(r.role, OverlayRowRole::Status | OverlayRowRole::Header)).count();
+    let estimated = if visible_rows == 0 {
+        INITIAL_HEIGHT
+    } else {
+        (60.0 + 7.0 + 48.0 + 16.0 + (visible_rows as f64) * 46.0).clamp(INITIAL_HEIGHT, MAX_HEIGHT)
+    };
+    if estimated > *last_applied_height && (*last_applied_height - INITIAL_HEIGHT).abs() < 0.5 {
+        *last_applied_height = estimated;
+        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, estimated));
+    }
+
+    // Build lightweight JSON without icons (~2KB).
     let state_json = snapshot_state_json(&snapshot, show_pending);
 
     // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
-    // Note: png_bytes() may block on first decode per icon (cold cache),
-    // but the state lock is not held during this work.
     let icons_json = snapshot_icons_json(&snapshot, icons);
 
     // Phase 4: Send both messages back-to-back (same frame).

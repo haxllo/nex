@@ -46,7 +46,8 @@ use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, overlay_rows,
     reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
-    track_uninstall_title_suppression, ConfirmationKind, PendingConfirmation,
+    track_uninstall_title_suppression, uninstall_target_title_from_action_title,
+    ConfirmationKind, PendingConfirmation,
     ACTION_POWER_CANCEL_ID, ACTION_POWER_CONFIRM_ID,
     ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
     STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
@@ -892,6 +893,23 @@ impl RuntimeWorker {
                     log_info(&format!("[nex] uninstalling '{}' via command '{}'", _title, item.id));
                     match crate::uninstall_registry::execute_uninstall_action(&item.id) {
                         Ok(()) => {
+                            track_uninstall_title_suppression(
+                                &mut self.suppressed_uninstall_titles,
+                                &format!("Uninstall {}", _title),
+                            );
+                            let lookup = if !path.is_empty() { path.to_string() } else { _title.to_string() };
+                            if let Ok(guard) = self.service.write() {
+                                if let Ok(Some((stale_id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&guard.db_ref(), &lookup) {
+                                    let _ = guard.delete_item_by_id(&stale_id);
+                                }
+                            }
+                            filter_suppressed_uninstall_results(&mut self.current_results, &self.suppressed_uninstall_titles);
+                            if self.current_results.is_empty() {
+                                set_status_row_overlay_state(&self.overlay, STATUS_ROW_NO_RESULTS);
+                            } else {
+                                let rows = overlay_rows(&self.current_results, false);
+                                self.overlay.set_results(&rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
+                            }
                             self.overlay.set_status_text(&format!("Uninstalling '{}'...", _title));
                         }
                         Err(error) => {
@@ -1506,6 +1524,13 @@ impl RuntimeWorker {
                                             &mut self.suppressed_uninstall_titles,
                                             uninstall_action.title.as_str(),
                                         );
+                                        if let Some(target_title) = uninstall_target_title_from_action_title(uninstall_action.title.as_str()) {
+                                            if let Ok(guard) = self.service.write() {
+                                                if let Ok(Some((stale_id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&guard.db_ref(), &target_title) {
+                                                    let _ = guard.delete_item_by_id(&stale_id);
+                                                }
+                                            }
+                                        }
                                         self.overlay.set_status_text("");
                                         reset_overlay_session(
                                             &self.overlay,

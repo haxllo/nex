@@ -919,6 +919,58 @@ fn discover_start_menu_root(
         });
     }
 
+    // Prune start-menu variant shortcuts: when several shortcuts target the
+    // same executable and exactly one of them maps to a registered uninstall
+    // DisplayName, keep only that canonical entry (e.g. VLC's "… skinned" /
+    // "… - reset preferences" variants vs "VLC media player").
+    let mut target_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, candidate) in candidates.iter().enumerate() {
+        if candidate.ext != "lnk" {
+            continue;
+        }
+        let Some(target) = candidate.shortcut_target.as_deref() else {
+            continue;
+        };
+        let key = normalize_shortcut_target_path(target).to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        target_groups.entry(key).or_default().push(idx);
+    }
+    let mut drop_indices: HashSet<usize> = HashSet::new();
+    for (_, group) in target_groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let canonical: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                publisher_from_uninstall_map(candidates[idx].title.as_str(), uninstall_publishers)
+                    .is_some()
+            })
+            .collect();
+        if canonical.len() == 1 {
+            let keep = canonical[0];
+            for &idx in &group {
+                if idx != keep {
+                    drop_indices.insert(idx);
+                }
+            }
+        }
+    }
+    if !drop_indices.is_empty() {
+        let mut kept = Vec::with_capacity(
+            candidates.len().saturating_sub(drop_indices.len()),
+        );
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            if !drop_indices.contains(&idx) {
+                kept.push(candidate);
+            }
+        }
+        candidates = kept;
+    }
+
     let mut exe_paths = HashSet::new();
     for candidate in &candidates {
         if candidate.ext == "exe" {

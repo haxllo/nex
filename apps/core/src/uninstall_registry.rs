@@ -252,6 +252,11 @@ fn uninstall_entry_score(entry: &UninstallEntry, normalized_query: &str) -> Opti
     if normalized_name.contains(normalized_query) {
         return Some(12_000 - (normalized_name.len() as i64 - normalized_query.len() as i64).abs());
     }
+    // Reverse: the entry name sits inside a longer query (start-menu
+    // shortcut titles often append extra words, e.g. "- reset preferences").
+    if normalized_query.contains(normalized_name.as_str()) {
+        return Some(10_000 - (normalized_query.len() as i64 - normalized_name.len() as i64).abs());
+    }
     if normalized_publisher.contains(normalized_query) {
         return Some(
             8_000 - (normalized_publisher.len() as i64 - normalized_query.len() as i64).abs(),
@@ -354,6 +359,11 @@ fn load_entries_windows() -> Result<Vec<UninstallEntry>, String> {
         KEY_WOW64_32KEY,
         &mut entries,
     )?;
+
+    match collect_appx_packages(&mut entries) {
+        Ok(()) => {}
+        Err(e) => crate::runtime::log_warn(&format!("[nex] appx uninstall enumeration failed: {e}")),
+    }
 
     let mut seen = HashSet::new();
     entries.retain(|entry| {
@@ -474,6 +484,53 @@ fn collect_entries_from_uninstall_key(
 
     unsafe {
         RegCloseKey(uninstall_root);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn collect_appx_packages(out: &mut Vec<UninstallEntry>) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-AppxPackage | ForEach-Object { \"{0}`t{1}\" -f $_.Name, $_.PackageFullName }",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("failed to spawn powershell for appx: {e}"))?;
+
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or_default().trim().to_string();
+        let full_name = parts.next().unwrap_or_default().trim().to_string();
+        if name.is_empty() || full_name.is_empty() {
+            continue;
+        }
+        out.push(UninstallEntry {
+            token: format!("appx:{full_name}"),
+            display_name: name,
+            publisher: String::new(),
+            uninstall_command: format!(
+                "powershell -NoProfile -NonInteractive -Command \"Remove-AppxPackage -Package '{full_name}'\""
+            ),
+            fallback_uninstall_command: None,
+        });
     }
     Ok(())
 }

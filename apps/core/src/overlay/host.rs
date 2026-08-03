@@ -475,17 +475,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Shrink request: apply immediately to avoid
                         // exposing acrylic while the debounce delays
                         // the native window size reduction.
-                        pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
                             window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
                         }
-                    } else if first_resize_after_show {
-                        // First resize after show: apply immediately to
-                        // prevent the "search bar first, items pop in
-                        // 100ms later" visual flash.
+                    } else if first_resize_after_show || (last_applied_height - INITIAL_HEIGHT).abs() < 0.5 {
+                        // First resize after show, or growing from idle height:
+                        // apply immediately to prevent results appearing clipped.
                         first_resize_after_show = false;
-                        pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
                             window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));

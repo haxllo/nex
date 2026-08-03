@@ -259,11 +259,14 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
-    bodyEl.classList.toggle("idle", !hasRows);
-    footerEl.classList.toggle("idle", !hasRows);
+    // Only show idle (quick launch) when the query is empty — avoid
+    // a flash of quick launch items between typing and results arriving.
+    const hasResults = rows.some((r) => r.role !== "status");
+    const idle = !hasResults && (typeof state.query === "string" ? state.query.trim() === "" : true);
+    bodyEl.classList.toggle("idle", idle);
+    footerEl.classList.toggle("idle", idle);
 
     // Idle: the power button replaces the config button in the search row.
-    const idle = !hasRows;
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
 

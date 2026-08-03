@@ -262,7 +262,16 @@
     // Only show idle (quick launch) when the query is empty — avoid
     // a flash of quick launch items between typing and results arriving.
     const hasResults = rows.some((r) => r.role !== "status");
+    const wasIdle = bodyEl.classList.contains("idle");
     const idle = !hasResults && (typeof state.query === "string" ? state.query.trim() === "" : true);
+
+    // When transitioning from idle to results, hide content until the
+    // resize IPC reaches Rust and the panel expands. The measure()
+    // function will reveal the body after posting the resize.
+    if (wasIdle && !idle && hasResults) {
+      bodyEl.style.visibility = "hidden";
+    }
+
     bodyEl.classList.toggle("idle", idle);
     footerEl.classList.toggle("idle", idle);
 
@@ -404,19 +413,19 @@
         if (h > 0 && h !== lastH) {
           const prev = lastH;
           lastH = h;
-          // First measurement: skip resize only if panel is truly idle
-          // (no rows, search bar only). If content is already showing
-          // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            // Rust-side debounce (100ms) coalesces rapid typing resize
-            // requests — no need for a JS-side debounce here.
             post("resize", h);
           }
         }
         if (needsPainted) {
           needsPainted = false;
-          scrollToInstant(0); // fresh show = fresh scroll, after paint
+          scrollToInstant(0);
           post("painted");
+        }
+        // After height is sent (and Rust applies it), reveal the body
+        // if it was hidden waiting for the resize.
+        if (bodyEl.style.visibility === "hidden") {
+          bodyEl.style.visibility = "";
         }
       });
     });

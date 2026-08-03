@@ -311,6 +311,37 @@ pub fn find_item_by_path_or_title(
         )));
     }
 
+    // Try case-insensitive partial path match (query contains path segment or vice versa)
+    let normalized_query = query.replace('/', "\\").to_ascii_lowercase();
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(REPLACE(path, '/', '\\')) LIKE '%' || ?1 || '%' OR ?1 LIKE '%' || LOWER(REPLACE(path, '/', '\\')) || '%' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![normalized_query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    // Try case-insensitive partial title match
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(title) LIKE '%' || ?1 || '%' OR ?1 LIKE '%' || LOWER(title) || '%' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![query.to_ascii_lowercase()])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
     Ok(None)
 }
 

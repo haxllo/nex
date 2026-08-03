@@ -267,16 +267,18 @@ fn extract_uninstall_search_term(query: &str) -> Option<String> {
         return None;
     }
 
+    // Accept both command-mode prefixes and direct app names (context menu)
     let mut parts = trimmed.split_whitespace();
     let first = parts.next()?.to_ascii_lowercase();
-    if !matches!(
+    if matches!(
         first.as_str(),
         "uninstall" | "remove" | "delete" | "del" | "rm" | "u"
     ) {
-        return None;
+        Some(parts.collect::<Vec<_>>().join(" ").trim().to_string())
+    } else {
+        // Direct app name — context menu or non-command usage
+        Some(trimmed.to_string())
     }
-
-    Some(parts.collect::<Vec<_>>().join(" ").trim().to_string())
 }
 
 fn load_cached_entries(force_refresh: bool) -> Result<Vec<UninstallEntry>, String> {

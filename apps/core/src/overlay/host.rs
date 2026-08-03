@@ -103,7 +103,7 @@ pub(crate) enum UiCommand {
     /// The page painted after a push_state — trigger deferred show.
     Painted,
     /// The page measured its content height (CSS px); resize to hug it.
-    Resize(f64),
+    Resize { h: f64, immediate: bool },
     /// Exit the event loop (clean shutdown).
     Quit,
     /// Debounce timer fired — apply the coalesced resize height.
@@ -188,8 +188,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Resize debounce state. Growth requests go through a debounce
     // timer (UiCommand::Resize stores the target height and arms the
     // timer; UiCommand::ApplyResize fires after the quiet period and
-    // calls set_inner_size). Shrink requests bypass debounce entirely
-    // and apply immediately to prevent acrylic exposure.
+    // calls set_inner_size). Shrink requests and immediate-flagged
+    // resizes bypass debounce entirely and apply immediately.
     let mut pending_resize: Option<f64> = None;
     let mut last_applied_height: f64 = INITIAL_HEIGHT;
     // First resize after show bypasses debounce so content appears
@@ -469,12 +469,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
 
-                UiCommand::Resize(h) => {
+                UiCommand::Resize { h, immediate } => {
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
-                    if h < last_applied_height {
-                        // Shrink request: apply immediately to avoid
-                        // exposing acrylic while the debounce delays
-                        // the native window size reduction.
+                    if immediate || h < last_applied_height {
+                        // Immediate flag, shrink request, or first resize
+                        // after show: apply right away. Immediate skips the
+                        // growth debounce so QL→results transitions don't
+                        // leak into the quick-launch area.
+                        first_resize_after_show = false;
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
@@ -760,9 +762,20 @@ fn handle_ipc(
             let _ = event_tx.send(OverlayEvent::TogglePowerPopup);
         }
         "resize" => {
-            if let Some(h) = value.get("v").and_then(|v| v.as_f64()) {
-                let _ = proxy.send_event(UiCommand::Resize(h));
-            }
+            // JS sends {t:"resize", v:{v:h, immediate:bool}} (new) or
+            // {t:"resize", v:h} (legacy number-only).
+            let (h, immediate) = match value.get("v") {
+                Some(serde_json::Value::Object(obj)) => {
+                    let h = obj.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let imm = obj.get("immediate").and_then(|v| v.as_bool()).unwrap_or(false);
+                    (h, imm)
+                }
+                Some(serde_json::Value::Number(n)) => {
+                    (n.as_f64().unwrap_or(0.0), false)
+                }
+                _ => return,
+            };
+            let _ = proxy.send_event(UiCommand::Resize { h, immediate });
         }
         "painted" => {
             // First paint after push_state — safe to show the window.
@@ -806,6 +819,12 @@ fn handle_ipc(
                 };
                 let _ = event_tx.send(event);
             }
+        }
+        "contextAction" => {
+            let action = value.get("v").and_then(|v| v.get("action")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let title = value.get("v").and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let path = value.get("v").and_then(|v| v.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
         }
         _ => {}
     }
@@ -898,7 +917,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
             } else {
                 serde_json::Value::String(r.icon_path.clone())
             };
-            // Include the actual file path for addToQuickLaunch
+            // r.icon_path carries the real executable/filesystem path.
+            // r.path is the display subtitle (publisher name for UWP apps).
             let file_path = if r.icon_path.is_empty() {
                 serde_json::Value::Null
             } else {

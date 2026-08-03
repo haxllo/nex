@@ -552,14 +552,15 @@ impl RuntimeWorker {
         // Query the database for Quick Launch items
         if let Ok(guard) = self.service.read() {
             let db = guard.db_ref();
-            match crate::index_store::get_quick_launch_items(&db, pinned, max_items) {
+            match crate::index_store::get_quick_launch_items(&db, pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
                             crate::overlay::model::QuickLaunchItem {
                                 title,
                                 path,
+                                subtitle,
                                 icon_path,
                                 is_pinned,
                             }
@@ -595,14 +596,15 @@ impl RuntimeWorker {
         // Query the database for Quick Launch items
         if let Ok(guard) = self.service.read() {
             let db = guard.db_ref();
-            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items) {
+            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, _subtitle, icon_path, is_pinned)| {
+                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
                             crate::overlay::model::QuickLaunchItem {
                                 title,
                                 path,
+                                subtitle,
                                 icon_path,
                                 is_pinned,
                             }
@@ -626,7 +628,6 @@ impl RuntimeWorker {
     fn show_idle_or_quick_launch(&mut self) {
         if self.runtime_config.quick_launch.enabled
             && !self.quick_launch_items.is_empty()
-            && !self.runtime_config.quick_launch.pinned.is_empty()
         {
             crate::runtime_overlay_rows::set_quick_launch_overlay_state(
                 &self.overlay,
@@ -689,18 +690,42 @@ impl RuntimeWorker {
 
     /// Unpin an app from Quick Launch by title.
     fn unpin_app_from_quick_launch(&mut self, title: &str) {
-        // Find the app path
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+
+        // First, try to find by title in quick_launch_items (idle state).
         let app_path = self.quick_launch_items.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
             .map(|item| item.path.clone());
 
-        let Some(path) = app_path else {
-            log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found or not pinned", title));
-            return;
+        // If not found, try to find by title in current_results (search mode).
+        let path_to_remove = if let Some(path) = app_path {
+            path
+        } else {
+            // Also try matching directly against entries in the config pinned list
+            let from_config = self.runtime_config.quick_launch.pinned.iter()
+                .find(|p| p.eq_ignore_ascii_case(title))
+                .cloned();
+            if let Some(path) = from_config {
+                path
+            } else {
+                let from_results = self.current_results.iter()
+                    .find(|item| item.title.eq_ignore_ascii_case(title))
+                    .map(|item| item.path.clone());
+                match from_results {
+                    Some(path) => path,
+                    None => {
+                        log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found in results", title));
+                        return;
+                    }
+                }
+            }
         };
 
         // Normalize the path for comparison
-        let normalized = path.replace('/', "\\").to_ascii_lowercase();
+        let normalized = path_to_remove.replace('/', "\\").to_ascii_lowercase();
 
         // Remove from config pinned list
         self.runtime_config.quick_launch.pinned.retain(|p| {
@@ -794,6 +819,104 @@ impl RuntimeWorker {
         let _ = overlay.run_message_pump(&event_rx, &is_running, move |event| {
             let _ = shared_for_closure.borrow_mut().on_event(event);
         });
+    }
+
+    fn handle_context_action(&mut self, action: &str, _title: &str, path: &str) {
+        match action {
+            "runas" => {
+                let target = if !path.is_empty() { path } else { _title };
+                self.overlay.hide_sync();
+                self.overlay_state.on_escape();
+                match crate::action_executor::launch_as_admin(target) {
+                    Ok(()) => {
+                        log_info(&format!("[nex] launched as admin: '{target}'"));
+                        reset_overlay_session(
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
+                        );
+                        self.last_query.clear();
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                    }
+                    Err(error) => {
+                        self.overlay.set_status_text(&format!("Run as admin error: {error}"));
+                    }
+                }
+            }
+            "openfolder" => {
+                if path.is_empty() { return; }
+                let parent = std::path::Path::new(path).parent();
+                let folder = parent
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string());
+                if folder.is_empty() { return; }
+                // Use explorer /select to highlight the file/folder, works for
+                // both filesystem paths and shell: URIs.
+                let folder_arg = if folder.starts_with("shell:") {
+                    folder.clone()
+                } else {
+                    folder.to_string()
+                };
+                self.overlay.hide_sync();
+                self.overlay_state.on_escape();
+                match crate::action_executor::launch_open_target(&folder_arg) {
+                    Ok(()) => {
+                        log_info(&format!("[nex] opened file location: '{}'", folder));
+                        reset_overlay_session(
+                            &self.overlay,
+                            &mut self.current_results,
+                            &mut self.selected_index,
+                        );
+                        self.last_query.clear();
+                        self.search_session.clear();
+                        self.search_worker.clear_session();
+                    }
+                    Err(error) => {
+                        self.overlay.set_status_text(&format!("Open location error: {error}"));
+                    }
+                }
+            }
+            "copypath" => {
+                if path.is_empty() { return; }
+                if copy_to_clipboard(path) {
+                    self.overlay.set_status_text("Path copied to clipboard");
+                } else {
+                    self.overlay.set_status_text("Failed to copy path");
+                }
+            }
+            "uninstall" => {
+                if _title.is_empty() { return; }
+                let items = crate::uninstall_registry::search_uninstall_actions(_title, 5);
+                if let Some(item) = items.first() {
+                    log_info(&format!("[nex] uninstalling '{}' via command '{}'", _title, item.id));
+                    match crate::uninstall_registry::execute_uninstall_action(&item.id) {
+                        Ok(()) => {
+                            self.overlay.set_status_text(&format!("Uninstalling '{}'...", _title));
+                        }
+                        Err(error) => {
+                            let msg = format!("Uninstall failed: {error}");
+                            log_warn(&format!("[nex] {msg}"));
+                            self.overlay.set_status_text(&msg);
+                        }
+                    }
+                } else {
+                    let msg = format!("No uninstall entry found for '{}'", _title);
+                    log_info(&format!("[nex] {msg}"));
+                    self.overlay.set_status_text(&msg);
+                }
+            }
+            "pin" => {
+                if !path.is_empty() { self.add_to_quick_launch(path); }
+                else { self.pin_app_to_quick_launch(_title); }
+            }
+            "unpin" => {
+                self.unpin_app_from_quick_launch(_title);
+            }
+            _ => {
+                log_warn(&format!("[nex] unknown context action: {action}"));
+            }
+        }
     }
 
     fn on_event(&mut self, event: OverlayEvent) {
@@ -1635,6 +1758,9 @@ impl RuntimeWorker {
             }
             OverlayEvent::AddToQuickLaunch(path) => {
                 self.add_to_quick_launch(&path);
+            }
+            OverlayEvent::ContextAction(action, title, path) => {
+                self.handle_context_action(&action, &title, &path);
             }
             _ => {} // MoveSelection is handled locally by JS; other variants are forward-compat
         }

@@ -499,6 +499,19 @@ pub(crate) fn set_idle_overlay_state(overlay: &NativeOverlayShell) {
     overlay.set_status_text("");
 }
 
+/// Sanitize subtitle for Quick Launch items. Follows the same
+/// semantics as `overlay_subtitle()` for `kind == "app"`: drop
+/// empty/whitespace-only subtitles and those containing path
+/// separators or drive-letter colons.
+fn quick_launch_subtitle(subtitle: &str) -> String {
+    let s = subtitle.trim();
+    if s.is_empty() || s.contains('\\') || s.contains('/') || s.contains(':') {
+        String::new()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Build Quick Launch rows for the idle state (empty query).
 /// Returns rows with QuickLaunch role, ready to be pushed to the overlay.
 #[cfg(target_os = "windows")]
@@ -513,7 +526,7 @@ pub(crate) fn build_quick_launch_rows(
             result_index: Some(index),
             kind: "app".to_string(),
             title: item.title.clone(),
-            path: String::new(), // No subtitle for Quick Launch
+            path: quick_launch_subtitle(&item.subtitle),
             icon_path: item.icon_path.clone(),
         })
         .collect()

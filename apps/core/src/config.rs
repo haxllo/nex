@@ -211,7 +211,7 @@ impl Default for QuickLaunchConfig {
             enabled: true,
             max_items: 6,
             pinned: Vec::new(),
-            auto_fill: true,
+            auto_fill: false,
         }
     }
 }
@@ -270,7 +270,7 @@ impl Default for Config {
             discovery_exclude_roots: default_discovery_exclude_roots(),
             show_files: false,
             show_folders: false,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Win".to_string(),
             launch_at_startup: true,
             hotkey_help: format!(
                 "Set `hotkey` as Modifier+Key (example: Ctrl+Space or Win alone), then restart {APP_DISPLAY_NAME}."
@@ -305,7 +305,7 @@ impl Default for Config {
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
             game_mode_enabled: false,
-            grid_view: false,
+            grid_view: true,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
@@ -1127,7 +1127,7 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
                 quick_launch.pinned = raw_extract_string_array(raw, "quick_launch_pinned");
             }
             if raw_has_key(raw, "quick_launch_auto_fill") {
-                quick_launch.auto_fill = raw_extract_bool(raw, "quick_launch_auto_fill").unwrap_or(true);
+                quick_launch.auto_fill = raw_extract_bool(raw, "quick_launch_auto_fill").unwrap_or(false);
             }
             
             cfg.quick_launch = quick_launch;

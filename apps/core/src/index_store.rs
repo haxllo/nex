@@ -200,6 +200,7 @@ pub fn get_quick_launch_items(
     db: &Connection,
     pinned_paths: &[String],
     max_items: usize,
+    auto_fill: bool,
 ) -> Result<Vec<(String, String, String, String, String, String, bool)>, StoreError> {
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -225,10 +226,14 @@ pub fn get_quick_launch_items(
         return Ok(result);
     }
 
-    // No pinned items: auto-fill from usage
+    // No pinned items: only auto-fill from usage if configured
+    if !auto_fill {
+        return Ok(result);
+    }
+
     let remaining = max_items.saturating_sub(result.len());
     if remaining > 0 {
-        // First try apps with launch_count > 0
+        // Fill from launch history (apps with launch_count > 0)
         let mut stmt = db.prepare(
             "SELECT id, kind, title, path, subtitle FROM item
              WHERE kind = 'app' AND launch_count > 0
@@ -242,33 +247,6 @@ pub fn get_quick_launch_items(
             }
             let id: String = row.get(0)?;
             if !seen_ids.contains(&id) {
-                let kind: String = row.get(1)?;
-                let title: String = row.get(2)?;
-                let path: String = row.get(3)?;
-                let subtitle: String = row.get(4)?;
-                let icon_path = path.clone();
-                result.push((id, kind, title, path, subtitle, icon_path, false));
-            }
-        }
-
-        // If still not enough, fill with any apps (alphabetical)
-        let still_remaining = max_items.saturating_sub(result.len());
-        if still_remaining > 0 {
-            let mut stmt = db.prepare(
-                "SELECT id, kind, title, path, subtitle FROM item
-                 WHERE kind = 'app'
-                 ORDER BY title ASC
-                 LIMIT ?1",
-            )?;
-            let mut rows = stmt.query(params![still_remaining as i64])?;
-            while let Some(row) = rows.next()? {
-                if result.len() >= max_items {
-                    break;
-                }
-                let id: String = row.get(0)?;
-                if !seen_ids.insert(id.clone()) {
-                    continue;
-                }
                 let kind: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let path: String = row.get(3)?;
@@ -323,6 +301,37 @@ pub fn find_item_by_path_or_title(
         "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(title) = LOWER(?1) LIMIT 1",
     )?;
     let mut rows = stmt.query(params![query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    // Try case-insensitive partial path match (query contains path segment or vice versa)
+    let normalized_query = query.replace('/', "\\").to_ascii_lowercase();
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(REPLACE(path, '/', '\\')) LIKE '%' || ?1 || '%' OR ?1 LIKE '%' || LOWER(REPLACE(path, '/', '\\')) || '%' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![normalized_query])?;
+    if let Some(row) = rows.next()? {
+        return Ok(Some((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        )));
+    }
+
+    // Try case-insensitive partial title match
+    let mut stmt = db.prepare(
+        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(title) LIKE '%' || ?1 || '%' OR ?1 LIKE '%' || LOWER(title) || '%' LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![query.to_ascii_lowercase()])?;
     if let Some(row) = rows.next()? {
         return Ok(Some((
             row.get(0)?,

@@ -23,6 +23,7 @@
   const powerConfirmYes = $("power-confirm-yes");
   const powerWrapTop = $("power-wrap-top");
   const powerBtnTop = $("power-btn-top");
+  const contextMenu = $("context-menu");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -231,6 +232,11 @@
         setSelected(i, false);
         post("submit", i);
       });
+      li.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        setSelected(i, false);
+        showContextMenu(e.clientX, e.clientY, r);
+      });
       frag.appendChild(li);
     }
 
@@ -388,7 +394,7 @@
   // coalesces rapid typing requests into a single frame update.
   let lastH = 0;
   let needsPainted = false;
-  function measure() {
+  function measure(immediate) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
@@ -401,7 +407,8 @@
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
             // Rust-side debounce (100ms) coalesces rapid typing resize
             // requests — no need for a JS-side debounce here.
-            post("resize", h);
+            // immediate flag skips the growth debounce on the Rust side.
+            post("resize", { v: h, immediate: !!immediate });
           }
         }
         if (needsPainted) {
@@ -496,6 +503,17 @@
     const query = inCommandMode ? ">" + raw : raw;
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
+
+    // Hide quick-launch rows instantly when typing a non-empty query.
+    // Prevents results from leaking into the QL area while the Rust
+    // state push + resize is in flight.
+    if (raw && !inCommandMode) {
+      for (const li of list.querySelectorAll(".quick-launch")) {
+        li.style.display = "none";
+      }
+      measure();
+    }
+
     const now = performance.now();
     const delay = (now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
@@ -587,7 +605,99 @@
   document.addEventListener("click", (e) => {
     if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
     if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
+    if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
+      hideContextMenu();
+    }
   });
+
+  // ── context menu ──────────────────────────────────────────
+  let ctxRow = null; // the row the context menu was opened on
+
+  function showContextMenu(x, y, row) {
+    ctxRow = row;
+    // Determine which actions are relevant
+    const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
+    const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
+
+    const el = contextMenu;
+    const btns = el.querySelectorAll("button");
+
+    // Show/hide buttons based on item kind
+    btns.forEach(b => {
+      const action = b.dataset.action;
+      if (action === "open") b.classList.toggle("hidden", false);
+      else if (action === "runas") b.classList.toggle("hidden", !isApp && !isFile);
+      else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
+      else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
+      else if (action === "pin") {
+        const path = row.filePath || row.icon || "";
+        const pinned = isItemPinned(path) || isItemPinned(row.icon);
+        b.textContent = pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch";
+        b.classList.toggle("hidden", row.kind !== "app");
+      }
+      else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
+    });
+
+    // Temporarily remove hidden to measure actual layout, then position
+    el.classList.remove("hidden");
+    const menuW = el.offsetWidth || 180;
+    const menuH = el.offsetHeight || 0;
+    el.classList.add("hidden");
+
+    const pad = 8;
+    let left = x + pad;
+    if (left + menuW > window.innerWidth - pad) {
+      left = x - menuW - pad;
+    }
+    let top = y + pad;
+    if (top + menuH > window.innerHeight - pad) {
+      top = y - menuH - pad;
+    }
+    el.style.left = Math.max(pad, Math.min(left, window.innerWidth - menuW - pad)) + "px";
+    el.style.top = Math.max(pad, Math.min(top, window.innerHeight - menuH - pad)) + "px";
+    el.classList.remove("hidden");
+  }
+
+  function hideContextMenu() {
+    contextMenu.classList.add("hidden");
+    ctxRow = null;
+  }
+
+  contextMenu.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !ctxRow) return;
+    const action = b.dataset.action;
+    if (!action) return;
+
+    const title = ctxRow.title || "";
+    const path = ctxRow.filePath || ctxRow.subtitle || "";
+    const pinned = isItemPinned(path) || isItemPinned(ctxRow.icon);
+
+    if (action === "open") {
+      hideContextMenu();
+      post("submit", selected);
+    } else if (action === "pin") {
+      hideContextMenu();
+      if (pinned) {
+        post("unpin", title);
+      } else {
+        post("pin", title);
+      }
+    } else {
+      // All other actions sent to Rust
+      hideContextMenu();
+      post("contextAction", { action, title, path });
+    }
+    input.focus();
+  });
+
+  // Close context menu on Escape
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !contextMenu.classList.contains("hidden")) {
+      hideContextMenu();
+      input.focus();
+    }
+  }, true);
 
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
@@ -608,6 +718,7 @@
       // (show, hide, query change, etc.)
       footerPower.closeMenu();
       footerPower.closeConfirm();
+      hideContextMenu();
 
       // Lightweight selection-only update (no rows = incremental).
       if (!Array.isArray(state.rows) && typeof state.selected === "number") {
@@ -635,6 +746,10 @@
           input.value = display;
         }
       }
+
+      // Track QL presence before overwriting rows — used to detect
+      // quick-launch → results transition for immediate resize.
+      const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
@@ -665,6 +780,17 @@
         scrollToInstant(0);
       }
       render();
+
+      // Quick-launch → results transition: post immediate resize so the
+      // window expands right away instead of waiting for the debounced
+      // growth path (2x rAF in measure() + 100ms Rust debounce).
+      if (prevHadQuickLaunch && rows.length > 0) {
+        const h = Math.ceil(panel.getBoundingClientRect().height);
+        if (h > 0) {
+          lastH = h;
+          post("resize", { v: h, immediate: true });
+        }
+      }
 
       // On fresh show, the Show push has empty rows (hide cleared them).
       // Real results arrive on a later Apply push with showPending=false.

@@ -617,7 +617,12 @@
       else if (action === "runas") b.classList.toggle("hidden", !isApp && !isFile);
       else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
-      else if (action === "pin") b.classList.toggle("hidden", row.kind !== "app");
+      else if (action === "pin") {
+        const path = row.filePath || row.icon || "";
+        const pinned = isItemPinned(path) || isItemPinned(row.icon);
+        b.textContent = pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch";
+        b.classList.toggle("hidden", row.kind !== "app");
+      }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
     });
 
@@ -642,14 +647,19 @@
     if (!action) return;
 
     const title = ctxRow.title || "";
-    const path = ctxRow.subtitle || ctxRow.filePath || "";
+    const path = ctxRow.filePath || ctxRow.subtitle || "";
+    const pinned = isItemPinned(path) || isItemPinned(ctxRow.icon);
 
     if (action === "open") {
       hideContextMenu();
       post("submit", selected);
     } else if (action === "pin") {
       hideContextMenu();
-      post("pin", title);
+      if (pinned) {
+        post("unpin", title);
+      } else {
+        post("addToQuickLaunch", path || ctxRow.icon || title);
+      }
     } else {
       // All other actions sent to Rust
       hideContextMenu();

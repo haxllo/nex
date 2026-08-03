@@ -552,7 +552,7 @@ impl RuntimeWorker {
         // Query the database for Quick Launch items
         if let Ok(guard) = self.service.read() {
             let db = guard.db_ref();
-            match crate::index_store::get_quick_launch_items(&db, pinned, max_items) {
+            match crate::index_store::get_quick_launch_items(&db, pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
@@ -595,7 +595,7 @@ impl RuntimeWorker {
         // Query the database for Quick Launch items
         if let Ok(guard) = self.service.read() {
             let db = guard.db_ref();
-            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items) {
+            match crate::index_store::get_quick_launch_items(&db, &pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
@@ -626,7 +626,6 @@ impl RuntimeWorker {
     fn show_idle_or_quick_launch(&mut self) {
         if self.runtime_config.quick_launch.enabled
             && !self.quick_launch_items.is_empty()
-            && !self.runtime_config.quick_launch.pinned.is_empty()
         {
             crate::runtime_overlay_rows::set_quick_launch_overlay_state(
                 &self.overlay,

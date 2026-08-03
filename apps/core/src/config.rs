@@ -211,7 +211,7 @@ impl Default for QuickLaunchConfig {
             enabled: true,
             max_items: 6,
             pinned: Vec::new(),
-            auto_fill: true,
+            auto_fill: false,
         }
     }
 }
@@ -1127,7 +1127,7 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
                 quick_launch.pinned = raw_extract_string_array(raw, "quick_launch_pinned");
             }
             if raw_has_key(raw, "quick_launch_auto_fill") {
-                quick_launch.auto_fill = raw_extract_bool(raw, "quick_launch_auto_fill").unwrap_or(true);
+                quick_launch.auto_fill = raw_extract_bool(raw, "quick_launch_auto_fill").unwrap_or(false);
             }
             
             cfg.quick_launch = quick_launch;

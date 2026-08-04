@@ -324,8 +324,7 @@ html[data-theme="light"] .row.selected .title {
 .grid-view .section {
   grid-column: 1 / -1;
 }
-.grid-view .row.calculator,
-.grid-view .row.single-row {
+.grid-view .row.calculator {
   grid-column: 1 / -1;
   flex-direction: row;
   align-items: center;
@@ -334,25 +333,21 @@ html[data-theme="light"] .row.selected .title {
   padding: 0 12px;
   text-align: left;
 }
-.grid-view .row.calculator .icon,
-.grid-view .row.single-row .icon {
+.grid-view .row.calculator .icon {
   width: 24px;
   height: 24px;
   border-radius: 6px;
 }
-.grid-view .row.calculator .icon.placeholder::after,
-.grid-view .row.single-row .icon.placeholder::after {
+.grid-view .row.calculator .icon.placeholder::after {
   width: 20px;
   height: 20px;
 }
-.grid-view .row.calculator .text,
-.grid-view .row.single-row .text {
+.grid-view .row.calculator .text {
   text-align: left;
   flex: 1 1 auto;
   width: auto;
 }
-.grid-view .row.calculator .title,
-.grid-view .row.single-row .title {
+.grid-view .row.calculator .title {
   font-size: 13px;
 }
 .grid-view .row.calculator {
@@ -365,10 +360,6 @@ html[data-theme="light"] .row.selected .title {
 .grid-view .row.calculator .subtitle {
   font-size: 12px;
   color: var(--accent);
-}
-.grid-view .row.single-row {
-  height: 46px;
-  padding: 0 12px;
 }
 
 /* .kind: hidden for now. Uncomment block below and delete display:none to restore.

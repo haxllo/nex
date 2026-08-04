@@ -377,7 +377,24 @@ unsafe extern "system" {
     ) -> windows_sys::core::HRESULT;
 }
 
-/// Primary icon extraction: IShellItemImageFactory::GetImage (256px).
+/// Extraction size by path type. Resource-rich binaries (.exe/.ico/.dll/.lnk)
+/// carry real high-res icons — extract at 256. Generic file types ship only
+/// 16/32px native icons; asking Windows for 256 upscales them (blur).
+/// Requesting 64 produces far crisper results for those.
+fn extraction_size_for_path(path: &str) -> i32 {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".exe")
+        || lower.ends_with(".ico")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".lnk")
+    {
+        EXTRACT_ICON_SIZE
+    } else {
+        64
+    }
+}
+
+/// Primary icon extraction: IShellItemImageFactory::GetImage.
 /// Returns HBITMAP that we render into an RGBA buffer via GDI.
 /// Works for all shell types: .exe, .lnk, .ico, shell:AppsFolder\...
 #[cfg(target_os = "windows")]
@@ -401,9 +418,10 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
         }
         let factory = &*(item as *const IShellItemImageFactory);
 
+        let size_px = extraction_size_for_path(shell_path);
         let size = windows_sys::Win32::Foundation::SIZE {
-            cx: EXTRACT_ICON_SIZE,
-            cy: EXTRACT_ICON_SIZE,
+            cx: size_px,
+            cy: size_px,
         };
 
         let mut hbmp: HBITMAP = std::ptr::null_mut();
@@ -414,7 +432,7 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
             return None;
         }
 
-        let png = hbitmap_to_rgba_png(hbmp, EXTRACT_ICON_SIZE);
+        let png = hbitmap_to_rgba_png(hbmp, size_px);
         DeleteObject(hbmp as _);
         png
     }

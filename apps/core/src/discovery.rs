@@ -41,6 +41,12 @@ pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
     ".ruff_cache",
     ".tox",
     ".pnpm-store",
+    ".claude",
+    ".commandcode",
+    ".grok",
+    ".pi",
+    ".rustup",
+    "EBWebView",
 ];
 pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &[
     "pagefile.sys",

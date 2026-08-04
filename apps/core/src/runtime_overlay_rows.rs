@@ -627,3 +627,102 @@ pub(crate) fn next_selection_index(current: usize, len: usize, direction: i32) -
         current.min(max)
     }
 }
+
+#[cfg(test)]
+#[cfg(target_os = "windows")]
+mod tests {
+    use super::*;
+    use crate::overlay::OverlayRowRole;
+
+    fn app(id: &str, title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(id, "app", title, "").with_match_tier(tier)
+    }
+    fn folder(id: &str, title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(id, "folder", title, "").with_match_tier(tier)
+    }
+    fn file(id: &str, title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(id, "file", title, "").with_match_tier(tier)
+    }
+    fn action(id: &str, title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(id, "action", title, "").with_match_tier(tier)
+    }
+    fn clipboard(id: &str, title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(id, "clipboard", title, "").with_match_tier(tier)
+    }
+
+    fn role_of(row: &OverlayRow) -> &OverlayRowRole {
+        &row.role
+    }
+
+    /// (a) Fuzzy app (tier 3) renders BEFORE exact folder (tier 0).
+    #[test]
+    fn fuzzy_app_before_exact_folder() {
+        let results = vec![folder("f1", "folder", 0), app("a1", "app", 3)];
+        let rows = overlay_rows(&results, false);
+
+        // TopHit (app) + Folders header + folder item = 3 rows.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].title, "app");
+        assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
+        assert_eq!(rows[1].title, "Folders"); // header
+        assert_eq!(*role_of(&rows[1]), OverlayRowRole::Header);
+        assert_eq!(rows[2].title, "folder");
+        assert_eq!(*role_of(&rows[2]), OverlayRowRole::Item);
+    }
+
+    /// (b) No apps → top hit is best file/folder.
+    #[test]
+    fn no_apps_top_hit_is_file_or_folder() {
+        let results = vec![file("f1", "exact file", 0), folder("f2", "fuzzy folder", 3)];
+        let rows = overlay_rows(&results, false);
+
+        assert_eq!(rows.len(), 3); // TopHit + header + file
+        assert_eq!(rows[0].title, "exact file");
+        assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
+    }
+
+    /// (c) Kind order: apps > folders > files > actions > clipboard, same tier.
+    #[test]
+    fn kind_order_within_same_tier() {
+        let results = vec![
+            clipboard("c1", "clip", 2),
+            action("a1", "act", 2),
+            file("f1", "file", 2),
+            folder("fo1", "folder", 2),
+            app("ap1", "app", 2),
+        ];
+        let rows = overlay_rows(&results, false);
+
+        // Row 0: TopHit = app
+        assert_eq!(rows[0].title, "app");
+        assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
+
+        // Remaining apps (none), then folders header + folder, files header + file,
+        // actions header + action, clipboard header + clipboard.
+        let titles: Vec<&str> = rows[1..].iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Folders", "folder", "Files", "file", "Actions", "act", "Clipboard", "clip"]
+        );
+    }
+
+    /// (d) Command mode preserves original score order, no regroup.
+    #[test]
+    fn command_mode_preserves_order() {
+        let results = vec![
+            action("a1", "action1", 0),
+            action("a2", "action2", 3),
+            file("f1", "file1", 1),
+        ];
+        let rows = overlay_rows(&results, true);
+
+        // All rows are Item, in original order, no headers.
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            assert_eq!(*role_of(row), OverlayRowRole::Item);
+        }
+        assert_eq!(rows[0].title, "action1");
+        assert_eq!(rows[1].title, "action2");
+        assert_eq!(rows[2].title, "file1");
+    }
+}

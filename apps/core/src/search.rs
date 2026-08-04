@@ -161,8 +161,8 @@ pub fn search_with_filter_with_boosts(
         scored.truncate(limit);
     }
     scored.sort_unstable_by(compare_scored);
-    apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
     deduplicate_apps(&mut scored);
+    apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
 
     scored
         .into_iter()

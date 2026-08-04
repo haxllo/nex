@@ -670,15 +670,18 @@ mod tests {
         assert_eq!(*role_of(&rows[2]), OverlayRowRole::Item);
     }
 
-    /// (b) No apps → top hit is best file/folder.
+    /// (b) No apps → top hit is best file/folder (A3).
+    ///     Folder (tier=3) at index 0 must NOT become TopHit — the exact
+    ///     file (tier=0) at index 1 must be selected instead.
     #[test]
     fn no_apps_top_hit_is_file_or_folder() {
-        let results = vec![file("f1", "exact file", 0), folder("f2", "fuzzy folder", 3)];
+        let results = vec![folder("f2", "fuzzy folder", 3), file("f1", "exact file", 0)];
         let rows = overlay_rows(&results, false);
 
-        assert_eq!(rows.len(), 3); // TopHit + header + file
-        assert_eq!(rows[0].title, "exact file");
+        // TopHit (exact file) + Folders header + folder = 3 rows.
+        assert_eq!(rows.len(), 3);
         assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
+        assert_eq!(rows[0].title, "exact file");
     }
 
     /// (c) Kind order: apps > folders > files > actions > clipboard, same tier.

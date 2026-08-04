@@ -154,37 +154,52 @@ impl CoreService {
     pub fn new(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache(config, db)
+        Self::with_loaded_cache(config, db, true)
     }
 
     pub fn with_connection(config: Config, db: Connection) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
-        Self::with_loaded_cache(config, db)
+        Self::with_loaded_cache(config, db, true)
     }
 
-    fn with_loaded_cache(config: Config, db: Connection) -> Result<Self, ServiceError> {
+    /// Background rebuild service: SQLite + cache only, NO Tantivy index.
+    /// The background thread must never open its own IndexWriter on the
+    /// same directory as the main service — concurrent writers race and
+    /// corrupt meta.json (empty index). The main service syncs Tantivy
+    /// from cache after background completion instead.
+    pub(crate) fn new_background(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        Self::with_loaded_cache(config, db, false)
+    }
+
+    fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
         let cached = index_store::list_items(&db)?;
         let cached_apps = collect_app_items(&cached);
 
         let index_dir = config.index_db_path.parent().unwrap_or(Path::new("."));
         let tantivy_path = index_dir.join("index.tantivy");
 
-        let tantivy_index = match open_tantivy_index(&tantivy_path) {
-            Some(idx) => Some(idx),
-            None => {
-                // Schema mismatch or corrupt — delete dir and recreate
-                crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
-                let _ = std::fs::remove_dir_all(&tantivy_path);
-                match TantivyIndex::open(&tantivy_path) {
-                    Ok(idx) => Some(idx),
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "[nex] Tantivy index init after reset: {e}, running without search index"
-                        ));
-                        None
+        let tantivy_index = if enable_tantivy {
+            match open_tantivy_index(&tantivy_path, &db) {
+                Some(idx) => Some(idx),
+                None => {
+                    // Schema mismatch or corrupt — delete dir and recreate
+                    crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
+                    let _ = std::fs::remove_dir_all(&tantivy_path);
+                    match TantivyIndex::open(&tantivy_path) {
+                        Ok(idx) => Some(idx),
+                        Err(e) => {
+                            crate::logging::info(&format!(
+                                "[nex] Tantivy index init after reset: {e}, running without search index"
+                            ));
+                            None
+                        }
                     }
                 }
             }
+        } else {
+            None
         };
 
         Ok(Self {
@@ -912,7 +927,7 @@ impl CoreService {
     }
 }
 
-fn open_tantivy_index(tantivy_path: &std::path::Path) -> Option<TantivyIndex> {
+fn open_tantivy_index(tantivy_path: &std::path::Path, db: &Connection) -> Option<TantivyIndex> {
     match TantivyIndex::open(tantivy_path) {
         Ok(idx) => {
             match idx.num_docs() {
@@ -920,11 +935,28 @@ fn open_tantivy_index(tantivy_path: &std::path::Path) -> Option<TantivyIndex> {
                     // Valid index with documents — keep it
                     Some(idx)
                 }
-                _ => {
-                    // Empty or corrupt — clear and rebuild on next sync
-                    let _ = idx.clear();
-                    Some(idx)
+                Ok(_) => {
+                    // Empty index — re-seed from SQLite immediately so
+                    // searches never silently fall back to the cache
+                    // (cache holds files only, no folders). No clear():
+                    // committing an empty state before re-seeding risks
+                    // sealing an empty index if the process dies after.
+                    match index_store::list_items(db) {
+                        Ok(items) if !items.is_empty() => {
+                            match idx.index_items(&items) {
+                                Ok(()) => Some(idx),
+                                Err(e) => {
+                                    crate::logging::info(&format!(
+                                        "[nex] Tantivy re-seed failed: {e}"
+                                    ));
+                                    Some(idx)
+                                }
+                            }
+                        }
+                        _ => Some(idx),
+                    }
                 }
+                Err(_) => Some(idx),
             }
         }
         Err(_e) => None, // Schema mismatch or other error — caller will reset

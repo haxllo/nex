@@ -51,6 +51,22 @@ Verify ordering apps > files/folders > actions holds (manual, `cargo test` broke
 - command_mode
 - grid_view ON and OFF — non-app rows identical rows either way
 
+### Grid-view rendering checklist (Sprint 2)
+
+| Combo | grid_view | Expected |
+|-------|-----------|----------|
+| only apps | ON | Apps render as grid cells (column layout, 36px icons, centered text) |
+| only apps | OFF | Apps render as standard rows (inline-flex, 24px icons, left text) |
+| files + apps | ON | Apps = grid cells; files = full-width rows (span all columns, row layout) |
+| files + apps | OFF | All rows = standard inline-flex rows |
+| folders + apps | ON | Apps = grid cells; folders = full-width rows |
+| folders + apps | OFF | All rows = standard inline-flex rows |
+| all true | ON | Apps = grid cells; files, folders, actions = full-width rows |
+| all true | OFF | All rows = standard inline-flex rows |
+| Search Web for* | ON | Action row = full-width row (row-list), not grid cell |
+| Search Web for* | OFF | Action row = standard row (same as always) |
+| calculator | ON | Calculator row spans full width, 64px height, 21px title (unchanged) |
+
 ## Part D — Polish [LAST]
 
 - D1: update tests asserting old tier/order expectations.

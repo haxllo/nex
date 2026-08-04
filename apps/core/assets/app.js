@@ -164,7 +164,7 @@
       }
 
       const li = document.createElement("li");
-      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (r.kind === "action" && r.title && r.title.startsWith("Search Web for") ? " single-row" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : " row-list") : "");
+      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : " row-list") : "");
       li.setAttribute("role", "option");
       li.dataset.index = String(i);
       if (i === selected) li.classList.add("selected");

@@ -30,8 +30,24 @@ pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
     ".m2",
     ".dropbox.cache",
     ".ssh",
+    "target",
+    ".bun",
+    ".cargo",
+    ".npm",
+    ".yarn",
+    ".nuget",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".pnpm-store",
 ];
-pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &["pagefile.sys", "hiberfil.sys"];
+pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &[
+    "pagefile.sys",
+    "hiberfil.sys",
+    "thumbs.db",
+    "desktop.ini",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {

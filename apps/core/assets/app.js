@@ -772,6 +772,7 @@
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
+      const wasIdle = bodyEl.classList.contains("idle");
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
@@ -806,7 +807,7 @@
       // Quick-launch → results transition: post immediate resize so the
       // window expands right away instead of waiting for the debounced
       // growth path (2x rAF in measure() + 100ms Rust debounce).
-      if (prevHadQuickLaunch && rows.length > 0) {
+      if ((prevHadQuickLaunch || wasIdle) && rows.length > 0) {
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0) {
           lastH = h;

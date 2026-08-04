@@ -396,6 +396,23 @@
   let lastH = 0;
   let needsPainted = false;
   function measure(immediate) {
+    const h = Math.ceil(panel.getBoundingClientRect().height);
+    // Shrink path: apply immediately — host applies shrink synchronously,
+    // so the 2-rAF deferral would produce a visible acrylic void flash.
+    if (h > 0 && h < lastH) {
+      const prev = lastH;
+      lastH = h;
+      if (prev > 0 || !bodyEl.classList.contains("idle")) {
+        post("resize", { v: h, immediate: true });
+      }
+      if (needsPainted) {
+        needsPainted = false;
+        scrollToInstant(0);
+        post("painted");
+      }
+      return;
+    }
+    // Grow / equal path: existing double-rAF deferral.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
@@ -509,10 +526,14 @@
     // Prevents results from leaking into the QL area while the Rust
     // state push + resize is in flight.
     if (raw && !inCommandMode) {
+      let didHide = false;
       for (const li of list.querySelectorAll(".quick-launch")) {
-        li.style.display = "none";
+        if (li.style.display !== "none") {
+          li.style.display = "none";
+          didHide = true;
+        }
       }
-      measure();
+      if (didHide) measure();
     }
 
     const now = performance.now();

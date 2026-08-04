@@ -142,6 +142,7 @@
   function render() {
     clampSelected();
     const frag = document.createDocumentFragment();
+    const isGridView = list.classList.contains("grid-view");
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
@@ -163,7 +164,7 @@
       }
 
       const li = document.createElement("li");
-      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (r.kind === "action" && r.title && r.title.startsWith("Search Web for") ? " single-row" : "");
+      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (r.kind === "action" && r.title && r.title.startsWith("Search Web for") ? " single-row" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : " row-list") : "");
       li.setAttribute("role", "option");
       li.dataset.index = String(i);
       if (i === selected) li.classList.add("selected");

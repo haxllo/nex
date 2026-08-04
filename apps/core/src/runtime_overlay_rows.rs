@@ -35,6 +35,24 @@ pub(crate) struct PendingConfirmation {
     pub(crate) previous_command_mode: bool,
 }
 
+/// Kind rendering order: apps first, then folders, files, actions, clipboard, other.
+/// This SUPERSEDES the previous tier-beats-kind bucket structure.
+fn kind_group_order(kind: &str) -> u8 {
+    if kind.eq_ignore_ascii_case("app") {
+        0
+    } else if kind.eq_ignore_ascii_case("folder") {
+        1
+    } else if kind.eq_ignore_ascii_case("file") {
+        2
+    } else if kind.eq_ignore_ascii_case("action") {
+        3
+    } else if kind.eq_ignore_ascii_case("clipboard") {
+        4
+    } else {
+        5
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<OverlayRow> {
     if results.is_empty() {
@@ -49,81 +67,93 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
             .collect();
     }
 
+    // Select TopHit index first (A2/A3), independent of kind-group rebuild.
+    let top_hit_index = select_top_hit_index(results);
+
+    // Group remaining indices by kind, then sort within each kind by tier
+    // (0=Exact → 3=Fuzzy), preserving original index for stability.
+    let mut kind_buckets: [Vec<usize>; 6] = Default::default();
+
+    for (index, item) in results.iter().enumerate() {
+        if index == top_hit_index {
+            continue;
+        }
+        let gi = kind_group_order(&item.kind) as usize;
+        kind_buckets[gi].push(index);
+    }
+
+    // Sort each kind bucket by tier (ascending = better tier first), then
+    // original index for stability (lower index = earlier in score order).
+    for bucket in &mut kind_buckets {
+        bucket.sort_by(|&a, &b| {
+            let tier_a = results[a].match_tier.unwrap_or(3);
+            let tier_b = results[b].match_tier.unwrap_or(3);
+            tier_a.cmp(&tier_b).then(a.cmp(&b))
+        });
+    }
+
     let mut rows = Vec::new();
+
+    // Emit TopHit row.
     rows.push(result_row(
-        &results[0],
-        0,
+        &results[top_hit_index],
+        top_hit_index,
         OverlayRowRole::TopHit,
         command_mode,
     ));
 
-    // Partition rows 1+ by match tier (0=Exact, 1=Prefix, 2=Substring, 3=Fuzzy).
-    // Within each tier bucket, keep kind regroup order (App→Folders→Files→
-    // Actions→Clipboard→Other). Across buckets, keep global score order
-    // (higher tier first regardless of kind).
-    let mut tier_buckets: [Vec<usize>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-
-    for (index, item) in results.iter().enumerate().skip(1) {
-        let tier = item.match_tier.unwrap_or(3) as usize;
-        let tier = tier.min(3);
-        tier_buckets[tier].push(index);
+    // Emit remaining rows in kind-first order.
+    // Apps: no section header (current visual contract — first app was TopHit,
+    // remaining apps render as Item rows without a header).
+    for &index in &kind_buckets[0] {
+        rows.push(result_row(
+            &results[index],
+            index,
+            OverlayRowRole::Item,
+            command_mode,
+        ));
     }
+    append_group_rows(&mut rows, "Folders", &kind_buckets[1], results, command_mode);
+    append_group_rows(&mut rows, "Files", &kind_buckets[2], results, command_mode);
+    append_group_rows(&mut rows, "Actions", &kind_buckets[3], results, command_mode);
+    append_group_rows(&mut rows, "Clipboard", &kind_buckets[4], results, command_mode);
+    append_group_rows(&mut rows, "Other", &kind_buckets[5], results, command_mode);
 
-    let mut first_tier_app_seen = false;
-    for bucket in &tier_buckets {
-        if bucket.is_empty() {
-            continue;
-        }
-        let mut app_indices = Vec::new();
-        let mut folder_indices = Vec::new();
-        let mut file_indices = Vec::new();
-        let mut action_indices = Vec::new();
-        let mut clipboard_indices = Vec::new();
-        let mut other_indices = Vec::new();
-
-        for &index in bucket {
-            let item = &results[index];
-            if item.kind.eq_ignore_ascii_case("app") {
-                app_indices.push(index);
-            } else if item.kind.eq_ignore_ascii_case("folder") {
-                folder_indices.push(index);
-            } else if item.kind.eq_ignore_ascii_case("file") {
-                file_indices.push(index);
-            } else if item.kind.eq_ignore_ascii_case("action") {
-                action_indices.push(index);
-            } else if item.kind.eq_ignore_ascii_case("clipboard") {
-                clipboard_indices.push(index);
-            } else {
-                other_indices.push(index);
-            }
-        }
-
-        // First app across all tier buckets gets TopHit role;
-        // remaining apps get Item role.
-        if let Some(first) = app_indices.first() {
-            let role = if !first_tier_app_seen {
-                first_tier_app_seen = true;
-                OverlayRowRole::TopHit
-            } else {
-                OverlayRowRole::Item
-            };
-            rows.push(result_row(&results[*first], *first, role, command_mode));
-            for index in &app_indices[1..] {
-                rows.push(result_row(
-                    &results[*index],
-                    *index,
-                    OverlayRowRole::Item,
-                    command_mode,
-                ));
-            }
-        }
-        append_group_rows(&mut rows, "Folders", &folder_indices, results, command_mode);
-        append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
-        append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
-        append_group_rows(&mut rows, "Clipboard", &clipboard_indices, results, command_mode);
-        append_group_rows(&mut rows, "Other", &other_indices, results, command_mode);
-    }
     rows
+}
+
+/// Select the TopHit index for the overlay row 0 position.
+///
+/// A2: When any app exists in results, TopHit = best-scored app.
+/// A3: When no apps exist, TopHit = best-scored folder or file (highest tier,
+///     tie → original order preserved, i.e. lower index wins).
+/// "Best" = lowest match_tier value (0=Exact best, 3=Fuzzy worst).
+///     Tie → original earlier index (results arrive score-sorted, so lower
+///     index = higher score).
+fn select_top_hit_index(results: &[SearchItem]) -> usize {
+    // Prefer best app when any app exists (A2).
+    let has_app = results.iter().any(|item| item.kind.eq_ignore_ascii_case("app"));
+    if has_app {
+        return results
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.kind.eq_ignore_ascii_case("app"))
+            .min_by_key(|(idx, item)| (item.match_tier.unwrap_or(3), *idx))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+    }
+
+    // No apps: fallback to best folder or file (A3).
+    // Folders and files at equal tier retain original relative order (stable).
+    results
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            item.kind.eq_ignore_ascii_case("folder") || item.kind.eq_ignore_ascii_case("file")
+        })
+        .min_by_key(|(idx, item)| (item.match_tier.unwrap_or(3), *idx))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
 }
 
 #[cfg(target_os = "windows")]

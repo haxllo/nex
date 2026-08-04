@@ -200,7 +200,7 @@ body {
 }
 
 /* Non-app rows: force full-width list layout inside grid */
-.grid-view .row-list {
+.grid-view .row.row-list {
   grid-column: 1 / -1;
   flex-direction: row;
   align-items: center;
@@ -209,31 +209,31 @@ body {
   padding: 0 12px;
   min-height: 0;
 }
-.grid-view .row-list .icon {
+.grid-view .row.row-list .icon {
   width: 24px;
   height: 24px;
   border-radius: 6px;
 }
-.grid-view .row-list .icon.placeholder::after {
+.grid-view .row.row-list .icon.placeholder::after {
   width: 20px;
   height: 20px;
 }
-.grid-view .row-list .text {
+.grid-view .row.row-list .text {
   flex: 1 1 auto;
   width: auto;
   text-align: left;
 }
-.grid-view .row-list .title {
+.grid-view .row.row-list .title {
   font-size: 13px;
   font-weight: 400;
   max-width: none;
 }
-.grid-view .row-list .subtitle {
+.grid-view .row.row-list .subtitle {
   font-size: 11px;
   max-width: none;
 }
-.grid-view .row-list .add-icon,
-.grid-view .row-list .pin-icon {
+.grid-view .row.row-list .add-icon,
+.grid-view .row.row-list .pin-icon {
   position: static;
   width: 18px;
   height: 18px;

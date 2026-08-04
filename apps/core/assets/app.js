@@ -426,7 +426,10 @@
             // Rust-side debounce (100ms) coalesces rapid typing resize
             // requests — no need for a JS-side debounce here.
             // immediate flag skips the growth debounce on the Rust side.
-            post("resize", { v: h, immediate: !!immediate });
+            // Structural growth jumps (>= 70px, ~1.5 rows) also bypass
+            // the debounce to avoid visible row escape on erase-then-type.
+            const bigJump = h - prev >= 70;
+            post("resize", { v: h, immediate: !!immediate || bigJump });
           }
         }
         if (needsPainted) {

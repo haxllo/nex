@@ -13,6 +13,10 @@ pub struct SearchItem {
     /// Match-tier bucket (0=Exact, 1=Prefix, 2=Substring, 3=Fuzzy).
     /// Set by the scoring pipeline; `None` when not scored lexically.
     pub match_tier: Option<u8>,
+    /// Override string used by `score_text` for lexical matching.
+    /// When set, scoring uses this string instead of `title`.
+    /// Used by uninstall actions to score against the original app name.
+    pub match_target: Option<String>,
     normalized_title: String,
     normalized_search_text: String,
 }
@@ -87,6 +91,7 @@ impl SearchItem {
             last_launched_at,
             pre_score: None,
             match_tier: None,
+            match_target: None,
             normalized_title,
             normalized_search_text,
         }
@@ -99,6 +104,11 @@ impl SearchItem {
 
     pub fn with_match_tier(mut self, tier: u8) -> Self {
         self.match_tier = Some(tier);
+        self
+    }
+
+    pub fn with_match_target(mut self, target: &str) -> Self {
+        self.match_target = Some(target.to_string());
         self
     }
 

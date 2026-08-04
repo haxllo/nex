@@ -227,12 +227,14 @@ fn uninstall_entry_to_action(entry: &UninstallEntry) -> SearchItem {
     } else {
         format!("{} application", entry.publisher.trim())
     };
+    let display_name = entry.display_name.trim();
     SearchItem::new(
         &id,
         "action",
-        &format!("Uninstall {}", entry.display_name.trim()),
+        &format!("Uninstall {}", display_name),
         &subtitle,
     )
+    .with_match_target(display_name)
 }
 
 fn uninstall_entry_score(entry: &UninstallEntry, normalized_query: &str) -> Option<i64> {

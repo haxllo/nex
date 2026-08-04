@@ -214,7 +214,12 @@ fn score_item_fast(
             kind: tier,
         }
     } else {
-        score_text(item.normalized_title(), normalized_query)?
+        let title_for_match = item
+            .match_target
+            .as_deref()
+            .map(|t| crate::model::normalize_for_search(t))
+            .unwrap_or_else(|| item.normalized_title().to_string());
+        score_text(&title_for_match, normalized_query)?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
     let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), SearchMode::All);
@@ -280,7 +285,12 @@ fn score_item(
             kind: TextMatchKind::Substring,
         }
     } else {
-        score_text(item.normalized_title(), normalized_query).or_else(|| {
+        let title_for_match = item
+            .match_target
+            .as_deref()
+            .map(|t| crate::model::normalize_for_search(t))
+            .unwrap_or_else(|| item.normalized_title().to_string());
+        score_text(&title_for_match, normalized_query).or_else(|| {
             score_text(item.normalized_search_text(), normalized_query).map(|text_score| {
                 TextScore {
                     score: text_score.score - 1_500,

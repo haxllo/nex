@@ -7,9 +7,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCORE_EXACT: i64 = 30_000;
-const SCORE_PREFIX: i64 = 24_000;
-const SCORE_SUBSTRING: i64 = 18_000;
-const SCORE_FUZZY: i64 = 12_000;
+const SCORE_PREFIX: i64 = 27_000;
+const SCORE_SUBSTRING: i64 = 24_000;
+const SCORE_FUZZY: i64 = 20_000;
 
 const SOURCE_APP_BONUS: i64 = 700;
 const SOURCE_LOCAL_FS_BONUS: i64 = 420;
@@ -26,9 +26,9 @@ const APP_INTENT_SHORT_QUERY_BONUS: i64 = 320;
 const APP_INTENT_MEDIUM_QUERY_BONUS: i64 = 160;
 const NON_APP_SHORT_QUERY_PENALTY: i64 = 120;
 
-const TOP_HIT_CONFIDENCE_DELTA_SHORT: i64 = 52;
-const TOP_HIT_CONFIDENCE_DELTA_MEDIUM: i64 = 78;
-const TOP_HIT_CONFIDENCE_DELTA_LONG: i64 = 108;
+const TOP_HIT_CONFIDENCE_DELTA_SHORT: i64 = 3_000;
+const TOP_HIT_CONFIDENCE_DELTA_MEDIUM: i64 = 3_000;
+const TOP_HIT_CONFIDENCE_DELTA_LONG: i64 = 3_000;
 const TOP_HIT_APP_PREFERENCE_DELTA_SHORT: i64 = 7_000;
 const TOP_HIT_APP_PREFERENCE_DELTA_MEDIUM: i64 = 2_100;
 const TOP_HIT_APP_PREFERENCE_DELTA_LONG: i64 = 780;
@@ -161,13 +161,17 @@ pub fn search_with_filter_with_boosts(
         scored.truncate(limit);
     }
     scored.sort_unstable_by(compare_scored);
-    apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
     deduplicate_apps(&mut scored);
+    apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
 
     scored
         .into_iter()
         .take(limit)
-        .map(|scored| scored.item.clone())
+        .map(|scored| {
+            let mut item = scored.item.clone();
+            item.match_tier = Some(scored.match_kind.rank());
+            item
+        })
         .collect()
 }
 
@@ -198,15 +202,27 @@ fn score_item_fast(
     personalization_boost: i64,
 ) -> Option<TextScore> {
     let text_score = if let Some(pre_score) = item.pre_score {
+        // BM25 pre-score: derive tier from threshold, add within-tier bonus.
+        let (tier, base) = if pre_score >= 3_000 {
+            (TextMatchKind::Prefix, SCORE_PREFIX)
+        } else {
+            (TextMatchKind::Substring, SCORE_SUBSTRING)
+        };
+        let within_tier_bonus = pre_score.min(2_500);
         TextScore {
-            score: pre_score,
-            kind: TextMatchKind::Substring,
+            score: base + within_tier_bonus,
+            kind: tier,
         }
     } else {
-        score_text(item.normalized_title(), normalized_query)?
+        let title_for_match = item
+            .match_target
+            .as_deref()
+            .map(|t| crate::model::normalize_for_search(t))
+            .unwrap_or_else(|| item.normalized_title().to_string());
+        score_text(&title_for_match, normalized_query)?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), SearchMode::All);
     let source_bonus = source_bonus(item);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
     let frequency_bonus = frequency_bonus(item.use_count);
@@ -252,9 +268,16 @@ fn score_item(
     }
 
     let text_score = if let Some(pre_score) = item.pre_score {
+        // BM25 pre-score: derive tier from threshold, add within-tier bonus.
+        let (tier, base) = if pre_score >= 3_000 {
+            (TextMatchKind::Prefix, SCORE_PREFIX)
+        } else {
+            (TextMatchKind::Substring, SCORE_SUBSTRING)
+        };
+        let within_tier_bonus = pre_score.min(2_500);
         TextScore {
-            score: pre_score,
-            kind: TextMatchKind::Substring,
+            score: base + within_tier_bonus,
+            kind: tier,
         }
     } else if normalized_query.is_empty() {
         TextScore {
@@ -262,7 +285,12 @@ fn score_item(
             kind: TextMatchKind::Substring,
         }
     } else {
-        score_text(item.normalized_title(), normalized_query).or_else(|| {
+        let title_for_match = item
+            .match_target
+            .as_deref()
+            .map(|t| crate::model::normalize_for_search(t))
+            .unwrap_or_else(|| item.normalized_title().to_string());
+        score_text(&title_for_match, normalized_query).or_else(|| {
             score_text(item.normalized_search_text(), normalized_query).map(|text_score| {
                 TextScore {
                     score: text_score.score - 1_500,
@@ -272,7 +300,7 @@ fn score_item(
         })?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), filter.mode);
     let source_bonus = source_bonus(item);
     let mode_bonus = mode_bonus(item, filter.mode);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
@@ -518,7 +546,12 @@ fn normalized_word_tokens(title: &str) -> Vec<String> {
     words
 }
 
-fn app_intent_bonus(item: &SearchItem, app_intent_query: bool, normalized_query_len: usize) -> i64 {
+fn app_intent_bonus(
+    item: &SearchItem,
+    app_intent_query: bool,
+    normalized_query_len: usize,
+    mode: SearchMode,
+) -> i64 {
     if !app_intent_query || normalized_query_len == 0 {
         return 0;
     }
@@ -533,6 +566,7 @@ fn app_intent_bonus(item: &SearchItem, app_intent_query: bool, normalized_query_
         }
     } else if (item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder"))
         && normalized_query_len <= 2
+        && matches!(mode, SearchMode::Apps)
     {
         -NON_APP_SHORT_QUERY_PENALTY
     } else {

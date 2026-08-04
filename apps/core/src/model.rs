@@ -10,6 +10,9 @@ pub struct SearchItem {
     pub launch_count: u32,
     pub last_launched_at: i64,
     pub pre_score: Option<i64>,
+    /// Match-tier bucket (0=Exact, 1=Prefix, 2=Substring, 3=Fuzzy).
+    /// Set by the scoring pipeline; `None` when not scored lexically.
+    pub match_tier: Option<u8>,
     normalized_title: String,
     normalized_search_text: String,
 }
@@ -83,6 +86,7 @@ impl SearchItem {
             launch_count,
             last_launched_at,
             pre_score: None,
+            match_tier: None,
             normalized_title,
             normalized_search_text,
         }
@@ -90,6 +94,11 @@ impl SearchItem {
 
     pub fn with_pre_score(mut self, pre_score: i64) -> Self {
         self.pre_score = Some(pre_score);
+        self
+    }
+
+    pub fn with_match_tier(mut self, tier: u8) -> Self {
+        self.match_tier = Some(tier);
         self
     }
 

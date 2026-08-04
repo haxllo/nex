@@ -57,53 +57,72 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
         command_mode,
     ));
 
-    let mut app_indices = Vec::new();
-    let mut folder_indices = Vec::new();
-    let mut file_indices = Vec::new();
-    let mut action_indices = Vec::new();
-    let mut clipboard_indices = Vec::new();
-    let mut other_indices = Vec::new();
+    // Partition rows 1+ by match tier (0=Exact, 1=Prefix, 2=Substring, 3=Fuzzy).
+    // Within each tier bucket, keep kind regroup order (App→Folders→Files→
+    // Actions→Clipboard→Other). Across buckets, keep global score order
+    // (higher tier first regardless of kind).
+    let mut tier_buckets: [Vec<usize>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
 
     for (index, item) in results.iter().enumerate().skip(1) {
-        if item.kind.eq_ignore_ascii_case("app") {
-            app_indices.push(index);
-        } else if item.kind.eq_ignore_ascii_case("folder") {
-            folder_indices.push(index);
-        } else if item.kind.eq_ignore_ascii_case("file") {
-            file_indices.push(index);
-        } else if item.kind.eq_ignore_ascii_case("action") {
-            action_indices.push(index);
-        } else if item.kind.eq_ignore_ascii_case("clipboard") {
-            clipboard_indices.push(index);
-        } else {
-            other_indices.push(index);
-        }
+        let tier = item.match_tier.unwrap_or(3) as usize;
+        let tier = tier.min(3);
+        tier_buckets[tier].push(index);
     }
 
-    // Folders come above files within the file-system section so that
-    // directory navigation surfaces before document content.
-    // Top-hit app on top (no section header), then group the rest.
-    if let Some(first) = app_indices.first() {
-        rows.push(result_row(
-            &results[*first],
-            *first,
-            OverlayRowRole::TopHit,
-            command_mode,
-        ));
-        for index in &app_indices[1..] {
-            rows.push(result_row(
-                &results[*index],
-                *index,
-                OverlayRowRole::Item,
-                command_mode,
-            ));
+    let mut first_tier_app_seen = false;
+    for bucket in &tier_buckets {
+        if bucket.is_empty() {
+            continue;
         }
+        let mut app_indices = Vec::new();
+        let mut folder_indices = Vec::new();
+        let mut file_indices = Vec::new();
+        let mut action_indices = Vec::new();
+        let mut clipboard_indices = Vec::new();
+        let mut other_indices = Vec::new();
+
+        for &index in bucket {
+            let item = &results[index];
+            if item.kind.eq_ignore_ascii_case("app") {
+                app_indices.push(index);
+            } else if item.kind.eq_ignore_ascii_case("folder") {
+                folder_indices.push(index);
+            } else if item.kind.eq_ignore_ascii_case("file") {
+                file_indices.push(index);
+            } else if item.kind.eq_ignore_ascii_case("action") {
+                action_indices.push(index);
+            } else if item.kind.eq_ignore_ascii_case("clipboard") {
+                clipboard_indices.push(index);
+            } else {
+                other_indices.push(index);
+            }
+        }
+
+        // First app across all tier buckets gets TopHit role;
+        // remaining apps get Item role.
+        if let Some(first) = app_indices.first() {
+            let role = if !first_tier_app_seen {
+                first_tier_app_seen = true;
+                OverlayRowRole::TopHit
+            } else {
+                OverlayRowRole::Item
+            };
+            rows.push(result_row(&results[*first], *first, role, command_mode));
+            for index in &app_indices[1..] {
+                rows.push(result_row(
+                    &results[*index],
+                    *index,
+                    OverlayRowRole::Item,
+                    command_mode,
+                ));
+            }
+        }
+        append_group_rows(&mut rows, "Folders", &folder_indices, results, command_mode);
+        append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
+        append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
+        append_group_rows(&mut rows, "Clipboard", &clipboard_indices, results, command_mode);
+        append_group_rows(&mut rows, "Other", &other_indices, results, command_mode);
     }
-    append_group_rows(&mut rows, "Folders", &folder_indices, results, command_mode);
-    append_group_rows(&mut rows, "Files", &file_indices, results, command_mode);
-    append_group_rows(&mut rows, "Actions", &action_indices, results, command_mode);
-    append_group_rows(&mut rows, "Clipboard", &clipboard_indices, results, command_mode);
-    append_group_rows(&mut rows, "Other", &other_indices, results, command_mode);
     rows
 }
 

@@ -55,7 +55,7 @@ pub(crate) fn start_background_index_refresh(
         // Catch panics so a buggy provider can never silently leave the main
         // thread waiting on a completion flag that will never flip.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            CoreService::new(worker_config)
+            CoreService::new_background(worker_config)
                 .map(|service| service.with_runtime_providers())
                 .and_then(|service| service.rebuild_index_incremental_with_report())
                 .map_err(|error| format!("background indexing failed: {error}"))

@@ -202,9 +202,16 @@ fn score_item_fast(
     personalization_boost: i64,
 ) -> Option<TextScore> {
     let text_score = if let Some(pre_score) = item.pre_score {
+        // BM25 pre-score: derive tier from threshold, add within-tier bonus.
+        let (tier, base) = if pre_score >= 3_000 {
+            (TextMatchKind::Prefix, SCORE_PREFIX)
+        } else {
+            (TextMatchKind::Substring, SCORE_SUBSTRING)
+        };
+        let within_tier_bonus = pre_score.min(2_500);
         TextScore {
-            score: pre_score,
-            kind: TextMatchKind::Substring,
+            score: base + within_tier_bonus,
+            kind: tier,
         }
     } else {
         score_text(item.normalized_title(), normalized_query)?
@@ -256,9 +263,16 @@ fn score_item(
     }
 
     let text_score = if let Some(pre_score) = item.pre_score {
+        // BM25 pre-score: derive tier from threshold, add within-tier bonus.
+        let (tier, base) = if pre_score >= 3_000 {
+            (TextMatchKind::Prefix, SCORE_PREFIX)
+        } else {
+            (TextMatchKind::Substring, SCORE_SUBSTRING)
+        };
+        let within_tier_bonus = pre_score.min(2_500);
         TextScore {
-            score: pre_score,
-            kind: TextMatchKind::Substring,
+            score: base + within_tier_bonus,
+            kind: tier,
         }
     } else if normalized_query.is_empty() {
         TextScore {

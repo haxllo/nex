@@ -60,6 +60,10 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
     }
 
     if command_mode {
+        // A4: actions render in score-descending deterministic order.
+        // Results arrive pre-sorted by the scoring pipeline; enumerate+
+        // map preserves that order exactly. No regroup or kind ordering
+        // is applied in command mode — actions stay in score order.
         return results
             .iter()
             .enumerate()

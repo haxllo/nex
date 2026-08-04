@@ -9,7 +9,7 @@ use crate::model::SearchItem;
 
 const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
 const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
-const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "2";
+const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "3";
 pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "windows",
     "program files",

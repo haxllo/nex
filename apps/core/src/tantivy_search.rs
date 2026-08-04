@@ -17,6 +17,7 @@ use crate::model::SearchItem;
 pub(crate) struct TantivyFields {
     pub id: Field,
     pub title: Field,
+    pub title_norm: Field,
     pub path: Field,
     pub subtitle: Field,
     pub kind: Field,
@@ -44,6 +45,7 @@ impl TantivyIndex {
 
         let id = schema_builder.add_text_field("id", STRING | STORED);
         let title = schema_builder.add_text_field("title", TEXT | STORED);
+        let title_norm = schema_builder.add_text_field("title_norm", TEXT);
         let path = schema_builder.add_text_field("path", STRING | STORED);
         let subtitle = schema_builder.add_text_field("subtitle", TEXT);
         let kind = schema_builder.add_text_field("kind", STRING);
@@ -80,6 +82,7 @@ impl TantivyIndex {
             fields: TantivyFields {
                 id,
                 title,
+                title_norm,
                 path,
                 subtitle,
                 kind,
@@ -131,7 +134,8 @@ impl TantivyIndex {
         let query = build_prefix_query(
             &searcher.index(),
             query_text,
-            &[self.fields.title, self.fields.path, self.fields.subtitle],
+            &[self.fields.title_norm, self.fields.path, self.fields.subtitle],
+            self.fields.title_norm,
         )
         .map_err(|e| format!("tantivy query build error: {e}"))?;
 
@@ -214,6 +218,7 @@ impl TantivyIndex {
                 .add_document(doc!(
                     self.fields.id => item.id.as_str(),
                     self.fields.title => item.title.as_str(),
+                    self.fields.title_norm => crate::model::normalize_for_search(item.title.as_str()),
                     self.fields.path => item.path.as_str(),
                     self.fields.subtitle => item.subtitle.as_str(),
                     self.fields.kind => item.kind.as_str(),
@@ -278,6 +283,7 @@ impl TantivyIndex {
             .add_document(doc!(
                 self.fields.id => item.id.as_str(),
                 self.fields.title => item.title.as_str(),
+                self.fields.title_norm => crate::model::normalize_for_search(item.title.as_str()),
                 self.fields.path => item.path.as_str(),
                 self.fields.subtitle => item.subtitle.as_str(),
                 self.fields.kind => item.kind.as_str(),
@@ -347,6 +353,7 @@ impl TantivyIndex {
                 .add_document(doc!(
                     self.fields.id => item.id.as_str(),
                     self.fields.title => item.title.as_str(),
+                    self.fields.title_norm => crate::model::normalize_for_search(item.title.as_str()),
                     self.fields.path => item.path.as_str(),
                     self.fields.subtitle => item.subtitle.as_str(),
                     self.fields.kind => item.kind.as_str(),
@@ -416,6 +423,7 @@ fn build_prefix_query(
     _index: &Index,
     query_text: &str,
     fields: &[Field],
+    norm_field: Field,
 ) -> Result<Box<dyn Query>, String> {
     let terms: Vec<&str> = query_text
         .split_whitespace()
@@ -427,8 +435,17 @@ fn build_prefix_query(
 
     if terms.len() == 1 {
         let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        let word = if fields.iter().any(|&f| f == norm_field) {
+            crate::model::normalize_for_search(terms[0])
+        } else {
+            terms[0].to_string()
+        };
         for &field in fields {
-            let term = tantivy::Term::from_field_text(field, terms[0]);
+            let term = if field == norm_field {
+                tantivy::Term::from_field_text(field, &word)
+            } else {
+                tantivy::Term::from_field_text(field, terms[0])
+            };
             subqueries.push((
                 Occur::Should,
                 Box::new(FuzzyTermQuery::new_prefix(term, 0, false)),
@@ -439,9 +456,18 @@ fn build_prefix_query(
 
     let mut all_subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for word in &terms {
+        let normalized_word = if fields.iter().any(|&f| f == norm_field) {
+            crate::model::normalize_for_search(word)
+        } else {
+            word.to_string()
+        };
         let mut word_subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         for &field in fields {
-            let term = tantivy::Term::from_field_text(field, word);
+            let term = if field == norm_field {
+                tantivy::Term::from_field_text(field, &normalized_word)
+            } else {
+                tantivy::Term::from_field_text(field, word)
+            };
             word_subqueries.push((
                 Occur::Should,
                 Box::new(FuzzyTermQuery::new_prefix(term, 0, false)),

@@ -98,13 +98,18 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
 
     let mut rows = Vec::new();
 
-    // Emit TopHit row.
-    rows.push(result_row(
-        &results[top_hit_index],
-        top_hit_index,
-        OverlayRowRole::TopHit,
-        command_mode,
-    ));
+    // Emit TopHit row only when the top hit is an app — the standalone
+    // TopHit slot is the app presentation (grid cell, no section header).
+    // When no apps are present, folders/files belong under their own
+    // section headers (Folders/Files) instead of floating alone above them.
+    if results[top_hit_index].kind.eq_ignore_ascii_case("app") {
+        rows.push(result_row(
+            &results[top_hit_index],
+            top_hit_index,
+            OverlayRowRole::TopHit,
+            command_mode,
+        ));
+    }
 
     // Emit remaining rows in kind-first order.
     // Apps: no section header (current visual contract — first app was TopHit,

@@ -217,7 +217,7 @@ fn score_item_fast(
         score_text(item.normalized_title(), normalized_query)?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), SearchMode::All);
     let source_bonus = source_bonus(item);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
     let frequency_bonus = frequency_bonus(item.use_count);
@@ -290,7 +290,7 @@ fn score_item(
         })?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), filter.mode);
     let source_bonus = source_bonus(item);
     let mode_bonus = mode_bonus(item, filter.mode);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
@@ -536,7 +536,12 @@ fn normalized_word_tokens(title: &str) -> Vec<String> {
     words
 }
 
-fn app_intent_bonus(item: &SearchItem, app_intent_query: bool, normalized_query_len: usize) -> i64 {
+fn app_intent_bonus(
+    item: &SearchItem,
+    app_intent_query: bool,
+    normalized_query_len: usize,
+    mode: SearchMode,
+) -> i64 {
     if !app_intent_query || normalized_query_len == 0 {
         return 0;
     }
@@ -551,6 +556,7 @@ fn app_intent_bonus(item: &SearchItem, app_intent_query: bool, normalized_query_
         }
     } else if (item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder"))
         && normalized_query_len <= 2
+        && matches!(mode, SearchMode::Apps)
     {
         -NON_APP_SHORT_QUERY_PENALTY
     } else {

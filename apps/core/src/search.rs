@@ -167,7 +167,11 @@ pub fn search_with_filter_with_boosts(
     scored
         .into_iter()
         .take(limit)
-        .map(|scored| scored.item.clone())
+        .map(|scored| {
+            let mut item = scored.item.clone();
+            item.match_tier = Some(scored.match_kind.rank());
+            item
+        })
         .collect()
 }
 

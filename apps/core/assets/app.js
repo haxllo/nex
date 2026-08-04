@@ -776,6 +776,7 @@
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
       const wasIdle = bodyEl.classList.contains("idle");
+      const prevRowCount = rows.length;
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
@@ -807,10 +808,12 @@
       }
       render();
 
-      // Quick-launch → results transition: post immediate resize so the
-      // window expands right away instead of waiting for the debounced
-      // growth path (2x rAF in measure() + 100ms Rust debounce).
-      if ((prevHadQuickLaunch || wasIdle) && rows.length > 0) {
+      // Structural transitions → post immediate resize so the window
+      // follows right away instead of waiting for the debounced growth
+      // path (2x rAF in measure() + 100ms Rust debounce): QL → results,
+      // idle/empty → content, and >= 2-row jumps (row-count based so
+      // mixed grid/row-list content triggers regardless of pixel delta).
+      if ((prevHadQuickLaunch || wasIdle || rows.length - prevRowCount >= 2) && rows.length > 0) {
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0) {
           lastH = h;

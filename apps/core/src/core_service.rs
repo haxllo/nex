@@ -414,7 +414,12 @@ impl CoreService {
                             Some(&query_boosts),
                         );
                         for item in cache_ranked {
-                            if !ranked.iter().any(|r| r.id == item.id) {
+                            let dominated = ranked.iter().any(|r| {
+                                (!r.path.is_empty() && !item.path.is_empty()
+                                    && r.path.eq_ignore_ascii_case(&item.path))
+                                    || r.id == item.id
+                            });
+                            if !dominated {
                                 ranked.push(item);
                                 if ranked.len() >= effective_limit {
                                     break;
@@ -423,6 +428,18 @@ impl CoreService {
                         }
                     }
                 }
+                // Hoist apps to the top so the grid-cell app row is
+                // always visible regardless of BM25 score ordering.
+                let mut apps: Vec<SearchItem> = Vec::new();
+                let mut rest: Vec<SearchItem> = Vec::new();
+                for r in ranked {
+                    if r.kind.eq_ignore_ascii_case("app") {
+                        apps.push(r);
+                    } else {
+                        rest.push(r);
+                    }
+                }
+                ranked = apps.into_iter().chain(rest).collect();
                 return Ok(ranked);
             }
         }

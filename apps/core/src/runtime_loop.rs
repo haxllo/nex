@@ -1920,8 +1920,10 @@ fn apply_search_results(
         filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
     }
 
-    // Sort pinned items to the top of search results
-    if !pinned_paths.is_empty() {
+    // Sort pinned items to the top ONLY during idle quick-launch view
+    // (empty query). When query is non-empty, keep natural rank order.
+    let is_idle = overlay.query_text().trim().is_empty();
+    if !pinned_paths.is_empty() && is_idle {
         let pinned_normalized: Vec<String> = pinned_paths.iter()
             .map(|p| p.replace('/', "\\").to_ascii_lowercase())
             .collect();

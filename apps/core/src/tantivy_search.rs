@@ -47,8 +47,8 @@ impl TantivyIndex {
         let title = schema_builder.add_text_field("title", TEXT | STORED);
         let title_norm = schema_builder.add_text_field("title_norm", TEXT);
         let path = schema_builder.add_text_field("path", STRING | STORED);
-        let subtitle = schema_builder.add_text_field("subtitle", TEXT);
-        let kind = schema_builder.add_text_field("kind", STRING);
+        let subtitle = schema_builder.add_text_field("subtitle", TEXT | STORED);
+        let kind = schema_builder.add_text_field("kind", STRING | STORED);
         let extension = schema_builder.add_text_field("extension", STRING);
         let use_count = schema_builder.add_i64_field("use_count", STORED);
         let last_accessed_epoch_secs =

@@ -268,8 +268,8 @@ impl Default for Config {
             config_path,
             discovery_roots: default_discovery_roots(),
             discovery_exclude_roots: default_discovery_exclude_roots(),
-            show_files: false,
-            show_folders: false,
+            show_files: true,
+            show_folders: true,
             hotkey: "Win".to_string(),
             launch_at_startup: true,
             hotkey_help: format!(

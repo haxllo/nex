@@ -74,12 +74,17 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
     // Select TopHit index first (A2/A3), independent of kind-group rebuild.
     let top_hit_index = select_top_hit_index(results);
 
-    // Group remaining indices by kind, then sort within each kind by tier
+    // Only mark top hit as "consumed" when it IS an app — its TopHit row is
+    // emitted below.  Non-app top hits (files, folders, action rows) stay in
+    // their normal kind bucket so they render under their section header.
+    let top_hit_is_app = results[top_hit_index].kind.eq_ignore_ascii_case("app");
+
+    // Group indices by kind, then sort within each kind by tier
     // (0=Exact → 3=Fuzzy), preserving original index for stability.
     let mut kind_buckets: [Vec<usize>; 6] = Default::default();
 
     for (index, item) in results.iter().enumerate() {
-        if index == top_hit_index {
+        if top_hit_is_app && index == top_hit_index {
             continue;
         }
         let gi = kind_group_order(&item.kind) as usize;

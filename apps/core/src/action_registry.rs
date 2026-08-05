@@ -10,6 +10,8 @@ pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle_
 pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
 pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
+pub const ACTION_CREATE_FOLDER_PREFIX: &str = "__nex_action_create_folder__:";
+pub const ACTION_CREATE_FILE_PREFIX: &str = "__nex_action_create_file__:";
 pub const ACTION_LOCK_ID: &str = "__nex_action_lock__";
 pub const ACTION_SLEEP_ID: &str = "__nex_action_sleep__";
 pub const ACTION_SHUTDOWN_ID: &str = "__nex_action_shutdown__";
@@ -199,6 +201,158 @@ pub(crate) fn dynamic_provider_web_search_action(query: &str, cfg: &Config) -> O
         "action",
         &format!("Search Web for \"{trimmed}\""),
         &url,
+    ))
+}
+
+/// Resolve the base directory for create-file / create-folder actions.
+/// Uses `cfg.default_create_dir` when non-empty, falls back to
+/// `USERPROFILE\Desktop`, then `"."` as last resort.
+fn folder_target_base(cfg: &Config) -> std::path::PathBuf {
+    if !cfg.default_create_dir.as_os_str().is_empty() {
+        cfg.default_create_dir.clone()
+    } else if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        std::path::PathBuf::from(user_profile).join("Desktop")
+    } else {
+        std::path::PathBuf::from(".")
+    }
+}
+
+/// Windows device names can never be created as files/folders.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
+            | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
+            | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
+/// Detect a trailing-`\` query (user typing a folder name they want to
+/// create) and produce a create/open-folder action row.
+///
+/// Query must end with `\` (or `/`). Everything before it is the folder
+/// name (may be nested: `a\b\c`). Target parent = config.default_create_dir,
+/// falling back to USERPROFILE\Desktop when unset. If the resolved target
+/// already exists on disk, produce an "Open folder" row instead of a create row.
+pub(crate) fn dynamic_provider_create_folder_action(
+    query: &str,
+    cfg: &Config,
+) -> Option<SearchItem> {
+    let trimmed = query.trim();
+    if !cfg.create_actions_enabled {
+        return None;
+    }
+    if trimmed.len() <= 1 {
+        return None;
+    }
+    if !trimmed.ends_with('\\') && !trimmed.ends_with('/') {
+        return None;
+    }
+    let name = trimmed[..trimmed.len() - 1].trim();
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    if is_windows_reserved_name(name) {
+        return None;
+    }
+    // Reject illegal Windows path characters in the folder name portion.
+    for ch in name.chars() {
+        if matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+            return None;
+        }
+    }
+    let base = folder_target_base(cfg);
+    let target = base.join(name);
+    let exists = target.exists();
+
+    let id = format!(
+        "{ACTION_CREATE_FOLDER_PREFIX}{}",
+        if exists { "open:" } else { "create:" }
+    );
+    let title = if exists {
+        format!("Open folder '{name}'")
+    } else {
+        format!("Create folder '{name}'")
+    };
+    Some(SearchItem::new(
+        &id,
+        "action",
+        &title,
+        &target.to_string_lossy(),
+    ))
+}
+
+/// Detect a query ending in a whitelisted file extension (e.g. `x.txt`)
+/// and produce a create/open-file action row.
+///
+/// Query must end with `.ext` where ext is in cfg.create_file_extensions
+/// (case-insensitive). Name = query before the dot-ext. Target parent =
+/// config.default_create_dir, falling back to USERPROFILE\Desktop when
+/// unset. If the resolved target already exists, produce an "Open file"
+/// row instead of a create row.
+pub(crate) fn dynamic_provider_create_file_action(
+    query: &str,
+    cfg: &crate::config::Config,
+) -> Option<SearchItem> {
+    let trimmed = query.trim();
+    if !cfg.create_actions_enabled {
+        return None;
+    }
+    let dot = trimmed.rfind('.')?;
+    if dot == 0 || dot == trimmed.len() - 1 {
+        return None;
+    }
+    // No trailing slashes allowed — folder creation owns those queries.
+    if trimmed.ends_with('/') || trimmed.ends_with('\\') {
+        return None;
+    }
+    let name = trimmed[..dot].trim();
+    if name.is_empty() {
+        return None;
+    }
+    if is_windows_reserved_name(name) {
+        return None;
+    }
+    for ch in name.chars() {
+        if matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\' | '/') {
+            return None;
+        }
+    }
+    let ext = trimmed[dot + 1..].to_ascii_lowercase();
+    if !cfg
+        .create_file_extensions
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(&ext))
+    {
+        return None;
+    }
+
+    let base = folder_target_base(cfg);
+    let target = base.join(trimmed);
+    let exists = target.exists();
+
+    let id = format!(
+        "{ACTION_CREATE_FILE_PREFIX}{}",
+        if exists { "open:" } else { "create:" }
+    );
+    let title = if exists {
+        format!("Open file '{trimmed}'")
+    } else {
+        format!("Create file '{trimmed}'")
+    };
+    Some(SearchItem::new(
+        &id,
+        "action",
+        &title,
+        &target.to_string_lossy(),
     ))
 }
 

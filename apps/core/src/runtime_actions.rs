@@ -5,7 +5,7 @@ use crate::action_registry::{
     ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
     ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID,
     ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID,
-    ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
+    ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::Config;
@@ -148,6 +148,38 @@ pub(crate) fn execute_action_selection(
     if selected.id.starts_with(ACTION_WEB_SEARCH_PREFIX) {
         return crate::action_executor::launch_open_target(selected.path.trim())
             .map_err(|error| format!("web search launch failed: {error}"));
+    }
+
+    if selected.id.starts_with(ACTION_CREATE_FOLDER_PREFIX) {
+        let target = std::path::PathBuf::from(selected.path.trim());
+        if target.exists() {
+            return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+                .map_err(|error| format!("open folder failed: {error}"));
+        }
+        std::fs::create_dir_all(&target)
+            .map_err(|error| format!("create folder failed: {error}"))?;
+        log_info(&format!("[nex] created folder {}", target.display()));
+        return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+            .map_err(|error| format!("reveal folder failed: {error}"));
+    }
+
+    if selected.id.starts_with(ACTION_CREATE_FILE_PREFIX) {
+        let target = std::path::PathBuf::from(selected.path.trim());
+        if target.exists() {
+            // Row said "Open file" — launch it.
+            return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+                .map_err(|error| format!("open file failed: {error}"));
+        }
+        // Row said "Create file" — create_new never overwrites an
+        // existing file (race-safe), then open it.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|error| format!("create file failed: {error}"))?;
+        log_info(&format!("[nex] created file {}", target.display()));
+        return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+            .map_err(|error| format!("open created file failed: {error}"));
     }
 
     match selected.id.as_str() {

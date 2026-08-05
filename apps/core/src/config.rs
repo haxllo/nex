@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 18;
+pub const CURRENT_CONFIG_VERSION: u32 = 20;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -28,6 +28,9 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "max_results",
     "discovery_roots",
     "discovery_exclude_roots",
+    "default_create_dir",
+    "create_file_extensions",
+    "create_actions_enabled",
     "show_files",
     "show_folders",
     "search_mode_default",
@@ -225,6 +228,9 @@ pub struct Config {
     pub config_path: PathBuf,
     pub discovery_roots: Vec<PathBuf>,
     pub discovery_exclude_roots: Vec<PathBuf>,
+    pub default_create_dir: PathBuf,
+    pub create_file_extensions: Vec<String>,
+    pub create_actions_enabled: bool,
     pub show_files: bool,
     pub show_folders: bool,
     pub hotkey: String,
@@ -268,6 +274,15 @@ impl Default for Config {
             config_path,
             discovery_roots: default_discovery_roots(),
             discovery_exclude_roots: default_discovery_exclude_roots(),
+            default_create_dir: PathBuf::new(),
+            create_file_extensions: vec![
+                "txt".to_string(), "md".to_string(), "py".to_string(), "ps1".to_string(),
+                "bat".to_string(), "cmd".to_string(), "js".to_string(), "ts".to_string(),
+                "json".to_string(), "yaml".to_string(), "yml".to_string(), "toml".to_string(),
+                "ini".to_string(), "cfg".to_string(), "log".to_string(), "csv".to_string(),
+                "html".to_string(), "css".to_string(),
+            ],
+            create_actions_enabled: true,
             show_files: true,
             show_folders: true,
             hotkey: "Win".to_string(),
@@ -601,6 +616,17 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("discovery_exclude_roots = ");
     text.push_str(&excluded_roots_section);
     text.push_str("\n\n");
+    text.push_str("# Where files/folders are created when the user types a name with no local match.\n");
+    text.push_str("# Empty = Desktop of the current user.\n");
+    text.push_str("default_create_dir = ");
+    text.push_str(&json_string(&cfg.default_create_dir.to_string_lossy()));
+    text.push_str("\n\n");
+    text.push_str("# Create-file affordance: extensions offered when the typed name has no match.\n");
+    text.push_str("create_file_extensions = ");
+    text.push_str(&toml_string_array_section(&cfg.create_file_extensions));
+    text.push_str("\ncreate_actions_enabled = ");
+    text.push_str(if cfg.create_actions_enabled { "true" } else { "false" });
+    text.push_str("\n\n");
 
     text.push_str("# Toggle file and folder visibility in results.\n");
     text.push_str("show_files = ");
@@ -875,6 +901,21 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         return Err("discovery_exclude_roots contains an empty path".into());
     }
 
+    if !cfg.default_create_dir.as_os_str().is_empty()
+        && (!cfg.default_create_dir.exists() || !cfg.default_create_dir.is_dir())
+    {
+        return Err("default_create_dir must be an existing directory when set".into());
+    }
+
+    for ext in &cfg.create_file_extensions {
+        let trimmed = ext.trim();
+        if trimmed.is_empty() || trimmed != ext || trimmed.contains('.') || trimmed.contains('/') || trimmed.contains('\\') {
+            return Err(format!(
+                "create_file_extensions entries must be bare extensions (no dot/slash/space), got {ext:?}"
+            ).into());
+        }
+    }
+
     if cfg
         .plugin_paths
         .iter()
@@ -1137,6 +1178,20 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
 
     if source_version < 18 && !raw_has_key(raw, "grid_view") {
         cfg.grid_view = Config::default().grid_view;
+        changed = true;
+    }
+
+    if source_version < 19 && !raw_has_key(raw, "default_create_dir") {
+        cfg.default_create_dir = Config::default().default_create_dir;
+        changed = true;
+    }
+
+    if source_version < 20 && !raw_has_key(raw, "create_file_extensions") {
+        cfg.create_file_extensions = Config::default().create_file_extensions;
+        changed = true;
+    }
+    if source_version < 20 && !raw_has_key(raw, "create_actions_enabled") {
+        cfg.create_actions_enabled = Config::default().create_actions_enabled;
         changed = true;
     }
 

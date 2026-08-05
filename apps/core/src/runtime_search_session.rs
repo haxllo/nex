@@ -205,6 +205,52 @@ pub(crate) fn search_overlay_results_with_session(
         merged.extend(clipboard_results);
     }
 
+    // Creation affordance: (a) empty result set with trailing slash or backslash
+    // signals explicit create-folder intent; (b) non-empty result set where no
+    // app/folder title matches the query exactly means the user likely wants to
+    // create a new folder. Only in the default All mode, outside command mode
+    // and the short-query apps bias.
+    if !parsed_query.command_mode
+        && !short_query_app_bias
+        && filter.mode == crate::config::SearchMode::All
+    {
+        let trailing_slash = text_query.ends_with('\\') || text_query.ends_with('/');
+        let exact_title_match = merged.iter().any(|r| {
+            (r.kind.eq_ignore_ascii_case("app") || r.kind.eq_ignore_ascii_case("folder"))
+                && crate::model::normalize_for_search(&r.title)
+                    == crate::model::normalize_for_search(text_query)
+        });
+        let show_create = (merged.is_empty() && trailing_slash)
+            || (!merged.is_empty() && !exact_title_match);
+        if show_create {
+            if let Some(create_item) =
+                crate::action_registry::dynamic_provider_create_folder_action(text_query, cfg)
+            {
+                merged.push(create_item);
+            }
+        }
+    }
+
+    // Create-file affordance: typed name ends with a whitelisted
+    // extension (e.g. x.txt) and nothing in the results matches that
+    // title exactly → offer to create it (or open it when it exists).
+    if !parsed_query.command_mode
+        && !short_query_app_bias
+        && filter.mode == crate::config::SearchMode::All
+    {
+        let exact_any_match = merged.iter().any(|r| {
+            crate::model::normalize_for_search(&r.title)
+                == crate::model::normalize_for_search(text_query)
+        });
+        if !exact_any_match {
+            if let Some(create_item) =
+                crate::action_registry::dynamic_provider_create_file_action(text_query, cfg)
+            {
+                merged.push(create_item);
+            }
+        }
+    }
+
     let rank_started = Instant::now();
     let ranked = search_with_filter(&merged, text_query, result_limit, &filter);
     let rank_ms = rank_started.elapsed().as_millis();

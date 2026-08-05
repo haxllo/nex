@@ -785,8 +785,11 @@
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
+      const prevHadAction = rows.some(r => r.kind === "action");
       const wasIdle = bodyEl.classList.contains("idle");
       const prevRowCount = rows.length;
+      const prevHadInline = rows.some(r => r.kind === "file" || r.kind === "folder");
+      const prevHadApp = rows.some(r => r.kind === "app");
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
@@ -821,9 +824,21 @@
       // Structural transitions → post immediate resize so the window
       // follows right away instead of waiting for the debounced growth
       // path (2x rAF in measure() + 100ms Rust debounce): QL → results,
-      // idle/empty → content, and >= 2-row jumps (row-count based so
-      // mixed grid/row-list content triggers regardless of pixel delta).
-      if ((prevHadQuickLaunch || wasIdle || rows.length - prevRowCount >= 2) && rows.length > 0) {
+      // idle/empty → content, >= 2-row jumps (row-count based so
+      // mixed grid/row-list content triggers regardless of pixel delta),
+      // first inline (file/folder) row appearing under an app grid, and
+      // app-grid presence flipping on/off. The pixel-delta bigJump (70px)
+      // misses single 46px row growth and equal-height layout flips,
+      // which then pop after the 100ms debounce.
+      const nowHasInline = rows.some(r => r.kind === "file" || r.kind === "folder");
+      const nowHasApp = rows.some(r => r.kind === "app");
+      if ((prevHadQuickLaunch
+        || wasIdle
+        || rows.length - prevRowCount >= 2
+        || (!prevHadAction && rows.some(r => r.kind === "action"))
+        || (!prevHadInline && nowHasInline)
+        || (prevHadApp !== nowHasApp))
+        && rows.length > 0) {
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0) {
           lastH = h;

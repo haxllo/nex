@@ -12,6 +12,7 @@ pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
 pub const ACTION_CREATE_FOLDER_PREFIX: &str = "__nex_action_create_folder__:";
 pub const ACTION_CREATE_FILE_PREFIX: &str = "__nex_action_create_file__:";
+pub const ACTION_OPEN_URL_PREFIX: &str = "__nex_action_open_url__:";
 pub const ACTION_LOCK_ID: &str = "__nex_action_lock__";
 pub const ACTION_SLEEP_ID: &str = "__nex_action_sleep__";
 pub const ACTION_SHUTDOWN_ID: &str = "__nex_action_shutdown__";
@@ -125,6 +126,12 @@ pub fn search_actions_with_mode(
         if !uninstall_intent {
             if let Some(web_action) = dynamic_provider_web_search_action(trimmed_query, cfg) {
                 out.push(web_action);
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+            if let Some(open_url_action) = dynamic_provider_open_url_action(trimmed_query, cfg) {
+                out.push(open_url_action);
                 if out.len() >= limit {
                     return out;
                 }
@@ -354,6 +361,70 @@ pub(crate) fn dynamic_provider_create_file_action(
         &title,
         &target.to_string_lossy(),
     ))
+}
+
+/// Detect a bare domain or explicit URL (youtube.com, github.com/haxllo/nex,
+/// https://localhost:8080) and produce an "Open <url>" action row.
+///
+/// Accepted when either:
+///  - the query starts with http:// or https:// (any host, incl. localhost), or
+///  - the query is a single whitespace-free token whose last dot-segment is a
+///    known TLD from cfg.url_tlds (bare domain → auto-prefix https://).
+/// Queries ending in a whitelisted create-file extension never match ("site.com
+/// .html" → .html is a create-file extension; its TLD segment isn't in url_tlds
+/// anyway).
+pub(crate) fn dynamic_provider_open_url_action(
+    query: &str,
+    cfg: &crate::config::Config,
+) -> Option<SearchItem> {
+    if !cfg.open_url_in_default_browser {
+        return None;
+    }
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let url = if lower.starts_with("http://") || lower.starts_with("https://") {
+        trimmed.to_string()
+    } else if looks_like_bare_domain(&lower, &cfg.url_tlds) {
+        format!("https://{trimmed}")
+    } else {
+        return None;
+    };
+    let id = format!("{ACTION_OPEN_URL_PREFIX}{trimmed}");
+    Some(SearchItem::new(
+        &id,
+        "action",
+        &format!("Open {trimmed}"),
+        &url,
+    ))
+}
+
+fn looks_like_bare_domain(lower_query: &str, tlds: &[String]) -> bool {
+    // Single whitespace-free token.
+    if lower_query.contains(char::is_whitespace) {
+        return false;
+    }
+    // Explicit scheme already handled by caller — reject any other scheme.
+    if lower_query.contains("://") {
+        return false;
+    }
+    // Must not be an IP literal or a localhost:port form.
+    if lower_query.starts_with("localhost") {
+        return false;
+    }
+    let Some((name_part, tld)) = lower_query.rsplit_once('.') else {
+        return false; // no dot at all → not a domain
+    };
+    if name_part.is_empty() {
+        return false;
+    }
+    // TLD must be >= 2 chars, all lowercase ASCII.
+    if tld.is_empty() || tld.len() < 2 || !tld.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    tlds.iter().any(|known| known.eq_ignore_ascii_case(tld))
 }
 
 fn url_encode_component(input: &str) -> String {

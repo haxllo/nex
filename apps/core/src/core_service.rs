@@ -183,20 +183,7 @@ impl CoreService {
         let tantivy_index = if enable_tantivy {
             match open_tantivy_index(&tantivy_path, &db) {
                 Some(idx) => Some(idx),
-                None => {
-                    // Schema mismatch or corrupt — delete dir and recreate
-                    crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
-                    let _ = std::fs::remove_dir_all(&tantivy_path);
-                    match TantivyIndex::open(&tantivy_path) {
-                        Ok(idx) => Some(idx),
-                        Err(e) => {
-                            crate::logging::info(&format!(
-                                "[nex] Tantivy index init after reset: {e}, running without search index"
-                            ));
-                            None
-                        }
-                    }
-                }
+                None => reset_tantivy_index(&tantivy_path),
             }
         } else {
             None
@@ -980,6 +967,22 @@ fn open_tantivy_index(tantivy_path: &std::path::Path, db: &Connection) -> Option
     }
 }
 
+/// Delete a corrupt/schema-mismatched tantivy directory and reopen from scratch.
+/// Shared by boot-time and mid-run reset paths.
+fn reset_tantivy_index(tantivy_path: &std::path::Path) -> Option<TantivyIndex> {
+    crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
+    let _ = std::fs::remove_dir_all(tantivy_path);
+    match TantivyIndex::open(tantivy_path) {
+        Ok(idx) => Some(idx),
+        Err(e) => {
+            crate::logging::info(&format!(
+                "[nex] Tantivy index init after reset: {e}, running without search index"
+            ));
+            None
+        }
+    }
+}
+
 impl CoreService {
     fn cached_len(&self) -> usize {
         match self.cached_items.read() {
@@ -1214,10 +1217,40 @@ impl CoreService {
             tantivy_is_first,
         ));
 
+        // Derive tantivy path before taking the tantivy lock to avoid
+        // holding config RwLock + tantivy Mutex simultaneously.
+        let tantivy_path = {
+            let cfg = self.config.read().unwrap();
+            let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
+            index_dir.join("index.tantivy")
+        };
+
         let tantivy_guard = match self.tantivy_index.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
+
+        // Mid-run self-heal: if the index is None (schema bump or
+        // corruption), reset and reopen while we hold the lock.
+        let tantivy_guard = if tantivy_guard.is_none() {
+            crate::logging::info("[nex] Tantivy index missing or schema changed mid-run, resetting");
+            drop(tantivy_guard);
+            let healed = reset_tantivy_index(&tantivy_path);
+            match self.tantivy_index.lock() {
+                Ok(mut guard) => {
+                    *guard = healed;
+                    guard
+                }
+                Err(poisoned) => {
+                    let mut guard = poisoned.into_inner();
+                    *guard = healed;
+                    guard
+                }
+            }
+        } else {
+            tantivy_guard
+        };
+
         if let Some(ref idx) = *tantivy_guard {
             let result = if tantivy_is_first {
                 idx.index_items(&items)

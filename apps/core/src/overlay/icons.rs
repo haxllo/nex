@@ -365,7 +365,9 @@ struct IShellItemImageFactory {
 const IID_ISHELL_ITEM_IMAGE_FACTORY: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0xBCC18B79_BA16_442F_80C4_8A59C30C463B);
 
 #[cfg(target_os = "windows")]
-const SIIGBF_RESIZETOFIT: u32 = 0x00000000;
+const SIIGBF_ICONONLY: u32 = 0x00000100;
+#[cfg(target_os = "windows")]
+const SIIGBF_BIGGERSIZEOK: u32 = 0x00000001;
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" {
@@ -377,21 +379,12 @@ unsafe extern "system" {
     ) -> windows_sys::core::HRESULT;
 }
 
-/// Extraction size by path type. Resource-rich binaries (.exe/.ico/.dll/.lnk)
-/// carry real high-res icons — extract at 256. Generic file types ship only
-/// 16/32px native icons; asking Windows for 256 upscales them (blur).
-/// Requesting 64 produces far crisper results for those.
+/// Request 256 for every item; files whose shell icon lacks hi-res just
+/// return their native smaller bitmap (no upscale) thanks to BIGGERSIZEOK
+/// without RESIZETOFIT.
 fn extraction_size_for_path(path: &str) -> i32 {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".exe")
-        || lower.ends_with(".ico")
-        || lower.ends_with(".dll")
-        || lower.ends_with(".lnk")
-    {
-        EXTRACT_ICON_SIZE
-    } else {
-        64
-    }
+    let _ = path;
+    EXTRACT_ICON_SIZE
 }
 
 /// Primary icon extraction: IShellItemImageFactory::GetImage.
@@ -425,7 +418,17 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
         };
 
         let mut hbmp: HBITMAP = std::ptr::null_mut();
-        let hr = ((*factory.lp_vtbl).get_image)(item, size, SIIGBF_RESIZETOFIT, &mut hbmp);
+        // SIIGBF_ICONONLY: never let the shell substitute a content
+        // thumbnail (image/video/PDF files). SIIGBF_BIGGERSIZEOK without
+        // RESIZETOFIT returns the native bitmap (no forced upscale):
+        // items with real 256px icons yield hi-res, small 16/32px natives
+        // pass through untouched at native size (crisp at 24px CSS).
+        let hr = ((*factory.lp_vtbl).get_image)(
+            item,
+            size,
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+            &mut hbmp,
+        );
         ((*factory.lp_vtbl).release)(item);
 
         if hr < 0 || hbmp.is_null() {
@@ -440,8 +443,8 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "windows")]
 /// Render an HBITMAP into an RGBA buffer via GetDIBits, then normalize to PNG.
-/// Handles bitmaps returned at any size — if smaller than target, stretches via
-/// StretchBlt so UWP apps with 32×32 icon resources fill the full canvas.
+/// Hi-res sources (>= 128px) fill the target canvas; small native bitmaps
+/// render at native size to avoid blur from upscaling 16/32→256.
 fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_size: i32) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, SelectObject, ReleaseDC, DeleteObject,
@@ -457,6 +460,17 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
         }
         let src_w = bm.bmWidth;
         let src_h = bm.bmHeight;
+        if src_w <= 0 || src_h <= 0 {
+            return None;
+        }
+
+        // Small native icons (16/32px — most generic file types) must NOT
+        // be stretched to the 256px canvas: that produces blur. Only
+        // hi-res sources (>= 128px) fill the target canvas; small sources
+        // render at native size — normalize_to_square_png passes them
+        // through untouched and CSS object-fit handles display.
+        let src_min = src_w.min(src_h);
+        let canvas = if src_min >= 128 { target_size } else { src_w };
 
         let screen_dc = GetDC(std::ptr::null_mut());
         let src_dc = CreateCompatibleDC(screen_dc);
@@ -467,11 +481,11 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
 
         let old_src = SelectObject(src_dc, hbmp as _);
 
-        // Create a 32-bit BGRA DIB of the target size.
+        // Create a 32-bit BGRA DIB sized to the canvas (source or target).
         let mut header: BITMAPINFOHEADER = std::mem::zeroed();
         header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        header.biWidth = target_size;
-        header.biHeight = -target_size; // top-down
+        header.biWidth = canvas;
+        header.biHeight = -canvas; // top-down
         header.biPlanes = 1;
         header.biBitCount = 32;
         header.biCompression = BI_RGB;
@@ -492,10 +506,10 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
         }
         let old_dst = SelectObject(dst_dc, dst_bmp as _);
 
-        // Fill with transparent black, then stretch-blit the source into it.
-        let pixel_count = (target_size * target_size) as usize;
+        // Fill with transparent black, then blit the source into the canvas.
+        let pixel_count = (canvas * canvas) as usize;
         std::ptr::write_bytes(bits, 0, pixel_count * 4);
-        StretchBlt(dst_dc, 0, 0, target_size, target_size, src_dc, 0, 0, src_w, src_h, SRCCOPY);
+        StretchBlt(dst_dc, 0, 0, canvas, canvas, src_dc, 0, 0, src_w, src_h, SRCCOPY);
 
         SelectObject(src_dc, old_src);
         DeleteDC(src_dc);
@@ -514,7 +528,7 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
         DeleteObject(dst_bmp as _);
         DeleteDC(dst_dc);
 
-        let img = image::RgbaImage::from_raw(target_size as u32, target_size as u32, rgba)?;
+        let img = image::RgbaImage::from_raw(canvas as u32, canvas as u32, rgba)?;
         normalize_to_square_png(img)
     }
 }

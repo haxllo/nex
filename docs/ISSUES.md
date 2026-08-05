@@ -463,3 +463,107 @@ Build succeeds. Manual testing:
 - Destructive actions (shutdown/restart) require confirmation; non-destructive fire immediately
 
 **Why:** Core gap for Win-key-as-default — users no longer need the Start Menu for power actions.
+
+---
+
+## Issue 12: Domain navigation row — PLANNED
+
+**Branch:** `feat/creation-actions`
+
+**Scope:** Typing a bare domain or URL (`youtube.com`, `github.com/haxllo/nex`, `https://...`) with no matching local DB result.
+
+**Symptom/request:** User wants to OPEN the site in the default browser. Currently only "Search Web for ..." row appears (search instead of navigate).
+
+### Design
+
+Single-token query ending in a known TLD (`com`/`net`/`org`/`io`/`dev`/`ai`/`gg`/`xyz`/`app`...) or with an explicit scheme (`https://`, `http://`) → `"Open <url>"` action row replaces the web-search row. Enter → `ShellExecute` opens default browser, auto-prefix `https://`.
+
+**Precedence ladder:**
+
+| Priority | Match | Action |
+|----------|-------|--------|
+| 1 | Real DB hit | Normal results — no injection |
+| 2 | Domain / URL | Open URL row |
+| 3 | Whitelisted extension | Create-file row |
+| 4 | Else | Web search row (existing) |
+
+**Edge cases:**
+
+- `site.com.html` → `create-file` wins (extension in whitelist beats domain detection)
+- `localhost:3000` → only with explicit scheme (`http://localhost:3000`); bare `localhost:3000` ignored
+
+### Implementation details
+
+- **Action id prefix:** `__nex_action_open_url__:` (payload = encoded target URL)
+- **Config keys:**
+  - `open_url_in_default_browser = true` (boolean toggle)
+  - `url_tlds` (optional list — override/extend built-in TLD set)
+- **Files:**
+  - `action_registry.rs` — provider fn: detect trailing TLD or explicit scheme, return open-url action
+  - `runtime_actions.rs` — dispatch arm: prefix match → `ShellExecuteA("open", url, ...)` with `https://` prefix
+  - `runtime_loop.rs` — empty-branch injection (same engine as web search; precedence slot 2)
+
+### Verification
+
+- Build: `cargo build --release --bin Nex`
+- Manual: `youtube.com` → open row appears → Enter → browser opens YouTube; `site.com.html` → create-file row instead; `http://localhost:3000` → open row; `localhost:3000` (no scheme) → web search fallback
+
+---
+
+## Issue 13: Folder + file creation from query — IN PROGRESS
+
+**Branch:** `feat/creation-actions`
+
+**Scope:** User types a name of something that doesn't exist → offered a create action row.
+
+### Folder rule (Phase 1 — NOW)
+
+Query ends with trailing `\` (e.g. `docs\`) → `"+ Create folder 'docs'"` row.
+
+- **Target resolution:** parent = `default_create_dir` config key (fallback `USERPROFILE\Desktop`); nested names allowed (`a\b\c` → `create_dir_all`)
+- **Existence pre-check at row render:** if target already exists → row flips to `"Open existing folder"`
+- **Action id prefix:** `__nex_action_create_folder__:` (payload = encoded target path)
+
+### File rule (Phase 2)
+
+Query ends with whitelisted extension AND no DB file with same title → `"+ Create file 'x.txt'"` row.
+
+- **Whitelist:** `.txt` `.md` `.py` `.ps1` `.bat` `.cmd` `.js` `.ts` `.json` `.yaml` `.yml` `.toml` `.ini` `.cfg` `.log` `.csv` `.html` `.css`
+- **Existence check:** target exists → `"Open existing file"`; never overwrite
+- **Action id prefix:** `__nex_action_create_file__:` (payload = encoded target path)
+
+### Injection point
+
+`runtime_loop.rs` empty-results branch (same slot as web search):
+
+- Create-folder check runs **before** web search when query ends with `\`
+- Create-file check runs when query ends with whitelisted extension and no DB match
+- Domain check runs before web search fallback (Issue 12)
+
+### Dispatch
+
+`runtime_actions.rs` `execute_action_selection` new id-prefix arms:
+
+| Prefix | Action |
+|--------|--------|
+| `__nex_action_create_folder__:` | `std::fs::create_dir_all` → status toast "Created folder: `<path>`" |
+| `__nex_action_create_file__:` | Create empty file (never overwrite; exists → open) → status toast |
+
+### Config keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `default_create_dir` | string | empty (fallback `USERPROFILE\Desktop`) | Parent directory for new folders/files |
+| `create_file_extensions` | list | (whitelist above) | Extensions recognized as file-creation triggers |
+| `create_actions_enabled` | bool | `true` | Master toggle for all creation action rows |
+
+### v1 limitations (noted for v2)
+
+- Target resolution uses `default_create_dir` only — no DB-folder path matching yet
+- No context-menu "New folder here" / "New file here"
+- No command verbs `>new file` / `>new folder`
+
+### Verification
+
+- Build: `cargo build --release --bin Nex`
+- Manual: query `docs\` → create row → Enter → folder exists on Desktop + toast; repeat → open-existing row; `report.txt` (no DB match) → create-file row (phase 2); `nonexistent.xyz` → no create row (extension not whitelisted)

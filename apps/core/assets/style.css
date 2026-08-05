@@ -184,7 +184,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 46.22px;
+  height: 46px;
   padding: 0 12px;
   border-radius: var(--row-radius);
   cursor: pointer;
@@ -206,7 +206,7 @@ body {
   flex-direction: row;
   align-items: center;
   gap: 12px;
-  height: 46.22px;
+  height: 46px;
   padding: 0 12px;
   min-height: 0;
 }

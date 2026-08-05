@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 20;
+pub const CURRENT_CONFIG_VERSION: u32 = 21;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -31,6 +31,8 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "default_create_dir",
     "create_file_extensions",
     "create_actions_enabled",
+    "open_url_in_default_browser",
+    "url_tlds",
     "show_files",
     "show_folders",
     "search_mode_default",
@@ -231,6 +233,8 @@ pub struct Config {
     pub default_create_dir: PathBuf,
     pub create_file_extensions: Vec<String>,
     pub create_actions_enabled: bool,
+    pub open_url_in_default_browser: bool,
+    pub url_tlds: Vec<String>,
     pub show_files: bool,
     pub show_folders: bool,
     pub hotkey: String,
@@ -283,6 +287,17 @@ impl Default for Config {
                 "html".to_string(), "css".to_string(),
             ],
             create_actions_enabled: true,
+            open_url_in_default_browser: true,
+            url_tlds: vec![
+                "com".to_string(), "net".to_string(), "org".to_string(), "io".to_string(),
+                "dev".to_string(), "ai".to_string(), "gg".to_string(), "xyz".to_string(),
+                "me".to_string(), "app".to_string(), "co".to_string(), "uk".to_string(),
+                "de".to_string(), "fr".to_string(), "jp".to_string(), "cn".to_string(),
+                "ru".to_string(), "in".to_string(), "br".to_string(), "ca".to_string(),
+                "au".to_string(), "nz".to_string(), "tv".to_string(), "cc".to_string(),
+                "biz".to_string(), "info".to_string(), "pro".to_string(), "name".to_string(),
+                "edu".to_string(), "gov".to_string(), "us".to_string(), "eu".to_string(),
+            ],
             show_files: true,
             show_folders: true,
             hotkey: "Win".to_string(),
@@ -627,6 +642,12 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("\ncreate_actions_enabled = ");
     text.push_str(if cfg.create_actions_enabled { "true" } else { "false" });
     text.push_str("\n\n");
+    text.push_str("# Open bare domains (youtube.com) in the default browser from search.\n");
+    text.push_str("open_url_in_default_browser = ");
+    text.push_str(if cfg.open_url_in_default_browser { "true" } else { "false" });
+    text.push_str("\nurl_tlds = ");
+    text.push_str(&toml_string_array_section(&cfg.url_tlds));
+    text.push_str("\n\n");
 
     text.push_str("# Toggle file and folder visibility in results.\n");
     text.push_str("show_files = ");
@@ -916,6 +937,15 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         }
     }
 
+    for tld in &cfg.url_tlds {
+        let trimmed = tld.trim();
+        if trimmed.is_empty() || trimmed != tld || trimmed.contains('.') || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains(' ') {
+            return Err(format!(
+                "url_tlds entries must be bare TLDs (no dot/slash/space), got {tld:?}"
+            ).into());
+        }
+    }
+
     if cfg
         .plugin_paths
         .iter()
@@ -1192,6 +1222,15 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
     }
     if source_version < 20 && !raw_has_key(raw, "create_actions_enabled") {
         cfg.create_actions_enabled = Config::default().create_actions_enabled;
+        changed = true;
+    }
+
+    if source_version < 21 && !raw_has_key(raw, "open_url_in_default_browser") {
+        cfg.open_url_in_default_browser = Config::default().open_url_in_default_browser;
+        changed = true;
+    }
+    if source_version < 21 && !raw_has_key(raw, "url_tlds") {
+        cfg.url_tlds = Config::default().url_tlds;
         changed = true;
     }
 

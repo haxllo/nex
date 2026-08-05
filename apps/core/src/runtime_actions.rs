@@ -5,7 +5,7 @@ use crate::action_registry::{
     ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
     ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID,
     ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID,
-    ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
+    ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX, ACTION_OPEN_URL_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::Config;
@@ -180,6 +180,11 @@ pub(crate) fn execute_action_selection(
         log_info(&format!("[nex] created file {}", target.display()));
         return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
             .map_err(|error| format!("open created file failed: {error}"));
+    }
+
+    if selected.id.starts_with(ACTION_OPEN_URL_PREFIX) {
+        return crate::action_executor::launch_open_target(selected.path.trim())
+            .map_err(|error| format!("open url failed: {error}"));
     }
 
     match selected.id.as_str() {

@@ -223,15 +223,87 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
 /// then center-composite onto transparent canvas. Every result row
 /// gets uniform square icon with consistent padding — Raycast look.
 ///
-/// Does NOT upscale sources smaller than TARGET — those pass through
-/// at native size (CSS handles display). Upscaling small sources adds
-/// Lanczos blur without benefit for the 30px CSS display container.
+/// Content-aware upscale for sparse glyph icons: if visible pixels
+/// fill < 35% of the source image (small glyph centered in large
+/// transparent padding), crop to bounding box first then upscale the
+/// cropped region to fill TARGET × TARGET. This prevents Magnifier/
+/// JPEGView-style icons from rendering as tiny dots.
+///
+/// Full-bleed icons (Notepad ~58% fill) keep existing behavior.
+/// Degenerate case (all-transparent) returns native PNG as-is.
 fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
     let target = TARGET_ICON_SIZE;
     let (w, h) = (img.width(), img.height());
 
-    // Source already at or below target → pass through at native size.
-    // The CSS container (30px, object-fit: contain) handles display.
+    // ── Compute fill ratio (alpha > 8 = visible) ──
+    let mut content_px: u64 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            if img.get_pixel(x, y)[3] > 8 {
+                content_px += 1;
+            }
+        }
+    }
+    let fill_ratio = content_px as f32 / ((w * h) as f32);
+
+    // ── Compute core bounding box (alpha > 128 = solid) ──
+    // Use a stricter threshold to find the actual glyph core — anti-aliased
+    // border pixels (alpha 9-128) can span the full image, making the bbox
+    // useless for cropping. Core bbox captures the opaque glyph content.
+    let mut core_min_x = w;
+    let mut core_min_y = h;
+    let mut core_max_x: u32 = 0;
+    let mut core_max_y: u32 = 0;
+    let mut core_px: u64 = 0;
+    for y in 0..h {
+        for x in 0..w {
+            if img.get_pixel(x, y)[3] > 128 {
+                core_px += 1;
+                if x < core_min_x { core_min_x = x; }
+                if y < core_min_y { core_min_y = y; }
+                if x > core_max_x { core_max_x = x; }
+                if y > core_max_y { core_max_y = y; }
+            }
+        }
+    }
+    let core_bbox_valid = core_px > 0 && core_max_x >= core_min_x && core_max_y >= core_min_y;
+
+    // ── Sparse glyph: crop to core bbox, upscale to target ──
+    // fill_ratio uses alpha>8 (permissive), core_bbox uses alpha>128 (strict).
+    // Both must agree: low fill AND core bbox significantly smaller than image.
+    if core_bbox_valid && fill_ratio < 0.35 {
+        let bbox_w = core_max_x - core_min_x + 1;
+        let bbox_h = core_max_y - core_min_y + 1;
+        // Only crop if core bbox is actually smaller than the source —
+        // otherwise we'd just be resizing the same dimensions.
+        if bbox_w < w || bbox_h < h {
+            use image::imageops::{self, FilterType};
+            let pad: u32 = 2;
+            let crop_x = core_min_x.saturating_sub(pad);
+            let crop_y = core_min_y.saturating_sub(pad);
+            let crop_x2 = (core_max_x + pad).min(w - 1);
+            let crop_y2 = (core_max_y + pad).min(h - 1);
+            let crop_w = crop_x2 - crop_x + 1;
+            let crop_h = crop_y2 - crop_y + 1;
+
+            let crop = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
+
+            // Upscale cropped region to fill TARGET × TARGET.
+            let resized = imageops::resize(&crop, target, target, FilterType::Lanczos3);
+            let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
+            let x = target.saturating_sub(resized.width()) / 2;
+            let y = target.saturating_sub(resized.height()) / 2;
+            imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
+            return rgba_to_png(canvas);
+        }
+    }
+
+    // Degenerate: all-transparent image → return native as-is.
+    if content_px == 0 {
+        return rgba_to_png(img);
+    }
+
+    // ── Full-bleed / normal path ──
     if w <= target && h <= target {
         return rgba_to_png(img);
     }
@@ -239,7 +311,6 @@ fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
     // Source larger than target → downscale to fit within target,
     // center on transparent canvas (consistent padding).
     use image::imageops::{self, FilterType};
-    // imageops::resize preserves aspect ratio (fits within target×target)
     let resized = imageops::resize(&img, target, target, FilterType::Lanczos3);
     let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
     let x = target.saturating_sub(resized.width()) / 2;
@@ -828,5 +899,302 @@ mod tests {
         // Assert both paths are in the same ballpark (within 3x of each other)
         let ratio = siif_mean.max(peiw_mean) / siif_mean.min(peiw_mean);
         assert!(ratio < 3.0, "IShellItemImageFactory (mean={siif_mean:.0}µs) vs PrivateExtractIconsW (mean={peiw_mean:.0}µs) differ by {ratio:.1}x — unexpected");
+    }
+}
+
+#[cfg(test)]
+mod probe_magnifier {
+    use super::*;
+
+    #[test]
+    fn probe_magnifier_icon_size() {
+        // COM must be initialized for IShellItemImageFactory paths.
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0, // COINIT_MULTITHREADED
+            );
+        }
+
+        // Build candidate paths.
+        let exe_direct = concat!(env!("windir"), "\\System32\\Magnify.exe");
+
+        let mut lnk_candidates: Vec<String> = Vec::new();
+        // ProgramData path (shared across users).
+        lnk_candidates.push(
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Accessories\\Magnifier.lnk"
+                .to_string(),
+        );
+        // Per-user AppData path.
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            lnk_candidates.push(format!(
+                "{userprofile}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Accessories\\Magnifier.lnk"
+            ));
+        } else {
+            println!("magnifier probe: USERPROFILE env var not set, skipping AppData .lnk");
+        }
+
+        let mut paths: Vec<String> = Vec::new();
+        paths.push(exe_direct.to_string());
+        for lnk in &lnk_candidates {
+            paths.push(lnk.clone());
+        }
+
+        for path in &paths {
+            let exists = std::path::Path::new(path).exists();
+            if !exists {
+                println!("magnifier probe: path={path} -> file does not exist, skipping");
+                continue;
+            }
+
+            let pb = PathBuf::from(path);
+            match decode_png(&pb) {
+                Some(bytes) => {
+                    let non_empty = !bytes.is_empty();
+                    match image::load_from_memory(&bytes) {
+                        Ok(img) => {
+                            let (w, h) = (img.width(), img.height());
+                            println!(
+                                "magnifier probe: path={path} png_bytes={} dims={}x{} non_empty={non_empty}",
+                                bytes.len(), w, h,
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "magnifier probe: path={path} png_bytes={} decode_error={e} non_empty={non_empty}",
+                                bytes.len(),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    println!("magnifier probe: path={path} -> None");
+                }
+            }
+        }
+    }
+
+    /// Content-size hypothesis probe: decode icons, measure non-transparent
+    /// bounding box, report how much of the 128x128 canvas is actually used.
+    #[test]
+    fn probe_content_bbox() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0,
+            );
+        }
+
+        let paths = [
+            "shell:AppsFolder\\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\magnify.exe",
+            "shell:AppsFolder\\{6D809377-6AF0-444B-8957-A3773F02200E}\\JPEGView\\JPEGView.exe",
+            "C:\\Program Files\\JPEGView\\JPEGView.exe",
+            "C:\\Windows\\System32\\Magnify.exe",
+            "C:\\WINDOWS\\System32\\notepad.exe",
+        ];
+
+        for path in &paths {
+            let pb = PathBuf::from(path);
+            match decode_png(&pb) {
+                Some(bytes) => {
+                    match image::load_from_memory(&bytes) {
+                        Ok(img) => {
+                            let rgba = img.into_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            let mut min_x = w;
+                            let mut min_y = h;
+                            let mut max_x: u32 = 0;
+                            let mut max_y: u32 = 0;
+                            let mut content_px: u64 = 0;
+                            for y in 0..h {
+                                for x in 0..w {
+                                    let p = rgba.get_pixel(x, y);
+                                    if p[3] > 8 {
+                                        content_px += 1;
+                                        if x < min_x { min_x = x; }
+                                        if y < min_y { min_y = y; }
+                                        if x > max_x { max_x = x; }
+                                        if y > max_y { max_y = y; }
+                                    }
+                                }
+                            }
+                            if content_px == 0 {
+                                println!(
+                                    "bbox probe: path={path} dims={w}x{h} content_bbox=0:0:0:0 content_px=0 pct=0.00"
+                                );
+                            } else {
+                                let bw = max_x - min_x + 1;
+                                let bh = max_y - min_y + 1;
+                                let total = (w as f64) * (h as f64);
+                                let pct = (content_px as f64) / total * 100.0;
+                                println!(
+                                    "bbox probe: path={path} dims={w}x{h} content_bbox={min_x}:{min_y}:{bw}:{bh} content_px={content_px} pct={pct:.2}"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("bbox probe: path={path} decode_error={e}");
+                        }
+                    }
+                }
+                None => {
+                    println!("bbox probe: path={path} -> None");
+                }
+            }
+        }
+    }
+
+    /// Probe normalize_to_square_png: verify sparse glyph icons get
+    /// content-aware upscaling (output fill ratio ~90%+), full-bleed
+    /// icons (notepad) remain unchanged.
+    #[test]
+    fn probe_sparse_vs_fullbleed_after_normalize() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0,
+            );
+        }
+
+        let cases: Vec<(&str, &str)> = vec![
+            ("magnify", "shell:AppsFolder\\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\magnify.exe"),
+            ("jpegview", "shell:AppsFolder\\{6D809377-6AF0-444B-8957-A3773F02200E}\\JPEGView\\JPEGView.exe"),
+            ("notepad", "C:\\Windows\\System32\\notepad.exe"),
+        ];
+
+        // Helper: scan image, return (fill_pct, core_bbox_w, core_bbox_h, core_fill_pct)
+        fn scan_icon(rgba: &image::RgbaImage) -> (f64, f64, Option<(u32,u32,u32,u32)>) {
+            let (w, h) = rgba.dimensions();
+            let total = (w * h) as f64;
+            let mut content_px: u64 = 0;
+            let mut min_x = w; let mut min_y = h;
+            let mut max_x: u32 = 0; let mut max_y: u32 = 0;
+            let mut core_px: u64 = 0;
+            let mut cmin_x = w; let mut cmin_y = h;
+            let mut cmax_x: u32 = 0; let mut cmax_y: u32 = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let a = rgba.get_pixel(x, y)[3];
+                    if a > 8 {
+                        content_px += 1;
+                        if x < min_x { min_x = x; }
+                        if y < min_y { min_y = y; }
+                        if x > max_x { max_x = x; }
+                        if y > max_y { max_y = y; }
+                    }
+                    if a > 128 {
+                        core_px += 1;
+                        if x < cmin_x { cmin_x = x; }
+                        if y < cmin_y { cmin_y = y; }
+                        if x > cmax_x { cmax_x = x; }
+                        if y > cmax_y { cmax_y = y; }
+                    }
+                }
+            }
+            let fill_pct = content_px as f64 / total * 100.0;
+            if core_px > 0 && cmax_x >= cmin_x && cmax_y >= cmin_y {
+                let bw = cmax_x - cmin_x + 1;
+                let bh = cmax_y - cmin_y + 1;
+                let core_area = (bw as f64) * (bh as f64);
+                let core_fill = core_px as f64 / core_area * 100.0;
+                (fill_pct, core_fill, Some((cmin_x, cmin_y, bw, bh)))
+            } else {
+                (fill_pct, 0.0, None)
+            }
+        }
+
+        for (label, path) in &cases {
+            let pb = PathBuf::from(path);
+            let Some(raw_bytes) = decode_png(&pb) else {
+                println!("normalize probe [{label}]: path={path} -> decode_png returned None, skipping");
+                continue;
+            };
+            let Ok(img) = image::load_from_memory(&raw_bytes) else {
+                println!("normalize probe [{label}]: image decode failed, skipping");
+                continue;
+            };
+            let rgba = img.into_rgba8();
+
+            let (before_fill, before_core_fill, before_bbox) = scan_icon(&rgba);
+            let (w, h) = rgba.dimensions();
+            match before_bbox {
+                Some((_bx, _by, bw, bh)) => {
+                    println!("normalize probe [{label}] BEFORE: dims={w}x{h} fill={before_fill:.2}% core_bbox={bw}x{bh} core_fill={before_core_fill:.2}%");
+                }
+                None => {
+                    println!("normalize probe [{label}] BEFORE: dims={w}x{h} fill={before_fill:.2}% (no core content)");
+                }
+            }
+
+            let Some(normalized) = normalize_to_square_png(rgba) else {
+                println!("normalize probe [{label}]: normalize_to_square_png returned None");
+                continue;
+            };
+
+            let norm_img = image::load_from_memory(&normalized).expect("normalized PNG decodes");
+            let norm_rgba = norm_img.into_rgba8();
+            let (nw, nh) = norm_rgba.dimensions();
+            let (after_fill, after_core_fill, after_bbox) = scan_icon(&norm_rgba);
+            match after_bbox {
+                Some((_bx, _by, bw, bh)) => {
+                    println!("normalize probe [{label}]  AFTER: dims={nw}x{nh} fill={after_fill:.2}% core_bbox={bw}x{bh} core_fill={after_core_fill:.2}% png_bytes={}", normalized.len());
+                }
+                None => {
+                    println!("normalize probe [{label}]  AFTER: dims={nw}x{nh} fill={after_fill:.2}% (no core content) png_bytes={}", normalized.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn probe_jpegview_and_missing() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0,
+            );
+        }
+
+        let candidates = vec![
+            "C:\\Program Files\\JPEGView\\JPEGView.exe".to_string(),
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\JPEGView\\JPEGView.lnk"
+                .to_string(),
+            "C:\\Windows\\System32\\nonexistent_nex_probe.lnk".to_string(),
+        ];
+
+        for path in &candidates {
+            let exists = std::path::Path::new(path).exists();
+            if !exists {
+                println!("jpegview probe: path={path} -> file does not exist, testing fallback");
+            }
+            let pb = PathBuf::from(path);
+            match decode_png(&pb) {
+                Some(bytes) => {
+                    let non_empty = !bytes.is_empty();
+                    match image::load_from_memory(&bytes) {
+                        Ok(img) => {
+                            let (w, h) = (img.width(), img.height());
+                            println!(
+                                "jpegview probe: path={path} png_bytes={} dims={}x{} non_empty={non_empty}",
+                                bytes.len(), w, h,
+                            );
+                        }
+                        Err(e) => {
+                            println!(
+                                "jpegview probe: path={path} png_bytes={} decode_error={e} non_empty={non_empty}",
+                                bytes.len(),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    println!("jpegview probe: path={path} -> None");
+                }
+            }
+        }
     }
 }

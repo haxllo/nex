@@ -409,6 +409,7 @@ pub(crate) fn run_windows_runtime(
         max_results,
         config_watcher,
         current_results: Vec::new(),
+        current_rows: Vec::new(),
         suppressed_uninstall_titles: Vec::new(),
         pending_confirmation: None,
         selected_index: 0,
@@ -521,6 +522,7 @@ struct RuntimeWorker {
     max_results: usize,
     config_watcher: RuntimeConfigWatcher,
     current_results: Vec<crate::model::SearchItem>,
+    current_rows: Vec<crate::overlay::OverlayRow>,
     suppressed_uninstall_titles: Vec<String>,
     pending_confirmation: Option<PendingConfirmation>,
     selected_index: usize,
@@ -914,7 +916,8 @@ impl RuntimeWorker {
                                 set_status_row_overlay_state(&self.overlay, STATUS_ROW_NO_RESULTS);
                             } else {
                                 let rows = overlay_rows(&self.current_results, false);
-                                self.overlay.set_results(&rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
+                                self.current_rows = rows;
+                                self.overlay.set_results(&self.current_rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
                             }
                             self.overlay.set_status_text(&format!("Uninstalling '{}'...", _title));
                         }
@@ -1392,6 +1395,7 @@ impl RuntimeWorker {
                 if trimmed.is_empty() {
                     // Query cleared — show Quick Launch or idle state
                     self.current_results.clear();
+                    self.current_rows.clear();
                     self.selected_index = 0;
                     self.last_query.clear();
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
@@ -1431,6 +1435,7 @@ impl RuntimeWorker {
                     &self.suppressed_uninstall_titles,
                     &self.runtime_config.quick_launch.pinned,
                     &mut self.current_results,
+                    &mut self.current_rows,
                     &mut self.selected_index,
                     self.last_sent_generation,
                 );
@@ -1501,7 +1506,12 @@ impl RuntimeWorker {
                 }
 
                 if let Some(list_selection) = self.overlay.selected_index() {
-                    self.selected_index = list_selection.min(self.current_results.len() - 1);
+                    let mapped = self
+                        .current_rows
+                        .get(list_selection)
+                        .and_then(|r| r.result_index)
+                        .unwrap_or(list_selection);
+                    self.selected_index = mapped.min(self.current_results.len() - 1);
                 }
 
                 let selected = &self.current_results[self.selected_index];
@@ -1581,7 +1591,8 @@ impl RuntimeWorker {
                                                     &self.current_results,
                                                     pending.previous_command_mode,
                                                 );
-                                                self.overlay.set_results(&rows, self.selected_index);
+                                                self.current_rows = rows;
+                                                self.overlay.set_results(&self.current_rows, self.selected_index);
                                             }
                                             self.overlay.set_status_text(
                                                 "Uninstall entry is stale and was hidden",
@@ -1655,7 +1666,8 @@ impl RuntimeWorker {
                                 &self.current_results,
                                 pending.previous_command_mode,
                             );
-                            self.overlay.set_results(&rows, self.selected_index);
+                            self.current_rows = rows;
+                            self.overlay.set_results(&self.current_rows, self.selected_index);
                         }
                         self.overlay.set_status_text("");
                         return;
@@ -1683,7 +1695,8 @@ impl RuntimeWorker {
                     self.current_results = uninstall_confirmation_results(selected);
                     self.selected_index = 0;
                     let rows = overlay_rows(&self.current_results, true);
-                    self.overlay.set_results(&rows, self.selected_index);
+                    self.current_rows = rows;
+                    self.overlay.set_results(&self.current_rows, self.selected_index);
                     self.overlay.set_status_text("");
                     return;
                 }
@@ -1714,7 +1727,8 @@ impl RuntimeWorker {
                     self.current_results = power_confirmation_results(kind);
                     self.selected_index = 0;
                     let rows = overlay_rows(&self.current_results, true);
-                    self.overlay.set_results(&rows, self.selected_index);
+                    self.current_rows = rows;
+                    self.overlay.set_results(&self.current_rows, self.selected_index);
                     self.overlay.set_status_text("");
                     return;
                 }
@@ -1904,6 +1918,7 @@ fn apply_search_results(
     suppressed_uninstall_titles: &[String],
     pinned_paths: &[String],
     current_results: &mut Vec<crate::model::SearchItem>,
+    current_rows: &mut Vec<crate::overlay::OverlayRow>,
     selected_index: &mut usize,
     last_sent_generation: u64,
 ) {
@@ -1919,6 +1934,7 @@ fn apply_search_results(
 
     if let Some(error) = result.error {
         current_results.clear();
+        current_rows.clear();
         *selected_index = 0;
         overlay.set_results(&[], 0);
         overlay.set_status_text(&format!("Search error: {error}"));
@@ -1978,14 +1994,16 @@ fn apply_search_results(
                 *current_results = vec![search_item];
                 *selected_index = 0;
                 let rows = overlay_rows(current_results, command_mode);
-                overlay.set_results(&rows, *selected_index);
+                *current_rows = rows;
+                overlay.set_results(current_rows, *selected_index);
             } else {
                 set_status_row_overlay_state(overlay, STATUS_ROW_NO_RESULTS);
             }
         }
     } else {
         let rows = overlay_rows(current_results, command_mode);
-        overlay.set_results(&rows, *selected_index);
+        *current_rows = rows;
+        overlay.set_results(current_rows, *selected_index);
     }
 }
 

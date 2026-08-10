@@ -764,6 +764,7 @@ impl Drop for HotkeyListener {
                     logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
                     let _ = std::process::Command::new("taskkill")
                         .args(["/F", "/IM", "NexHelper.exe"])
+                        .creation_flags(0x08000000)
                         .output();
                 }
                 // Drop JoinHandle without joining (detaches the thread).

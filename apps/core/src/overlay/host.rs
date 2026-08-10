@@ -37,6 +37,20 @@ const RESIZE_DEBOUNCE_MS: u64 = 100;
 /// on Win key-down (only toggle when visible; hook handles first press).
 pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
+/// Set to `true` before `run_return` enters and `false` after it
+/// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
+/// straggler messages cannot land on a destroyed tao runner.
+static LOOP_ALIVE: AtomicBool = AtomicBool::new(false);
+
+/// Send a [`UiCommand`] through the event-loop proxy only if the
+/// event loop is still alive. Silently discards the send error
+/// (mirrors the old `let _ = proxy.send_event(…)` pattern).
+fn try_send_ui(proxy: &EventLoopProxy<UiCommand>, cmd: UiCommand) {
+    if LOOP_ALIVE.load(Ordering::SeqCst) {
+        let _ = proxy.send_event(cmd);
+    }
+}
+
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
@@ -179,6 +193,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             None
         }
     };
+    if let Some(ref wv) = webview {
+        subscribe_webview2_diagnostics(wv);
+    }
     let mut ready = false;
     let mut warm_gen: u64 = 0;
     let mut was_focused = false;
@@ -218,7 +235,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     Ok(None) => break,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         armed = None;
-                        let _ = resize_debounce_proxy.send_event(UiCommand::ApplyResize);
+                        try_send_ui(&resize_debounce_proxy, UiCommand::ApplyResize);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
@@ -256,7 +273,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     Ok(None) => break,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                         if let Some((_, generation)) = armed.take() {
-                            let _ = warm_release_proxy.send_event(UiCommand::Teardown(generation));
+                            try_send_ui(&warm_release_proxy, UiCommand::Teardown(generation));
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -266,14 +283,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .ok();
     let warm_release_arm = warm_release_tx.clone();
 
-    let _ = event_loop.run_return(move |event, _target, control_flow| {
-        *control_flow = ControlFlow::Wait;
+    LOOP_ALIVE.store(true, Ordering::SeqCst);
+    let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run_return(move |event, _target, control_flow| {
+            *control_flow = ControlFlow::Wait;
 
-        match event {
-            Event::UserEvent(cmd) => match cmd {
-                UiCommand::WebviewReady => {
-                    crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
-                    ready = true;
+            match event {
+                Event::UserEvent(cmd) => match cmd {
+                    UiCommand::WebviewReady => {
+                        crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
+                        ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
                         window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
@@ -323,7 +342,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // before WebviewReady can display it.
                         show_pending = true;
                         match build_webview(&window, &state, &proxy, &event_tx) {
-                            Ok(wv) => webview = Some(wv),
+                            Ok(wv) => {
+                                subscribe_webview2_diagnostics(&wv);
+                                webview = Some(wv);
+                            }
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
                                 return;
@@ -342,7 +364,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = false;
                         show_pending = true;
                         match build_webview(&window, &state, &proxy, &event_tx) {
-                            Ok(wv) => webview = Some(wv),
+                            Ok(wv) => {
+                                subscribe_webview2_diagnostics(&wv);
+                                webview = Some(wv);
+                            }
                             Err(e) => {
                                 crate::runtime::log_warn(&format!("[nex] webview rebuild failed: {e}"));
                                 return;
@@ -403,7 +428,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let proxy_delay = proxy.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_millis(200));
-                        let _ = proxy_delay.send_event(UiCommand::CheckKeyboardState(Instant::now()));
+                        try_send_ui(&proxy_delay, UiCommand::CheckKeyboardState(Instant::now()));
                     });
                     // Clear any pending resize so stale height doesn't
                     // apply after next Show.
@@ -619,7 +644,20 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             _ => {}
         }
     });
+}));
 
+    if let Err(payload) = run_result {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "(unknown panic payload)".to_string()
+        };
+        crate::logging::warn(&format!("[nex] event loop panicked during teardown; continuing shutdown: {msg}"));
+    }
+
+    LOOP_ALIVE.store(false, Ordering::SeqCst);
     is_running.store(false, Ordering::SeqCst);
 
     Ok(())
@@ -723,7 +761,7 @@ fn handle_ipc(
     let t = value.get("t").and_then(|v| v.as_str()).unwrap_or("");
     match t {
         "ready" => {
-            let _ = proxy.send_event(UiCommand::WebviewReady);
+            try_send_ui(proxy, UiCommand::WebviewReady);
         }
         "query" => {
             // Ignore queries that fire after hide (debounced input
@@ -775,13 +813,13 @@ fn handle_ipc(
                 }
                 _ => return,
             };
-            let _ = proxy.send_event(UiCommand::Resize { h, immediate });
+            try_send_ui(proxy, UiCommand::Resize { h, immediate });
         }
         "painted" => {
             // First paint after push_state — safe to show the window.
             // Deferred from WebviewReady / Show to avoid a flash of
             // uncomposited content before the WebView2 paints.
-            let _ = proxy.send_event(UiCommand::Painted);
+            try_send_ui(proxy, UiCommand::Painted);
         }
         "openConfig" => {
             let path = state
@@ -827,6 +865,156 @@ fn handle_ipc(
             let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
         }
         _ => {}
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// WebView2 diagnostics — subscribe to process-death events so the
+// overlay doesn't silently go dead without any log output.
+// ─────────────────────────────────────────────────────────────────
+
+/// Best-effort subscription to `ICoreWebView2::add_ProcessFailed`.
+///
+/// Logs `[nex:webview2] process_failed kind=<N>` when the WebView2
+/// renderer, GPU, or utility process crashes or is killed. Never
+/// propagates — subscription failure is logged and forgotten.
+fn subscribe_webview2_diagnostics(webview: &WebView) {
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PROCESS_FAILED_KIND,
+        ICoreWebView2ProcessFailedEventArgs,
+        ICoreWebView2ProcessFailedEventHandler,
+        ICoreWebView2ProcessFailedEventHandler_Vtbl,
+    };
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use windows_core::Interface;
+
+    // ── minimal COM object implementing ICoreWebView2ProcessFailedEventHandler ──
+
+    #[repr(C)]
+    struct ProcessFailedHandler {
+        vtbl: *const ICoreWebView2ProcessFailedEventHandler_Vtbl,
+        ref_count: AtomicU32,
+    }
+
+    unsafe impl Send for ProcessFailedHandler {}
+    unsafe impl Sync for ProcessFailedHandler {}
+
+    unsafe extern "system" fn invoke(
+        _this: *mut core::ffi::c_void,
+        _sender: *mut core::ffi::c_void,
+        args: *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT {
+        if !args.is_null() {
+            // SAFETY: WebView2 passes a valid ICoreWebView2ProcessFailedEventArgs pointer
+            let args = unsafe { &*(args as *const ICoreWebView2ProcessFailedEventArgs) };
+            let mut kind: COREWEBVIEW2_PROCESS_FAILED_KIND =
+                unsafe { std::mem::zeroed() };
+            if unsafe { args.ProcessFailedKind(&mut kind) }.is_ok() {
+                crate::logging::error(&format!(
+                    "[nex:webview2] process_failed kind={}",
+                    kind.0
+                ));
+            } else {
+                crate::logging::error("[nex:webview2] process_failed kind=<unreadable>");
+            }
+        }
+        windows_core::HRESULT(0)
+    }
+
+    unsafe extern "system" fn add_ref(
+        this: *mut core::ffi::c_void,
+    ) -> u32 {
+        // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
+        let h = unsafe { &*(this as *const ProcessFailedHandler) };
+        h.ref_count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    unsafe extern "system" fn release(
+        this: *mut core::ffi::c_void,
+    ) -> u32 {
+        // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
+        let h = unsafe { &*(this as *const ProcessFailedHandler) };
+        let prev = h.ref_count.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            // SAFETY: ref_count reached 0; we own the sole reference.
+            unsafe { drop(Box::from_raw(this as *mut ProcessFailedHandler)); }
+        }
+        prev - 1
+    }
+
+    unsafe extern "system" fn query_interface(
+        _this: *mut core::ffi::c_void,
+        iid: *const windows_core::GUID,
+        out: *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT {
+        if out.is_null() {
+            return windows_core::imp::E_POINTER;
+        }
+        // SAFETY: out is non-null per check above
+        unsafe { *out = core::ptr::null_mut(); }
+        if iid.is_null() {
+            return windows_core::imp::E_INVALIDARG;
+        }
+        // Support IUnknown and our own interface.
+        // SAFETY: iid is non-null per check above
+        let iid = unsafe { &*iid };
+        if *iid == <windows_core::IUnknown as Interface>::IID
+            || *iid == <ICoreWebView2ProcessFailedEventHandler as Interface>::IID
+        {
+            // SAFETY: out is non-null per check above
+            unsafe { *out = _this; }
+            // SAFETY: _this points to a valid ProcessFailedHandler
+            unsafe { add_ref(_this); }
+            windows_core::imp::S_OK
+        } else {
+            windows_core::imp::E_NOINTERFACE
+        }
+    }
+
+    static VTBL: ICoreWebView2ProcessFailedEventHandler_Vtbl =
+        ICoreWebView2ProcessFailedEventHandler_Vtbl {
+            base__: windows_core::IUnknown_Vtbl {
+                QueryInterface: query_interface,
+                AddRef: add_ref,
+                Release: release,
+            },
+            Invoke: invoke,
+        };
+
+    // ── construct handler + subscribe ──
+
+    let wv2 = webview.webview();
+    let handler = Box::new(ProcessFailedHandler {
+        vtbl: &VTBL as *const _,
+        ref_count: AtomicU32::new(1),
+    });
+    // SAFETY: ProcessFailedHandler is #[repr(C)] with vtbl pointer as the first
+    // field, matching the COM object layout expected by ICoreWebView2ProcessFailedEventHandler
+    // (which is repr(transparent) over IUnknown over *mut c_void).
+    let handler_ptr = Box::into_raw(handler) as *mut core::ffi::c_void;
+    let handler_com: ICoreWebView2ProcessFailedEventHandler =
+        unsafe { core::mem::transmute(handler_ptr) };
+
+    let mut token: i64 = 0;
+    let result = unsafe { wv2.add_ProcessFailed(&handler_com, &mut token) };
+    match result {
+        Ok(()) => {
+            crate::logging::info("[nex] webview2 ProcessFailed subscription OK");
+            // Intentionally leak handler_com — WebView2 holds a ref and
+            // will call remove_ProcessFailed (via token) implicitly when
+            // the webview is destroyed. Our AddRef=1 keeps it alive.
+            // The handler just logs; no cleanup needed.
+            std::mem::forget(handler_com);
+        }
+        Err(e) => {
+            crate::logging::warn(&format!(
+                "[nex] webview2 subscriptions skipped: {e}"
+            ));
+            // Reclaim our allocation since WebView2 didn't take it.
+            // SAFETY: handler_ptr was created from Box::into_raw above and has
+            // not been freed — we are the sole owner on the error path.
+            drop(unsafe { Box::from_raw(handler_ptr as *mut ProcessFailedHandler) });
+        }
     }
 }
 

@@ -176,7 +176,8 @@ fn install_panic_hook() {
                 .map(|s| (*s).to_string())
                 .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic payload unavailable".to_string());
-            error(&format!("panic at {location}: {payload}"));
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            error(&format!("panic at {location}: {payload}\nbacktrace:\n{backtrace}"));
             prior(panic_info);
         }));
     });

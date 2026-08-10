@@ -58,11 +58,11 @@ pub fn is_instance_window_present() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn signal_existing_instance_show() -> Result<bool, String> {
+pub fn signal_existing_instance_show(_target_pids: &[u32]) -> Result<bool, String> {
     Ok(false)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn signal_existing_instance_quit() -> Result<bool, String> {
+pub fn signal_existing_instance_quit(_target_pids: &[u32]) -> Result<bool, String> {
     Ok(false)
 }

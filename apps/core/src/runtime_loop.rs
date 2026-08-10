@@ -1,6 +1,8 @@
 #[cfg(target_os = "windows")]
 use std::cell::RefCell;
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
 use std::rc::Rc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
@@ -993,6 +995,7 @@ impl RuntimeWorker {
                             .output();
                         let _ = std::process::Command::new("taskkill")
                             .args(["/F", "/IM", "NexHelper.exe"])
+                            .creation_flags(0x08000000)
                             .output();
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1070,6 +1073,7 @@ impl RuntimeWorker {
                                 .output();
                             let _ = std::process::Command::new("taskkill")
                                 .args(["/F", "/IM", "NexHelper.exe"])
+                                .creation_flags(0x08000000)
                                 .output();
                             std::thread::sleep(std::time::Duration::from_millis(500));
                             // start() writes helper-config.json, relaunches

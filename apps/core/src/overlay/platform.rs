@@ -18,7 +18,8 @@ use windows_sys::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, RegisterWindowMessageW,
+    EnumWindows, FindWindowW, GetClassNameW, GetWindowThreadProcessId, PostMessageW,
+    RegisterWindowMessageW,
 };
 
 use crate::overlay::model::OverlayEvent;
@@ -57,9 +58,13 @@ pub fn is_instance_window_present() -> bool {
     !hwnd.is_null()
 }
 
-pub fn signal_existing_instance_show() -> Result<bool, String> {
-    let class = to_wide(CLASS_NAME);
-    let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+pub fn signal_existing_instance_show(target_pids: &[u32]) -> Result<bool, String> {
+    let hwnd = if target_pids.is_empty() {
+        let class = to_wide(CLASS_NAME);
+        unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) }
+    } else {
+        find_hwnd_by_pids(target_pids)
+    };
     if hwnd.is_null() {
         return Ok(false);
     }
@@ -67,13 +72,17 @@ pub fn signal_existing_instance_show() -> Result<bool, String> {
     if msg_id == 0 {
         return Err("RegisterWindowMessageW(show) failed".to_string());
     }
-    let ok = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, msg_id, 0, 0) };
+    let ok = unsafe { PostMessageW(hwnd, msg_id, 0, 0) };
     Ok(ok != 0)
 }
 
-pub fn signal_existing_instance_quit() -> Result<bool, String> {
-    let class = to_wide(CLASS_NAME);
-    let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+pub fn signal_existing_instance_quit(target_pids: &[u32]) -> Result<bool, String> {
+    let hwnd = if target_pids.is_empty() {
+        let class = to_wide(CLASS_NAME);
+        unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) }
+    } else {
+        find_hwnd_by_pids(target_pids)
+    };
     if hwnd.is_null() {
         return Ok(false);
     }
@@ -81,7 +90,7 @@ pub fn signal_existing_instance_quit() -> Result<bool, String> {
     if msg_id == 0 {
         return Err("RegisterWindowMessageW(quit) failed".to_string());
     }
-    let ok = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, msg_id, 0, 0) };
+    let ok = unsafe { PostMessageW(hwnd, msg_id, 0, 0) };
     Ok(ok != 0)
 }
 
@@ -89,6 +98,49 @@ fn to_wide(s: &str) -> Vec<u16> {
     let mut wide: Vec<u16> = s.encode_utf16().collect();
     wide.push(0);
     wide
+}
+
+struct EnumCtx {
+    class_wide: Vec<u16>,
+    target_pids: Vec<u32>,
+    found_hwnd: HWND,
+}
+
+unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: isize) -> i32 {
+    // SAFETY: lparam is always the *mut EnumCtx we passed from find_hwnd_by_pids.
+    let ctx = unsafe { &mut *(lparam as *mut EnumCtx) };
+    let mut class_buf = [0u16; 128];
+    // SAFETY: hwnd is a valid top-level window handle from EnumWindows.
+    let len = unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+    // Compare lengths first (class_wide includes null terminator, GetClassNameW does not)
+    if len <= 0 || (len as usize) != ctx.class_wide.len() - 1 {
+        return 1;
+    }
+    if class_buf[..len as usize] != ctx.class_wide[..len as usize] {
+        return 1;
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: hwnd is valid; pid out-pointer is stack-allocated.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if ctx.target_pids.contains(&pid) {
+        ctx.found_hwnd = hwnd;
+        return 0; // stop enumeration
+    }
+    1
+}
+
+/// Find the first top-level window whose class matches `CLASS_NAME` and
+/// whose owning process is in `target_pids`. Returns null HWND if none.
+fn find_hwnd_by_pids(target_pids: &[u32]) -> HWND {
+    let mut ctx = EnumCtx {
+        class_wide: to_wide(CLASS_NAME),
+        target_pids: target_pids.to_vec(),
+        found_hwnd: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumWindows(Some(enum_windows_callback), &mut ctx as *mut EnumCtx as isize);
+    }
+    ctx.found_hwnd
 }
 
 /// Map a Win32 hotkey ID to the legacy `OverlayEvent` hotkey ID. The
@@ -116,9 +168,9 @@ mod tests {
     #[test]
     fn instance_signal_handles_absent_window() {
         assert!(!is_instance_window_present());
-        let result = signal_existing_instance_show();
+        let result = signal_existing_instance_show(&[]);
         assert!(matches!(result, Ok(false)));
-        let result = signal_existing_instance_quit();
+        let result = signal_existing_instance_quit(&[]);
         assert!(matches!(result, Ok(false)));
     }
 }

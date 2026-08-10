@@ -87,6 +87,12 @@ static HOTKEY_DEBOUNCE: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// and the dead-thread recovery path skips its check while this is true.
 static RE_REGISTERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set to `true` when any quit path is taken (ExternalQuit, TrayQuit,
+/// power restart).  Prevents the dead-thread recovery from restarting the
+/// hotkey listener during teardown — the restart race is what triggers
+/// the tao "cannot move state from Destroyed" panic.
+static QUIT_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "windows")]
 pub(crate) fn run_windows_runtime(
     startup_started_at: Instant,
@@ -211,7 +217,7 @@ pub(crate) fn run_windows_runtime(
         Err(error) => return Err(RuntimeError::Overlay(error)),
     };
     if _single_instance.is_none() {
-        let _ = signal_existing_instance_show();
+        let _ = signal_existing_instance_show(&[]);
         log_info("[nex] runtime already active; signaled existing instance");
         return Ok(());
     }
@@ -956,7 +962,7 @@ impl RuntimeWorker {
             self.last_memory_log = Instant::now();
         }
 
-        if self.hotkey_check_counter % 32 == 0 && !RE_REGISTERING.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.hotkey_check_counter % 32 == 0 && !RE_REGISTERING.load(std::sync::atomic::Ordering::SeqCst) && !QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
             let needs_restart = match self.hotkey_listener.lock() {
                 Ok(guard) => match guard.as_ref() {
                     Some(listener) => !listener.is_alive(),
@@ -986,6 +992,10 @@ impl RuntimeWorker {
                             .args(["/F", "/IM", "NexHelper.exe"])
                             .output();
                         std::thread::sleep(std::time::Duration::from_millis(500));
+                        if QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                            log_info("[nex] skipping hotkey listener restart: quit in progress");
+                            return;
+                        }
                         match HotkeyListener::start(&recovery_hotkey, recovery_etx) {
                             Ok(listener) => {
                                 log_info("[nex] hotkey listener restarted successfully");
@@ -1269,6 +1279,7 @@ impl RuntimeWorker {
                 }
             }
             OverlayEvent::ExternalQuit => {
+                QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
                 crate::overlay::power_popup::quit();
                 self.overlay.hide_now();
                 self.last_query.clear();

@@ -146,7 +146,7 @@ pub(crate) fn stop_runtime_instance(
     }
 
     if state.has_overlay_window {
-        let _ = signal_existing_instance_quit().map_err(RuntimeError::Overlay)?;
+        let _ = signal_existing_instance_quit(&state.other_runtime_pids).map_err(RuntimeError::Overlay)?;
         if wait_until_overlay_window_closed(timeout) {
             state = inspect_runtime_process_state();
             if state.other_runtime_pids.is_empty() {

@@ -643,6 +643,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // retry thread is armed, spawn one.  The double
                         // Focused(false) per blur is deduplicated by the
                         // swap — only the first event arms a thread.
+                        // 150ms: imperceptible delay for genuine outside
+                        // clicks; focus-flap at show (same-ms pairs in
+                        // logs) re-focuses well within this window and
+                        // cancels the hide.
                         if state_vis && !deferred_hide_armed.swap(true, Ordering::SeqCst) {
                             let state_clone = state.clone();
                             let tx_clone = event_tx.clone();
@@ -650,7 +654,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             std::thread::Builder::new()
                                 .name("nex-deferred-hide".into())
                                 .spawn(move || {
-                                    std::thread::sleep(Duration::from_millis(450));
+                                    std::thread::sleep(Duration::from_millis(150));
                                     if let Ok(s) = state_clone.lock() {
                                         if s.visible && !s.has_focus {
                                             let _ = tx_clone.send(OverlayEvent::Escape);

@@ -321,15 +321,14 @@
     setSelected(sel[pos], true);
   }
 
-  // Grid-aware vertical navigation: jump to same column in prev/next row.
-  function moveSelectionGridDown(dy) {
+  // Grid row grouping + current-position search (shared by vertical and
+  // horizontal grid navigation).  Returns { rows, cr, cc } where rows
+  // is an array of selectable-index arrays grouped by offsetTop, cr/cc
+  // is the current selection's row/column, or null if not found.
+  function gridRowsAndPos() {
     const sel = selectableIndices();
-    if (sel.length === 0) return;
-    let pos = sel.indexOf(selected);
-    if (pos === -1) pos = 0;
-
-    // Group selectable indices into physical rows by offsetTop.
-    const rows = [];
+    if (sel.length === 0) return null;
+    const gridRows = [];
     const placed = new Set();
     for (const idx of sel) {
       if (placed.has(idx)) continue;
@@ -345,22 +344,47 @@
           placed.add(otherIdx);
         }
       }
-      if (row.length > 0) rows.push(row);
+      if (row.length > 0) gridRows.push(row);
     }
-
-    // Find current position in the row grid.
     let cr = -1, cc = -1;
-    for (let r = 0; r < rows.length; r++) {
-      const c = rows[r].indexOf(selected);
+    for (let r = 0; r < gridRows.length; r++) {
+      const c = gridRows[r].indexOf(selected);
       if (c !== -1) { cr = r; cc = c; break; }
     }
-    if (cr === -1) return;
+    if (cr === -1) return null;
+    return { rows: gridRows, cr, cc };
+  }
 
-    const tr = cr + dy;
-    if (tr < 0 || tr >= rows.length) return;
-    // Clamp column to target row width.
-    const tc = Math.min(cc, rows[tr].length - 1);
+  // Grid-aware navigation: vertical (dy) and horizontal (dx).
+  // Horizontal uses row-wrapping: right past end → next row first col,
+  // left before start → prev row last col. Stops at grid edges (no wrap-around).
+  function moveSelectionGrid(dx, dy) {
+    const info = gridRowsAndPos();
+    if (!info) return;
+    const { rows, cr, cc } = info;
+    let tr = cr, tc = cc;
+    if (dy !== 0) {
+      tr = cr + dy;
+      if (tr < 0 || tr >= rows.length) return;
+      tc = Math.min(cc, rows[tr].length - 1);
+    } else if (dx !== 0) {
+      tc = cc + dx;
+      if (dx > 0 && tc >= rows[cr].length) {
+        tr = cr + 1;
+        if (tr >= rows.length) return;
+        tc = 0;
+      } else if (dx < 0 && tc < 0) {
+        tr = cr - 1;
+        if (tr < 0) return;
+        tc = rows[tr].length - 1;
+      }
+    }
     setSelected(rows[tr][tc], true);
+  }
+
+  // Grid-aware vertical navigation: jump to same column in prev/next row.
+  function moveSelectionGridDown(dy) {
+    moveSelectionGrid(0, dy);
   }
 
   // ── icon patching ─────────────────────────────────────────
@@ -486,6 +510,11 @@
           moveSelectionGridDown(-1);
         } else {
           moveSelection(-1);
+        }
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        if (list.classList.contains("grid-view")) {
+          moveSelectionGrid(e.key === "ArrowLeft" ? -1 : 1, 0);
         }
       } else if (e.key === "Enter") {
         e.preventDefault();

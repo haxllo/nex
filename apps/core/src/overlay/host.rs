@@ -201,6 +201,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut was_focused = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    let deferred_hide_armed = Arc::new(AtomicBool::new(false));
 
     // Resize debounce state. Growth requests go through a debounce
     // timer (UiCommand::Resize stores the target height and arms the
@@ -638,6 +639,27 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             "[nex::debug] Focused(false): BLOCKED Escape (was_focused={} show_pending={} bare_win={} grace={}ms state_vis={})",
                             was_focused_val, show_pending_val, bare_win, grace_ms, state_vis,
                         ));
+                        // Deferred hide: if overlay still visible and no
+                        // retry thread is armed, spawn one.  The double
+                        // Focused(false) per blur is deduplicated by the
+                        // swap — only the first event arms a thread.
+                        if state_vis && !deferred_hide_armed.swap(true, Ordering::SeqCst) {
+                            let state_clone = state.clone();
+                            let tx_clone = event_tx.clone();
+                            let armed = deferred_hide_armed.clone();
+                            std::thread::Builder::new()
+                                .name("nex-deferred-hide".into())
+                                .spawn(move || {
+                                    std::thread::sleep(Duration::from_millis(450));
+                                    if let Ok(s) = state_clone.lock() {
+                                        if s.visible && !s.has_focus {
+                                            let _ = tx_clone.send(OverlayEvent::Escape);
+                                        }
+                                    }
+                                    armed.store(false, Ordering::SeqCst);
+                                })
+                                .ok();
+                        }
                     }
                 }
             }

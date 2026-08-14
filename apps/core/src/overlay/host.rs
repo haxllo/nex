@@ -560,6 +560,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         show_pending = false;
                         last_show = Instant::now();
                         was_focused = false;
+                        // Gate on live state: an outside-click Escape during
+                        // the show window (between Show and first paint)
+                        // already hid the overlay — do NOT resurrect it.
+                        // Mirrors the WebviewReady gate.
+                        if !state.lock().map(|s| s.visible).unwrap_or(false) {
+                            crate::runtime::log_info("[nex] host Painted: visible=false, skipping show (clicked away during show window)");
+                            return;
+                        }
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Always register raw input sink so the overlay

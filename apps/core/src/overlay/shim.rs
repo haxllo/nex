@@ -206,6 +206,7 @@ impl NativeOverlayShell {
             // WindowEvent::Focused(true) sets has_focus after the window
             // is actually shown and gains focus.
         });
+        crate::overlay::hotkey::set_overlay_visible(true);
         self.post(UiCommand::Show);
     }
 
@@ -227,6 +228,7 @@ impl NativeOverlayShell {
             s.rows.clear();
             s.selected = 0;
         });
+        crate::overlay::hotkey::set_overlay_visible(false);
         self.post(UiCommand::Hide);
     }
 
@@ -235,6 +237,7 @@ impl NativeOverlayShell {
             s.visible = false;
             s.has_focus = false;
         });
+        crate::overlay::hotkey::set_overlay_visible(false);
         self.post(UiCommand::Hide);
     }
 
@@ -243,6 +246,7 @@ impl NativeOverlayShell {
             s.visible = false;
             s.has_focus = false;
         });
+        crate::overlay::hotkey::set_overlay_visible(false);
         let (tx, rx) = std::sync::mpsc::channel();
         self.post(UiCommand::HideSync(tx));
         let _ = rx.recv_timeout(Duration::from_millis(500));

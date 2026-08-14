@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -48,6 +48,8 @@ static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
 
 static OVERLAY_HAS_FOCUS: AtomicBool = AtomicBool::new(false);
 static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
+static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
@@ -109,6 +111,14 @@ pub(crate) fn is_bare_win_press_active() -> bool {
 
 pub(crate) fn set_overlay_focus(focused: bool) {
     OVERLAY_HAS_FOCUS.store(focused, Ordering::SeqCst);
+}
+
+pub(crate) fn set_overlay_visible(visible: bool) {
+    OVERLAY_VISIBLE.store(visible, Ordering::SeqCst);
+}
+
+pub(crate) fn set_overlay_hwnd(hwnd: isize) {
+    OVERLAY_HWND.store(hwnd, Ordering::SeqCst);
 }
 
 /// Clears the focus-loss guard after the runtime has handled the Win toggle.
@@ -420,6 +430,106 @@ unsafe extern "system" fn keyboard_hook_proc(
 }
 
 // ---------------------------------------------------------------------------
+// Mouse hook — instant click-outside hide
+// ---------------------------------------------------------------------------
+
+unsafe extern "system" fn mouse_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowRect, MSLLHOOKSTRUCT,
+    };
+
+    if n_code < 0 {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    let msg = w_param as u32;
+    // Only process button-down messages — never UP.
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_MBUTTONDOWN: u32 = 0x0207;
+    const WM_XBUTTONDOWN: u32 = 0x020B;
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const WM_NCRBUTTONDOWN: u32 = 0x00A4;
+
+    let is_button_down = matches!(
+        msg,
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN
+    );
+
+    if !is_button_down || !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    let msll = unsafe { *(l_param as *const MSLLHOOKSTRUCT) };
+    // Skip injected (SendInput) clicks.
+    const LLMHF_INJECTED: u32 = 0x1;
+    if (msll.flags & LLMHF_INJECTED) != 0 {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
+    if hwnd.is_null() {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    let mut cursor = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                std::ptr::null_mut(), n_code, w_param, l_param,
+            )
+        };
+    }
+
+    // Cursor outside overlay rect → real outside click → send Escape.
+    if cursor.x < rect.left || cursor.x >= rect.right
+        || cursor.y < rect.top || cursor.y >= rect.bottom
+    {
+        crate::runtime::log_info("[nex::debug] Mouse hook: outside click -> Escape");
+        let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
+        if let Some(sender) = ctx {
+            let _ = sender.send(OverlayEvent::Escape);
+        }
+    }
+
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+            std::ptr::null_mut(), n_code, w_param, l_param,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HotkeyListener
 // ---------------------------------------------------------------------------
 
@@ -558,7 +668,7 @@ impl HotkeyListener {
             .spawn(move || {
                 use windows_sys::Win32::UI::WindowsAndMessaging::{
                     DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, MSG,
-                    WH_KEYBOARD_LL,
+                    WH_KEYBOARD_LL, WH_MOUSE_LL,
                 };
                 let hook_id = unsafe {
                     SetWindowsHookExW(WH_KEYBOARD_LL as i32, Some(keyboard_hook_proc), std::ptr::null_mut(), 0)
@@ -566,6 +676,12 @@ impl HotkeyListener {
                 if hook_id.is_null() {
                     let _ = ready_tx.send(Err("SetWindowsHookExW failed".into()));
                     return;
+                }
+                let mouse_hook_id = unsafe {
+                    SetWindowsHookExW(WH_MOUSE_LL as i32, Some(mouse_hook_proc), std::ptr::null_mut(), 0)
+                };
+                if mouse_hook_id.is_null() {
+                    logging::warn("[nex::debug] Hook: SetWindowsHookExW(WH_MOUSE_LL) failed, click-outside disabled");
                 }
                 let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = thread_id_for_thread.set(tid);
@@ -651,6 +767,9 @@ impl HotkeyListener {
                     if let Some(f) = unregister_hotkey {
                         unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
                     }
+                }
+                if !mouse_hook_id.is_null() {
+                    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id); }
                 }
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id); }
                 if !should_exit_for_thread.load(Ordering::SeqCst) {

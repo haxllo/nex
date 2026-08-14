@@ -166,6 +166,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .map_err(|e| format!("failed to create overlay window: {e}"))?;
 
     let hwnd = window.hwnd() as HWND;
+    crate::overlay::hotkey::set_overlay_hwnd(hwnd as isize);
     if let Ok(mut s) = state.lock() {
         s.hwnd = hwnd as isize;
     }

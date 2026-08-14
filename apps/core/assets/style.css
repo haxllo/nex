@@ -237,10 +237,8 @@ body {
   background: var(--icon-bg);
   border-radius: 10px;
   border: 1px solid transparent;
-  height: 112px;
-  /* Icon top, label block bottom-anchored — uniform bottom baseline
-     across tiles whether or not a subtitle (publisher) exists. */
-  justify-content: space-between;
+  /* Fixed height: 18 padding + 36 icon + 6 gap + 31 two-line title. */
+  height: 96px;
 }
 .grid-view .row.row-grid:hover {
   background: var(--hover);
@@ -374,8 +372,7 @@ html[data-theme="light"] .row.selected .title {
   text-overflow: ellipsis;
 }
 .grid-view .row .subtitle {
-  font-size: 10px;
-  max-width: 100%;
+  display: none;
 }
 
 /* Section headers span full grid width */

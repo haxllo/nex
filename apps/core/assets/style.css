@@ -348,6 +348,15 @@ body {
   font-size: 12px;
   font-weight: 500;
   max-width: 100%;
+  /* Two-line wrap: long names no longer clip mid-word. Min-height
+     keeps labels aligned across tiles in a row (grid stretch
+     equalizes tile heights, not title lines). */
+  white-space: normal;
+  line-height: 1.3;
+  min-height: 2.6em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 .row.selected .title {
   color: #fff;

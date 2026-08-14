@@ -108,7 +108,12 @@ impl NativeOverlayShell {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                state: Arc::new(Mutex::new(ShimState::default())),
+                state: Arc::new(Mutex::new({
+                    let mut s = ShimState::default();
+                    s.theme = crate::overlay::platform::detect_system_theme();
+                    s.accent_color = crate::overlay::platform::detect_accent_color();
+                    s
+                })),
                 icon_cache,
                 is_running: Arc::new(AtomicBool::new(false)),
                 proxy,

@@ -167,6 +167,7 @@ body {
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   gap: 8px;
   scrollbar-gutter: stable;
+  padding-top: 4px;
 }
 #list:empty {
   display: none;
@@ -228,7 +229,10 @@ body {
   min-height: 0;
 }
 
-/* Grid tiles: filled card treatment + hover lift. */
+/* Grid tiles: filled card treatment. No translateY lift — the list
+   scroll container clips content at its top edge (rows sit flush,
+   padding-top 0), so any upward shift slices the tile's rounded
+   corner; border+bg alone reads clearly as hover. */
 .grid-view .row.row-grid {
   background: var(--icon-bg);
   border-radius: 10px;
@@ -237,7 +241,6 @@ body {
 .grid-view .row.row-grid:hover {
   background: var(--hover);
   border-color: var(--border);
-  transform: translateY(-1px);
 }
 .grid-view .row.row-grid.selected {
   background: var(--sel);

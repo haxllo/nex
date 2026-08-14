@@ -52,6 +52,33 @@ pub(crate) fn detect_system_theme() -> Theme {
     }
 }
 
+/// Windows accent color (DWM `AccentColor`, DWORD ABGR) as `#RRGGBB`.
+pub(crate) fn detect_accent_color() -> Option<String> {
+    let key = to_wide("Software\\Microsoft\\Windows\\DWM");
+    let value = to_wide("AccentColor");
+    let mut data: u32 = 0;
+    let mut data_size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut data as *mut u32 as *mut c_void,
+            &mut data_size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    // ABGR → RRGGBB.
+    let b = data & 0xFF;
+    let g = (data >> 8) & 0xFF;
+    let r = (data >> 16) & 0xFF;
+    Some(format!("#{r:02X}{g:02X}{b:02X}"))
+}
+
 pub fn is_instance_window_present() -> bool {
     let class = to_wide(CLASS_NAME);
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };

@@ -1188,6 +1188,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "hotkeyHint": s.hotkey_hint,
         "hotkeyIssue": s.hotkey_issue_active,
         "theme": theme,
+        "accent": s.accent_color,
         "gridView": s.grid_view,
         "showPending": show_pending,
         "quickLaunch": quick_launch,

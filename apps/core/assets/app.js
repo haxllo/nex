@@ -32,6 +32,7 @@
   let lastQuerySent = "";
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
+  let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let quickLaunchItems = []; // Quick Launch items for idle state
   let pendingShow = false; // show occurred, waiting for first real results
 
@@ -147,6 +148,14 @@
     clampSelected();
     const frag = document.createDocumentFragment();
     const isGridView = list.classList.contains("grid-view");
+    let animIdx = 0;
+    // Entrance stagger: animate only when content actually changed
+    // (query edits, result sets), not on selection-only re-renders.
+    const sig = rows
+      .map((r) => `${r.role || ""}|${r.kind || ""}|${r.title || ""}|${r.subtitle || ""}`)
+      .join(";");
+    const animating = sig !== lastRowSig;
+    lastRowSig = sig;
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
@@ -169,6 +178,10 @@
 
       const li = document.createElement("li");
       li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : (r.role === "calculator" ? "" : " row-list")) : "");
+      if (animating && r.role !== "status") {
+        li.style.animationDelay = Math.min(animIdx, 8) * 7 + "ms";
+        animIdx++;
+      }
       li.setAttribute("role", "option");
       li.dataset.index = String(i);
       if (i === selected) li.classList.add("selected");
@@ -791,6 +804,11 @@
       }
 
       if (state.theme) document.documentElement.dataset.theme = state.theme;
+
+      // System accent (DWM AccentColor) → CSS var; falls back to theme palette.
+      if (state.accent) {
+        document.documentElement.style.setProperty("--accent", state.accent);
+      }
 
       // Toggle grid/list layout based on Rust config
       if (typeof state.gridView === "boolean") {

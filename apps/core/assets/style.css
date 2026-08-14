@@ -25,6 +25,7 @@
   --text-faint: #76767f;
   --sel: rgba(255, 255, 255, 0.09);
   --sel-border: rgba(255, 255, 255, 0.08);
+  --hover: rgba(255, 255, 255, 0.05);
   --accent: #6ea8fe;
   --divider: rgba(255, 255, 255, 0.06);
   --kbd-bg: rgba(255, 255, 255, 0.08);
@@ -41,6 +42,7 @@ html[data-theme="light"] {
   --text-faint: #8a8a93;
   --sel: rgba(0, 0, 0, 0.06);
   --sel-border: rgba(0, 0, 0, 0.06);
+  --hover: rgba(0, 0, 0, 0.04);
   --accent: #2f6bff;
   --divider: rgba(0, 0, 0, 0.07);
   --kbd-bg: rgba(0, 0, 0, 0.06);
@@ -189,6 +191,32 @@ body {
   border-radius: var(--row-radius);
   cursor: pointer;
   position: relative;
+  transition: background 100ms ease, transform 100ms ease;
+  animation: nexRowIn 150ms ease-out backwards;
+}
+.row:hover {
+  background: var(--hover);
+}
+
+/* Entrance stagger — rows fade+rise in; re-animation gated in JS. */
+@keyframes nexRowIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.section {
+  animation: nexRowIn 150ms ease-out backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .row,
+  .section {
+    animation: none;
+  }
 }
 
 .grid-view .row {
@@ -198,6 +226,22 @@ body {
   height: auto;
   padding: 10px 6px 8px;
   min-height: 0;
+}
+
+/* Grid tiles: filled card treatment + hover lift. */
+.grid-view .row.row-grid {
+  background: var(--icon-bg);
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+.grid-view .row.row-grid:hover {
+  background: var(--hover);
+  border-color: var(--border);
+  transform: translateY(-1px);
+}
+.grid-view .row.row-grid.selected {
+  background: var(--sel);
+  border-color: var(--sel-border);
 }
 
 /* Non-app rows: force full-width list layout inside grid */

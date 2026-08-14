@@ -100,6 +100,8 @@ pub struct ShimState {
     pub game_mode_enabled: bool,
     pub grid_view: bool,
     pub theme: Theme,
+    /// System accent color as `#RRGGBB` (from DWM AccentColor), if readable.
+    pub accent_color: Option<String>,
     pub rows: Vec<OverlayRow>,
     pub selected: usize,
     pub visible: bool,
@@ -126,6 +128,7 @@ impl Default for ShimState {
             game_mode_enabled: false,
             grid_view: false,
             theme: Theme::Dark,
+            accent_color: None,
             rows: Vec::new(),
             selected: 0,
             visible: false,

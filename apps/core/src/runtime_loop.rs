@@ -693,7 +693,7 @@ impl RuntimeWorker {
                     self.show_idle_or_quick_launch();
                 } else {
                     // In search mode — just push state (includes updated quickLaunch array for pin icons)
-                    self.overlay.set_status_text(&format!("Pinned '{}' to Quick Launch", title));
+                    self.overlay.set_status_text_and_refresh(&format!("Pinned '{}' to Quick Launch", title));
                 }
             }
         }
@@ -756,7 +756,7 @@ impl RuntimeWorker {
                 self.show_idle_or_quick_launch();
             } else {
                 // In search mode — just push state (includes updated quickLaunch array for pin icons)
-                self.overlay.set_status_text(&format!("Unpinned '{}' from Quick Launch", title));
+                self.overlay.set_status_text_and_refresh(&format!("Unpinned '{}' from Quick Launch", title));
             }
         }
     }
@@ -804,7 +804,7 @@ impl RuntimeWorker {
                     self.show_idle_or_quick_launch();
                 } else {
                     // In search mode — just push state (includes updated quickLaunch array for pin icons)
-                    self.overlay.set_status_text(&format!("Added to Quick Launch"));
+                    self.overlay.set_status_text_and_refresh(&format!("Added to Quick Launch"));
                 }
             }
         } else {

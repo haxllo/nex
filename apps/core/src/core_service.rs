@@ -963,7 +963,10 @@ fn open_tantivy_index(tantivy_path: &std::path::Path, db: &Connection) -> Option
                 Err(_) => Some(idx),
             }
         }
-        Err(_e) => None, // Schema mismatch or other error — caller will reset
+        Err(e) => {
+            crate::logging::info(&format!("[nex] Tantivy open failed: {e}"));
+            None // Schema mismatch or other error — caller will reset
+        }
     }
 }
 
@@ -971,7 +974,14 @@ fn open_tantivy_index(tantivy_path: &std::path::Path, db: &Connection) -> Option
 /// Shared by boot-time and mid-run reset paths.
 fn reset_tantivy_index(tantivy_path: &std::path::Path) -> Option<TantivyIndex> {
     crate::logging::info("[nex] Tantivy index schema changed or corrupt, resetting");
-    let _ = std::fs::remove_dir_all(tantivy_path);
+    if let Err(e) = std::fs::remove_dir_all(tantivy_path) {
+        // MmapDirectory holds handles on Windows; a partial delete leaves
+        // stale files that later commits reference. Log so a corrupt
+        // directory is diagnosable instead of silently looping.
+        crate::logging::info(&format!(
+            "[nex] Tantivy reset: remove_dir_all failed: {e}"
+        ));
+    }
     match TantivyIndex::open(tantivy_path) {
         Ok(idx) => Some(idx),
         Err(e) => {
@@ -1257,8 +1267,21 @@ impl CoreService {
             } else {
                 idx.incremental_sync_items(&items)
             };
-            if let Err(e) = result {
-                crate::logging::info(&format!("[nex] Tantivy index sync error: {e}"));
+            match result {
+                Ok(()) => {
+                    let n = idx
+                        .num_docs()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|e| format!("num_docs err: {e}"));
+                    crate::logging::info(&format!(
+                        "[nex] Tantivy sync committed items={} docs={}",
+                        items.len(),
+                        n
+                    ));
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("[nex] Tantivy index sync error: {e}"));
+                }
             }
         }
         drop(tantivy_guard);
@@ -1557,16 +1580,41 @@ fn cache_compaction_summary(items: &[SearchItem], cfg: &Config) -> CacheCompacti
 impl CacheCompactionSummary {
     fn retain_items(&self, items: &[SearchItem]) -> (Vec<SearchItem>, usize) {
         let mut out = Vec::with_capacity(items.len().min(self.effective_file_seed_cap + 2048));
+        let mut folders: Vec<&SearchItem> = Vec::new();
+        let mut files: Vec<&SearchItem> = Vec::new();
         let mut file_or_folder_count = 0_usize;
 
+        // DB listing is ORDER BY id, which sorts every "file:..." before
+        // every "folder:..." — a plain first-N pass would retain files
+        // only and starve the cache of folders entirely. Retain all
+        // folders first (they are far fewer), then fill the remaining
+        // slots with files, so cache-only fallback searches still
+        // surface folder results.
         for item in items {
             if is_file_or_folder_kind(item.kind.as_str()) {
-                if file_or_folder_count >= self.effective_file_seed_cap {
-                    continue;
+                if item.kind.eq_ignore_ascii_case("folder") {
+                    folders.push(item);
+                } else {
+                    files.push(item);
                 }
-                file_or_folder_count += 1;
+                continue;
             }
             out.push(item.clone());
+        }
+
+        for folder in folders {
+            if file_or_folder_count >= self.effective_file_seed_cap {
+                break;
+            }
+            file_or_folder_count += 1;
+            out.push(folder.clone());
+        }
+        for file in files {
+            if file_or_folder_count >= self.effective_file_seed_cap {
+                break;
+            }
+            file_or_folder_count += 1;
+            out.push(file.clone());
         }
 
         (out, file_or_folder_count)
@@ -1581,15 +1629,32 @@ fn retained_cache_counts(
     let mut retained_apps = 0_usize;
     let mut retained_file_folders = 0_usize;
     let mut retained_other = 0_usize;
-    let mut file_or_folder_count = 0_usize;
+
+    // Mirrors retain_items: folders retained first, files fill the rest.
+    let folder_count = items
+        .iter()
+        .filter(|i| {
+            is_file_or_folder_kind(i.kind.as_str())
+                && i.kind.eq_ignore_ascii_case("folder")
+        })
+        .count();
+    let folder_retained = folder_count.min(effective_file_seed_cap);
+    let file_retained =
+        effective_file_seed_cap.saturating_sub(folder_retained);
 
     for item in items {
         if is_file_or_folder_kind(item.kind.as_str()) {
-            if file_or_folder_count >= effective_file_seed_cap {
+            if item.kind.eq_ignore_ascii_case("folder") {
+                if retained_file_folders < folder_retained {
+                    retained_file_folders += 1;
+                } else {
+                    continue;
+                }
+            } else if retained_file_folders >= folder_retained + file_retained {
                 continue;
+            } else {
+                retained_file_folders += 1;
             }
-            file_or_folder_count += 1;
-            retained_file_folders += 1;
         } else if item.kind.eq_ignore_ascii_case("app") {
             retained_apps += 1;
         } else {

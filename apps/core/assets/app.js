@@ -39,6 +39,7 @@
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
   const iconCache = new Map();
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // Themed fallback shown while real icon loads (cold cache).
   // 128×128 app icons, base64-encoded PNGs.
@@ -47,6 +48,9 @@
   const FOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAADsQAAA7EB9YPtSQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAOpSURBVHic7dhPa1xlGIbx63nndKympaQqiTaLWkNsaRrE9nOYSBpcCC5c6F6FgAspFMQ2rl24cuFC6miTqIjfoUEw/tmEuqmhG0VqoCaZnMfFOFWa2ARNzjtznvu3mhnO4h7mmjMvAyIiIiIiIiIiIiIiIiJST7bTi/79THOr5AXcJ914zmAEGKh4Wwn8ZvCTwzck+7rxyMAX9tSHf1S8o9a2BdD+bnoat6vAqQx7dvOLG+8XxcacnV78PfeYOrgXgF+babTP+BWDN3IO2qPbOK8UE62vcg/pd6n7oI8+fIBhjC83ly9eyj2k3xncu+23co/5L8x5uzHRupx7R7+yzoHPf6Q3f/P3wsFfLs59+lHuIf3I2sszL4J/nHvI/+Il6ecVbONu7iW9ZA24BSyBL3D72Ly9trR5/0UJfKr6bfvMEuXwSWgUuZf0kiPAaeAlsGsM3/nBPx/b9lknh/PVbzsARZNy6CTYjn9tCIxS+nWfH3vXL/19+E8GT+RctZ/88ADl8dq8nYNhPsuzY+90nyY6t4ra8GOP40eP557R28xnfXF0EsDayxc995595yVpdQVb16HwAW6y3jyTdr+uD1nqnAd0KHyQUzTXn69nAKBD4V5YmqxvAOhQuDu/UOsAQIfCXZyofQAA5WMn8Icezj2jFx0NEYAOhf8uRgDQORQ++TQUzdxLekqcAAA/dJitkWcoB4c7PwkW6u3vKN49MSV8cAgfHMq9pCfoKxCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBKYDgFEBwCiA4BRCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBKYDgFEBwCiA4BRCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBJWAt9wjJ5k5y89XcKyQPh9VkpS3lHiJ5GNxImM/nHiKZJFtIjfVHrwMrubdI5W42YDHZhQ82gdnca6Rizut29pONBFCca33m8F7uTVINN64UE60F+Mf/AMX4+Kzjc/lmSRXcuVqcHX+r+9zuv6D97fQUZnPAaKXL5KCt4LzZ/eZ3bQsAwG+8emir+esUxqTDeYMR4EglM2W/rDncMlgi2Xzj7uDCX+c9EREREREREREREREREQnhTy52wK21rlFtAAAAAElFTkSuQmCC";
   const FILE_PLACEHOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAAA3NCSVQICAjb4U/gAAAACXBIWXMAAAG7AAABuwE67OPiAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAEtQTFRF////3ubv09zp4ufws7/Lz9rm4ufv4ufwy9fky9bknay6oa+9pLK/sLzJtcDNydXjztnmz9nm09zo1d7p2uDp3OPt3ePt3uTu4ufw0km01gAAAAp0Uk5TAB86p8Dh5vD9/i9D6pkAAADNSURBVFjD7dfLEsIgDAVQKhYrSlHrI///pS4c+7LkRjLVDXefMxMumxjTp7KOktkamGpHTDwWLLEAFhwAoEAIQAIGgCAAeEECsIII4AQZwAhCIC1IgaTAA0cs8EDrocAD1wMUCAgt2oJgujgkCxgLecBIyAQGAQLBzxKmQjbwFnJX6AUF8BI0AHVagC5a4KEFaF3g4wcs/IZ1gf+/QWmhtFBaKC2UFphHDL8GSgsKwMnn77H5+vSdzJ9jnTi+b6coyn6zeL5bJ5tv6tH8Ezzc5sExY4ClAAAAAElFTkSuQmCC";
   function folderIcon() { return FOLDER_ICON; }
+  // Transparent 1px GIF — cold-cache icon slot. Avoids flashing a wrong
+  // placeholder glyph; patchIcons() pops the real icon in when decoded.
+  const BLANK_ICON = "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
   function filePlaceholderIcon() { return FILE_PLACEHOLDER_ICON; }
   function placeholderIcon() {
     return document.documentElement.dataset.theme === "light" ? PLACEHOLDER_ICON_DARK : PLACEHOLDER_ICON_LIGHT;
@@ -178,7 +182,7 @@
 
       const li = document.createElement("li");
       li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : (r.role === "calculator" ? "" : " row-list")) : "");
-      if (animating && r.role !== "status") {
+      if (animating && r.role !== "status" && r.role !== "quick_launch") {
         li.style.animationDelay = Math.min(animIdx, 8) * 7 + "ms";
         animIdx++;
       }
@@ -199,7 +203,9 @@
           if (iconCache.has(r.icon)) {
             img.src = iconCache.get(r.icon);
           } else {
-            img.src = r.kind === "file" ? filePlaceholderIcon() : placeholderIcon(); // theme-aware fallback
+            // Cold cache: blank slot, no wrong-glyph flash. patchIcons()
+            // pops the real icon in (with pop-in) once decoded.
+            img.src = BLANK_ICON;
           }
           // Don't add placeholder class here — patchIcons() will set
           // src and the browser handles loading. Only onerror triggers
@@ -412,7 +418,16 @@
       const path = img.dataset.iconPath;
       if (path && iconCache.has(path)) {
         const dataUri = iconCache.get(path);
-        if (img.src !== dataUri) img.src = dataUri;
+        if (img.src !== dataUri) {
+          // Only animate on a real src swap; re-patches of the same URI
+          // (every keystroke) stay silent.
+          if (!reduceMotion) {
+            img.classList.remove("icon-pop");
+            void img.offsetWidth;
+            img.classList.add("icon-pop");
+          }
+          img.src = dataUri;
+        }
       }
     }
   }
@@ -703,7 +718,7 @@
     btns.forEach(b => {
       const action = b.dataset.action;
       if (action === "open") b.classList.toggle("hidden", false);
-      else if (action === "runas") b.classList.toggle("hidden", !isApp && !isFile);
+      else if (action === "runas") b.classList.toggle("hidden", (!isApp && !isFile) || row.kind === "folder");
       else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "pin") {
@@ -714,6 +729,13 @@
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
     });
+
+    // Hide dividers whose adjacent sections are empty (e.g. pin/uninstall
+    // are app-only, so files/folders must not show trailing gaps).
+    const pinVisible = el.querySelector('button[data-action="pin"]')?.classList.contains("hidden") === false;
+    const uninstallVisible = el.querySelector('button[data-action="uninstall"]')?.classList.contains("hidden") === false;
+    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", !pinVisible && !uninstallVisible);
+    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", !uninstallVisible);
 
     // Temporarily remove hidden to measure actual layout, then position
     el.classList.remove("hidden");
@@ -800,6 +822,12 @@
       // Lightweight selection-only update (no rows = incremental).
       if (!Array.isArray(state.rows) && typeof state.selected === "number") {
         setSelected(state.selected, true);
+        return;
+      }
+
+      // Lightweight status-only update — apply without re-rendering rows.
+      if (!Array.isArray(state.rows) && typeof state.status === "string") {
+        statusEl.dataset.text = state.status || "";
         return;
       }
 
@@ -920,4 +948,19 @@
   // the first push_state.  painted must only fire after nex.apply()
   // renders the pushed state, otherwise the window appears blank.
   post("ready");
+
+  // ── scrollbar idle fade ────────────────────────────────────
+  // Thumb fades out after 1.4s without scroll/hover over the list;
+  // reappears on activity.
+  let scrollFadeTimer = null;
+  function armScrollFade() {
+    list.classList.remove("scroll-idle");
+    clearTimeout(scrollFadeTimer);
+    scrollFadeTimer = setTimeout(() => {
+      list.classList.add("scroll-idle");
+    }, 1400);
+  }
+  list.addEventListener("scroll", armScrollFade, { passive: true });
+  list.addEventListener("mousemove", armScrollFade, { passive: true });
+  list.classList.add("scroll-idle");
 })();

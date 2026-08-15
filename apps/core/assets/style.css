@@ -549,6 +549,7 @@ html[data-theme="light"] .row.selected .title {
 
 /* ── footer ───────────────────────────────────────────────── */
 #footer {
+  position: relative;
   display: flex;
   align-items: center;
   height: 40px;
@@ -559,11 +560,15 @@ html[data-theme="light"] .row.selected .title {
   color: var(--text-faint);
 }
 #footer .hints {
-  flex: 1;
+  /* Absolutely centered over the whole footer — the power button on the
+     right no longer pushes the hint group off-center. */
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+  pointer-events: none;
 }
 #footer .hint {
   display: flex;

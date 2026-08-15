@@ -198,6 +198,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     };
     if let Some(ref wv) = webview {
         subscribe_webview2_diagnostics(wv);
+        // Oversize the viewport up front so the first show/grow has
+        // pre-rasterized content beyond the window edge.
+        keep_webview_viewport_max(wv);
     }
     let mut ready = false;
     let mut warm_gen: u64 = 0;
@@ -299,7 +302,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
-                        window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                        apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
                         last_applied_height = INITIAL_HEIGHT;
                         pending_resize = None;
                         first_resize_after_show = true;
@@ -391,7 +394,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                     position_window(&window, hwnd);
                     // Start at search-bar height — JS sends resize when content appears.
-                    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT));
+                    apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -514,7 +517,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                            apply_window_height(&window, webview.as_ref(), h);
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -524,7 +527,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                            apply_window_height(&window, webview.as_ref(), h);
                         }
                     } else {
                         // Growth request: debounce to coalesce rapid
@@ -543,7 +546,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+                            apply_window_height(&window, webview.as_ref(), h);
                         }
                     }
                 }
@@ -1281,6 +1284,27 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     };
     if let Err(_e) = window_vibrancy::apply_acrylic(window, tint) {
         crate::logging::info("[nex] acrylic unavailable; using opaque panel");
+    }
+}
+
+/// Keep the WebView viewport pinned to the maximum panel size so content
+/// beyond the window edge is always rasterized. Window growth then just
+/// reveals already-painted pixels — no blank webview frame, no acrylic
+/// flash; shrink requires no WebView work at all (the window clips it).
+fn keep_webview_viewport_max(webview: &WebView) {
+    use wry::dpi::{LogicalPosition, LogicalSize};
+    let _ = webview.set_bounds(wry::Rect {
+        position: LogicalPosition::new(0.0, 0.0).into(),
+        size: LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT).into(),
+    });
+}
+
+/// Resize the window and immediately re-assert the oversized WebView
+/// viewport (wry snaps it to the window size on WM_SIZE).
+fn apply_window_height(window: &Window, webview: Option<&WebView>, h: f64) {
+    window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+    if let Some(wv) = webview {
+        keep_webview_viewport_max(wv);
     }
 }
 

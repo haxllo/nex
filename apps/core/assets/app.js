@@ -30,8 +30,6 @@
   // Rows snapshot for event handlers on reused nodes (they must read the
   // CURRENT row for the live index, not the row captured at creation).
   let currentRows = [];
-  // Coalesces small-grow/shrink resize IPC during typing bursts.
-  let settleTimer = null;
   let selected = 0;
   let queryEcho = ""; // last query Rust pushed back (avoid input clobber)
   let lastQuerySent = "";
@@ -519,38 +517,30 @@
   // at full height (clipped by overflow:hidden) — no DWM acrylic flash.
   // The first measurement (idle, ~109px) records the height but does NOT
   // send resize — only the transition to real content triggers expansion.
-  // Resize IPC is sent immediately — the Rust-side debounce (100ms)
-  // coalesces rapid typing requests into a single frame update.
+  // All resizes post immediate:true (host applies synchronously); the
+  // host keeps the WebView viewport oversized so reveals are pre-painted
+  // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
-  // Stable-height policy: big grows and structural transitions resize
-  // immediately (never clip new content); small grows and ALL shrinks
-  // coalesce through a settle timer so rapid typing keeps the window at
-  // its peak height — no per-keystroke resize/DWM-acrylic churn.
-  const BIG_JUMP = 70;
-  const GROW_SETTLE_MS = 120;
-  const SHRINK_SETTLE_MS = 350;
-  function applySettledHeight() {
-    const now = Math.ceil(panel.getBoundingClientRect().height);
-    if (now > 0 && now !== lastH) {
-      lastH = now;
-      post("resize", { v: now, immediate: true });
-    }
-  }
-  function measure(immediate) {
+  function measure() {
     const h = Math.ceil(panel.getBoundingClientRect().height);
-    // Shrink path: hold the current window height during typing bursts;
-    // apply the smaller height only after the settle window.
+    // Shrink path: apply immediately. The WebView viewport is pinned at
+    // max height (host keeps it oversized), so shrinking just clips
+    // already-rasterized content — no blank region, no acrylic gap.
     if (h > 0 && h < lastH) {
-      clearTimeout(settleTimer);
-      settleTimer = setTimeout(applySettledHeight, SHRINK_SETTLE_MS);
+      const prev = lastH;
+      lastH = h;
+      if (prev > 0 || !bodyEl.classList.contains("idle")) {
+        post("resize", { v: h, immediate: true });
+      }
       if (needsPainted) {
         needsPainted = false;
         requestAnimationFrame(() => { scrollToInstant(0); post("painted"); });
       }
       return;
     }
-    // Grow / equal path: existing double-rAF deferral.
+    // Grow / equal path: defer two frames so newly rendered rows are
+    // painted before the window reveals them.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
@@ -561,17 +551,7 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            const bigJump = h - prev >= BIG_JUMP;
-            if (bigJump || immediate) {
-              // Structural growth jumps bypass the settle window to avoid
-              // visible row escape on erase-then-type.
-              clearTimeout(settleTimer);
-              post("resize", { v: h, immediate: true });
-            } else {
-              // Small grow: coalesce during typing.
-              clearTimeout(settleTimer);
-              settleTimer = setTimeout(applySettledHeight, GROW_SETTLE_MS);
-            }
+            post("resize", { v: h, immediate: true });
           }
         }
         if (needsPainted) {

@@ -218,10 +218,12 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     normalize_to_square_png(img.into_rgba8())
 }
 
-/// Normalize large RGBA image down to consistent square:
-/// Lanczos-resize preserving aspect to fit within TARGET × TARGET,
-/// then center-composite onto transparent canvas. Every result row
-/// gets uniform square icon with consistent padding — Raycast look.
+/// Normalize any RGBA image to a consistent square canvas:
+/// Lanczos-resize to TARGET × TARGET (upscaling small sources,
+/// downscaling large ones), centered on a transparent canvas. Every
+/// result row gets a uniform square icon with consistent padding —
+/// Raycast look. Without the upscale, small shell extractions (e.g.
+/// Windows Settings) would render smaller than 256px sources (Spotify).
 ///
 /// Content-aware upscale for sparse glyph icons: if visible pixels
 /// fill < 35% of the source image (small glyph centered in large
@@ -304,12 +306,10 @@ fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
     }
 
     // ── Full-bleed / normal path ──
-    if w <= target && h <= target {
-        return rgba_to_png(img);
-    }
-
-    // Source larger than target → downscale to fit within target,
-    // center on transparent canvas (consistent padding).
+    // Uniform canvas: upscale small sources, downscale large ones —
+    // every row icon renders at the same CSS size no matter what size
+    // the shell extraction returned (some app icons come back small,
+    // e.g. Windows Settings, while others are 256px).
     use image::imageops::{self, FilterType};
     let resized = imageops::resize(&img, target, target, FilterType::Lanczos3);
     let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));

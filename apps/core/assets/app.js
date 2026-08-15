@@ -27,6 +27,11 @@
 
   // Local mirror of pushed state.
   let rows = [];
+  // Rows snapshot for event handlers on reused nodes (they must read the
+  // CURRENT row for the live index, not the row captured at creation).
+  let currentRows = [];
+  // Coalesces small-grow/shrink resize IPC during typing bursts.
+  let settleTimer = null;
   let selected = 0;
   let queryEcho = ""; // last query Rust pushed back (avoid input clobber)
   let lastQuerySent = "";
@@ -148,8 +153,127 @@
     if (!sel.includes(selected)) selected = sel[0];
   }
 
+  // Stable identity for a row. Includes icon path so same-title rows with
+  // different targets (e.g. two setup.exe) never collide.
+  function rowKey(r) {
+    return `${r.role || ""}|${r.kind || ""}|${r.title || ""}|${r.subtitle || ""}|${r.icon || ""}`;
+  }
+
+  function rowClassName(r, isGridView) {
+    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : (r.role === "calculator" ? "" : " row-list")) : "");
+  }
+
+  function buildSection(key, r) {
+    const li = document.createElement("li");
+    li.className = "section";
+    li.dataset.key = key;
+    li.textContent = r.title;
+    if (r.role === "status") {
+      li.style.textTransform = "none";
+      li.style.color = "var(--text-faint)";
+    }
+    return li;
+  }
+
+  // Pin/add/kind trailing node. Refreshed on reuse because pinned state can
+  // change while the row identity stays the same.
+  function appendTrailing(li, r, i) {
+    if (r.role === "quick_launch") {
+      const quickLaunchItem = quickLaunchItems.find(item => item.title === r.title);
+      if (quickLaunchItem) {
+        li.appendChild(createPinIcon(quickLaunchItem, i));
+      }
+    } else if (r.kind === "app" && r.role !== "calculator") {
+      li.appendChild(createAddIcon(r));
+    } else if (r.kind && r.role !== "calculator") {
+      const kind = document.createElement("div");
+      kind.className = "kind";
+      kind.textContent = r.kind;
+      li.appendChild(kind);
+    }
+  }
+
+  function buildRow(key, r, i, isGridView, animDelay) {
+    const li = document.createElement("li");
+    li.className = rowClassName(r, isGridView);
+    if (animDelay) li.style.animationDelay = animDelay;
+    li.setAttribute("role", "option");
+    li.dataset.key = key;
+    li.dataset.index = String(i);
+    if (i === selected) li.classList.add("selected");
+
+    if (r.role !== "calculator") {
+      if (r.kind === "folder") {
+        const img = document.createElement("img");
+        img.className = "icon";
+        img.src = folderIcon();
+        li.appendChild(img);
+      } else if (r.icon && r.kind !== "action") {
+        const img = document.createElement("img");
+        img.className = "icon";
+        img.dataset.iconPath = r.icon; // store path for patchIcons()
+        if (iconCache.has(r.icon)) {
+          img.src = iconCache.get(r.icon);
+        } else {
+          // Cold cache: blank slot, no wrong-glyph flash. patchIcons()
+          // pops the real icon in (with pop-in) once decoded.
+          img.src = BLANK_ICON;
+        }
+        // Don't add placeholder class here — patchIcons() will set
+        // src and the browser handles loading. Only onerror triggers
+        // placeholder.
+        img.onerror = () => { if (r.kind === "file") { img.src = filePlaceholderIcon(); } else { img.classList.add("placeholder"); } };
+        li.appendChild(img);
+      } else if (r.kind !== "action") {
+        const ph = document.createElement("div");
+        ph.className = "icon placeholder";
+        li.appendChild(ph);
+      }
+      // Web search row — use themed web icon
+      if (r.kind === "action" && r.title && r.title.startsWith("Search Web for")) {
+        const img = document.createElement("img");
+        img.className = "icon";
+        img.src = webIcon();
+        li.appendChild(img);
+      }
+    }
+
+    const text = document.createElement("div");
+    text.className = "text";
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = r.title;
+    text.appendChild(title);
+    if (r.subtitle) {
+      const sub = document.createElement("div");
+      sub.className = "subtitle";
+      sub.textContent = r.subtitle;
+      text.appendChild(sub);
+    }
+    li.appendChild(text);
+
+    appendTrailing(li, r, i);
+
+    // Handlers read the live index + current row so reused nodes always
+    // act on the row they currently render (not the one from creation).
+    li.addEventListener("mousemove", () => setSelected(Number(li.dataset.index), false));
+    li.addEventListener("click", () => {
+      const idx = Number(li.dataset.index);
+      setSelected(idx, false);
+      post("submit", idx);
+    });
+    li.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const idx = Number(li.dataset.index);
+      setSelected(idx, false);
+      showContextMenu(e.clientX, e.clientY, currentRows[idx]);
+    });
+    return li;
+  }
+
   function render() {
     clampSelected();
+    currentRows = rows;
     const frag = document.createDocumentFragment();
     const isGridView = list.classList.contains("grid-view");
     let animIdx = 0;
@@ -161,115 +285,57 @@
     const animating = sig !== lastRowSig;
     lastRowSig = sig;
 
+    // Index live nodes by key so unchanged rows are reused in place —
+    // no teardown, no image re-decode, no entrance re-animation.
+    const live = new Map();
+    for (const li of list.children) {
+      const k = li.dataset.key;
+      if (k && !live.has(k)) live.set(k, li);
+    }
+
+    const usedKeys = new Set();
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      if (r.role === "header") {
-        const li = document.createElement("li");
-        li.className = "section";
-        li.textContent = r.title;
-        frag.appendChild(li);
-        continue;
+      const key = rowKey(r);
+      const isSection = r.role === "header" || r.role === "status";
+      let li = null;
+      if (!usedKeys.has(key)) {
+        li = live.get(key) || null;
       }
-      if (r.role === "status") {
-        const li = document.createElement("li");
-        li.className = "section";
-        li.style.textTransform = "none";
-        li.style.color = "var(--text-faint)";
-        li.textContent = r.title;
-        frag.appendChild(li);
-        continue;
-      }
-
-      const li = document.createElement("li");
-      li.className = "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : (r.role === "calculator" ? "" : " row-list")) : "");
-      if (animating && r.role !== "status" && r.role !== "quick_launch") {
-        li.style.animationDelay = Math.min(animIdx, 8) * 7 + "ms";
-        animIdx++;
-      }
-      li.setAttribute("role", "option");
-      li.dataset.index = String(i);
-      if (i === selected) li.classList.add("selected");
-
-      if (r.role !== "calculator") {
-        if (r.kind === "folder") {
-          const img = document.createElement("img");
-          img.className = "icon";
-          img.src = folderIcon();
-          li.appendChild(img);
-        } else         if (r.icon && r.kind !== "action") {
-          const img = document.createElement("img");
-          img.className = "icon";
-          img.dataset.iconPath = r.icon; // store path for patchIcons()
-          if (iconCache.has(r.icon)) {
-            img.src = iconCache.get(r.icon);
-          } else {
-            // Cold cache: blank slot, no wrong-glyph flash. patchIcons()
-            // pops the real icon in (with pop-in) once decoded.
-            img.src = BLANK_ICON;
-          }
-          // Don't add placeholder class here — patchIcons() will set
-          // src and the browser handles loading. Only onerror triggers
-          // placeholder.
-          img.onerror = () => { if (r.kind === "file") { img.src = filePlaceholderIcon(); } else { img.classList.add("placeholder"); } };
-          li.appendChild(img);
-        } else if (r.kind !== "action") {
-          const ph = document.createElement("div");
-          ph.className = "icon placeholder";
-          li.appendChild(ph);
+      if (li) {
+        // Reuse.
+        usedKeys.add(key);
+        live.delete(key);
+        if (!isSection) {
+          // Refresh only what can change: layout class, live index,
+          // selection, and the trailing pin/add/kind node. Text and
+          // icon are identical by key — leave them untouched.
+          li.className = rowClassName(r, isGridView);
+          li.dataset.index = String(i);
+          li.classList.toggle("selected", i === selected);
+          const trailing = li.querySelector(".pin-icon, .add-icon, .kind");
+          if (trailing) trailing.remove();
+          appendTrailing(li, r, i);
         }
-        // Web search row — use themed web icon
-        if (r.kind === "action" && r.title && r.title.startsWith("Search Web for")) {
-          const img = document.createElement("img");
-          img.className = "icon";
-          img.src = webIcon();
-          li.appendChild(img);
+      } else {
+        // New row.
+        usedKeys.add(key);
+        if (isSection) {
+          li = buildSection(key, r);
+        } else {
+          const delay = (animating && r.role !== "status" && r.role !== "quick_launch")
+            ? Math.min(animIdx++, 8) * 7 + "ms"
+            : undefined;
+          li = buildRow(key, r, i, isGridView, delay);
         }
       }
-
-      const text = document.createElement("div");
-      text.className = "text";
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = r.title;
-      text.appendChild(title);
-      if (r.subtitle) {
-        const sub = document.createElement("div");
-        sub.className = "subtitle";
-        sub.textContent = r.subtitle;
-        text.appendChild(sub);
-      }
-      li.appendChild(text);
-
-      // Quick Launch row: add pin/bookmark icon
-      if (r.role === "quick_launch") {
-        const quickLaunchItem = quickLaunchItems.find(item => item.title === r.title);
-        if (quickLaunchItem) {
-          li.appendChild(createPinIcon(quickLaunchItem, i));
-        }
-      } else if (r.kind === "app" && r.role !== "calculator") {
-        // App row: add "+" icon to add to Quick Launch
-        li.appendChild(createAddIcon(r));
-      } else if (r.kind && r.role !== "calculator") {
-        const kind = document.createElement("div");
-        kind.className = "kind";
-        kind.textContent = r.kind;
-        li.appendChild(kind);
-      }
-
-      li.addEventListener("mousemove", () => setSelected(i, false));
-      li.addEventListener("click", () => {
-        setSelected(i, false);
-        post("submit", i);
-      });
-      li.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        setSelected(i, false);
-        showContextMenu(e.clientX, e.clientY, r);
-      });
       frag.appendChild(li);
     }
 
-    // Atomic swap — no flash between clearing and rebuilding.
+    // Rows that no longer exist.
+    for (const li of live.values()) li.remove();
+
+    // Atomic swap — reused nodes just move, new ones are added.
     list.replaceChildren(frag);
 
     // Rebuild row map for O(1) selection toggles.
@@ -457,20 +523,30 @@
   // coalesces rapid typing requests into a single frame update.
   let lastH = 0;
   let needsPainted = false;
+  // Stable-height policy: big grows and structural transitions resize
+  // immediately (never clip new content); small grows and ALL shrinks
+  // coalesce through a settle timer so rapid typing keeps the window at
+  // its peak height — no per-keystroke resize/DWM-acrylic churn.
+  const BIG_JUMP = 70;
+  const GROW_SETTLE_MS = 120;
+  const SHRINK_SETTLE_MS = 350;
+  function applySettledHeight() {
+    const now = Math.ceil(panel.getBoundingClientRect().height);
+    if (now > 0 && now !== lastH) {
+      lastH = now;
+      post("resize", { v: now, immediate: true });
+    }
+  }
   function measure(immediate) {
     const h = Math.ceil(panel.getBoundingClientRect().height);
-    // Shrink path: apply immediately — host applies shrink synchronously,
-    // so the 2-rAF deferral would produce a visible acrylic void flash.
+    // Shrink path: hold the current window height during typing bursts;
+    // apply the smaller height only after the settle window.
     if (h > 0 && h < lastH) {
-      const prev = lastH;
-      lastH = h;
-      if (prev > 0 || !bodyEl.classList.contains("idle")) {
-        post("resize", { v: h, immediate: true });
-      }
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(applySettledHeight, SHRINK_SETTLE_MS);
       if (needsPainted) {
         needsPainted = false;
-        scrollToInstant(0);
-        post("painted");
+        requestAnimationFrame(() => { scrollToInstant(0); post("painted"); });
       }
       return;
     }
@@ -485,13 +561,17 @@
           // (no rows, search bar only). If content is already showing
           // (quick launch items), send resize immediately.
           if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            // Rust-side debounce (100ms) coalesces rapid typing resize
-            // requests — no need for a JS-side debounce here.
-            // immediate flag skips the growth debounce on the Rust side.
-            // Structural growth jumps (>= 70px, ~1.5 rows) also bypass
-            // the debounce to avoid visible row escape on erase-then-type.
-            const bigJump = h - prev >= 70;
-            post("resize", { v: h, immediate: !!immediate || bigJump });
+            const bigJump = h - prev >= BIG_JUMP;
+            if (bigJump || immediate) {
+              // Structural growth jumps bypass the settle window to avoid
+              // visible row escape on erase-then-type.
+              clearTimeout(settleTimer);
+              post("resize", { v: h, immediate: true });
+            } else {
+              // Small grow: coalesce during typing.
+              clearTimeout(settleTimer);
+              settleTimer = setTimeout(applySettledHeight, GROW_SETTLE_MS);
+            }
           }
         }
         if (needsPainted) {

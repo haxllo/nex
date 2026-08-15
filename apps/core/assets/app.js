@@ -652,20 +652,6 @@
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
 
-    // Hide quick-launch rows instantly when typing a non-empty query.
-    // Prevents results from leaking into the QL area while the Rust
-    // state push + resize is in flight.
-    if (raw && !inCommandMode) {
-      let didHide = false;
-      for (const li of list.querySelectorAll(".quick-launch")) {
-        if (li.style.display !== "none") {
-          li.style.display = "none";
-          didHide = true;
-        }
-      }
-      if (didHide) measure();
-    }
-
     const now = performance.now();
     const delay = (now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;

@@ -52,8 +52,34 @@ pub(crate) fn detect_system_theme() -> Theme {
     }
 }
 
-/// Windows accent color (DWM `AccentColor`, DWORD ABGR) as `#RRGGBB`.
+/// Windows accent color as `#RRGGBB`.
+///
+/// Prefers `DwmGetColorizationColor` (always live — tracks both custom
+/// picks and auto/wallpaper-derived accents) and falls back to the
+/// `AccentColor` registry DWORD (ABGR). The registry key keeps the last
+/// *custom* color and goes stale when the accent is set to Automatic,
+/// which is why the DWM API takes priority.
 pub(crate) fn detect_accent_color() -> Option<String> {
+    let mut colorization: u32 = 0;
+    let mut opaque: i32 = 0;
+    let status = unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmGetColorizationColor(
+            &mut colorization,
+            &mut opaque,
+        )
+    };
+    if status == 0 {
+        // ColorizationColor is 0xAARRGGBB — drop the alpha byte.
+        let r = (colorization >> 16) & 0xFF;
+        let g = (colorization >> 8) & 0xFF;
+        let b = colorization & 0xFF;
+        return Some(format!("#{r:02X}{g:02X}{b:02X}"));
+    }
+    detect_accent_color_registry()
+}
+
+/// `HKCU\Software\Microsoft\Windows\DWM\AccentColor` (DWORD ABGR) as `#RRGGBB`.
+fn detect_accent_color_registry() -> Option<String> {
     let key = to_wide("Software\\Microsoft\\Windows\\DWM");
     let value = to_wide("AccentColor");
     let mut data: u32 = 0;

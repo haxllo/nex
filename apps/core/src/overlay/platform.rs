@@ -54,12 +54,36 @@ pub(crate) fn detect_system_theme() -> Theme {
 
 /// Windows accent color as `#RRGGBB`.
 ///
-/// Prefers `DwmGetColorizationColor` (always live — tracks both custom
-/// picks and auto/wallpaper-derived accents) and falls back to the
-/// `AccentColor` registry DWORD (ABGR). The registry key keeps the last
-/// *custom* color and goes stale when the accent is set to Automatic,
-/// which is why the DWM API takes priority.
+/// Sources, in order of authority:
+///   1. `HKCU\...\CurrentVersion\Explorer\Accent\StartColorMenu` — the
+///      actual accent used by the shell; tracks **both** custom picks and
+///      auto/wallpaper-derived accents, so it never goes stale.
+///   2. `HKCU\Software\Microsoft\Windows\DWM\AccentColor` — same color,
+///      written on custom picks and auto re-derives.
+///   3. `DwmGetColorizationColor` — the Aero colorization tint, which is
+///      *not* the accent (it gets blended/grayed on Automatic); last
+///      resort only.
+/// All three DWORDs are stored in **RGBA** byte order (red in the lowest
+/// byte) — the common "ABGR" reading flips red/blue and produces a
+/// complementary hue. Raw values are logged for diagnostics.
 pub(crate) fn detect_accent_color() -> Option<String> {
+    let start_menu = detect_registry_dword(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+        "StartColorMenu",
+    )
+    .map(rgba_to_rgb);
+    let registry = detect_registry_dword("Software\\Microsoft\\Windows\\DWM", "AccentColor")
+        .map(rgba_to_rgb);
+    let colorization = detect_accent_colorization();
+    crate::logging::info(&format!(
+        "[nex] accent detect: startMenu={:?} reg={:?} colorization={:?}",
+        start_menu, registry, colorization
+    ));
+    start_menu.or(registry).or(colorization)
+}
+
+/// `DwmGetColorizationColor` (0xAARRGGBB) as `#RRGGBB`, alpha stripped.
+fn detect_accent_colorization() -> Option<String> {
     let mut colorization: u32 = 0;
     let mut opaque: i32 = 0;
     let status = unsafe {
@@ -68,20 +92,19 @@ pub(crate) fn detect_accent_color() -> Option<String> {
             &mut opaque,
         )
     };
-    if status == 0 {
-        // ColorizationColor is 0xAARRGGBB — drop the alpha byte.
-        let r = (colorization >> 16) & 0xFF;
-        let g = (colorization >> 8) & 0xFF;
-        let b = colorization & 0xFF;
-        return Some(format!("#{r:02X}{g:02X}{b:02X}"));
+    if status != 0 {
+        return None;
     }
-    detect_accent_color_registry()
+    let r = (colorization >> 16) & 0xFF;
+    let g = (colorization >> 8) & 0xFF;
+    let b = colorization & 0xFF;
+    Some(format!("#{r:02X}{g:02X}{b:02X}"))
 }
 
-/// `HKCU\Software\Microsoft\Windows\DWM\AccentColor` (DWORD ABGR) as `#RRGGBB`.
-fn detect_accent_color_registry() -> Option<String> {
-    let key = to_wide("Software\\Microsoft\\Windows\\DWM");
-    let value = to_wide("AccentColor");
+/// Read a REG_DWORD under `HKCU\<key_path>\<value_name>`.
+fn detect_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
+    let key = to_wide(key_path);
+    let value = to_wide(value_name);
     let mut data: u32 = 0;
     let mut data_size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
@@ -98,11 +121,15 @@ fn detect_accent_color_registry() -> Option<String> {
     if status != 0 {
         return None;
     }
-    // ABGR → RRGGBB.
-    let b = data & 0xFF;
+    Some(data)
+}
+
+/// RGBA DWORD → `#RRGGBB` (red in lowest byte).
+fn rgba_to_rgb(data: u32) -> String {
+    let r = data & 0xFF;
     let g = (data >> 8) & 0xFF;
-    let r = (data >> 16) & 0xFF;
-    Some(format!("#{r:02X}{g:02X}{b:02X}"))
+    let b = (data >> 16) & 0xFF;
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 pub fn is_instance_window_present() -> bool {

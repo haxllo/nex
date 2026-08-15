@@ -398,6 +398,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
+                    // Re-detect platform look on every show — accent color and
+                    // theme may have changed in Windows settings while nex was
+                    // hidden. The window is still invisible here, so re-applying
+                    // the acrylic tint cannot flicker.
+                    if let Ok(mut s) = state.lock() {
+                        s.accent_color = crate::overlay::platform::detect_accent_color();
+                        s.theme = crate::overlay::platform::detect_system_theme();
+                    }
+                    apply_window_chrome(&window, &state);
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);

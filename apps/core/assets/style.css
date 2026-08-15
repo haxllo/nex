@@ -161,6 +161,14 @@ body {
   overflow-y: auto;
   padding: 0 8px 6px;
   scroll-behavior: smooth;
+  /* Modern scrollbar API: thumb fades out while idle (class toggled in
+     JS); Chromium WebView2 supports scrollbar-color + transitions. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  transition: scrollbar-color 300ms ease;
+}
+#list.scroll-idle {
+  scrollbar-color: transparent transparent;
 }
 #list.grid-view {
   display: grid;
@@ -198,6 +206,11 @@ body {
 .row:hover {
   background: var(--hover);
 }
+/* Quick Launch rows are persistent chrome (idle state) — they must not
+   replay the entrance animation on every show. */
+.row.quick-launch {
+  animation: none;
+}
 
 /* Entrance stagger — rows fade+rise in; re-animation gated in JS. */
 @keyframes nexRowIn {
@@ -213,9 +226,26 @@ body {
 .section {
   animation: nexRowIn 150ms ease-out backwards;
 }
+/* Icon pop-in — placeholder → real icon swap (gated in JS on src change). */
+@keyframes nexIconIn {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+img.icon.icon-pop {
+  animation: nexIconIn 120ms ease-out;
+}
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section {
+    animation: none;
+  }
+  img.icon.icon-pop {
     animation: none;
   }
 }
@@ -370,6 +400,7 @@ html[data-theme="light"] .row.selected .title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
 }
 .grid-view .row .subtitle {
   display: none;

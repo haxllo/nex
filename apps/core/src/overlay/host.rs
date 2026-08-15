@@ -102,6 +102,8 @@ pub(crate) enum UiCommand {
     ApplyIcons,
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
+    /// Only the status text changed — send a lightweight update.
+    ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
     Show,
     /// Focus the search input without showing/reshowing the overlay.
@@ -308,6 +310,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         push_state(&webview, &state, &icon_cache, false);
+                    }
+                }
+                UiCommand::ApplyStatus => {
+                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        push_status(&webview, &state);
                     }
                 }
                 UiCommand::ApplyIcons => {
@@ -1108,6 +1115,20 @@ fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &
 fn push_selected(webview: &Option<WebView>, selected: usize) {
     let Some(wv) = webview else { return };
     let json = serde_json::json!({ "selected": selected }).to_string();
+    post_json(&wv, &json);
+}
+
+/// Push only a status text change (lightweight, no full re-render).
+/// Mirrors push_selected: the JS side detects the missing `rows` field
+/// and applies the status without rebuilding the result list.
+fn push_status(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>) {
+    let Some(wv) = webview else { return };
+    let status = state
+        .lock()
+        .ok()
+        .map(|s| s.status_text.clone())
+        .unwrap_or_default();
+    let json = serde_json::json!({ "status": status }).to_string();
     post_json(&wv, &json);
 }
 

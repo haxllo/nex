@@ -272,6 +272,14 @@ impl NativeOverlayShell {
 
     pub fn set_status_text(&self, message: &str) {
         self.with_state(|s| s.status_text = message.to_string());
+        self.post(UiCommand::ApplyStatus);
+    }
+
+    /// Set status text AND re-push the full state so the page re-renders
+    /// (used when the status accompanies a visible UI change, e.g. pin
+    /// toggles the bookmark icon on app rows).
+    pub fn set_status_text_and_refresh(&self, message: &str) {
+        self.with_state(|s| s.status_text = message.to_string());
         self.post(UiCommand::Apply);
     }
 

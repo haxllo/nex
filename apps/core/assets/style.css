@@ -554,7 +554,7 @@ html[data-theme="light"] .row.selected .title {
   align-items: center;
   height: 40px;
   margin-top: 8px;
-  padding: 8px var(--pad-x) 0;
+  padding: 0 var(--pad-x);
   border-top: 1px solid var(--divider);
   font-size: 11px;
   color: var(--text-faint);

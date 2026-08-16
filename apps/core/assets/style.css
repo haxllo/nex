@@ -240,12 +240,22 @@ body {
 img.icon.icon-pop {
   animation: nexIconIn 120ms ease-out;
 }
+/* Power dropup entrance — fades + rises from the button. */
+@keyframes nexPowerMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section {
     animation: none;
   }
   img.icon.icon-pop {
+    animation: none;
+  }
+  #power-menu {
     animation: none;
   }
 }
@@ -641,6 +651,8 @@ html[data-theme="light"] .row.selected .title {
   border: 1px solid var(--border);
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
   overflow: hidden;
+  transform-origin: bottom right;
+  animation: nexPowerMenuIn 140ms ease-out;
 }
 #power-menu button {
   display: block;

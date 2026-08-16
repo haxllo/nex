@@ -186,6 +186,12 @@ impl IconCache {
 fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
     let path_str = path.to_string_lossy();
 
+    // ms-settings:{uri} — synthetic Settings page icons: render the
+    // page's Segoe Fluent glyph instead of extracting a shell icon.
+    if let Some(uri) = path_str.strip_prefix("ms-settings:") {
+        return settings_glyph_png(uri);
+    }
+
     // .png files don't have embedded Windows icons; decode directly.
     if path_str.to_ascii_lowercase().ends_with(".png") {
         if let Ok(bytes) = std::fs::read(path) {
@@ -401,6 +407,133 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, s
 
 #[cfg(not(target_os = "windows"))]
 fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void, _size: i32) -> Option<Vec<u8>> {
+    None
+}
+
+/// Render a Settings page glyph (`ms-settings:{uri}`) as a white
+/// Segoe Fluent Icons / Segoe MDL2 Assets glyph on a transparent
+/// 128px canvas, normalized to PNG. The overlay tints it per theme
+/// via CSS (`img.icon.glyph`).
+#[cfg(target_os = "windows")]
+fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, CreateDIBSection, SelectObject, DeleteObject,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        CreateFontW, DrawTextW, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER,
+        SetBkMode, TRANSPARENT, GetTextFaceW, SetTextColor,
+    };
+
+    const SIZE: i32 = 128;
+    let glyph: u16 = crate::settings_catalog::settings_glyph(uri);
+    let text = [glyph, 0u16];
+
+    unsafe {
+        let hdc = CreateCompatibleDC(std::ptr::null_mut());
+        if hdc.is_null() { return None; }
+
+        let mut header: BITMAPINFOHEADER = std::mem::zeroed();
+        header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        header.biWidth = SIZE;
+        header.biHeight = -SIZE; // top-down
+        header.biPlanes = 1;
+        header.biBitCount = 32;
+        header.biCompression = BI_RGB;
+
+        let mut bmpinfo: BITMAPINFO = std::mem::zeroed();
+        bmpinfo.bmiHeader = header;
+
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbmp = CreateDIBSection(
+            hdc,
+            &bmpinfo,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if hbmp.is_null() || bits.is_null() {
+            DeleteDC(hdc);
+            return None;
+        }
+        let old_bmp = SelectObject(hdc, hbmp as _);
+        let pixel_count = (SIZE * SIZE) as usize;
+        std::ptr::write_bytes(bits, 0, pixel_count * 4);
+
+        // Segoe Fluent Icons on Win11; Segoe MDL2 Assets on Win10.
+        let mut font_name = "Segoe Fluent Icons".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let mut hfont = CreateFontW(
+            -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, font_name.as_ptr(),
+        );
+        if !hfont.is_null() {
+            // Confirm the face actually resolved (missing font → GDI
+            // substitutes and the glyph renders as a tofu box).
+            let mut face = [0u16; 64];
+            let old_font = SelectObject(hdc, hfont as _);
+            let face_len = GetTextFaceW(hdc, face.len() as i32, face.as_mut_ptr());
+            let resolved = face_len > 0
+                && face[..face_len as usize]
+                    == "Segoe Fluent Icons".encode_utf16().collect::<Vec<u16>>()[..];
+            SelectObject(hdc, old_font);
+            if !resolved {
+                DeleteObject(hfont as _);
+                hfont = std::ptr::null_mut();
+            }
+        }
+        if hfont.is_null() {
+            font_name = "Segoe MDL2 Assets".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+            hfont = CreateFontW(
+                -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, font_name.as_ptr(),
+            );
+        }
+        if hfont.is_null() {
+            SelectObject(hdc, old_bmp);
+            DeleteObject(hbmp as _);
+            DeleteDC(hdc);
+            return None;
+        }
+
+        let old_font = SelectObject(hdc, hfont as _);
+        SetBkMode(hdc, TRANSPARENT as i32);
+        let rect = windows_sys::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: SIZE,
+            bottom: SIZE,
+        };
+        // White glyph; the web layer tints per theme.
+        SetTextColor(hdc, 0x00FF_FFFF);
+        let _ = DrawTextW(
+            hdc,
+            text.as_ptr(),
+            -1,
+            &rect as *const _ as *mut _,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+        );
+
+        SelectObject(hdc, old_font);
+        SelectObject(hdc, old_bmp);
+
+        // BGRA → RGBA.
+        let pixels = std::slice::from_raw_parts(bits as *const u8, pixel_count * 4);
+        let mut rgba = vec![0u8; pixel_count * 4];
+        for (i, chunk) in pixels.chunks_exact(4).enumerate() {
+            rgba[i * 4] = chunk[2];
+            rgba[i * 4 + 1] = chunk[1];
+            rgba[i * 4 + 2] = chunk[0];
+            rgba[i * 4 + 3] = chunk[3];
+        }
+
+        DeleteObject(hfont as _);
+        DeleteObject(hbmp as _);
+        DeleteDC(hdc);
+
+        let img = image::RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)?;
+        normalize_to_square_png(img)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn settings_glyph_png(_uri: &str) -> Option<Vec<u8>> {
     None
 }
 

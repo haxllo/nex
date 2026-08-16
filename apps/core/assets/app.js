@@ -208,7 +208,7 @@
         li.appendChild(img);
       } else if (r.icon && r.kind !== "action") {
         const img = document.createElement("img");
-        img.className = "icon";
+        img.className = "icon" + (r.kind === "settings" ? " glyph" : "");
         img.dataset.iconPath = r.icon; // store path for patchIcons()
         if (iconCache.has(r.icon)) {
           img.src = iconCache.get(r.icon);

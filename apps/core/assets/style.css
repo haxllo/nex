@@ -264,7 +264,6 @@ img.icon.icon-pop {
    so content-driven heights made rows vary: square vs tall). 112px =
    18 padding + 36 icon + 6 gap + 31 title + 1 gap + 12 subtitle. */
 .grid-view .row.row-grid {
-  background: var(--icon-bg);
   border-radius: 10px;
   border: 1px solid transparent;
   /* Fixed height: 18 padding + 36 icon + 6 gap + 31 two-line title. */

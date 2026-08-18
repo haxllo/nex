@@ -560,8 +560,10 @@ impl RuntimeWorker {
         let pinned = &self.runtime_config.quick_launch.pinned;
         log_info(&format!("[nex] quick_launch loading pinned={:?}", pinned));
 
-        // Query the database for Quick Launch items
-        if let Ok(guard) = self.service.read() {
+        // Query the database for Quick Launch items. Use try_read so the
+        // worker never blocks behind the background indexer; on contention
+        // the load is retried by the tick when the lock frees up.
+        if let Ok(guard) = self.service.try_read() {
             let db = guard.db_ref();
             match crate::index_store::get_quick_launch_items(&db, pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
@@ -589,6 +591,10 @@ impl RuntimeWorker {
                     self.quick_launch_loaded = true;
                 }
             }
+        } else {
+            // Indexer busy — leave quick_launch_loaded false; the tick
+            // retries the load once the service lock is free.
+            log_info("[nex] quick_launch load deferred (index busy)");
         }
     }
 
@@ -605,7 +611,7 @@ impl RuntimeWorker {
         let pinned = self.runtime_config.quick_launch.pinned.clone();
 
         // Query the database for Quick Launch items
-        if let Ok(guard) = self.service.read() {
+        if let Ok(guard) = self.service.try_read() {
             let db = guard.db_ref();
             match crate::index_store::get_quick_launch_items(&db, &pinned, max_items, self.runtime_config.quick_launch.auto_fill) {
                 Ok(items) => {
@@ -961,7 +967,7 @@ impl RuntimeWorker {
         }
 
         if self.last_memory_log.elapsed() >= Duration::from_secs(30) {
-            if let Ok(guard) = self.service.read() {
+            if let Ok(guard) = self.service.try_read() {
                 guard.log_memory_stats();
             }
             self.last_memory_log = Instant::now();
@@ -1166,6 +1172,20 @@ impl RuntimeWorker {
                 &mut self.last_sent_generation,
             );
         }
+
+        // Retry a quick-launch load deferred by a busy indexer. The show
+        // path opens the overlay immediately even when the service lock is
+        // contended, so fill the idle view as soon as the lock frees.
+        if !self.quick_launch_loaded
+            && self.runtime_config.quick_launch.enabled
+            && self.overlay.is_visible()
+            && self.overlay.query_text().trim().is_empty()
+        {
+            self.load_quick_launch_items();
+            if self.quick_launch_loaded {
+                self.show_idle_or_quick_launch();
+            }
+        }
         match event {
             OverlayEvent::Hotkey(_) => {
                 // Debounce: skip if we just processed a hotkey within 50ms.
@@ -1226,10 +1246,13 @@ impl RuntimeWorker {
                         // overlay.  The user can't type until the window appears
                         // (~160ms animation) and the IPC channel is live, so
                         // the ~50ms warmup finishes well before the first char.
-                        // Uses blocking read() — a background indexer holding
-                        // the write lock is rare at show time.
-                        if let Ok(guard) = self.service.read() {
-                            guard.warm_search_cache();
+                        // Uses try_read() — if the background indexer holds the
+                        // write lock (e.g. first-run rebuild), skip the warmup
+                        // and show immediately; the query path re-warms on the
+                        // first keystroke.
+                        match self.service.try_read() {
+                            Ok(guard) => guard.warm_search_cache(),
+                            Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
                         }
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,

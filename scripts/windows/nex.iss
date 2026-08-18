@@ -347,6 +347,26 @@ begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  // All-users installs run elevated, so pre-create the elevated helper
+  // task here — nex then never needs a UAC prompt on first run. Mirrors
+  // the task nex builds itself (past one-shot trigger + on-demand start,
+  // HighestAvailable run level). Current-user installs are not elevated,
+  // so they keep nex's first-run creation (prompt at the first hotkey).
+  if (CurStep = ssPostInstall) and IsAdminInstallMode then
+    Exec(
+      ExpandConstant('{sys}\schtasks.exe'),
+      '/create /tn NexHelperV2 /tr ""{app}\bin\NexHelper.exe"" --config ""{userappdata}\Nex\helper-config.json"" /sc once /st 23:59 /rl HIGHEST /f',
+      '',
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+end;
+
 procedure InitializeUninstallWizard();
 begin
   // Opt-in checkbox on the uninstall welcome page — user data is

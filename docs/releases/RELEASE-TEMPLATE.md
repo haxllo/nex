@@ -9,7 +9,7 @@
 3. Work the changelog from the commit list + issue list; if a commit fixes a user-visible bug, it belongs under Bug Fixes, not only in the Commit Log.
 4. Binary links must match `{VER}` exactly — build artifacts first, verify names exist in `artifacts/windows/`.
 
-**Voice (IMPORTANT):** These notes are for one person — the author — and anyone curious. Write like you're explaining to a friend, not like a corporate changelog:
+**Voice (IMPORTANT):** These notes are for readers — anyone who picks up the release page: future us, contributors, and curious people checking what changed. Write like you're explaining to a smart friend, not like a corporate changelog:
 - No "User-Reported Issues" section, no "user" wording — it's "what we fixed", "what changed", "we found that..."
 - Explain *what happened and why it mattered*, not just the technical fix. Say "pressing the hotkey used to stall until the index finished" instead of "blocking read on the service lock was replaced with try_read".
 - Keep technical terms only when there's no plain way to say it (e.g. "search index" is fine, "tantivy" is not; "web engine" instead of "WebView2 environment").

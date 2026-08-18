@@ -24,14 +24,12 @@ pub fn settings_page_items() -> Vec<SearchItem> {
         .iter()
         .map(|page| {
             let path = format!("ms-settings:{}", page.uri);
-            let mut item = SearchItem::new(
+            SearchItem::new(
                 &format!("settings:{}", page.uri),
                 "settings",
                 page.title,
                 &path,
-            );
-            item = item.with_subtitle("Windows settings");
-            item
+            )
         })
         .collect()
 }

@@ -344,6 +344,14 @@ img.icon.icon-pop {
   height: 36px;
   border-radius: 8px;
 }
+/* Settings-page glyph icons render white; dim in dark theme to match
+   --text, darken to near-text in light theme. */
+img.icon.glyph {
+  filter: brightness(0.95);
+}
+html[data-theme="light"] img.icon.glyph {
+  filter: brightness(0.2);
+}
 .row .icon.placeholder {
   display: grid;
   place-items: center;

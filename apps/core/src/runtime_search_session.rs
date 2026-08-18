@@ -109,10 +109,12 @@ pub(crate) fn search_overlay_results_with_session(
     .min(seed_cap);
     let short_query_app_bias =
         should_use_short_query_app_mode(parsed_query, &filter, &normalized_query);
-    let mut indexed_filter = filter.clone();
-    if short_query_app_bias {
-        indexed_filter.mode = crate::config::SearchMode::Apps;
-    }
+    // Short queries (<= 2 chars) still search the FULL indexed pool —
+    // files, folders and Settings pages included. Apps stay on top via
+    // the app-intent bonus in ranking. The bias flag only suppresses
+    // noisy plugin-provider, clipboard and creation affordances, and
+    // enables the indexed prefix cache.
+    let indexed_filter = filter.clone();
 
     let search_started = Instant::now();
     let mut merged = Vec::new();

@@ -23,13 +23,17 @@ pub fn settings_page_items() -> Vec<SearchItem> {
     SETTINGS_PAGES
         .iter()
         .map(|page| {
-            let path = format!("ms-settings:{}", page.uri);
-            SearchItem::new(
-                &format!("settings:{}", page.uri),
-                "settings",
-                page.title,
-                &path,
-            )
+            // "sysdm" is a Control Panel dialog (no ms-settings: page);
+            // everything else is an ms-settings:{uri} launch protocol.
+            let (path, id) = if page.uri == "sysdm" {
+                ("sysdm.cpl".to_string(), "settings:sysdm".to_string())
+            } else {
+                (
+                    format!("ms-settings:{}", page.uri),
+                    format!("settings:{}", page.uri),
+                )
+            };
+            SearchItem::new(&id, "settings", page.title, &path)
         })
         .collect()
 }
@@ -107,6 +111,58 @@ pub const SETTINGS_PAGES: &[SettingsPage] = &[
     SettingsPage { title: "Windows Update", uri: "windowsupdate", glyph: 0xE895 },
     SettingsPage { title: "Search", uri: "search", glyph: 0xE721 },
     SettingsPage { title: "Search permissions", uri: "search-permissions", glyph: 0xE721 },
+    SettingsPage { title: "Advanced display", uri: "display-advanced", glyph: 0xE7F4 },
+    SettingsPage { title: "Graphics", uri: "display-advancedgraphics", glyph: 0xE7F4 },
+    SettingsPage { title: "Recovery", uri: "recovery", glyph: 0xE72C },
+    SettingsPage { title: "Activation", uri: "activation", glyph: 0xE713 },
+    SettingsPage { title: "Storage Sense", uri: "storagesense", glyph: 0xE74E },
+    SettingsPage { title: "Troubleshoot", uri: "troubleshoot", glyph: 0xE90F },
+    SettingsPage { title: "Cameras", uri: "cameras", glyph: 0xE77D },
+    SettingsPage { title: "AutoPlay", uri: "devices-autoplay", glyph: 0xE74E },
+    SettingsPage { title: "Advanced network settings", uri: "network-advancedsettings", glyph: 0xE701 },
+    SettingsPage { title: "Lock screen", uri: "personalization-lockscreen", glyph: 0xE72E },
+    SettingsPage { title: "Themes", uri: "personalization-themes", glyph: 0xE790 },
+    SettingsPage { title: "Fonts", uri: "personalization-fonts", glyph: 0xE8D2 },
+    SettingsPage { title: "Device use", uri: "personalization-devices", glyph: 0xE713 },
+    SettingsPage { title: "Taskbar items", uri: "personalization-taskbar-items", glyph: 0xE771 },
+    SettingsPage { title: "System tray", uri: "personalization-taskbar-systemtray", glyph: 0xE771 },
+    SettingsPage { title: "Installed apps", uri: "apps-installedapps", glyph: 0xE7C4 },
+    SettingsPage { title: "Advanced app settings", uri: "apps-advancedsettings", glyph: 0xE713 },
+    SettingsPage { title: "Websites", uri: "apps-websites", glyph: 0xE774 },
+    SettingsPage { title: "Video playback", uri: "apps-videoplayback", glyph: 0xE714 },
+    SettingsPage { title: "Email & accounts", uri: "emailandaccounts", glyph: 0xE715 },
+    SettingsPage { title: "Windows backup", uri: "accounts-backup", glyph: 0xE713 },
+    SettingsPage { title: "Other users", uri: "otherusers", glyph: 0xE716 },
+    SettingsPage { title: "Pen & Windows Ink", uri: "handwriting", glyph: 0xE70F },
+    SettingsPage { title: "Speech", uri: "speech", glyph: 0xE720 },
+    SettingsPage { title: "Voice activation", uri: "voiceactivation", glyph: 0xE720 },
+    SettingsPage { title: "Captures", uri: "gaming-gamedvr", glyph: 0xE714 },
+    SettingsPage { title: "Game Mode", uri: "gaming-gamemode", glyph: 0xE7FC },
+    SettingsPage { title: "Xbox networking", uri: "gaming-xboxnetwork", glyph: 0xE701 },
+    SettingsPage { title: "Narrator", uri: "accessibility-narrator", glyph: 0xE713 },
+    SettingsPage { title: "Eye control", uri: "accessibility-eyecontrol", glyph: 0xE713 },
+    SettingsPage { title: "Visual effects", uri: "accessibility-visualeffects", glyph: 0xE790 },
+    SettingsPage { title: "Text cursor", uri: "accessibility-textcursor", glyph: 0xE713 },
+    SettingsPage { title: "Color filters", uri: "accessibility-colorfilters", glyph: 0xE790 },
+    SettingsPage { title: "Contrast themes", uri: "accessibility-contrast", glyph: 0xE7B8 },
+    SettingsPage { title: "Live captions", uri: "accessibility-livecaptions", glyph: 0xE8C9 },
+    SettingsPage { title: "Voice access", uri: "accessibility-voiceaccess", glyph: 0xE720 },
+    SettingsPage { title: "General privacy", uri: "privacy-general", glyph: 0xE713 },
+    SettingsPage { title: "Location", uri: "privacy-location", glyph: 0xE81D },
+    SettingsPage { title: "Notifications privacy", uri: "privacy-notifications", glyph: 0xE7C4 },
+    SettingsPage { title: "Speech privacy", uri: "privacy-speechtyping", glyph: 0xE720 },
+    SettingsPage { title: "Activity history", uri: "privacy-activitieshistory", glyph: 0xE81C },
+    SettingsPage { title: "Documents", uri: "privacy-documents", glyph: 0xE8A5 },
+    SettingsPage { title: "Pictures", uri: "privacy-pictures", glyph: 0xEB9F },
+    SettingsPage { title: "Videos", uri: "privacy-videos", glyph: 0xE714 },
+    SettingsPage { title: "Diagnostics & feedback", uri: "privacy-feedback", glyph: 0xE713 },
+    SettingsPage { title: "Windows Security", uri: "windowsdefender", glyph: 0xE740 },
+    SettingsPage { title: "Optional features", uri: "optionalfeatures", glyph: 0xE713 },
+    SettingsPage { title: "For developers", uri: "developer", glyph: 0xE713 },
+    SettingsPage { title: "Advanced options", uri: "windowsupdate-settings", glyph: 0xE895 },
+    SettingsPage { title: "Optional updates", uri: "windowsupdate-optionalupdates", glyph: 0xE895 },
+    SettingsPage { title: "Update history", uri: "windowsupdate-history", glyph: 0xE81C },
+    SettingsPage { title: "Advanced system settings", uri: "sysdm", glyph: 0xE713 },
 ];
 
 #[cfg(test)]
@@ -119,7 +175,9 @@ mod tests {
         assert!(!items.is_empty());
         for item in &items {
             assert!(item.kind == "settings");
-            assert!(item.path.starts_with("ms-settings:"));
+            let is_ms_settings = item.path.starts_with("ms-settings:");
+            let is_sysdm = item.path == "sysdm.cpl";
+            assert!(is_ms_settings || is_sysdm, "unexpected path {}", item.path);
             assert!(item.id.starts_with("settings:"));
             assert!(!item.title.is_empty());
         }

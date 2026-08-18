@@ -24,7 +24,6 @@ const MAX_LEXICAL_SIGNAL_BOOST: i64 = 520;
 
 const APP_INTENT_SHORT_QUERY_BONUS: i64 = 320;
 const APP_INTENT_MEDIUM_QUERY_BONUS: i64 = 160;
-const NON_APP_SHORT_QUERY_PENALTY: i64 = 120;
 
 const TOP_HIT_CONFIDENCE_DELTA_SHORT: i64 = 3_000;
 const TOP_HIT_CONFIDENCE_DELTA_MEDIUM: i64 = 3_000;
@@ -222,7 +221,7 @@ fn score_item_fast(
         score_text(&title_for_match, normalized_query)?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), SearchMode::All);
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
     let source_bonus = source_bonus(item);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
     let frequency_bonus = frequency_bonus(item.use_count);
@@ -300,7 +299,7 @@ fn score_item(
         })?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
-    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len(), filter.mode);
+    let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
     let source_bonus = source_bonus(item);
     let mode_bonus = mode_bonus(item, filter.mode);
     let recency_bonus = recency_bonus(item.last_accessed_epoch_secs, now_epoch_secs);
@@ -550,7 +549,6 @@ fn app_intent_bonus(
     item: &SearchItem,
     app_intent_query: bool,
     normalized_query_len: usize,
-    mode: SearchMode,
 ) -> i64 {
     if !app_intent_query || normalized_query_len == 0 {
         return 0;
@@ -564,11 +562,6 @@ fn app_intent_bonus(
         } else {
             0
         }
-    } else if (item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder"))
-        && normalized_query_len <= 2
-        && matches!(mode, SearchMode::Apps)
-    {
-        -NON_APP_SHORT_QUERY_PENALTY
     } else {
         0
     }

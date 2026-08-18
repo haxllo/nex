@@ -189,7 +189,12 @@ fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
     // ms-settings:{uri} — synthetic Settings page icons: render the
     // page's Segoe Fluent glyph instead of extracting a shell icon.
     if let Some(uri) = path_str.strip_prefix("ms-settings:") {
-        return settings_glyph_png(uri);
+        let png = settings_glyph_png(uri);
+        crate::logging::info(&format!(
+            "[nex] settings icon: uri={uri} ok={}",
+            png.is_some()
+        ));
+        return png;
     }
 
     // .png files don't have embedded Windows icons; decode directly.
@@ -426,10 +431,14 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
     const SIZE: i32 = 128;
     let glyph: u16 = crate::settings_catalog::settings_glyph(uri);
     let text = [glyph, 0u16];
+    let fail = |msg: &str| {
+        crate::logging::warn(&format!("[nex] settings glyph '{uri}' U+{glyph:04X}: {msg}"));
+        None
+    };
 
     unsafe {
         let hdc = CreateCompatibleDC(std::ptr::null_mut());
-        if hdc.is_null() { return None; }
+        if hdc.is_null() { return fail("CreateCompatibleDC failed"); }
 
         let mut header: BITMAPINFOHEADER = std::mem::zeroed();
         header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -453,7 +462,7 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         );
         if hbmp.is_null() || bits.is_null() {
             DeleteDC(hdc);
-            return None;
+            return fail("CreateDIBSection failed");
         }
         let old_bmp = SelectObject(hdc, hbmp as _);
         let pixel_count = (SIZE * SIZE) as usize;
@@ -489,7 +498,7 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
             SelectObject(hdc, old_bmp);
             DeleteObject(hbmp as _);
             DeleteDC(hdc);
-            return None;
+            return fail("no icon font available (Segoe Fluent Icons / Segoe MDL2 Assets)");
         }
 
         let old_font = SelectObject(hdc, hfont as _);
@@ -510,6 +519,20 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
         );
 
+        // GDI text into a 32bpp DIB writes RGB only — the alpha channel
+        // stays 0, which would produce a fully transparent PNG. Derive
+        // alpha from the max channel (covers grayscale AA + ClearType
+        // fringes acceptably); background pixels stay 0.
+        {
+            let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, pixel_count * 4);
+            for chunk in pixels.chunks_exact_mut(4) {
+                let r = chunk[2] as u32;
+                let g = chunk[1] as u32;
+                let b = chunk[0] as u32;
+                chunk[3] = r.max(g).max(b) as u8;
+            }
+        }
+
         SelectObject(hdc, old_font);
         SelectObject(hdc, old_bmp);
 
@@ -528,7 +551,10 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         DeleteDC(hdc);
 
         let img = image::RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)?;
-        normalize_to_square_png(img)
+        match normalize_to_square_png(img) {
+            Some(png) => Some(png),
+            None => fail("normalize_to_square_png failed"),
+        }
     }
 }
 

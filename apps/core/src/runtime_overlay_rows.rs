@@ -519,6 +519,10 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     if is_shell {
         return String::new();
     }
+    // ms-settings: URIs are launch protocols, not display paths.
+    if path.starts_with("ms-settings:") {
+        return String::new();
+    }
     abbreviate_path(path)
 }
 

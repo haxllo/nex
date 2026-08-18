@@ -51,6 +51,11 @@ static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
 static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
+/// True once the elevated helper's pipe reader is active. The in-process
+/// hook keeps running (as a warm backup that never fired anyway) but its
+/// dispatch is gated so the helper and the hook can never double-toggle.
+static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.
@@ -77,6 +82,9 @@ fn win_chord_held_via_async() -> bool {
 }
 
 pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
+    if HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return false; // helper owns detection
+    }
     let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
         Some(ctx) => ctx,
         None => return false,
@@ -137,6 +145,9 @@ pub(crate) fn set_suppress_focus_escape(suppress: bool) {
 /// WH_KEYBOARD_LL and WM_INPUT both fail to fire (e.g. Task Manager /
 /// elevated UWP windows have focus).
 pub(crate) fn is_hotkey_pressed() -> bool {
+    if HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return false; // helper owns detection
+    }
     let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
         Some(ctx) => ctx,
         None => return false,
@@ -343,7 +354,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     // --- Win key-up: fire hotkey only if no chord was detected ---
     // Chord detection clears CONSUMED_WIN_VK to 0, making this a no-op.
     // No timer thread needed — everything runs in the hook pump.
-    if ctx.target_is_win && is_keyup && !injected {
+    if ctx.target_is_win && is_keyup && !injected && !HELPER_ACTIVE.load(Ordering::SeqCst) {
         let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             crate::runtime::log_info(&format!(
@@ -400,6 +411,13 @@ unsafe extern "system" fn keyboard_hook_proc(
         });
 
         if mods_ok && extra_free {
+            if HELPER_ACTIVE.load(Ordering::SeqCst) {
+                // Helper owns detection now — do not fire; still pass through.
+                return unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                        std::ptr::null_mut(), n_code, w_param, l_param)
+                };
+            }
             if ctx.target_is_win {
                 // First Win key-down: mark active, send mask, DON'T EAT.
                 // Hotkey fires on Win key-up (no chord) to prevent race
@@ -537,14 +555,24 @@ pub(crate) struct HotkeyListener {
     inner: Option<HotkeyListenerInner>,
 }
 
-struct HotkeyListenerInner {
-    should_exit: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
-    thread_id: Arc<OnceLock<u32>>,
-    // Helper mode fields (when elevated helper is used instead of in-process hook)
-    is_helper: bool,
+/// State shared between the listener and the late helper-setup thread.
+/// The helper connects asynchronously after the in-process hook is live,
+/// so startup never blocks on PowerShell/schtasks/pipe retries.
+struct HelperState {
+    /// True once the helper pipe reader is running.
+    active: bool,
+    /// Non-zero for direct-spawn mode, 0 for scheduled-task mode.
     helper_process_handle: Option<isize>,
     pipe_reader_thread: Option<thread::JoinHandle<()>>,
+}
+
+struct HotkeyListenerInner {
+    should_exit: Arc<AtomicBool>,
+    hook_thread: Option<thread::JoinHandle<()>>,
+    thread_id: Arc<OnceLock<u32>>,
+    helper: Arc<Mutex<HelperState>>,
+    /// Late helper-setup thread (detached on drop; self-exits on shutdown).
+    helper_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HotkeyListener {
@@ -569,51 +597,7 @@ impl HotkeyListener {
         *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
 
         if try_helper {
-            // --- Try elevated helper first (handles Task Manager / elevated windows) ---
-            let helper_result = spawn_and_connect_helper(
-                target_key, target_is_win, &required_mods, hotkey_str,
-            );
-
-            match helper_result {
-                Ok((helper_handle, pipe_file)) => {
-                    logging::info("[nex] hotkey: using elevated helper for detection");
-                    let pipe_event_tx = event_tx.clone();
-                    let pipe_reader_thread = thread::Builder::new()
-                        .name("NexHelper-pipe-reader".into())
-                        .spawn(move || {
-                            use std::io::BufRead;
-                            let reader = std::io::BufReader::new(pipe_file);
-                            for line in reader.lines() {
-                                match line {
-                                    Ok(l) if l == "HOTKEY" => {
-                                        let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
-                                    }
-                                    Ok(l) if l == "SUPPRESS_ON" => {
-                                        crate::overlay::hotkey::set_suppress_focus_escape(true);
-                                    }
-                                    Ok(l) if l == "SUPPRESS_OFF" => {
-                                        crate::overlay::hotkey::set_suppress_focus_escape(false);
-                                    }
-                                    Ok(_) => {} // ignore other lines
-                                    Err(_) => break, // pipe disconnected
-                                }
-                            }
-                        })
-                        .map_err(|e| format!("failed to spawn pipe reader: {e}"))?;
-                    return Ok(Self { inner: Some(HotkeyListenerInner {
-                        should_exit,
-                        thread: None,
-                        thread_id,
-                        is_helper: true,
-                        helper_process_handle: Some(helper_handle),
-                        pipe_reader_thread: Some(pipe_reader_thread),
-                    })});
-                }
-                Err(e) => {
-                    logging::warn(&format!("[nex] helper elevation failed: {e}"));
-                    logging::info("[nex] falling back to in-process hook thread");
-                }
-            }
+            logging::info("[nex] hotkey: elevated helper setup scheduled (async)");
         } else {
             logging::info("[nex] hotkey: skipping helper, using in-process hook");
         }
@@ -792,13 +776,105 @@ impl HotkeyListener {
                 return Err("hotkey thread panicked".into());
             }
         }
-        Ok(Self { inner: Some(HotkeyListenerInner {
-            should_exit,
-            thread: Some(thread),
-            thread_id,
-            is_helper: false,
+
+        // --- Late helper setup (async) ---
+        // The in-process hook is live. Spawn the elevated-helper dance on a
+        // side thread: task check, schtasks /run, pipe connect. When the
+        // helper connects, it takes over detection (HELPER_ACTIVE) and the
+        // hook thread is asked to exit. Failing that, the hook keeps working.
+        let helper = Arc::new(Mutex::new(HelperState {
+            active: false,
             helper_process_handle: None,
             pipe_reader_thread: None,
+        }));
+        let helper_thread = if try_helper {
+            let should_exit_h = should_exit.clone();
+            let thread_id_h = thread_id.clone();
+            let helper_h = helper.clone();
+            let event_tx_h = event_tx.clone();
+            let required_mods_h = required_mods.clone();
+            let hotkey_str_h = hotkey_str.to_string();
+            thread::Builder::new()
+                .name("nex-helper-setup".into())
+                .spawn(move || {
+                    if should_exit_h.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match spawn_and_connect_helper(
+                        target_key, target_is_win, &required_mods_h, &hotkey_str_h,
+                    ) {
+                        Ok((helper_handle, pipe_file)) => {
+                            if should_exit_h.load(Ordering::SeqCst) {
+                                // Shutdown raced us — don't install, kill the helper.
+                                kill_helper_process(helper_handle);
+                                return;
+                            }
+                            logging::info("[nex] hotkey: using elevated helper for detection");
+                            let pipe_event_tx = event_tx_h;
+                            match thread::Builder::new()
+                                .name("NexHelper-pipe-reader".into())
+                                .spawn(move || {
+                                    use std::io::BufRead;
+                                    let reader = std::io::BufReader::new(pipe_file);
+                                    for line in reader.lines() {
+                                        match line {
+                                            Ok(l) if l == "HOTKEY" => {
+                                                let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+                                            }
+                                            Ok(l) if l == "SUPPRESS_ON" => {
+                                                crate::overlay::hotkey::set_suppress_focus_escape(true);
+                                            }
+                                            Ok(l) if l == "SUPPRESS_OFF" => {
+                                                crate::overlay::hotkey::set_suppress_focus_escape(false);
+                                            }
+                                            Ok(_) => {} // ignore other lines
+                                            Err(_) => break, // pipe disconnected
+                                        }
+                                    }
+                                })
+                            {
+                                Ok(pipe_reader_thread) => {
+                                    HELPER_ACTIVE.store(true, Ordering::SeqCst);
+                                    // Hook thread no longer needs to run; it is gated
+                                    // by HELPER_ACTIVE anyway, so asking it to exit
+                                    // just frees the low-level hook slots.
+                                    if let Some(&tid) = thread_id_h.get() {
+                                        post_quit_to_thread(tid);
+                                    }
+                                    if let Ok(mut st) = helper_h.lock() {
+                                        st.active = true;
+                                        st.helper_process_handle = Some(helper_handle);
+                                        st.pipe_reader_thread = Some(pipe_reader_thread);
+                                    }
+                                }
+                                Err(e) => {
+                                    logging::warn(&format!(
+                                        "[nex] failed to spawn pipe reader: {e}"
+                                    ));
+                                    kill_helper_process(helper_handle);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if !should_exit_h.load(Ordering::SeqCst) {
+                                logging::warn(&format!("[nex] helper elevation failed: {e}"));
+                                logging::info("[nex] falling back to in-process hook thread");
+                            }
+                        }
+                    }
+                })
+                .map_err(|e| format!("failed to spawn helper setup thread: {e}"))?
+                .into()
+        } else {
+            None
+        };
+
+        Ok(Self { inner: Some(HotkeyListenerInner {
+            should_exit,
+            hook_thread: Some(thread),
+            thread_id,
+            helper,
+            helper_thread,
         }) })
     }
 
@@ -814,20 +890,23 @@ impl HotkeyListener {
     pub(crate) fn is_alive(&self) -> bool {
         match &self.inner {
             Some(inner) => {
-                if inner.is_helper {
-                    // Helper mode: check pipe reader thread is alive
-                    !inner.should_exit.load(Ordering::SeqCst)
-                        && inner.pipe_reader_thread.as_ref().is_some_and(|t| !t.is_finished())
-                } else {
-                    // Hook mode: thread_id is set before the message pump
-                    // starts. If it's not set yet the thread is still in
-                    // early startup — treat as alive.
-                    if inner.thread_id.get().is_none() {
-                        return true;
-                    }
-                    !inner.should_exit.load(Ordering::SeqCst)
-                        && inner.thread.as_ref().is_some_and(|t| !t.is_finished())
+                let helper_ok = inner
+                    .helper
+                    .lock()
+                    .ok()
+                    .map(|st| !st.active || st.pipe_reader_thread.as_ref().is_some_and(|t| !t.is_finished()))
+                    .unwrap_or(true);
+                if !helper_ok {
+                    return false;
                 }
+                // Hook mode: thread_id is set before the message pump
+                // starts. If it's not set yet the thread is still in
+                // early startup — treat as alive.
+                if inner.thread_id.get().is_none() {
+                    return true;
+                }
+                !inner.should_exit.load(Ordering::SeqCst)
+                    && inner.hook_thread.as_ref().is_some_and(|t| !t.is_finished())
             }
             None => false,
         }
@@ -849,59 +928,66 @@ impl Drop for HotkeyListener {
             SHIFT_DOWN.store(false, Ordering::SeqCst);
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
             SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
+            HELPER_ACTIVE.store(false, Ordering::SeqCst);
 
-            if inner.is_helper {
-                // Helper mode: terminate helper process then drop
-                // (detach) the pipe reader thread.
-                //
-                // The pipe reader blocks on BufReader::lines() reading
-                // from the named pipe.  Terminating the helper closes
-                // its pipe end, making the next read fail -> the reader
-                // loop breaks and the thread exits on its own.
-                //
-                // For direct-spawn mode (helper_process_handle != 0) we
-                // use TerminateProcess.  For scheduled-task mode the
-                // handle is 0 (no direct process ownership), so we kill
-                // by process name — safe because nex is single-instance
-                // so killing any NexHelper.exe belongs to us.
-                let had_handle = if let Some(handle) = inner.helper_process_handle.take() {
-                    if handle != 0 {
-                        logging::info("[nex] shutdown: terminating helper process");
-                        unsafe {
-                            let h = handle as *mut core::ffi::c_void;
-                            windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
-                            windows_sys::Win32::Foundation::CloseHandle(h);
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if !had_handle {
-                    logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/F", "/IM", "NexHelper.exe"])
-                        .creation_flags(0x08000000)
-                        .output();
-                }
-                // Drop JoinHandle without joining (detaches the thread).
-                drop(inner.pipe_reader_thread.take());
-            } else {
-                // Hook mode: post WM_QUIT and detach — must not join here
-                // because Drop runs on the runtime worker thread and joining
-                // would freeze the event loop (Windows marks the process
-                // "not responding").  HOOK_CTX is cleared immediately below,
-                // so the old hook proc becomes a no-op; the thread exits
-                // naturally on WM_QUIT.
-                if let Some(&tid) = inner.thread_id.get() {
-                    logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
-                    post_quit_to_thread(tid);
-                }
-                drop(inner.thread.take());
+            // Helper mode (installed or in-flight): terminate the helper
+            // process, then drop (detach) the pipe reader thread.
+            //
+            // The pipe reader blocks on BufReader::lines() reading from
+            // the named pipe.  Terminating the helper closes its pipe
+            // end, making the next read fail -> the reader loop breaks
+            // and the thread exits on its own.
+            //
+            // For direct-spawn mode (helper_process_handle != 0) we use
+            // TerminateProcess.  For scheduled-task mode the handle is 0
+            // (no direct process ownership), so we kill by process name —
+            // safe because nex is single-instance so killing any
+            // NexHelper.exe belongs to us.
+            let handle = inner
+                .helper
+                .lock()
+                .ok()
+                .and_then(|mut st| st.helper_process_handle.take());
+            if let Some(handle) = handle {
+                kill_helper_process(handle);
             }
+            // The late setup thread may still be mid-spawn; it checks
+            // should_exit and kills the helper itself if it connects late.
+            drop(inner.helper_thread.take());
+            // Drop JoinHandle without joining (detaches the thread).
+            drop(inner.helper.lock().ok().and_then(|mut st| st.pipe_reader_thread.take()));
+
+            // Hook mode: post WM_QUIT and detach — must not join here
+            // because Drop runs on the runtime worker thread and joining
+            // would freeze the event loop (Windows marks the process
+            // "not responding").  HOOK_CTX is cleared immediately below,
+            // so the old hook proc becomes a no-op; the thread exits
+            // naturally on WM_QUIT.
+            if let Some(&tid) = inner.thread_id.get() {
+                logging::info(&format!("[nex] shutdown: posting WM_QUIT to hotkey thread {tid}"));
+                post_quit_to_thread(tid);
+            }
+            drop(inner.hook_thread.take());
         }
+    }
+}
+
+/// Terminate the helper: TerminateProcess when we own a direct handle,
+/// taskkill by name for scheduled-task mode (handle == 0).
+fn kill_helper_process(handle: isize) {
+    if handle != 0 {
+        logging::info("[nex] shutdown: terminating helper process");
+        unsafe {
+            let h = handle as *mut core::ffi::c_void;
+            windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
+            windows_sys::Win32::Foundation::CloseHandle(h);
+        }
+    } else {
+        logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "NexHelper.exe"])
+            .creation_flags(0x08000000)
+            .output();
     }
 }
 
@@ -1135,29 +1221,24 @@ fn run_schtasks_elevated(args: &str) -> Result<(), String> {
 fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Path) -> Result<(), String> {
     let path_str = helper_path.display().to_string();
 
-    // Check if task already exists with matching command path
-    let ps_check = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            &format!("(Get-ScheduledTask -TaskName '{}').Actions.Execute", SCHTASK_NAME),
-        ])
+    // Query the existing task via schtasks (native, ~30ms) instead of
+    // PowerShell (cold CLR start ~1s). The XML output carries the
+    // <Command> element of the first action.
+    let query = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", SCHTASK_NAME, "/xml"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash at boot
         .output()
-        .map_err(|e| format!("powershell task query failed: {e}"))?;
+        .map_err(|e| format!("schtasks query failed: {e}"))?;
 
-    if ps_check.status.success() {
-        let actual = String::from_utf8_lossy(&ps_check.stdout).trim().to_string();
-        if actual == path_str {
-            return Ok(()); // task exists with correct path
+    if query.status.success() {
+        if let Some(actual) = parse_task_command(&query.stdout) {
+            if actual == path_str {
+                return Ok(()); // task exists with correct path
+            }
+            logging::info(&format!(
+                "[nex] helper path changed (was '{actual}'), recreating task",
+            ));
         }
-        logging::info(&format!(
-            "[nex] helper path changed (was '{}'), recreating task",
-            actual,
-        ));
     }
 
     // Task doesn't exist — create it via XML (avoids /tr quoting hell with UAC).
@@ -1236,6 +1317,31 @@ fn ensure_helper_task(helper_path: &std::path::Path, config_path: &std::path::Pa
 
     logging::info(&format!("[nex] scheduled task {} created successfully", SCHTASK_NAME));
     Ok(())
+}
+
+/// Extract the first `<Command>` element from `schtasks /query /xml`
+/// output (UTF-16LE with BOM when redirected), entity-decoded.
+fn parse_task_command(bytes: &[u8]) -> Option<String> {
+    let xml = if bytes.starts_with(&[0xFF, 0xFE]) {
+        String::from_utf16_lossy(
+            &bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<u16>>(),
+        )
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let start = xml.find("<Command>")? + "<Command>".len();
+    let end = xml[start..].find("</Command>")? + start;
+    let raw = &xml[start..end];
+    Some(
+        raw.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'"),
+    )
 }
 
 /// Run the scheduled task (no UAC).

@@ -890,18 +890,20 @@ impl HotkeyListener {
     pub(crate) fn is_alive(&self) -> bool {
         match &self.inner {
             Some(inner) => {
-                let helper_ok = inner
-                    .helper
-                    .lock()
-                    .ok()
-                    .map(|st| !st.active || st.pipe_reader_thread.as_ref().is_some_and(|t| !t.is_finished()))
-                    .unwrap_or(true);
-                if !helper_ok {
-                    return false;
+                if let Ok(st) = inner.helper.lock() {
+                    if st.active {
+                        // Helper mode: the pipe reader is the live
+                        // detection path. The hook thread intentionally
+                        // exits after handover — its state is irrelevant.
+                        return !inner.should_exit.load(Ordering::SeqCst)
+                            && st.pipe_reader_thread
+                                .as_ref()
+                                .is_some_and(|t| !t.is_finished());
+                    }
                 }
-                // Hook mode: thread_id is set before the message pump
-                // starts. If it's not set yet the thread is still in
-                // early startup — treat as alive.
+                // Hook mode (helper pending or skipped): thread_id is set
+                // before the message pump starts. If it's not set yet the
+                // thread is still in early startup — treat as alive.
                 if inner.thread_id.get().is_none() {
                     return true;
                 }

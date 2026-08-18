@@ -39,6 +39,7 @@ pub(crate) mod runtime_search_session;
 pub mod search;
 pub(crate) mod search_worker;
 pub mod settings;
+pub mod settings_catalog;
 pub mod startup;
 pub(crate) mod tantivy_search;
 pub mod transport;

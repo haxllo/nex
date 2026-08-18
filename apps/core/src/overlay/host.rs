@@ -201,6 +201,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         // Oversize the viewport up front so the first show/grow has
         // pre-rasterized content beyond the window edge.
         keep_webview_viewport_max(wv);
+        // Build the power popup only after the overlay WebView2 env is
+        // fully created. WebView2 env creation is not concurrency-safe
+        // across threads sharing a user-data folder; spawning it earlier
+        // (e.g. from the runtime worker at startup) can hang the overlay
+        // build and fail the popup's (E_INVALIDARG) — the host loop then
+        // never starts and every hotkey show is lost.
+        crate::overlay::power_popup::init_power_popup(event_tx.clone());
     }
     let mut ready = false;
     let mut warm_gen: u64 = 0;
@@ -357,6 +364,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             Ok(wv) => {
                                 subscribe_webview2_diagnostics(&wv);
                                 webview = Some(wv);
+                                crate::overlay::power_popup::init_power_popup(event_tx.clone());
                             }
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -379,6 +387,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             Ok(wv) => {
                                 subscribe_webview2_diagnostics(&wv);
                                 webview = Some(wv);
+                                crate::overlay::power_popup::init_power_popup(event_tx.clone());
                             }
                             Err(e) => {
                                 crate::runtime::log_warn(&format!("[nex] webview rebuild failed: {e}"));

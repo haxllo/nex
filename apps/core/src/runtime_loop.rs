@@ -246,8 +246,13 @@ pub(crate) fn run_windows_runtime(
     // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
-    // Build the persistent power popup once (hidden); toggle() repositions instantly.
-    crate::overlay::power_popup::init_power_popup(event_tx.clone());
+    // The power popup is initialized by the overlay host after its own
+    // WebView2 build completes (host.rs) — never here. WebView2 env
+    // creation is not concurrency-safe across threads sharing the same
+    // user-data folder; building the popup's env in parallel with the
+    // host's eager overlay webview can hang one and fail the other
+    // (E_INVALIDARG), wedging the host loop before it starts dispatching
+    // UiCommands. The host serializes the two builds on one thread.
 
     // Install a console Ctrl+C handler so `nex --foreground` can be
     // stopped from the terminal. The handler sends ExternalQuit down

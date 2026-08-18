@@ -519,8 +519,9 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     if is_shell {
         return String::new();
     }
-    // ms-settings: URIs are launch protocols, not display paths.
-    if path.starts_with("ms-settings:") {
+    // ms-settings: URIs and Control Panel .cpl dialogs are launch
+    // targets, not display paths.
+    if path.starts_with("ms-settings:") || path.ends_with(".cpl") {
         return String::new();
     }
     abbreviate_path(path)

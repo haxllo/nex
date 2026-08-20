@@ -674,7 +674,9 @@ html[data-theme="light"] .row.selected .title {
 
 .power-panel {
   margin: 0;
-  padding: 20px 16px 22px;
+  /* Top 26 + tile top 14 = 40px; bottom tile 18 + panel 22 = 40px —
+     equal breathing room above the icons and below the dots. */
+  padding: 26px 16px 22px;
   border-radius: 0;
   /* Transparent — the window's acrylic backdrop shows through
      (menu-open view hides search-row, so panel fills the window). */

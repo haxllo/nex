@@ -228,7 +228,8 @@ body {
 }
 /* Only the first rows ever shown animate — later keystrokes render
    instantly (class toggled in renderRows). */
-#list.no-anim .row {
+#list.no-anim .row,
+#list.no-anim .section {
   animation: none;
 }
 /* Quick Launch rows are persistent chrome (idle state) — they must not

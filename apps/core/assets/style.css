@@ -674,9 +674,9 @@ html[data-theme="light"] .row.selected .title {
 
 .power-panel {
   margin: 0;
-  /* Top 26 + tile top 14 = 40px; bottom tile 18 + panel 22 = 40px —
-     equal breathing room above the icons and below the dots. */
-  padding: 26px 16px 22px;
+  /* Taller menu window: top 34 + tile top 14 = 48px above the icons,
+     bottom tile 18 + panel 30 = 48px below the dots. */
+  padding: 34px 16px 30px;
   border-radius: 0;
   /* Transparent — the window's acrylic backdrop shows through
      (menu-open view hides search-row, so panel fills the window). */
@@ -727,7 +727,7 @@ html[data-theme="light"] .row.selected .title {
   width: 56px;
   height: 56px;
   box-sizing: border-box;
-  padding: 9px;
+  padding: 12px;
   border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
   border-radius: 14px;
   background: color-mix(in srgb, var(--c) 6%, transparent);
@@ -741,7 +741,7 @@ html[data-theme="light"] .row.selected .title {
 .power-panel .pcircle span {
   /* 10px between icon and label (8px gap + 2px margin). */
   margin-top: 2px;
-  font-size: 14px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-dim);
   white-space: nowrap;

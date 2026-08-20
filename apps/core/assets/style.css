@@ -194,6 +194,8 @@ body {
   gap: 8px;
   scrollbar-gutter: stable;
   padding-top: 4px;
+  /* Match bottom gap to the top (divider 6px + grid top padding 4px). */
+  padding-bottom: 10px;
 }
 #list:empty {
   display: none;

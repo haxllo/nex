@@ -705,7 +705,7 @@ html[data-theme="light"] .row.selected .title {
   gap: 8px;
   width: 100%;
   max-width: 96px;
-  padding: 8px 4px 14px;
+  padding: 14px 4px 18px;
   border: none;
   border-radius: 14px;
   background: transparent;
@@ -722,14 +722,19 @@ html[data-theme="light"] .row.selected .title {
 .power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
 .power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
 .power-panel .pcircle svg {
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
+  box-sizing: border-box;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--c) 6%, transparent);
   fill: none;
   stroke: currentColor;
-  stroke-width: 2.25;
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  transition: transform 150ms ease, filter 150ms ease;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
 }
 .power-panel .pcircle span {
   /* 10px between icon and label (8px gap + 2px margin). */
@@ -755,7 +760,8 @@ html[data-theme="light"] .row.selected .title {
 }
 .power-panel .pcircle:hover svg {
   transform: scale(1.05);
-  filter: brightness(1.25);
+  border-color: color-mix(in srgb, var(--c) 60%, transparent);
+  background: color-mix(in srgb, var(--c) 10%, transparent);
 }
 .power-panel .pcircle:hover span {
   color: var(--text);

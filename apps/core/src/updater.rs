@@ -54,6 +54,70 @@ impl Display for UpdateLaunchError {
 impl std::error::Error for UpdateLaunchError {}
 
 pub fn launch_updater(channel: UpdateChannel) -> Result<PathBuf, UpdateLaunchError> {
+    let script_path = resolve_updater_script()?;
+    launch_updater_script(script_path.as_path(), channel)?;
+    Ok(script_path)
+}
+
+/// Run the updater script to completion, capturing its output.
+/// Launches with a hidden window (no console flash).
+pub fn run_updater_capture(
+    channel: UpdateChannel,
+) -> Result<std::process::Output, UpdateLaunchError> {
+    let script_path = resolve_updater_script()?;
+    run_updater_script(script_path.as_path(), channel)
+}
+
+/// Summarize an updater script run into a single user-facing status line.
+/// Prefers the script's NEX_UPDATE_RESULT marker (JSON); falls back to
+/// exit code / stderr.
+pub fn summarize_update_output(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().rev() {
+        if let Some((_, json)) = line.split_once("NEX_UPDATE_RESULT:") {
+            let json = json.trim();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+                let status = value
+                    .get("status")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("");
+                let version = value
+                    .get("version")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("");
+                return match status {
+                    "up-to-date" => format!("Up to date (v{version})"),
+                    "updated" => format!("Updated to v{version}"),
+                    _ => {
+                        let message = value
+                            .get("message")
+                            .and_then(|field| field.as_str())
+                            .unwrap_or("unknown error");
+                        format!("Update failed: {message}")
+                    }
+                };
+            }
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last_err = stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    if output.status.success() {
+        "Update finished".to_string()
+    } else if !last_err.is_empty() {
+        format!("Update failed: {last_err}")
+    } else {
+        format!(
+            "Update failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        )
+    }
+}
+
+fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
     let exe_path = std::env::current_exe().map_err(|error| {
         UpdateLaunchError::EnvironmentUnavailable(format!(
             "could not resolve current executable path: {error}"
@@ -72,9 +136,28 @@ pub fn launch_updater(channel: UpdateChannel) -> Result<PathBuf, UpdateLaunchErr
         .ok_or_else(|| UpdateLaunchError::ScriptNotFound {
             checked_paths: checked_paths.clone(),
         })?;
-
-    launch_updater_script(script_path.as_path(), channel)?;
     Ok(script_path)
+}
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+fn build_updater_command(script_path: &Path, channel: UpdateChannel) -> std::process::Command {
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(script_path)
+        .arg("-Channel")
+        .arg(channel.as_arg());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 #[cfg(target_os = "windows")]
@@ -82,14 +165,7 @@ fn launch_updater_script(
     script_path: &Path,
     channel: UpdateChannel,
 ) -> Result<(), UpdateLaunchError> {
-    std::process::Command::new("powershell.exe")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(script_path)
-        .arg("-Channel")
-        .arg(channel.as_arg())
+    build_updater_command(script_path, channel)
         .spawn()
         .map_err(|error| {
             UpdateLaunchError::LaunchFailed(format!(
@@ -100,11 +176,34 @@ fn launch_updater_script(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn run_updater_script(
+    script_path: &Path,
+    channel: UpdateChannel,
+) -> Result<std::process::Output, UpdateLaunchError> {
+    build_updater_command(script_path, channel)
+        .output()
+        .map_err(|error| {
+            UpdateLaunchError::LaunchFailed(format!(
+                "failed to run updater script '{}': {error}",
+                script_path.display()
+            ))
+        })
+}
+
 #[cfg(not(target_os = "windows"))]
 fn launch_updater_script(
     _script_path: &Path,
     _channel: UpdateChannel,
 ) -> Result<(), UpdateLaunchError> {
+    Err(UpdateLaunchError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_updater_script(
+    _script_path: &Path,
+    _channel: UpdateChannel,
+) -> Result<std::process::Output, UpdateLaunchError> {
     Err(UpdateLaunchError::UnsupportedPlatform)
 }
 

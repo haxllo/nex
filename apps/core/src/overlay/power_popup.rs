@@ -41,10 +41,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_STYLE, GetSystemMetrics, GetWindowLongPtrW,
+    GetForegroundWindow, GWL_STYLE, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_BORDER, WS_DLGFRAME,
-    WS_THICKFRAME,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    WS_BORDER, WS_DLGFRAME, WS_THICKFRAME,
 };
 
 const POPUP_WIDTH: f64 = 130.0; // matches menu min-width; confirm resize bumps to 150+
@@ -62,7 +62,8 @@ static INIT_GUARD: AtomicBool = AtomicBool::new(false);
 enum PopupCmd {
     Show(isize),      // anchor hwnd
     Resize(f64, f64), // (w, h) measured content size from JS, logical px
-    Hide,             // internal: IPC handler / focus-loss asks loop to hide
+    Hide,             // close via Escape on the popup — return to overlay
+    HideAction,       // an action was executed — hide the overlay with it
     Quit,
 }
 
@@ -307,14 +308,14 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => {
+} => {
                 hide_popup(
                     &window,
                     &webview,
                     &mut visible,
                     &event_tx,
                     last_anchor,
-                    true,
+                    HideMode::ClickAway,
                 );
             }
             Event::WindowEvent {
@@ -329,7 +330,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                         &mut visible,
                         &event_tx,
                         last_anchor,
-                        true,
+                        HideMode::ClickAway,
                     );
                 }
             }
@@ -341,14 +342,15 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
             }
             Event::UserEvent(PopupCmd::Show(anchor)) => {
                 if visible {
-                    // Toggle: hide
+                    // Toggle: hide — user clicked the power icon again,
+                    // so keep the overlay and return focus to it.
                     hide_popup(
                         &window,
                         &webview,
                         &mut visible,
                         &event_tx,
                         last_anchor,
-                        true,
+                        HideMode::ReturnToOverlay,
                     );
                 } else {
                     // Reset to menu size before every show — the JS reportSize
@@ -398,13 +400,25 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                 }
             }
             Event::UserEvent(PopupCmd::Hide) => {
+                // Escape on the popup — close it and return to the overlay.
                 hide_popup(
                     &window,
                     &webview,
                     &mut visible,
                     &event_tx,
                     last_anchor,
-                    true,
+                    HideMode::ReturnToOverlay,
+                );
+            }
+            Event::UserEvent(PopupCmd::HideAction) => {
+                // An action was executed — hide the overlay along with it.
+                hide_popup(
+                    &window,
+                    &webview,
+                    &mut visible,
+                    &event_tx,
+                    last_anchor,
+                    HideMode::ClickAway,
                 );
             }
             Event::UserEvent(PopupCmd::Quit) => {
@@ -414,7 +428,7 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
                     &mut visible,
                     &event_tx,
                     last_anchor,
-                    false,
+                    HideMode::Silent,
                 );
                 *control_flow = ControlFlow::Exit;
             }
@@ -433,24 +447,66 @@ fn run_popup(event_tx: Sender<OverlayEvent>) -> Result<(), String> {
     Ok(())
 }
 
+/// Why the popup is being hidden. Controls whether focus is returned to
+/// the overlay. The overlay's own deferred-hide handles dismissal by
+/// clicking outside both windows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HideMode {
+    /// Dismissed by clicking outside / an action executed. Just close the
+    /// popup — the overlay hides itself via its focus-loss logic.
+    ClickAway,
+    /// User returned to the overlay (clicked power icon again or pressed
+    /// Escape on the popup). Close the popup and keep the overlay focused.
+    ReturnToOverlay,
+    /// Loop teardown — no focus/overlay interaction.
+    Silent,
+}
+
 fn hide_popup(
     window: &tao::window::Window,
     webview: &wry::WebView,
     visible: &mut bool,
     event_tx: &Sender<OverlayEvent>,
     _anchor: isize,
-    refocus: bool,
+    mode: HideMode,
 ) {
     if *visible {
         let _ = webview.evaluate_script("window.resetView&&window.resetView()");
         window.set_visible(false);
         *visible = false;
         crate::overlay::hotkey::set_suppress_focus_escape(false);
-        if refocus {
-            // Hide the overlay synchronously — the popup hides instantly
-            // (DWM animation suppressed), so hiding the overlay on the same
-            // frame keeps them visually in sync.
-            let _ = event_tx.send(OverlayEvent::Escape);
+        match mode {
+            HideMode::ReturnToOverlay => {
+                // Popup is closing back into the overlay (power-icon toggle
+                // or Escape). Return focus so the search bar stays live.
+                let hwnd = crate::overlay::hotkey::overlay_hwnd();
+                if hwnd != 0 {
+                    unsafe {
+                        SetForegroundWindow(hwnd as HWND);
+                    }
+                }
+                let _ = event_tx.send(OverlayEvent::FocusSearchInput);
+            }
+            HideMode::ClickAway => {
+                // Hide the overlay unless the user actually clicked back
+                // into it. The overlay cannot decide for itself here: it
+                // already lost focus when the popup opened, so its own
+                // focus-loss path never re-arms.
+                let overlay_hwnd = crate::overlay::hotkey::overlay_hwnd() as HWND;
+                let overlay_visible =
+                    crate::overlay::host::OVERLAY_VISIBLE.load(Ordering::SeqCst);
+                let clicked_into_overlay = overlay_visible
+                    && overlay_hwnd as usize != 0
+                    && unsafe { GetForegroundWindow() } == overlay_hwnd;
+                if clicked_into_overlay {
+                    // Focus the search input so typing works on the first
+                    // click (the overlay just regained activation).
+                    let _ = event_tx.send(OverlayEvent::FocusSearchInput);
+                } else {
+                    let _ = event_tx.send(OverlayEvent::Escape);
+                }
+            }
+            HideMode::Silent => {}
         }
     }
 }
@@ -479,7 +535,7 @@ fn handle_ipc(
             if let Some(e) = event {
                 let _ = event_tx.send(e);
             }
-            let _ = proxy.send_event(PopupCmd::Hide);
+            let _ = proxy.send_event(PopupCmd::HideAction);
         }
         "close" => {
             let _ = proxy.send_event(PopupCmd::Hide);

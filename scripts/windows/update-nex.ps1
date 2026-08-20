@@ -5,9 +5,12 @@ param(
   [string]$Repo = "haxllo/nex",
   [switch]$StartAfterUpdate = $true,
   [switch]$KeepBackup,
+  [switch]$Force,
   [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Nex",
   [string]$CacheRoot = "$env:LOCALAPPDATA\Nex\updates"
 )
+
+$UninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1'
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -148,6 +151,75 @@ function Resolve-InstalledRuntimePath {
   return (Join-Path $Root "bin\Nex.exe")
 }
 
+function Resolve-InstallRoot {
+  param([string]$DefaultRoot)
+
+  foreach ($hive in @('HKCU', 'HKLM')) {
+    $key = "$hive`:\$UninstallSubkey"
+    if (Test-Path $key) {
+      $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+      if ($null -ne $props.InstallLocation -and [string]$props.InstallLocation.Trim().Length -gt 0) {
+        $candidate = [string]$props.InstallLocation
+        if (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe")) {
+          return [pscustomobject]@{
+            Root = $candidate
+            NeedsElevation = ($hive -eq 'HKLM')
+          }
+        }
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    Root = $DefaultRoot
+    NeedsElevation = $false
+  }
+}
+
+function Resolve-InstalledVersion {
+  param([string]$Root)
+
+  $exe = Resolve-InstalledRuntimePath -Root $Root
+  if (-not (Test-Path -LiteralPath $exe)) {
+    return ""
+  }
+  try {
+    return [string](Get-Item -LiteralPath $exe).VersionInfo.FileVersion
+  }
+  catch {
+    return ""
+  }
+}
+
+function Compare-Versions {
+  param([string]$A, [string]$B)
+
+  $aParts = @(($A -split '[-+]')[0] -split '\.' | ForEach-Object { [int]$_ })
+  $bParts = @(($B -split '[-+]')[0] -split '\.' | ForEach-Object { [int]$_ })
+  $count = [Math]::Max($aParts.Count, $bParts.Count)
+  for ($i = 0; $i -lt $count; $i++) {
+    $ap = if ($i -lt $aParts.Count) { $aParts[$i] } else { 0 }
+    $bp = if ($i -lt $bParts.Count) { $bParts[$i] } else { 0 }
+    if ($ap -gt $bp) { return 1 }
+    if ($ap -lt $bp) { return -1 }
+  }
+  return 0
+}
+
+function Write-UpdateResult {
+  param(
+    [ValidateSet("up-to-date", "updated", "failed")]
+    [string]$Status,
+    [string]$Version,
+    [string]$Message
+  )
+
+  $obj = @{ status = $Status }
+  if ($Version) { $obj.version = $Version }
+  if ($Message) { $obj.message = $Message }
+  Write-Host "NEX_UPDATE_RESULT: $(ConvertTo-Json -Compress $obj)"
+}
+
 function Stop-Runtime {
   param([string]$InstalledExePath)
 
@@ -214,6 +286,10 @@ function Verify-ManifestAndInstaller {
   }
 }
 
+$installInfo = Resolve-InstallRoot -DefaultRoot $InstallRoot
+$InstallRoot = $installInfo.Root
+$needsElevation = $installInfo.NeedsElevation
+
 Write-Host "== Nex Update ==" -ForegroundColor Cyan
 Write-Host "Channel: $Channel"
 if ($Version) {
@@ -223,7 +299,8 @@ Write-Host "Repo: $Repo"
 Write-Host "Install root: $InstallRoot"
 
 $apiUrl = "https://api.github.com/repos/$Repo/releases?per_page=40"
-$releases = @(Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "Nex-Updater" })
+$releasesResponse = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "Nex-Updater" }
+$releases = @($releasesResponse)
 if ($releases.Count -eq 0) {
   throw "No releases were returned for '$Repo'."
 }
@@ -236,6 +313,13 @@ $setupNames = $artifactBaseCandidates | ForEach-Object { "$_-setup.exe" }
 $manifestNames = $artifactBaseCandidates | ForEach-Object { "$_-manifest.json" }
 
 Write-Host "Target release: $($targetRelease.tag_name)" -ForegroundColor Green
+
+$installedVersion = Resolve-InstalledVersion -Root $InstallRoot
+if (-not $Force -and $installedVersion -and (Compare-Versions $installedVersion $resolvedVersion) -ge 0) {
+  Write-Host "Already up to date (installed $installedVersion, latest $resolvedVersion)." -ForegroundColor Green
+  Write-UpdateResult -Status "up-to-date" -Version $installedVersion
+  exit 0
+}
 
 $setupAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $setupNames
 $manifestAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $manifestNames
@@ -277,7 +361,12 @@ try {
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
   $args = @("/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/SP-")
-  $proc = Start-Process -FilePath $setupPath -ArgumentList $args -PassThru -Wait
+  if ($needsElevation) {
+    $proc = Start-Process -FilePath $setupPath -ArgumentList $args -Verb RunAs -PassThru -Wait
+  }
+  else {
+    $proc = Start-Process -FilePath $setupPath -ArgumentList $args -PassThru -Wait
+  }
   if ($proc.ExitCode -ne 0) {
     throw "Installer exited with code $($proc.ExitCode)."
   }
@@ -304,9 +393,11 @@ try {
   if ($backupDir) {
     Write-Host "Rollback snapshot retained: $backupDir"
   }
+  Write-UpdateResult -Status "updated" -Version $resolvedVersion
 }
 catch {
   Write-Host "Update failed: $($_.Exception.Message)" -ForegroundColor Red
+  Write-UpdateResult -Status "failed" -Message $_.Exception.Message
   Write-Host "Attempting rollback..." -ForegroundColor Yellow
 
   try {

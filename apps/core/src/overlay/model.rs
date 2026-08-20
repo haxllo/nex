@@ -40,6 +40,8 @@ pub enum OverlayEvent {
     ExternalQuit,
     TrayToggleGameMode,
     TrayCheckForUpdates,
+    /// Status text result from a background updater run (shown in overlay).
+    UpdateStatus(String),
     TrayLock,
     TraySleep,
     TrayShutdown,

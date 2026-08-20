@@ -57,7 +57,7 @@ use crate::runtime_overlay_rows::{
 #[cfg(target_os = "windows")]
 use crate::runtime_process::{
     acquire_single_instance_guard, hotkey_registration_recovery_message,
-    hotkey_registration_status_text, launch_stable_updater,
+    hotkey_registration_status_text,
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_search_session::{
@@ -1329,13 +1329,26 @@ impl RuntimeWorker {
                 let _ = self.tray_gm_tx.send(self.runtime_config.game_mode_enabled);
             }
             OverlayEvent::TrayCheckForUpdates => {
-                match launch_stable_updater() {
-                    Ok(_) => self.overlay.set_status_text("Updater launched"),
-                    Err(error) => {
-                        log_warn(&format!("[nex] updater launch failed from tray: {error}"));
-                        self.overlay.set_status_text("Could not launch updater");
-                    }
-                }
+                self.overlay.set_status_text("Checking for updates...");
+                let event_tx = self.event_tx.clone();
+                std::thread::Builder::new()
+                    .name("nex-updater-check".into())
+                    .spawn(move || {
+                        let message = match crate::updater::run_updater_capture(
+                            crate::updater::UpdateChannel::Stable,
+                        ) {
+                            Ok(output) => crate::updater::summarize_update_output(&output),
+                            Err(error) => {
+                                format!("Could not launch updater: {error}")
+                            }
+                        };
+                        log_info(&format!("[nex] updater result: {message}"));
+                        let _ = event_tx.send(OverlayEvent::UpdateStatus(message));
+                    })
+                    .ok();
+            }
+            OverlayEvent::UpdateStatus(text) => {
+                self.overlay.set_status_text(&text);
             }
             OverlayEvent::TrayLock => {
                 std::thread::spawn(move || {

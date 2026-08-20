@@ -690,7 +690,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 .spawn(move || {
                                     std::thread::sleep(Duration::from_millis(150));
                                     if let Ok(s) = state_clone.lock() {
-                                        if s.visible && !s.has_focus {
+                                        if s.visible
+                                            && !s.has_focus
+                                            && !crate::overlay::hotkey::is_bare_win_press_active()
+                                        {
                                             let _ = tx_clone.send(OverlayEvent::Escape);
                                         }
                                     }

@@ -85,6 +85,9 @@ body {
   border-radius: var(--radius);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   clip-path: inset(-32px round var(--radius));
+  /* Contain children (power panel) so their corners round with the
+     window and margins don't collapse past the measured height. */
+  overflow: hidden;
 }
 
 /* ── search row ───────────────────────────────────────────── */
@@ -162,6 +165,11 @@ body {
 }
 #body.idle {
   visibility: hidden; /* keeps GPU layers alive; display:none would destroy them */
+}
+/* Idle: divider must not occupy layout — it would leak 7px (1px + 6px
+   margin) past the 60px idle window after a power-menu back. */
+#body.idle #divider {
+  display: none;
 }
 
 
@@ -667,20 +675,19 @@ html[data-theme="light"] .row.selected .title {
 }
 
 .power-panel {
-  width: max-content;
-  margin: 8px auto 12px;
-  padding: 10px 10px 12px;
-  border-radius: var(--radius);
+  margin: 0;
+  padding: 12px 10px;
+  border-radius: 0;
   background: var(--bg-opaque);
-  border: 1px solid var(--border);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  border: none;
+  box-shadow: none;
 }
 
 .power-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, max-content);
+  justify-content: center;
   gap: 6px;
-  justify-items: center;
 }
 
 .power-confirm .power-row {

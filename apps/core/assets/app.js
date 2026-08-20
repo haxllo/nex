@@ -537,11 +537,8 @@
     // max height (host keeps it oversized), so shrinking just clips
     // already-rasterized content — no blank region, no acrylic gap.
     if (h > 0 && h < lastH) {
-      const prev = lastH;
       lastH = h;
-      if (prev > 0 || !bodyEl.classList.contains("idle")) {
-        post("resize", { v: h, immediate: true });
-      }
+      post("resize", { v: h, immediate: true });
       if (needsPainted) {
         needsPainted = false;
         requestAnimationFrame(() => { scrollToInstant(0); post("painted"); });
@@ -554,14 +551,8 @@
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0 && h !== lastH) {
-          const prev = lastH;
           lastH = h;
-          // First measurement: skip resize only if panel is truly idle
-          // (no rows, search bar only). If content is already showing
-          // (quick launch items), send resize immediately.
-          if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            post("resize", { v: h, immediate: true });
-          }
+          post("resize", { v: h, immediate: true });
         }
         if (needsPainted) {
           needsPainted = false;

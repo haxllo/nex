@@ -226,6 +226,11 @@ body {
 .row:hover {
   background: var(--hover);
 }
+/* Only the first rows ever shown animate — later keystrokes render
+   instantly (class toggled in renderRows). */
+#list.no-anim .row {
+  animation: none;
+}
 /* Quick Launch rows are persistent chrome (idle state) — they must not
    replay the entrance animation on every show. */
 .row.quick-launch {

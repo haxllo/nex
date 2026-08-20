@@ -283,6 +283,9 @@
     const animating = !hasAnimatedFirstShow && sig !== lastRowSig;
     if (sig) hasAnimatedFirstShow = true;
     lastRowSig = sig;
+    // Kill the CSS entrance animation for non-first renders — fresh nodes
+    // would otherwise re-animate on every keystroke.
+    list.classList.toggle("no-anim", !animating);
 
     // Index live nodes by key so unchanged rows are reused in place —
     // no teardown, no image re-decode, no entrance re-animation.

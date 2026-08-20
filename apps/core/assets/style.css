@@ -667,7 +667,8 @@ html[data-theme="light"] .row.selected .title {
 }
 
 .power-panel {
-  margin: 8px 10px 12px;
+  width: max-content;
+  margin: 8px auto 12px;
   padding: 10px 10px 12px;
   border-radius: var(--radius);
   background: var(--bg-opaque);
@@ -676,8 +677,14 @@ html[data-theme="light"] .row.selected .title {
 }
 
 .power-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+  justify-items: center;
+}
+
+.power-confirm .power-row {
+  display: flex;
   justify-content: center;
 }
 

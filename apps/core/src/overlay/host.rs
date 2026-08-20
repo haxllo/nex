@@ -864,15 +864,6 @@ fn handle_ipc(
             // uncomposited content before the WebView2 paints.
             try_send_ui(proxy, UiCommand::Painted);
         }
-        "openConfig" => {
-            let path = state
-                .lock()
-                .map(|s| s.help_config_path.clone())
-                .unwrap_or_default();
-            if !path.is_empty() {
-                open_path(&path);
-            }
-        }
         "pin" => {
             if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
                 let _ = event_tx.send(OverlayEvent::PinApp(title.to_string()));
@@ -1385,23 +1376,6 @@ fn force_foreground(hwnd: HWND) {
             // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
-    }
-}
-
-fn open_path(path: &str) {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    let file: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            file.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        );
     }
 }
 

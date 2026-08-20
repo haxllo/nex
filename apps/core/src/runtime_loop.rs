@@ -226,7 +226,6 @@ pub(crate) fn run_windows_runtime(
 
     let overlay_state = OverlayState::default();
     let overlay = NativeOverlayShell::create().map_err(RuntimeError::Overlay)?;
-    overlay.set_help_config_path(runtime_config.config_path.to_string_lossy().as_ref());
     overlay.set_hotkey_hint(&runtime_config.hotkey);
     overlay.set_performance_tuning(
         runtime_config.idle_cache_trim_ms,

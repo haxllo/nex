@@ -323,10 +323,6 @@ impl NativeOverlayShell {
         let _ = self.inner.icon_cache.trim_unused();
     }
 
-    pub fn set_help_config_path(&self, path: &str) {
-        self.with_state(|s| s.help_config_path = path.to_string());
-    }
-
     pub fn show_placeholder_hint(&self, message: &str) {
         self.with_state(|s| s.placeholder_hint = Some(message.to_string()));
         self.post(UiCommand::Apply);

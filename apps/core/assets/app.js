@@ -15,14 +15,6 @@
   const searchIcon = $("search-icon");
   const bodyEl = $("body");
   const footerEl = $("footer");
-  const help = $("help");
-  const powerBtn = $("power-btn");
-  const powerMenu = $("power-menu");
-  const powerConfirm = $("power-confirm");
-  const powerConfirmTitle = $("power-confirm-title");
-  const powerConfirmYes = $("power-confirm-yes");
-  const powerPanel = $("power-panel");
-  const powerWrapTop = $("power-wrap-top");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -361,13 +353,8 @@
     bodyEl.classList.toggle("idle", !hasRows);
     footerEl.classList.toggle("idle", !hasRows);
 
-    // Idle: the power button replaces the config button in the search row.
-    const idle = !hasRows;
-    help.classList.toggle("hidden", idle);
-    powerWrapTop.classList.toggle("hidden", !idle);
-    // Panels tied to a hidden button must close (their trigger vanished).
-    if (!idle) topPower.closeMenu();
-    if (idle) footerPower.closeMenu();
+    // Menu tied to a hidden area must close (its trigger vanished).
+    if (!hasRows) topPower.closeMenu();
 
     measure();
   }
@@ -608,13 +595,13 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
-        if (topPower.hasConfirm() || footerPower.hasConfirm()) {
-          (topPower.hasConfirm() ? topPower : footerPower).closeConfirm();
+        if (topPower.hasConfirm()) {
+          topPower.closeConfirm();
           input.focus();
           return;
         }
-        if (topPower.isOpen() || footerPower.isOpen()) {
-          (topPower.isOpen() ? topPower : footerPower).closeMenu();
+        if (topPower.isOpen()) {
+          topPower.closeMenu();
           return;
         }
         e.preventDefault();
@@ -659,9 +646,7 @@
     debounce = setTimeout(() => post("query", query), delay);
   });
 
-  help.addEventListener("click", () => post("openConfig"));
-
-  // ── power panel (Hyprland-style circle row) ───────────────
+  // ── power panel (circle row) ────────────────────────────────
   // Factory wires one power button + in-flow panel with menu row +
   // confirm row. The panel lives in the document flow so measure()
   // grows/shrinks the overlay window with it.
@@ -751,13 +736,10 @@
     return api;
   }
 
-  const footerPower = makePowerUi(powerBtn, powerPanel, powerMenu, powerConfirm, powerConfirmTitle, powerConfirmYes);
   const topPower = makePowerUi(powerBtnTop, powerPanelTop, powerMenuTop, powerConfirmTop, powerConfirmTitleTop, powerConfirmYesTop);
 
   // Close the panel / confirm when clicking anywhere outside
   document.addEventListener("click", (e) => {
-    if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
-    if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
     if (topPower.hasConfirm() && !topPower.isConfirmTarget(e.target)) topPower.closeConfirm();
     if (topPower.isOpen() && !topPower.isMenuTarget(e.target)) topPower.closeMenu();
     if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
@@ -876,10 +858,8 @@
         return;
       }
 
-      // Close the power dropup / confirm whenever Rust pushes a fresh state
+      // Close the power panel / confirm whenever Rust pushes a fresh state
       // (show, hide, query change, etc.)
-      footerPower.closeMenu();
-      footerPower.closeConfirm();
       topPower.closeMenu();
       topPower.closeConfirm();
       hideContextMenu();

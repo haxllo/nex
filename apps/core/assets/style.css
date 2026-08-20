@@ -729,7 +729,6 @@ html[data-theme="light"] .row.selected .title {
   stroke-width: 2.25;
   stroke-linecap: round;
   stroke-linejoin: round;
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--c) 35%, transparent));
   transition: transform 150ms ease, filter 150ms ease;
 }
 .power-panel .pcircle span {
@@ -756,7 +755,7 @@ html[data-theme="light"] .row.selected .title {
 }
 .power-panel .pcircle:hover svg {
   transform: scale(1.05);
-  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--c) 70%, transparent)) brightness(1.2);
+  filter: brightness(1.25);
 }
 .power-panel .pcircle:hover span {
   color: var(--text);

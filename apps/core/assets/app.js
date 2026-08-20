@@ -34,6 +34,7 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
+  let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
   let pendingShow = false; // show occurred, waiting for first real results
 
@@ -273,12 +274,14 @@
     const frag = document.createDocumentFragment();
     const isGridView = list.classList.contains("grid-view");
     let animIdx = 0;
-    // Entrance stagger: animate only when content actually changed
-    // (query edits, result sets), not on selection-only re-renders.
+    // Entrance stagger: animate only the very first rows shown (initial
+    // show); later keystrokes render instantly. Selection-only
+    // re-renders (same sig) never animate.
     const sig = rows
       .map((r) => `${r.role || ""}|${r.kind || ""}|${r.title || ""}|${r.subtitle || ""}`)
       .join(";");
-    const animating = sig !== lastRowSig;
+    const animating = !hasAnimatedFirstShow && sig !== lastRowSig;
+    if (sig) hasAnimatedFirstShow = true;
     lastRowSig = sig;
 
     // Index live nodes by key so unchanged rows are reused in place —

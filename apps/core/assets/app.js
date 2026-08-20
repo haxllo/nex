@@ -351,7 +351,11 @@
 
     // Idle state: hide divider + list area and footer when no rows.
     bodyEl.classList.toggle("idle", !hasRows);
-    footerEl.classList.toggle("idle", !hasRows);
+    // Footer hints only with regular results — hidden in the idle
+    // window and in the quick-launch (pinned items) view.
+    const qlOnly =
+      hasRows && rows.every((r) => r.role === "quick_launch" || r.role === "header" || r.role === "status");
+    footerEl.classList.toggle("idle", !hasRows || qlOnly);
 
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();

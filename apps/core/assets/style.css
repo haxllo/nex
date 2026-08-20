@@ -676,7 +676,7 @@ html[data-theme="light"] .row.selected .title {
 
 .power-panel {
   margin: 0;
-  padding: 12px 10px;
+  padding: 20px 16px 22px;
   border-radius: 0;
   background: var(--bg-opaque);
   border: none;
@@ -685,9 +685,9 @@ html[data-theme="light"] .row.selected .title {
 
 .power-row {
   display: grid;
-  grid-template-columns: repeat(3, max-content);
-  justify-content: center;
-  gap: 6px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  justify-items: center;
 }
 
 .power-confirm .power-row {
@@ -700,11 +700,11 @@ html[data-theme="light"] .row.selected .title {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  width: 56px;
-  padding: 8px 0 6px;
+  gap: 8px;
+  width: 96px;
+  padding: 14px 0 10px;
   border: none;
-  border-radius: 10px;
+  border-radius: 14px;
   background: transparent;
   color: var(--c);
   cursor: pointer;
@@ -716,9 +716,10 @@ html[data-theme="light"] .row.selected .title {
 .power-panel .pcircle:nth-child(3) { animation-delay: 60ms; }
 .power-panel .pcircle:nth-child(4) { animation-delay: 80ms; }
 .power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
+.power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
 .power-panel .pcircle svg {
-  width: 22px;
-  height: 22px;
+  width: 34px;
+  height: 34px;
   fill: none;
   stroke: currentColor;
   stroke-width: 2;
@@ -727,7 +728,7 @@ html[data-theme="light"] .row.selected .title {
   transition: transform 120ms ease;
 }
 .power-panel .pcircle span {
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;
   transition: color 120ms ease;
@@ -743,7 +744,6 @@ html[data-theme="light"] .row.selected .title {
 }
 .power-panel .pcircle[data-power="back"] {
   color: var(--text-faint);
-  margin-right: 8px;
 }
 
 @keyframes nexPowerRise {

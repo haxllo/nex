@@ -201,13 +201,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         // Oversize the viewport up front so the first show/grow has
         // pre-rasterized content beyond the window edge.
         keep_webview_viewport_max(wv);
-        // The power popup is initialized on UiCommand::WebviewReady
-        // (inside the event loop), NOT here. WebView2 environment
-        // creation is not concurrency-safe across threads sharing a
-        // user-data folder; building the popup's env while the overlay
-        // build (or a Show-triggered rebuild) is in flight can hang one
-        // and fail the other (E_INVALIDARG), wedging the host loop so
-        // every UiCommand is queued but never dispatched.
     }
     let mut ready = false;
     let mut warm_gen: u64 = 0;
@@ -307,13 +300,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     UiCommand::WebviewReady => {
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                         ready = true;
-                        // The overlay WebView2 environment is fully created
-                        // and no other build is in flight (this is the only
-                        // completion path, reached after every eager build
-                        // and every Show-triggered rebuild). Safe to spawn
-                        // the power popup's env now — serialized on this
-                        // thread, never racing the overlay build. Idempotent.
-                        crate::overlay::power_popup::init_power_popup(event_tx.clone());
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
                         apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
@@ -385,9 +371,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView exists but the page hasn't loaded yet
                         // (e.g. Show raced the eager build's WebviewReady
                         // across threads). Do NOT destroy and rebuild —
-                        // recreating the controller while the power popup
-                        // thread builds its own env races WebView2 on the
-                        // shared user-data folder (hang + E_INVALIDARG).
                         // WebviewReady is already queued and completes the
                         // show via show_pending.
                         show_pending = true;
@@ -858,9 +841,6 @@ fn handle_ipc(
         }
         "escape" => {
             let _ = event_tx.send(OverlayEvent::Escape);
-        }
-        "powerPopup" => {
-            let _ = event_tx.send(OverlayEvent::TogglePowerPopup);
         }
         "resize" => {
             // JS sends {t:"resize", v:{v:h, immediate:bool}} (new) or

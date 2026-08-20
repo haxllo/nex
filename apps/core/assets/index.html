@@ -39,17 +39,51 @@
         </div>
       </div>
 
+      <div id="power-panel-top" class="power-panel hidden">
+        <div id="power-menu-top" class="power-row">
+          <button type="button" class="pcircle" style="--c:var(--lock)" data-power="lock"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Lock</span></button>
+          <button type="button" class="pcircle" style="--c:var(--logout)" data-power="signout"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Log Out</span></button>
+          <button type="button" class="pcircle" style="--c:var(--sleep)" data-power="sleep"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Sleep</span></button>
+          <button type="button" class="pcircle" style="--c:var(--restart)" data-power="restart"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>Restart</span></button>
+          <button type="button" class="pcircle" style="--c:var(--shutdown)" data-power="shutdown"><svg viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg><span>Shut Down</span></button>
+        </div>
+        <div id="power-confirm-top" class="power-confirm hidden">
+          <div class="confirm-title" id="power-confirm-title-top">Restart now?</div>
+          <div class="power-row">
+            <button type="button" class="pcircle" id="power-confirm-yes-top" data-confirm="yes"><svg viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg><span>Restart</span></button>
+            <button type="button" class="pcircle" id="power-confirm-cancel-top" data-confirm="no"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Cancel</span></button>
+          </div>
+        </div>
+      </div>
+
       <div id="body" class="idle">
         <div id="divider"></div>
         <ul id="list" role="listbox"></ul>
         <div id="status" class="hidden"></div>
       </div>
 
+      <div id="power-panel" class="power-panel hidden">
+        <div id="power-menu" class="power-row">
+          <button type="button" class="pcircle" style="--c:var(--lock)" data-power="lock"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Lock</span></button>
+          <button type="button" class="pcircle" style="--c:var(--logout)" data-power="signout"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg><span>Log Out</span></button>
+          <button type="button" class="pcircle" style="--c:var(--sleep)" data-power="sleep"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><span>Sleep</span></button>
+          <button type="button" class="pcircle" style="--c:var(--restart)" data-power="restart"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>Restart</span></button>
+          <button type="button" class="pcircle" style="--c:var(--shutdown)" data-power="shutdown"><svg viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg><span>Shut Down</span></button>
+        </div>
+        <div id="power-confirm" class="power-confirm hidden">
+          <div class="confirm-title" id="power-confirm-title">Restart now?</div>
+          <div class="power-row">
+            <button type="button" class="pcircle" id="power-confirm-yes" data-confirm="yes"><svg viewBox="0 0 24 24"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg><span>Restart</span></button>
+            <button type="button" class="pcircle" id="power-confirm-cancel" data-confirm="no"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Cancel</span></button>
+          </div>
+        </div>
+      </div>
+
       <footer id="footer">
         <div class="hints">
           <div class="hint"><span class="kbd">↵</span><span class="lbl">Open</span></div>
           <span class="dot">·</span>
-          <div class="hint"><span class="kbd">↑</span><span class="kbd">↓</span><span class="lbl">Move</span></div>
+          <div class="hint"><span class="kbd">↑</span><span class="lbl">Move</span></div>
           <span class="dot">·</span>
           <div class="hint"><span class="kbd">esc</span><span class="lbl">Close</span></div>
         </div>
@@ -60,21 +94,6 @@
               <path d="M18.4 6.6a9 9 0 1 1-12.8 0" />
             </svg>
           </button>
-          <div id="power-menu" class="hidden">
-            <button type="button" data-power="lock">Lock</button>
-            <button type="button" data-power="sleep">Sleep</button>
-            <hr />
-            <button type="button" data-power="shutdown">Shutdown</button>
-            <button type="button" data-power="restart">Restart</button>
-            <hr />
-            <button type="button" data-power="signout">Sign Out</button>
-          </div>
-          <div id="power-confirm" class="hidden">
-            <div class="confirm-title" id="power-confirm-title">Restart now?</div>
-            <hr />
-            <button type="button" class="confirm-yes" id="power-confirm-yes">Restart</button>
-            <button type="button" data-confirm="no">Cancel</button>
-          </div>
         </div>
       </footer>
     </main>

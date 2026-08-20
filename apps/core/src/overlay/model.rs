@@ -51,8 +51,6 @@ pub enum OverlayEvent {
     PowerMenuShutdown,
     /// Restart requested from the power menu after in-overlay confirmation.
     PowerMenuRestart,
-    /// Toggle the separate power popup window (idle-state power button).
-    TogglePowerPopup,
     /// Refocus the overlay search input without showing/reshowing the overlay.
     FocusSearchInput,
     SearchResultsReady,

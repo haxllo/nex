@@ -659,6 +659,13 @@ html[data-theme="light"] .row.selected .title {
 }
 
 /* ── power panel (Hyprland-style circle row) ─────────────── */
+/* Only the power menu + its back button are visible while open. */
+#panel.power-menu-open #search-row,
+#panel.power-menu-open #body,
+#panel.power-menu-open #footer {
+  display: none;
+}
+
 .power-panel {
   margin: 8px 10px 12px;
   padding: 10px 10px 12px;
@@ -719,6 +726,10 @@ html[data-theme="light"] .row.selected .title {
 }
 .power-panel .pcircle:hover span {
   color: var(--c);
+}
+.power-panel .pcircle[data-power="back"] {
+  color: var(--text-faint);
+  margin-right: 8px;
 }
 
 @keyframes nexPowerRise {

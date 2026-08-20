@@ -682,6 +682,7 @@
         open = false;
         menu.classList.add("hidden");
         btn.classList.remove("open");
+        panel.closest("#panel").classList.remove("power-menu-open");
         if (!confirmAction) panel.classList.add("hidden");
         input.focus();
         measure();
@@ -690,7 +691,8 @@
         if (!confirmAction) return;
         confirmAction = null;
         confirm.classList.add("hidden");
-        if (!open) panel.classList.add("hidden");
+        if (open) menu.classList.remove("hidden");
+        else panel.classList.add("hidden");
         measure();
       },
       isOpen() { return open; },
@@ -708,6 +710,7 @@
         return;
       }
       open = !open;
+      panel.closest("#panel").classList.toggle("power-menu-open", open);
       panel.classList.toggle("hidden", !open);
       menu.classList.toggle("hidden", !open);
       btn.classList.toggle("open", open);
@@ -719,6 +722,12 @@
       if (!b) return;
       const action = b.dataset.power;
       if (!action) return;
+      // Back button — close the menu and return to the overlay.
+      if (action === "back") {
+        e.stopPropagation();
+        api.closeMenu();
+        return;
+      }
       // Destructive actions need an in-overlay confirm panel first.
       if (action === "shutdown" || action === "restart") {
         e.stopPropagation(); // keep this click from closing the panel we're about to open

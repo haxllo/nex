@@ -741,7 +741,7 @@ html[data-theme="light"] .row.selected .title {
 .power-panel .pcircle span {
   /* 10px between icon and label (8px gap + 2px margin). */
   margin-top: 2px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-dim);
   white-space: nowrap;

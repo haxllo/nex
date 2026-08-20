@@ -189,8 +189,7 @@ impl NativeOverlayShell {
             .unwrap_or(false)
     }
 
-    /// Returns the live overlay window handle, used as anchor for the
-    /// power popup positioning.
+    /// Returns the live overlay window handle.
     pub fn hwnd(&self) -> isize {
         self.inner
             .state

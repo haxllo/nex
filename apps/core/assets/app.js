@@ -21,8 +21,14 @@
   const powerConfirm = $("power-confirm");
   const powerConfirmTitle = $("power-confirm-title");
   const powerConfirmYes = $("power-confirm-yes");
+  const powerPanel = $("power-panel");
   const powerWrapTop = $("power-wrap-top");
   const powerBtnTop = $("power-btn-top");
+  const powerMenuTop = $("power-menu-top");
+  const powerConfirmTop = $("power-confirm-top");
+  const powerConfirmTitleTop = $("power-confirm-title-top");
+  const powerConfirmYesTop = $("power-confirm-yes-top");
+  const powerPanelTop = $("power-panel-top");
   const contextMenu = $("context-menu");
 
   // Local mirror of pushed state.
@@ -359,6 +365,9 @@
     const idle = !hasRows;
     help.classList.toggle("hidden", idle);
     powerWrapTop.classList.toggle("hidden", !idle);
+    // Panels tied to a hidden button must close (their trigger vanished).
+    if (!idle) topPower.closeMenu();
+    if (idle) footerPower.closeMenu();
 
     measure();
   }
@@ -528,11 +537,8 @@
     // max height (host keeps it oversized), so shrinking just clips
     // already-rasterized content — no blank region, no acrylic gap.
     if (h > 0 && h < lastH) {
-      const prev = lastH;
       lastH = h;
-      if (prev > 0 || !bodyEl.classList.contains("idle")) {
-        post("resize", { v: h, immediate: true });
-      }
+      post("resize", { v: h, immediate: true });
       if (needsPainted) {
         needsPainted = false;
         requestAnimationFrame(() => { scrollToInstant(0); post("painted"); });
@@ -545,14 +551,8 @@
       requestAnimationFrame(() => {
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0 && h !== lastH) {
-          const prev = lastH;
           lastH = h;
-          // First measurement: skip resize only if panel is truly idle
-          // (no rows, search bar only). If content is already showing
-          // (quick launch items), send resize immediately.
-          if (prev > 0 || !bodyEl.classList.contains("idle")) {
-            post("resize", { v: h, immediate: true });
-          }
+          post("resize", { v: h, immediate: true });
         }
         if (needsPainted) {
           needsPainted = false;
@@ -608,13 +608,13 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
-        if (footerPower.hasConfirm()) {
-          footerPower.closeConfirm();
+        if (topPower.hasConfirm() || footerPower.hasConfirm()) {
+          (topPower.hasConfirm() ? topPower : footerPower).closeConfirm();
           input.focus();
           return;
         }
-        if (footerPower.isOpen()) {
-          footerPower.closeMenu();
+        if (topPower.isOpen() || footerPower.isOpen()) {
+          (topPower.isOpen() ? topPower : footerPower).closeMenu();
           return;
         }
         e.preventDefault();
@@ -661,9 +661,11 @@
 
   help.addEventListener("click", () => post("openConfig"));
 
-  // ── power button dropup ──────────────────────────────────
-  // Factory wires one power button + menu + confirm panel.
-  function makePowerUi(btn, menu, confirm, title, yes) {
+  // ── power panel (Hyprland-style circle row) ───────────────
+  // Factory wires one power button + in-flow panel with menu row +
+  // confirm row. The panel lives in the document flow so measure()
+  // grows/shrinks the overlay window with it.
+  function makePowerUi(btn, panel, menu, confirm, title, yes) {
     let open = false;
     let confirmAction = null; // "shutdown" | "restart" | null
     const api = {
@@ -671,17 +673,23 @@
         open = false;
         menu.classList.add("hidden");
         btn.classList.remove("open");
+        panel.closest("#panel").classList.remove("power-menu-open");
+        if (!confirmAction) panel.classList.add("hidden");
         input.focus();
+        measure();
       },
       closeConfirm() {
         if (!confirmAction) return;
         confirmAction = null;
         confirm.classList.add("hidden");
+        if (open) menu.classList.remove("hidden");
+        else panel.classList.add("hidden");
+        measure();
       },
       isOpen() { return open; },
       hasConfirm() { return confirmAction !== null; },
       isConfirmTarget(el) { return confirm.contains(el); },
-      isMenuTarget(el) { return btn.contains(el) || menu.contains(el); },
+      isMenuTarget(el) { return btn.contains(el) || panel.contains(el); },
     };
 
     btn.addEventListener("click", (e) => {
@@ -693,8 +701,11 @@
         return;
       }
       open = !open;
+      panel.closest("#panel").classList.toggle("power-menu-open", open);
+      panel.classList.toggle("hidden", !open);
       menu.classList.toggle("hidden", !open);
       btn.classList.toggle("open", open);
+      measure();
     });
 
     menu.addEventListener("click", (e) => {
@@ -702,15 +713,22 @@
       if (!b) return;
       const action = b.dataset.power;
       if (!action) return;
+      // Back button — close the menu and return to the overlay.
+      if (action === "back") {
+        e.stopPropagation();
+        api.closeMenu();
+        return;
+      }
       // Destructive actions need an in-overlay confirm panel first.
       if (action === "shutdown" || action === "restart") {
         e.stopPropagation(); // keep this click from closing the panel we're about to open
         confirmAction = action;
-        api.closeMenu();
+        menu.classList.add("hidden");
         const isShutdown = action === "shutdown";
         title.textContent = isShutdown ? "Shut down now?" : "Restart now?";
-        yes.textContent = isShutdown ? "Shut down" : "Restart";
+        yes.querySelector("span").textContent = isShutdown ? "Shut Down" : "Restart";
         confirm.classList.remove("hidden");
+        measure();
         return;
       }
       post("powerAction", action);
@@ -733,16 +751,15 @@
     return api;
   }
 
-  const footerPower = makePowerUi(powerBtn, powerMenu, powerConfirm, powerConfirmTitle, powerConfirmYes);
-  powerBtnTop.addEventListener("click", (e) => {
-    e.stopPropagation();
-    post("powerPopup");
-  });
+  const footerPower = makePowerUi(powerBtn, powerPanel, powerMenu, powerConfirm, powerConfirmTitle, powerConfirmYes);
+  const topPower = makePowerUi(powerBtnTop, powerPanelTop, powerMenuTop, powerConfirmTop, powerConfirmTitleTop, powerConfirmYesTop);
 
-  // Close the dropup / confirm when clicking anywhere outside
+  // Close the panel / confirm when clicking anywhere outside
   document.addEventListener("click", (e) => {
     if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
     if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
+    if (topPower.hasConfirm() && !topPower.isConfirmTarget(e.target)) topPower.closeConfirm();
+    if (topPower.isOpen() && !topPower.isMenuTarget(e.target)) topPower.closeMenu();
     if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
       hideContextMenu();
     }
@@ -863,6 +880,8 @@
       // (show, hide, query change, etc.)
       footerPower.closeMenu();
       footerPower.closeConfirm();
+      topPower.closeMenu();
+      topPower.closeConfirm();
       hideContextMenu();
 
       // Lightweight selection-only update (no rows = incremental).

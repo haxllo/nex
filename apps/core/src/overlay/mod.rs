@@ -38,8 +38,6 @@ pub(crate) mod shim;
 pub(crate) mod tray;
 #[cfg(target_os = "windows")]
 pub(crate) mod indexing_progress;
-#[cfg(target_os = "windows")]
-pub(crate) mod power_popup;
 
 #[cfg(target_os = "windows")]
 pub use model::{OverlayEvent, OverlayRow, OverlayRowRole};

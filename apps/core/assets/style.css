@@ -30,6 +30,11 @@
   --divider: rgba(255, 255, 255, 0.06);
   --kbd-bg: rgba(255, 255, 255, 0.08);
   --icon-bg: rgba(255, 255, 255, 0.06);
+  --lock: #6ea8fe;
+  --logout: #ffb454;
+  --sleep: #b07cff;
+  --restart: #4ade80;
+  --shutdown: #ff6b6b;
 }
 
 html[data-theme="light"] {
@@ -47,6 +52,11 @@ html[data-theme="light"] {
   --divider: rgba(0, 0, 0, 0.07);
   --kbd-bg: rgba(0, 0, 0, 0.06);
   --icon-bg: rgba(0, 0, 0, 0.05);
+  --lock: #2f6bff;
+  --logout: #d97706;
+  --sleep: #8b5cf6;
+  --restart: #16a34a;
+  --shutdown: #dc2626;
 }
 
 * {
@@ -75,6 +85,9 @@ body {
   border-radius: var(--radius);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   clip-path: inset(-32px round var(--radius));
+  /* Contain children (power panel) so their corners round with the
+     window and margins don't collapse past the measured height. */
+  overflow: hidden;
 }
 
 /* ── search row ───────────────────────────────────────────── */
@@ -152,6 +165,11 @@ body {
 }
 #body.idle {
   visibility: hidden; /* keeps GPU layers alive; display:none would destroy them */
+}
+/* Idle: divider must not occupy layout — it would leak 7px (1px + 6px
+   margin) past the 60px idle window after a power-menu back. */
+#body.idle #divider {
+  display: none;
 }
 
 
@@ -240,13 +258,6 @@ body {
 img.icon.icon-pop {
   animation: nexIconIn 120ms ease-out;
 }
-/* Power dropup entrance — fades + rises from the button. */
-@keyframes nexPowerMenuIn {
-  from {
-    opacity: 0;
-    transform: translateY(4px) scale(0.98);
-  }
-}
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section {
@@ -255,9 +266,15 @@ img.icon.icon-pop {
   img.icon.icon-pop {
     animation: none;
   }
-  #power-menu {
-    animation: none;
-  }
+#power-menu {
+  animation: none;
+}
+.power-panel {
+  animation: none;
+}
+.power-panel .pcircle {
+  animation: none;
+}
 }
 
 .grid-view .row {
@@ -642,92 +659,116 @@ html[data-theme="light"] .row.selected .title {
 }
 #power-btn:hover,
 #power-btn.open,
-#power-btn-top:hover {
+#power-btn-top:hover,
+#power-btn-top.open {
   color: var(--text);
   background: transparent;
   transform: scale(1.15);
 }
 
-#power-menu {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 6px);
-  min-width: 130px;
-  padding: 4px;
-  border-radius: var(--radius);
+/* ── power panel (Hyprland-style circle row) ─────────────── */
+/* Only the power menu + its back button are visible while open. */
+#panel.power-menu-open #search-row,
+#panel.power-menu-open #body,
+#panel.power-menu-open #footer {
+  display: none;
+}
+
+.power-panel {
+  margin: 0;
+  padding: 20px 16px 22px;
+  border-radius: 0;
   background: var(--bg-opaque);
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  overflow: hidden;
-  transform-origin: bottom right;
-  animation: nexPowerMenuIn 140ms ease-out;
-}
-#power-menu button {
-  display: block;
-  width: 100%;
-  padding: 6px 10px;
   border: none;
-  border-radius: var(--row-radius);
-  background: transparent;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
+  box-shadow: none;
 }
-#power-menu button:hover {
+
+.power-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  justify-items: center;
+}
+
+.power-confirm .power-row {
+  display: flex;
+  justify-content: center;
+}
+
+.power-panel .pcircle {
+  --c: var(--text-faint);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 96px;
+  padding: 14px 0 10px;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--c);
+  cursor: pointer;
+  opacity: 0;
+  animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
+.power-panel .pcircle:nth-child(2) { animation-delay: 40ms; }
+.power-panel .pcircle:nth-child(3) { animation-delay: 60ms; }
+.power-panel .pcircle:nth-child(4) { animation-delay: 80ms; }
+.power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
+.power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
+.power-panel .pcircle svg {
+  width: 34px;
+  height: 34px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 120ms ease;
+}
+.power-panel .pcircle span {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+.power-panel .pcircle:hover {
   background: var(--sel);
 }
-#power-menu hr {
-  height: 1px;
-  margin: 4px 6px;
-  border: none;
-  background: var(--divider);
+.power-panel .pcircle:hover svg {
+  transform: scale(1.18);
+}
+.power-panel .pcircle:hover span {
+  color: var(--c);
+}
+.power-panel .pcircle[data-power="back"] {
+  color: var(--text-faint);
+}
+
+@keyframes nexPowerRise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 /* Confirmation panel — same visual language as the power menu */
-#power-confirm {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 6px);
-  min-width: 150px;
-  padding: 4px;
-  border-radius: var(--radius);
-  background: var(--bg-opaque);
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  overflow: hidden;
+.power-confirm {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--divider);
 }
-#power-confirm .confirm-title {
-  padding: 6px 10px 2px;
+.power-confirm .confirm-title {
+  padding-bottom: 6px;
   font-size: 11px;
   color: var(--text-faint);
+  text-align: center;
   white-space: nowrap;
-}
-#power-confirm button {
-  display: block;
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  border-radius: var(--row-radius);
-  background: transparent;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-}
-#power-confirm button:hover {
-  background: var(--sel);
-}
-#power-confirm button.confirm-yes {
-  color: var(--accent);
-}
-#power-confirm hr {
-  height: 1px;
-  margin: 4px 6px;
-  border: none;
-  background: var(--divider);
 }
 
 /* ── context menu (right-click on rows) ──────────────────── */

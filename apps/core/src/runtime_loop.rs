@@ -1315,7 +1315,6 @@ impl RuntimeWorker {
             }
             OverlayEvent::ExternalQuit => {
                 QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                crate::overlay::power_popup::quit();
                 self.overlay.hide_now();
                 self.last_query.clear();
                 self.last_sent_generation = 0;
@@ -1399,9 +1398,6 @@ impl RuntimeWorker {
                         log_warn(&format!("[nex] power menu restart failed: {error}"));
                     }
                 });
-            }
-            OverlayEvent::TogglePowerPopup => {
-                crate::overlay::power_popup::toggle(self.overlay.hwnd());
             }
             OverlayEvent::FocusSearchInput => {
                 self.overlay.focus_search_input();

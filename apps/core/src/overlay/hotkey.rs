@@ -129,10 +129,6 @@ pub(crate) fn set_overlay_hwnd(hwnd: isize) {
     OVERLAY_HWND.store(hwnd, Ordering::SeqCst);
 }
 
-pub(crate) fn overlay_hwnd() -> isize {
-    OVERLAY_HWND.load(Ordering::SeqCst)
-}
-
 /// Clears the focus-loss guard after the runtime has handled the Win toggle.
 pub(crate) fn finish_bare_win_press() {
     SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);

@@ -676,7 +676,9 @@ html[data-theme="light"] .row.selected .title {
   margin: 0;
   padding: 20px 16px 22px;
   border-radius: 0;
-  background: var(--bg-opaque);
+  /* Transparent — the window's acrylic backdrop shows through
+     (menu-open view hides search-row, so panel fills the window). */
+  background: transparent;
   border: none;
   box-shadow: none;
 }

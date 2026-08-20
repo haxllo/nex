@@ -880,6 +880,8 @@
       // (show, hide, query change, etc.)
       footerPower.closeMenu();
       footerPower.closeConfirm();
+      topPower.closeMenu();
+      topPower.closeConfirm();
       hideContextMenu();
 
       // Lightweight selection-only update (no rows = incremental).

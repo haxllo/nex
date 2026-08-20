@@ -660,8 +660,8 @@ html[data-theme="light"] .row.selected .title {
 
 /* ── power panel (Hyprland-style circle row) ─────────────── */
 .power-panel {
-  margin: 8px 10px 0;
-  padding: 8px;
+  margin: 8px 10px 12px;
+  padding: 10px 10px 12px;
   border-radius: var(--radius);
   background: var(--bg-opaque);
   border: 1px solid var(--border);

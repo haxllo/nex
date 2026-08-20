@@ -1317,7 +1317,7 @@ fn position_window(window: &Window, _hwnd: HWND) {
     let work_w = right - left;
     let work_h = bottom - top;
     let x = left + (work_w - width_phys) / 2;
-    let y = top + (work_h as f32 * 0.20) as i32;
+    let y = top + (work_h as f32 * 0.30) as i32;
     window.set_outer_position(PhysicalPosition::new(x.max(left), y.max(top)));
 }
 

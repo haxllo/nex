@@ -376,13 +376,34 @@
     // on mousemove — re-select whatever row sits under the stationary
     // cursor so the highlight doesn't jump to the top. Must run AFTER the
     // rowMap rebuild above, or setSelected resolves stale nodes.
+    // When the pointer rests over a gap (grid gutters, headers), snap to
+    // the nearest row vertically — otherwise the stale row-0 selection
+    // stays visible until the mouse moves.
     if (contentChanged && lastMouseX >= 0) {
+      let target = null;
       const el = document.elementFromPoint(lastMouseX, lastMouseY);
       const hovered = el && el.closest ? el.closest(".row") : null;
       if (hovered) {
-        const idx = Number(hovered.dataset.index);
-        if (idx !== selected) setSelected(idx, false);
+        target = Number(hovered.dataset.index);
+      } else {
+        const lr = list.getBoundingClientRect();
+        if (lastMouseY >= lr.top && lastMouseY <= lr.bottom) {
+          let bestLi = null;
+          let bestDy = Infinity;
+          for (const li of list.children) {
+            if (!li.classList.contains("row")) continue;
+            const r = li.getBoundingClientRect();
+            if (r.height === 0) continue;
+            const dy = Math.abs(r.top + r.height / 2 - lastMouseY);
+            if (dy < bestDy) {
+              bestDy = dy;
+              bestLi = li;
+            }
+          }
+          if (bestLi) target = Number(bestLi.dataset.index);
+        }
       }
+      if (target !== null && target !== selected) setSelected(target, false);
     }
 
     // Status / empty state.

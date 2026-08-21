@@ -791,16 +791,17 @@ html[data-theme="light"] .row.selected .title {
   }
 }
 
-/* Confirmation panel — same visual language as the power menu */
+/* Confirmation panel — standalone view: the menu row is hidden while
+   confirming, so no divider or top offset; the panel padding frames it. */
 .power-confirm {
-  margin-top: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--divider);
+  margin: 0;
+  padding: 0;
+  border: none;
 }
 .power-confirm .confirm-title {
-  padding-bottom: 6px;
+  padding-bottom: 16px;
   font-size: 11px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   text-align: center;
   white-space: nowrap;
 }

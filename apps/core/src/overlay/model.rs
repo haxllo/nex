@@ -27,7 +27,6 @@ pub enum OverlayRowRole {
     Calculator,
     QuickLaunch,
     ShowAllApps,
-    ShowMoreApps,
 }
 
 /// Events the runtime callback receives on the worker thread.

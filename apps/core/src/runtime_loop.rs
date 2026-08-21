@@ -554,9 +554,6 @@ struct RuntimeWorker {
     apps_expanded: Option<String>,
 }
 
-/// Rows appended per "Show more" page in the Show-all-apps expansion.
-const SHOW_MORE_APPS_PAGE_SIZE: usize = 60;
-
 impl RuntimeWorker {
     /// Activate the "Show all apps" entry: re-issue the current query with
     /// an apps-only kind filter and a larger result limit, then mark the
@@ -582,9 +579,7 @@ impl RuntimeWorker {
     /// Append the full app index below the query-matched apps while the
     /// "Show all apps" expansion is active for the current query. Apps
     /// already present in the results are skipped; the rest are appended
-    /// directly after them (no section break), alphabetically, in pages
-    /// of [`SHOW_MORE_APPS_PAGE_SIZE`]. When more remain, a synthetic
-    /// "Show more" row is appended and the next call reveals the next page.
+    /// directly after them (no section break), alphabetically.
     fn append_all_apps_section(&mut self) {
         let mut known: std::collections::HashSet<String> = self
             .current_results
@@ -602,40 +597,22 @@ impl RuntimeWorker {
             }
         };
 
-        // Previously appended pages are already in `known`, so the first
-        // not-yet-shown entries in scan order are exactly the next page.
-        let mut page: Vec<(String, String, String, String)> = Vec::new();
-        let mut more_remaining = false;
+        let first_appended = self.current_results.len();
         for (id, title, path, subtitle) in all_apps {
             let key = path.replace('/', "\\").to_ascii_lowercase();
             if !known.insert(key) {
                 continue;
             }
-            if page.len() < SHOW_MORE_APPS_PAGE_SIZE {
-                page.push((id, title, path, subtitle));
-            } else {
-                more_remaining = true;
-                break;
-            }
-        }
-        if page.is_empty() {
-            return;
-        }
-
-        let first_appended = self.current_results.len();
-        for (id, title, path, subtitle) in page {
             self.current_results.push(
                 crate::model::SearchItem::new(&id, "app", &title, &path)
                     .with_subtitle(&subtitle),
             );
         }
+        if self.current_results.len() == first_appended {
+            return;
+        }
 
         let mut rows = std::mem::take(&mut self.current_rows);
-        // Drop the previous "Show more" button — a fresh one is appended
-        // below only when another page remains.
-        while rows.last().map(|r| r.role) == Some(OverlayRowRole::ShowMoreApps) {
-            rows.pop();
-        }
         for idx in first_appended..self.current_results.len() {
             rows.push(result_row(
                 &self.current_results[idx],
@@ -643,16 +620,6 @@ impl RuntimeWorker {
                 OverlayRowRole::Item,
                 false,
             ));
-        }
-        if more_remaining {
-            rows.push(OverlayRow {
-                role: OverlayRowRole::ShowMoreApps,
-                result_index: None,
-                kind: "action".to_string(),
-                title: "Show more".to_string(),
-                path: String::new(),
-                icon_path: String::new(),
-            });
         }
         self.current_rows = rows;
         let selected = self.selected_index;
@@ -1658,18 +1625,12 @@ impl RuntimeWorker {
                 }
 
                 // "Show all apps" entry — re-run the query apps-only.
-                // "Show more" entry — reveal the next page of the index.
                 if let Some(list_selection) = self.overlay.selected_index() {
-                    match self.current_rows.get(list_selection).map(|r| r.role) {
-                        Some(OverlayRowRole::ShowAllApps) => {
-                            self.expand_all_apps();
-                            return;
-                        }
-                        Some(OverlayRowRole::ShowMoreApps) => {
-                            self.append_all_apps_section();
-                            return;
-                        }
-                        _ => {}
+                    if self.current_rows.get(list_selection).map(|r| r.role)
+                        == Some(OverlayRowRole::ShowAllApps)
+                    {
+                        self.expand_all_apps();
+                        return;
                     }
                 }
 

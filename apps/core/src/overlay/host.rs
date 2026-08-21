@@ -32,6 +32,11 @@ use std::time::{Duration, Instant};
 /// acrylic while the native window waits for the timer to fire.
 const RESIZE_DEBOUNCE_MS: u64 = 100;
 
+/// Growth jumps larger than this bypass the debounce and apply at once —
+/// a big expansion (e.g. Show-all-apps) painting before the debounced
+/// grow lands reads as laggy. Small per-keystroke growth stays debounced.
+const RESIZE_IMMEDIATE_GROWTH: f64 = 80.0;
+
 /// Tracks whether the overlay window is currently visible.
 /// Used by the WM_INPUT handler to decide whether to toggle the overlay
 /// on Win key-down (only toggle when visible; hook handles first press).
@@ -527,6 +532,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             last_applied_height = h;
                             apply_window_height(&window, webview.as_ref(), h);
                         }
+                    } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
+                        // Large growth: apply immediately so the window is
+                        // already full-size when the new rows paint.
+                        first_resize_after_show = false;
+                        pending_resize = None;
+                        last_applied_height = h;
+                        apply_window_height(&window, webview.as_ref(), h);
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash

@@ -191,7 +191,7 @@ body {
 #list.grid-view {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: 8px;
+  gap: 0;
   scrollbar-gutter: stable;
   padding-top: 4px;
   /* Match bottom gap to the top (divider 6px + grid top padding 4px). */

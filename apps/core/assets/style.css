@@ -23,7 +23,7 @@
   --text: #f4f4f6;
   --text-dim: #818181;
   --text-faint: #76767f;
-  --sel: rgba(255, 255, 255, 0.09);
+  --sel: rgba(255, 255, 255, 0.05);
   --sel-border: rgba(255, 255, 255, 0.08);
   --hover: rgba(255, 255, 255, 0.05);
   --accent: #6ea8fe;
@@ -45,7 +45,7 @@ html[data-theme="light"] {
   --text: #16161a;
   --text-dim: #55555f;
   --text-faint: #8a8a93;
-  --sel: rgba(0, 0, 0, 0.06);
+  --sel: rgba(0, 0, 0, 0.04);
   --sel-border: rgba(0, 0, 0, 0.06);
   --hover: rgba(0, 0, 0, 0.04);
   --accent: #2f6bff;

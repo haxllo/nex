@@ -435,6 +435,7 @@ pub(crate) fn run_windows_runtime(
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
         apps_expanded: None,
+        pre_expand_state: None,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -552,6 +553,9 @@ struct RuntimeWorker {
     /// Query for which the "Show all apps" expansion is active. When set,
     /// the entry is suppressed and results are already apps-only.
     apps_expanded: Option<String>,
+    /// Snapshot taken when the expansion request was issued; restored if
+    /// the expanded search comes back empty.
+    pre_expand_state: Option<(Vec<crate::model::SearchItem>, Vec<crate::overlay::OverlayRow>, usize)>,
 }
 
 impl RuntimeWorker {
@@ -567,6 +571,12 @@ impl RuntimeWorker {
             ParsedQuery::parse(&query, self.runtime_config.search_dsl_enabled);
         parsed_query.kind_filter = Some("app".to_string());
         let limit = (self.max_results as usize).max(SHOW_ALL_APPS_RESULT_LIMIT);
+        // Snapshot the current view — restored if no apps match.
+        self.pre_expand_state = Some((
+            self.current_results.clone(),
+            self.current_rows.clone(),
+            self.selected_index,
+        ));
         let generation = self.search_worker.send_request(
             self.config_generation,
             parsed_query,
@@ -1510,6 +1520,7 @@ impl RuntimeWorker {
                     );
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
+                    self.pre_expand_state = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
                     self.search_session.clear();
@@ -1528,6 +1539,7 @@ impl RuntimeWorker {
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
+                    self.pre_expand_state = None;
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
@@ -1577,6 +1589,23 @@ impl RuntimeWorker {
                 if let Some(q) = self.apps_expanded.clone() {
                     if q == self.overlay.query_text().trim() {
                         self.append_all_apps_section();
+                    }
+                }
+                // Expansion came back empty — restore the pre-expansion
+                // view and hint instead of leaving a collapsed list.
+                if self.apps_expanded.is_some() {
+                    if self.current_results.is_empty() {
+                        if let Some((results, rows, sel)) = self.pre_expand_state.take() {
+                            self.current_results = results;
+                            self.current_rows = rows;
+                            self.selected_index = sel;
+                            let query = self.apps_expanded.clone().unwrap_or_default();
+                            self.overlay.set_results(&self.current_rows, self.selected_index);
+                            self.overlay.show_placeholder_hint(&format!("No apps match \"{query}\""));
+                        }
+                        self.apps_expanded = None;
+                    } else {
+                        self.pre_expand_state = None;
                     }
                 }
             }
@@ -2136,6 +2165,12 @@ fn apply_search_results(
             set_status_row_overlay_state(overlay, "Indexing, please wait...");
         } else if command_mode {
             set_status_row_overlay_state(overlay, STATUS_ROW_NO_COMMAND_RESULTS);
+        } else if apps_expanded_query.is_some() {
+            // "Show all apps" expansion found zero app matches — leave the
+            // results empty so the caller can restore the pre-expansion
+            // view instead of collapsing to a web-search row.
+            current_results.clear();
+            current_rows.clear();
         } else {
             let query = overlay.query_text();
             // Reuse the existing web search action system — respects

@@ -618,10 +618,9 @@ impl RuntimeWorker {
                     .with_subtitle(&subtitle),
             );
         }
-        if self.current_results.len() == first_appended {
-            return;
-        }
 
+        // Always push — the intermediate apps-only render was suppressed,
+        // so this is the single visible update for the expansion.
         let mut rows = std::mem::take(&mut self.current_rows);
         for idx in first_appended..self.current_results.len() {
             rows.push(result_row(
@@ -1585,10 +1584,13 @@ impl RuntimeWorker {
                     self.apps_expanded.as_deref(),
                 );
                 // "Show all apps" expansion: append the full app index
-                // below the query-matched apps.
+                // below the query-matched apps (single visible push).
                 if let Some(q) = self.apps_expanded.clone() {
                     if q == self.overlay.query_text().trim() {
                         self.append_all_apps_section();
+                    } else {
+                        let selected = self.selected_index;
+                        self.overlay.set_results(&self.current_rows, selected);
                     }
                 }
                 // Expansion came back empty — restore the pre-expansion
@@ -2193,7 +2195,13 @@ fn apply_search_results(
         let expanded = apps_expanded_query == Some(overlay.query_text().trim());
         let rows = overlay_rows_ext(current_results, command_mode, !command_mode && !is_idle && !expanded);
         *current_rows = rows;
-        overlay.set_results(current_rows, *selected_index);
+        // During expansion the intermediate apps-only view is NOT pushed —
+        // it's smaller than the pre-click list, so pushing it would make
+        // the window visibly shorten before the index append grows it
+        // back. The caller pushes once after appending.
+        if !expanded {
+            overlay.set_results(current_rows, *selected_index);
+        }
     }
 }
 

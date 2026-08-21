@@ -1003,7 +1003,11 @@ impl RuntimeWorker {
                             if self.current_results.is_empty() {
                                 set_status_row_overlay_state(&self.overlay, STATUS_ROW_NO_RESULTS);
                             } else {
-                                let rows = overlay_rows(&self.current_results, false);
+                                let rows = overlay_rows_ext(
+                                    &self.current_results,
+                                    false,
+                                    self.apps_expanded.is_none(),
+                                );
                                 self.current_rows = rows;
                                 self.overlay.set_results(&self.current_rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
                             }
@@ -1734,9 +1738,11 @@ impl RuntimeWorker {
                                                     },
                                                 );
                                             } else {
-                                                let rows = overlay_rows(
+                                                let rows = overlay_rows_ext(
                                                     &self.current_results,
                                                     pending.previous_command_mode,
+                                                    !pending.previous_command_mode
+                                                        && self.apps_expanded.is_none(),
                                                 );
                                                 self.current_rows = rows;
                                                 self.overlay.set_results(&self.current_rows, self.selected_index);
@@ -1809,9 +1815,10 @@ impl RuntimeWorker {
                                 },
                             );
                         } else {
-                            let rows = overlay_rows(
+                            let rows = overlay_rows_ext(
                                 &self.current_results,
                                 pending.previous_command_mode,
+                                !pending.previous_command_mode && self.apps_expanded.is_none(),
                             );
                             self.current_rows = rows;
                             self.overlay.set_results(&self.current_rows, self.selected_index);

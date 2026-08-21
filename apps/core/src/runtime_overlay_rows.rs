@@ -142,8 +142,10 @@ pub(crate) fn overlay_rows_ext(
     }
     // Synthetic "Show all apps" entry — last row of the app group. The
     // runtime intercepts its activation and re-issues the query with an
-    // apps-only kind filter and a larger limit.
-    if show_all_apps_entry && !kind_buckets[0].is_empty() {
+    // apps-only kind filter and a larger limit. Emitted whenever the flag
+    // is set — even when non-app results crowded every app out of the
+    // result cap (the activation re-search finds them).
+    if show_all_apps_entry {
         rows.push(OverlayRow {
             role: OverlayRowRole::ShowAllApps,
             result_index: None,
@@ -754,10 +756,14 @@ mod tests {
         let rows = overlay_rows_ext(&results, true, true);
         assert!(rows.iter().all(|r| r.role != OverlayRowRole::ShowAllApps));
 
-        // No apps → no entry even with the flag on.
+        // No apps in results → entry still emitted (activation re-searches
+        // apps-only; non-app rows may have crowded apps out of the cap).
         let no_apps = vec![folder("f1", "folder", 0)];
         let rows = overlay_rows_ext(&no_apps, false, true);
-        assert!(rows.iter().all(|r| r.role != OverlayRowRole::ShowAllApps));
+        assert_eq!(
+            rows.iter().filter(|r| r.role == OverlayRowRole::ShowAllApps).count(),
+            1
+        );
     }
 
     /// (c) Kind order: apps > folders > files > actions > clipboard, same tier.

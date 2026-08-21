@@ -65,17 +65,6 @@ pub(crate) fn start_background_index_refresh(
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        // Below-normal priority: the walk + Tantivy sync legitimately take
-        // seconds of CPU, but the UI thread must always win — otherwise the
-        // first hotkey show (which now lands inside this window, since the
-        // gate above deferred the storm past startup) freezes the overlay.
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows_sys::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-            };
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-        }
         // Catch panics so a buggy provider can never silently leave the main
         // thread waiting on a completion flag that will never flip.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -46,7 +46,7 @@ use crate::runtime_index::{
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, overlay_rows, overlay_rows_ext,
-    reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
+    reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
     ConfirmationKind, PendingConfirmation,
@@ -559,14 +559,12 @@ struct RuntimeWorker {
 }
 
 impl RuntimeWorker {
-    /// Activate the "Show all apps" entry — synchronous, two-phase:
-    ///
-    /// Phase 1 pushes just the first page (matched apps + enough index
-    /// apps to fill the window). Small DOM, fast raster, one resize.
-    /// Phase 2 delivers the remainder ~80ms later via
-    /// [`OverlayEvent::ShowAllAppsFillRest`] — by then the window is
-    /// already at its capped height, so appending rows causes no resize
-    /// and no acrylic flash.
+    /// Activate the "Show all apps" entry — synchronous, two-phase, and
+    /// order-stable: the currently visible app rows are kept exactly as
+    /// rendered (no regroup, no TopHit promotion), index apps are appended
+    /// after them. Phase 1 pushes enough rows to fill the window; phase 2
+    /// (`ShowAllAppsFillRest`) appends the remainder once the window is
+    /// already at its capped height — no resize, no flash.
     fn expand_all_apps(&mut self) {
         const FIRST_PAGE: usize = 60;
         let query = self.overlay.query_text().trim().to_string();
@@ -575,18 +573,30 @@ impl RuntimeWorker {
         }
         self.apps_expanded = Some(query);
 
-        // Matched apps keep their score order; everything else on screen
-        // (files/folders/actions) drops out of the expanded view.
+        // Existing app rows, verbatim — positions never move.
+        let mut rows: Vec<crate::overlay::OverlayRow> = self
+            .current_rows
+            .iter()
+            .filter(|r| {
+                (r.role == OverlayRowRole::Item || r.role == OverlayRowRole::TopHit)
+                    && r.kind.eq_ignore_ascii_case("app")
+                    && r.result_index.is_some()
+            })
+            .cloned()
+            .collect();
+        let mut results: Vec<crate::model::SearchItem> = rows
+            .iter()
+            .map(|r| {
+                let idx = r.result_index.unwrap_or(0);
+                self.current_results[idx].clone()
+            })
+            .collect();
+
+        // Paths already on screen (any kind) — never duplicated.
         let mut known: std::collections::HashSet<String> = self
             .current_results
             .iter()
             .map(|r| r.path.replace('/', "\\").to_ascii_lowercase())
-            .collect();
-        let mut results: Vec<crate::model::SearchItem> = self
-            .current_results
-            .iter()
-            .filter(|r| r.kind.eq_ignore_ascii_case("app"))
-            .cloned()
             .collect();
 
         let all_apps = {
@@ -599,41 +609,38 @@ impl RuntimeWorker {
                 }
             }
         };
+
+        // First page: fill up to FIRST_PAGE total rows now; queue the rest.
+        let mut pending: Vec<crate::model::SearchItem> = Vec::new();
         for (id, title, path, subtitle) in all_apps {
             let key = path.replace('/', "\\").to_ascii_lowercase();
             if !known.insert(key) {
                 continue;
             }
-            results.push(
-                crate::model::SearchItem::new(&id, "app", &title, &path)
-                    .with_subtitle(&subtitle),
-            );
+            let item = crate::model::SearchItem::new(&id, "app", &title, &path)
+                .with_subtitle(&subtitle);
+            if results.len() < FIRST_PAGE {
+                results.push(item.clone());
+                let idx = results.len() - 1;
+                rows.push(result_row(&item, idx, OverlayRowRole::Item, false));
+            } else {
+                pending.push(item);
+            }
         }
 
-        if results.len() <= FIRST_PAGE {
-            // Everything fits in the first page — single push.
-            self.current_results = results;
-            self.selected_index = 0;
-            let rows = overlay_rows_ext(&self.current_results, false, false);
-            self.current_rows = rows;
-            self.overlay.set_results(&self.current_rows, self.selected_index);
-            return;
-        }
-
-        // Phase 1: first page only.
-        self.current_results = results.drain(..FIRST_PAGE).collect();
-        self.pending_show_all = Some(results);
-        self.selected_index = 0;
-        let rows = overlay_rows_ext(&self.current_results, false, false);
+        self.current_results = results;
         self.current_rows = rows;
+        self.selected_index = 0;
         self.overlay.set_results(&self.current_rows, self.selected_index);
 
-        // Phase 2: remainder after the first paint settles.
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(80));
-            let _ = event_tx.send(OverlayEvent::ShowAllAppsFillRest);
-        });
+        if !pending.is_empty() {
+            self.pending_show_all = Some(pending);
+            let event_tx = self.event_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                let _ = event_tx.send(OverlayEvent::ShowAllAppsFillRest);
+            });
+        }
     }
 
     /// Load Quick Launch items from the database and config.
@@ -1588,17 +1595,25 @@ impl RuntimeWorker {
             OverlayEvent::ShowAllAppsFillRest => {
                 // Expansion was cancelled (query changed / escaped) before
                 // the remainder timer fired — drop it.
-                let Some(full) = self.pending_show_all.take() else {
+                let Some(pending) = self.pending_show_all.take() else {
                     return;
                 };
                 if self.apps_expanded.is_none() {
                     return;
                 }
-                self.current_results = full;
-                self.selected_index = 0;
-                let rows = overlay_rows_ext(&self.current_results, false, false);
-                self.current_rows = rows;
-                self.overlay.set_results(&self.current_rows, self.selected_index);
+                // Append-only: existing rows keep their exact positions.
+                for item in pending {
+                    self.current_results.push(item.clone());
+                    let idx = self.current_results.len() - 1;
+                    self.current_rows.push(result_row(
+                        &item,
+                        idx,
+                        OverlayRowRole::Item,
+                        false,
+                    ));
+                }
+                self.overlay
+                    .set_results(&self.current_rows, self.selected_index);
             }
             OverlayEvent::Submit => {
                 // Check if we're in Quick Launch mode (empty query, Quick Launch visible)

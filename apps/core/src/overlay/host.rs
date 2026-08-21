@@ -1142,11 +1142,16 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 OverlayRowRole::Status => "status",
                 OverlayRowRole::Calculator => "calculator",
                 OverlayRowRole::QuickLaunch => "quick_launch",
+                OverlayRowRole::ShowAllApps => "show_all_apps",
                 OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
             };
             let selectable = matches!(
                 r.role,
-                OverlayRowRole::Item | OverlayRowRole::TopHit | OverlayRowRole::Calculator | OverlayRowRole::QuickLaunch
+                OverlayRowRole::Item
+                    | OverlayRowRole::TopHit
+                    | OverlayRowRole::Calculator
+                    | OverlayRowRole::QuickLaunch
+                    | OverlayRowRole::ShowAllApps
             );
             let icon = if r.icon_path.is_empty() {
                 serde_json::Value::Null

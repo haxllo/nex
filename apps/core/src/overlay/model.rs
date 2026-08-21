@@ -55,6 +55,9 @@ pub enum OverlayEvent {
     /// Refocus the overlay search input without showing/reshowing the overlay.
     FocusSearchInput,
     SearchResultsReady,
+    /// Deliver the remainder of the Show-all-apps index after the first
+    /// page has painted (self-scheduled by the runtime worker).
+    ShowAllAppsFillRest,
     /// Pin an app to Quick Launch by title.
     PinApp(String),
     /// Unpin an app from Quick Launch by title.

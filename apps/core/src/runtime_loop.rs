@@ -435,6 +435,7 @@ pub(crate) fn run_windows_runtime(
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
         apps_expanded: None,
+        pending_show_all: None,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -552,14 +553,22 @@ struct RuntimeWorker {
     /// Query for which the "Show all apps" expansion is active. When set,
     /// the entry is suppressed in rebuilt rows until the query changes.
     apps_expanded: Option<String>,
+    /// Full expanded app list waiting to be pushed after the first page
+    /// has painted (see `expand_all_apps`).
+    pending_show_all: Option<Vec<crate::model::SearchItem>>,
 }
 
 impl RuntimeWorker {
-    /// Activate the "Show all apps" entry — fully synchronous: the
-    /// matched apps are already in `current_results`, and the rest of the
-    /// index is a local SQLite read. No search roundtrip, so the overlay
-    /// pushes exactly one state update and the window resizes once.
+    /// Activate the "Show all apps" entry — synchronous, two-phase:
+    ///
+    /// Phase 1 pushes just the first page (matched apps + enough index
+    /// apps to fill the window). Small DOM, fast raster, one resize.
+    /// Phase 2 delivers the remainder ~80ms later via
+    /// [`OverlayEvent::ShowAllAppsFillRest`] — by then the window is
+    /// already at its capped height, so appending rows causes no resize
+    /// and no acrylic flash.
     fn expand_all_apps(&mut self) {
+        const FIRST_PAGE: usize = 60;
         let query = self.overlay.query_text().trim().to_string();
         if query.is_empty() {
             return;
@@ -601,12 +610,30 @@ impl RuntimeWorker {
             );
         }
 
-        self.current_results = results;
+        if results.len() <= FIRST_PAGE {
+            // Everything fits in the first page — single push.
+            self.current_results = results;
+            self.selected_index = 0;
+            let rows = overlay_rows_ext(&self.current_results, false, false);
+            self.current_rows = rows;
+            self.overlay.set_results(&self.current_rows, self.selected_index);
+            return;
+        }
+
+        // Phase 1: first page only.
+        self.current_results = results.drain(..FIRST_PAGE).collect();
+        self.pending_show_all = Some(results);
         self.selected_index = 0;
-        // Apps-only slice → TopHit + app Items, no "Show all apps" entry.
         let rows = overlay_rows_ext(&self.current_results, false, false);
         self.current_rows = rows;
         self.overlay.set_results(&self.current_rows, self.selected_index);
+
+        // Phase 2: remainder after the first paint settles.
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let _ = event_tx.send(OverlayEvent::ShowAllAppsFillRest);
+        });
     }
 
     /// Load Quick Launch items from the database and config.
@@ -1493,6 +1520,7 @@ impl RuntimeWorker {
                     );
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
+                    self.pending_show_all = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
                     self.search_session.clear();
@@ -1511,6 +1539,7 @@ impl RuntimeWorker {
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
+                    self.pending_show_all = None;
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
@@ -1555,6 +1584,21 @@ impl RuntimeWorker {
                     self.last_sent_generation,
                     self.apps_expanded.as_deref(),
                 );
+            }
+            OverlayEvent::ShowAllAppsFillRest => {
+                // Expansion was cancelled (query changed / escaped) before
+                // the remainder timer fired — drop it.
+                let Some(full) = self.pending_show_all.take() else {
+                    return;
+                };
+                if self.apps_expanded.is_none() {
+                    return;
+                }
+                self.current_results = full;
+                self.selected_index = 0;
+                let rows = overlay_rows_ext(&self.current_results, false, false);
+                self.current_rows = rows;
+                self.overlay.set_results(&self.current_rows, self.selected_index);
             }
             OverlayEvent::Submit => {
                 // Check if we're in Quick Launch mode (empty query, Quick Launch visible)

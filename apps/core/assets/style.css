@@ -372,9 +372,11 @@ img.icon.icon-pop {
    This makes wrong-selection paints between JS corrections invisible. */
 #list:hover .row.selected {
   background: transparent;
+  border-color: transparent;
 }
 #list:hover .row.selected:hover {
   background: var(--hover);
+  border-color: var(--border);
 }
 
 .row .icon {

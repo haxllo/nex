@@ -631,6 +631,11 @@ impl RuntimeWorker {
         }
 
         let mut rows = std::mem::take(&mut self.current_rows);
+        // Drop the previous "Show more" button — a fresh one is appended
+        // below only when another page remains.
+        while rows.last().map(|r| r.role) == Some(OverlayRowRole::ShowMoreApps) {
+            rows.pop();
+        }
         for idx in first_appended..self.current_results.len() {
             rows.push(result_row(
                 &self.current_results[idx],

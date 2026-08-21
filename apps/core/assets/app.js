@@ -520,40 +520,32 @@
   // Does NOT skip placeholder elements — on cold cache, render() creates
   // icons without src, and patchIcons() must update them all.
   function patchIcons() {
-    // Snapshot the work, then assign src in small per-frame batches —
-    // a large expansion would otherwise trigger hundreds of simultaneous
-    // PNG decodes and stall the renderer during the window resize.
-    requestAnimationFrame(() => {
-      const pending = [];
-      for (const li of list.children) {
-        const img = li.querySelector("img.icon");
-        if (!img) continue;
-        if (img.src === folderIcon()) continue;
-        const path = img.dataset.iconPath;
-        if (path && iconCache.has(path)) {
-          const dataUri = iconCache.get(path);
-          if (img.src !== dataUri) pending.push([img, dataUri]);
-        }
-      }
-      let i = 0;
-      const BATCH = 24;
-      function step() {
-        const end = Math.min(i + BATCH, pending.length);
-        for (; i < end; i++) {
-          const [img, dataUri] = pending[i];
-          // Only animate on a real src swap; re-patches of the same URI
-          // (every keystroke) stay silent.
-          if (!reduceMotion) {
-            img.classList.remove("icon-pop");
-            void img.offsetWidth;
-            img.classList.add("icon-pop");
-          }
+    // Assign every pending src synchronously so the pre-rasterized
+    // viewport paints rows complete with icons before the window
+    // reveals them. The pop-in runs as ONE list-level CSS animation —
+    // the old per-image class toggle + offsetWidth read forced a sync
+    // reflow per icon, stalling the renderer on large expansions.
+    let anySwapped = false;
+    for (const li of list.children) {
+      const img = li.querySelector("img.icon");
+      if (!img) continue;
+      if (img.src === folderIcon()) continue;
+      const path = img.dataset.iconPath;
+      if (path && iconCache.has(path)) {
+        const dataUri = iconCache.get(path);
+        if (img.src !== dataUri) {
           img.src = dataUri;
+          anySwapped = true;
         }
-        if (i < pending.length) requestAnimationFrame(step);
       }
-      step();
-    });
+    }
+    if (anySwapped && !reduceMotion) {
+      list.classList.remove("icons-pop");
+      void list.offsetWidth;
+      list.classList.add("icons-pop");
+      clearTimeout(patchIcons.timer);
+      patchIcons.timer = setTimeout(() => list.classList.remove("icons-pop"), 220);
+    }
   }
 
   // ── command mode ───────────────────────────────────────────

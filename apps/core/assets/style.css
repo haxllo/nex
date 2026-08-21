@@ -266,12 +266,19 @@ body {
 img.icon.icon-pop {
   animation: nexIconIn 120ms ease-out;
 }
+/* List-level icon pop — one animation class for the whole batch. */
+#list.icons-pop img.icon {
+  animation: nexIconIn 120ms ease-out;
+}
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section {
     animation: none;
   }
   img.icon.icon-pop {
+    animation: none;
+  }
+  #list.icons-pop img.icon {
     animation: none;
   }
 #power-menu {

@@ -49,7 +49,7 @@ use crate::runtime_overlay_rows::{
     reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
-    ConfirmationKind, PendingConfirmation, SHOW_ALL_APPS_RESULT_LIMIT,
+    ConfirmationKind, PendingConfirmation,
     ACTION_POWER_CANCEL_ID, ACTION_POWER_CONFIRM_ID,
     ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
     STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
@@ -435,7 +435,7 @@ pub(crate) fn run_windows_runtime(
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
         apps_expanded: None,
-        pre_expand_state: None,
+        pending_show_all: None,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -551,51 +551,54 @@ struct RuntimeWorker {
     /// Whether Quick Launch items have been loaded for current session.
     quick_launch_loaded: bool,
     /// Query for which the "Show all apps" expansion is active. When set,
-    /// the entry is suppressed and results are already apps-only.
+    /// the entry is suppressed in rebuilt rows until the query changes.
     apps_expanded: Option<String>,
-    /// Snapshot taken when the expansion request was issued; restored if
-    /// the expanded search comes back empty.
-    pre_expand_state: Option<(Vec<crate::model::SearchItem>, Vec<crate::overlay::OverlayRow>, usize)>,
+    /// Full expanded app list waiting to be pushed after the first page
+    /// has painted (see `expand_all_apps`).
+    pending_show_all: Option<Vec<crate::model::SearchItem>>,
 }
 
 impl RuntimeWorker {
-    /// Activate the "Show all apps" entry: re-issue the current query with
-    /// an apps-only kind filter and a larger result limit, then mark the
-    /// expansion active so the entry is suppressed in the rebuilt rows.
+    /// Activate the "Show all apps" entry — synchronous, two-phase, and
+    /// order-stable: the currently visible app rows are kept exactly as
+    /// rendered (no regroup, no TopHit promotion), index apps are appended
+    /// after them. Phase 1 pushes enough rows to fill the window; phase 2
+    /// (`ShowAllAppsFillRest`) appends the remainder once the window is
+    /// already at its capped height — no resize, no flash.
     fn expand_all_apps(&mut self) {
+        const FIRST_PAGE: usize = 60;
         let query = self.overlay.query_text().trim().to_string();
         if query.is_empty() {
             return;
         }
-        let mut parsed_query =
-            ParsedQuery::parse(&query, self.runtime_config.search_dsl_enabled);
-        parsed_query.kind_filter = Some("app".to_string());
-        let limit = (self.max_results as usize).max(SHOW_ALL_APPS_RESULT_LIMIT);
-        // Snapshot the current view — restored if no apps match.
-        self.pre_expand_state = Some((
-            self.current_results.clone(),
-            self.current_rows.clone(),
-            self.selected_index,
-        ));
-        let generation = self.search_worker.send_request(
-            self.config_generation,
-            parsed_query,
-            limit,
-        );
-        self.last_sent_generation = generation;
         self.apps_expanded = Some(query);
-    }
 
-    /// Append the full app index below the query-matched apps while the
-    /// "Show all apps" expansion is active for the current query. Apps
-    /// already present in the results are skipped; the rest are appended
-    /// directly after them (no section break), alphabetically.
-    fn append_all_apps_section(&mut self) {
+        // Existing app rows, verbatim — positions never move.
+        let mut rows: Vec<crate::overlay::OverlayRow> = self
+            .current_rows
+            .iter()
+            .filter(|r| {
+                (r.role == OverlayRowRole::Item || r.role == OverlayRowRole::TopHit)
+                    && r.kind.eq_ignore_ascii_case("app")
+                    && r.result_index.is_some()
+            })
+            .cloned()
+            .collect();
+        let mut results: Vec<crate::model::SearchItem> = rows
+            .iter()
+            .map(|r| {
+                let idx = r.result_index.unwrap_or(0);
+                self.current_results[idx].clone()
+            })
+            .collect();
+
+        // Paths already on screen (any kind) — never duplicated.
         let mut known: std::collections::HashSet<String> = self
             .current_results
             .iter()
             .map(|r| r.path.replace('/', "\\").to_ascii_lowercase())
             .collect();
+
         let all_apps = {
             let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
             match crate::index_store::get_all_apps(&guard.db_ref()) {
@@ -607,43 +610,42 @@ impl RuntimeWorker {
             }
         };
 
-        let first_appended = self.current_results.len();
+        // First page: fill up to FIRST_PAGE total rows now; queue the rest.
+        let mut pending: Vec<crate::model::SearchItem> = Vec::new();
         for (id, title, path, subtitle) in all_apps {
             let key = path.replace('/', "\\").to_ascii_lowercase();
             if !known.insert(key) {
                 continue;
             }
-            self.current_results.push(
-                crate::model::SearchItem::new(&id, "app", &title, &path)
-                    .with_subtitle(&subtitle),
-            );
+            let item = crate::model::SearchItem::new(&id, "app", &title, &path)
+                .with_subtitle(&subtitle);
+            if results.len() < FIRST_PAGE {
+                results.push(item.clone());
+                let idx = results.len() - 1;
+                rows.push(result_row(&item, idx, OverlayRowRole::Item, false));
+            } else {
+                pending.push(item);
+            }
         }
 
-        // Always push — the intermediate apps-only render was suppressed,
-        // so this is the single visible update for the expansion.
-        let mut rows = std::mem::take(&mut self.current_rows);
-        for idx in first_appended..self.current_results.len() {
-            rows.push(result_row(
-                &self.current_results[idx],
-                idx,
-                OverlayRowRole::Item,
-                false,
-            ));
-        }
+        self.current_results = results;
         self.current_rows = rows;
-        let selected = self.selected_index;
-        self.overlay.set_results(&self.current_rows, selected);
+        self.selected_index = 0;
+        self.overlay.set_results(&self.current_rows, self.selected_index);
+
+        if !pending.is_empty() {
+            self.pending_show_all = Some(pending);
+            let event_tx = self.event_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                let _ = event_tx.send(OverlayEvent::ShowAllAppsFillRest);
+            });
+        }
     }
 
     /// Load Quick Launch items from the database and config.
     /// Called every time the overlay shows idle state to ensure fresh data.
     fn load_quick_launch_items(&mut self) {
-        // Refresh the indexed-app count for the overlay (drives the
-        // Show-all-apps pre-grow decision). Cheap COUNT query.
-        if let Ok(guard) = self.service.try_read() {
-            let n = crate::index_store::count_apps(&guard.db_ref()).unwrap_or(0);
-            self.overlay.set_apps_indexed(n as usize);
-        }
         if !self.runtime_config.quick_launch.enabled {
             self.quick_launch_items.clear();
             self.quick_launch_loaded = true;
@@ -1525,7 +1527,7 @@ impl RuntimeWorker {
                     );
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
-                    self.pre_expand_state = None;
+                    self.pending_show_all = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
                     self.search_session.clear();
@@ -1544,7 +1546,7 @@ impl RuntimeWorker {
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
-                    self.pre_expand_state = None;
+                    self.pending_show_all = None;
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
@@ -1589,33 +1591,29 @@ impl RuntimeWorker {
                     self.last_sent_generation,
                     self.apps_expanded.as_deref(),
                 );
-                // "Show all apps" expansion: append the full app index
-                // below the query-matched apps (single visible push).
-                if let Some(q) = self.apps_expanded.clone() {
-                    if q == self.overlay.query_text().trim() {
-                        self.append_all_apps_section();
-                    } else {
-                        let selected = self.selected_index;
-                        self.overlay.set_results(&self.current_rows, selected);
-                    }
+            }
+            OverlayEvent::ShowAllAppsFillRest => {
+                // Expansion was cancelled (query changed / escaped) before
+                // the remainder timer fired — drop it.
+                let Some(pending) = self.pending_show_all.take() else {
+                    return;
+                };
+                if self.apps_expanded.is_none() {
+                    return;
                 }
-                // Expansion came back empty — restore the pre-expansion
-                // view and hint instead of leaving a collapsed list.
-                if self.apps_expanded.is_some() {
-                    if self.current_results.is_empty() {
-                        if let Some((results, rows, sel)) = self.pre_expand_state.take() {
-                            self.current_results = results;
-                            self.current_rows = rows;
-                            self.selected_index = sel;
-                            let query = self.apps_expanded.clone().unwrap_or_default();
-                            self.overlay.set_results(&self.current_rows, self.selected_index);
-                            self.overlay.show_placeholder_hint(&format!("No apps match \"{query}\""));
-                        }
-                        self.apps_expanded = None;
-                    } else {
-                        self.pre_expand_state = None;
-                    }
+                // Append-only: existing rows keep their exact positions.
+                for item in pending {
+                    self.current_results.push(item.clone());
+                    let idx = self.current_results.len() - 1;
+                    self.current_rows.push(result_row(
+                        &item,
+                        idx,
+                        OverlayRowRole::Item,
+                        false,
+                    ));
                 }
+                self.overlay
+                    .set_results(&self.current_rows, self.selected_index);
             }
             OverlayEvent::Submit => {
                 // Check if we're in Quick Launch mode (empty query, Quick Launch visible)

@@ -6,8 +6,6 @@ use crate::overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
 
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
-/// Result limit used when the user activates "Show all apps".
-pub(crate) const SHOW_ALL_APPS_RESULT_LIMIT: usize = 100;
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_COMMAND_RESULTS: &str = "No command matches";
 #[cfg(target_os = "windows")]

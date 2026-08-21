@@ -37,7 +37,6 @@
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
   let pendingShow = false; // show occurred, waiting for first real results
-  let appsIndexed = 0; // indexed app count — gates the pre-grow jump
   // Last cursor position — lets a re-render keep the selection under a
   // stationary mouse (hover only fires on mousemove).
   let lastMouseX = -1;
@@ -279,7 +278,6 @@
     li.addEventListener("click", () => {
       const idx = Number(li.dataset.index);
       setSelected(idx, false);
-      preGrowForExpansion(currentRows[idx]);
       post("submit", idx);
     });
     li.addEventListener("contextmenu", (e) => {
@@ -581,19 +579,6 @@
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
-  // Mirrors host MAX_HEIGHT — pre-grow target for Show-all-apps.
-  const PANEL_MAX_H = 530;
-  // "Show all apps" grows the window a lot via an async roundtrip —
-  // with a large index, expand to max up front so the window morphs
-  // once and results fill into an already-full window. Small indexes
-  // resize properly to their actual (smaller) height instead. Using
-  // the real max lets measure() dedupe at-cap expansions.
-  function preGrowForExpansion(row) {
-    if (row && row.role === "show_all_apps" && appsIndexed > 30) {
-      lastH = PANEL_MAX_H;
-      post("resize", { v: PANEL_MAX_H, immediate: true });
-    }
-  }
   function measure() {
     const h = Math.ceil(panel.getBoundingClientRect().height);
     // Shrink path: apply immediately. The WebView viewport is pinned at
@@ -669,10 +654,7 @@
         }
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (selected >= 0) {
-          preGrowForExpansion(currentRows[selected]);
-          post("submit", selected);
-        }
+        if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
         if (topPower.hasConfirm()) {
           topPower.closeConfirm();
@@ -994,7 +976,6 @@
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
-      if (typeof state.appsIndexed === "number") appsIndexed = state.appsIndexed;
 
       // Store Quick Launch items if provided
       if (Array.isArray(state.quickLaunch)) {

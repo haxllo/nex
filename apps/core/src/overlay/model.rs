@@ -55,6 +55,9 @@ pub enum OverlayEvent {
     /// Refocus the overlay search input without showing/reshowing the overlay.
     FocusSearchInput,
     SearchResultsReady,
+    /// Deliver the remainder of the Show-all-apps index after the first
+    /// page has painted (self-scheduled by the runtime worker).
+    ShowAllAppsFillRest,
     /// Pin an app to Quick Launch by title.
     PinApp(String),
     /// Unpin an app from Quick Launch by title.
@@ -114,9 +117,6 @@ pub struct ShimState {
     pub quick_launch_items: Vec<QuickLaunchItem>,
     /// Whether Quick Launch is visible (query is empty).
     pub quick_launch_visible: bool,
-    /// Indexed app count — lets JS decide whether "Show all apps" is
-    /// worth pre-growing the window to max height.
-    pub apps_indexed: usize,
 }
 
 impl Default for ShimState {
@@ -141,7 +141,6 @@ impl Default for ShimState {
             ui_warm_release_ms: 5_000,
             quick_launch_items: Vec::new(),
             quick_launch_visible: false,
-            apps_indexed: 0,
         }
     }
 }

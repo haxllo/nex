@@ -226,9 +226,14 @@
         img.className = "icon";
         img.src = folderIcon();
         li.appendChild(img);
-        // Native tooltip: full folder path on hover.
+        // Folder path revealed on hover, right-aligned inside the row.
         const hint = r.filePath || r.icon || r.subtitle;
-        if (hint) li.title = hint;
+        if (hint) {
+          const p = document.createElement("div");
+          p.className = "path-hint";
+          p.textContent = hint;
+          li.appendChild(p);
+        }
       } else if (r.icon && r.kind !== "action") {
         const img = document.createElement("img");
         img.className = "icon" + (r.kind === "settings" ? " glyph" : "");

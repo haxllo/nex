@@ -226,6 +226,23 @@ body {
 .row:hover {
   background: var(--hover);
 }
+/* Folder path revealed on hover, right-aligned. */
+.row .path-hint {
+  display: none;
+  flex: 0 0 auto;
+  margin-left: auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  direction: rtl; /* ellipsize the middle, keep the tail visible */
+  text-align: left;
+}
+.row:hover .path-hint {
+  display: block;
+}
 /* Only the first rows ever shown animate — later keystrokes render
    instantly (class toggled in renderRows). */
 #list.no-anim .row,

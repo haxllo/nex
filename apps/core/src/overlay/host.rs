@@ -42,11 +42,6 @@ const RESIZE_IMMEDIATE_GROWTH: f64 = 80.0;
 /// on Win key-down (only toggle when visible; hook handles first press).
 pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
-/// Set once the WebView page has loaded (WebviewReady). Background
-/// indexing waits on this so its CPU storm never competes with the
-/// cold-start UI — the first-run freeze + delayed hotkey show.
-pub(crate) static UI_READY: AtomicBool = AtomicBool::new(false);
-
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -309,7 +304,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 Event::UserEvent(cmd) => match cmd {
                     UiCommand::WebviewReady => {
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
-                        UI_READY.store(true, Ordering::Release);
                         ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);

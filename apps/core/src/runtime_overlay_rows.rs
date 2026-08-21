@@ -6,6 +6,8 @@ use crate::overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
 
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
+/// Result limit used when the user activates "Show all apps".
+pub(crate) const SHOW_ALL_APPS_RESULT_LIMIT: usize = 100;
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_COMMAND_RESULTS: &str = "No command matches";
 #[cfg(target_os = "windows")]
@@ -55,6 +57,17 @@ fn kind_group_order(kind: &str) -> u8 {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<OverlayRow> {
+    overlay_rows_ext(results, command_mode, false)
+}
+
+/// Build overlay rows, optionally appending a synthetic "Show all apps"
+/// entry after the last app row (before the Folders header). Activating
+/// it re-runs the query apps-only with a larger limit.
+pub(crate) fn overlay_rows_ext(
+    results: &[SearchItem],
+    command_mode: bool,
+    show_all_apps_entry: bool,
+) -> Vec<OverlayRow> {
     if results.is_empty() {
         return Vec::new();
     }
@@ -126,6 +139,21 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
             OverlayRowRole::Item,
             command_mode,
         ));
+    }
+    // Synthetic "Show all apps" entry — last row of the app group. The
+    // runtime intercepts its activation and re-issues the query with an
+    // apps-only kind filter and a larger limit. Emitted whenever the flag
+    // is set — even when non-app results crowded every app out of the
+    // result cap (the activation re-search finds them).
+    if show_all_apps_entry {
+        rows.push(OverlayRow {
+            role: OverlayRowRole::ShowAllApps,
+            result_index: None,
+            kind: "action".to_string(),
+            title: "Show all apps".to_string(),
+            path: String::new(),
+            icon_path: String::new(),
+        });
     }
     append_group_rows(&mut rows, "Folders", &kind_buckets[1], results, command_mode);
     append_group_rows(&mut rows, "Files", &kind_buckets[2], results, command_mode);
@@ -210,7 +238,7 @@ pub(crate) fn result_row(
 }
 
 #[cfg(target_os = "windows")]
-fn header_row(label: &str) -> OverlayRow {
+pub(crate) fn header_row(label: &str) -> OverlayRow {
     OverlayRow {
         role: OverlayRowRole::Header,
         // `None` signals "no backing result index"; header rows are
@@ -697,6 +725,45 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
         assert_eq!(rows[0].title, "exact file");
+    }
+
+    /// "Show all apps" entry: appended after the last app row, before the
+    /// Folders header; suppressed when the flag is off; never in command mode.
+    #[test]
+    fn show_all_apps_entry_position_and_gating() {
+        let results = vec![
+            app("a1", "Alpha", 0),
+            app("a2", "Alfa", 1),
+            folder("f1", "folder", 0),
+            file("fi1", "file", 0),
+        ];
+        let rows = overlay_rows_ext(&results, false, true);
+
+        // TopHit(app) + remaining app + ShowAllApps + Folders hdr + folder
+        // + Files hdr + file.
+        assert_eq!(rows.len(), 7);
+        assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
+        assert_eq!(*role_of(&rows[1]), OverlayRowRole::Item);
+        assert_eq!(*role_of(&rows[2]), OverlayRowRole::ShowAllApps);
+        assert_eq!(rows[2].title, "Show all apps");
+        assert_eq!(rows[2].result_index, None);
+        assert_eq!(*role_of(&rows[3]), OverlayRowRole::Header);
+        assert_eq!(rows[3].title, "Folders");
+
+        let rows = overlay_rows_ext(&results, false, false);
+        assert!(rows.iter().all(|r| r.role != OverlayRowRole::ShowAllApps));
+
+        let rows = overlay_rows_ext(&results, true, true);
+        assert!(rows.iter().all(|r| r.role != OverlayRowRole::ShowAllApps));
+
+        // No apps in results → entry still emitted (activation re-searches
+        // apps-only; non-app rows may have crowded apps out of the cap).
+        let no_apps = vec![folder("f1", "folder", 0)];
+        let rows = overlay_rows_ext(&no_apps, false, true);
+        assert_eq!(
+            rows.iter().filter(|r| r.role == OverlayRowRole::ShowAllApps).count(),
+            1
+        );
     }
 
     /// (c) Kind order: apps > folders > files > actions > clipboard, same tier.

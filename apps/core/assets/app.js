@@ -50,6 +50,10 @@
   const FOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAADsQAAA7EB9YPtSQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAOpSURBVHic7dhPa1xlGIbx63nndKympaQqiTaLWkNsaRrE9nOYSBpcCC5c6F6FgAspFMQ2rl24cuFC6miTqIjfoUEw/tmEuqmhG0VqoCaZnMfFOFWa2ARNzjtznvu3mhnO4h7mmjMvAyIiIiIiIiIiIiIiIiJST7bTi/79THOr5AXcJ914zmAEGKh4Wwn8ZvCTwzck+7rxyMAX9tSHf1S8o9a2BdD+bnoat6vAqQx7dvOLG+8XxcacnV78PfeYOrgXgF+babTP+BWDN3IO2qPbOK8UE62vcg/pd6n7oI8+fIBhjC83ly9eyj2k3xncu+23co/5L8x5uzHRupx7R7+yzoHPf6Q3f/P3wsFfLs59+lHuIf3I2sszL4J/nHvI/+Il6ecVbONu7iW9ZA24BSyBL3D72Ly9trR5/0UJfKr6bfvMEuXwSWgUuZf0kiPAaeAlsGsM3/nBPx/b9lknh/PVbzsARZNy6CTYjn9tCIxS+nWfH3vXL/19+E8GT+RctZ/88ADl8dq8nYNhPsuzY+90nyY6t4ra8GOP40eP557R28xnfXF0EsDayxc995595yVpdQVb16HwAW6y3jyTdr+uD1nqnAd0KHyQUzTXn69nAKBD4V5YmqxvAOhQuDu/UOsAQIfCXZyofQAA5WMn8Icezj2jFx0NEYAOhf8uRgDQORQ++TQUzdxLekqcAAA/dJitkWcoB4c7PwkW6u3vKN49MSV8cAgfHMq9pCfoKxCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBKYDgFEBwCiA4BRCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBKYDgFEBwCiA4BRCcAghOAQSnAIJTAMEpgOAUQHAKIDgFEJwCCE4BBKcAglMAwSmA4BRAcAogOAUQnAIITgEEpwCCUwDBJWAt9wjJ5k5y89XcKyQPh9VkpS3lHiJ5GNxImM/nHiKZJFtIjfVHrwMrubdI5W42YDHZhQ82gdnca6Rizut29pONBFCca33m8F7uTVINN64UE60F+Mf/AMX4+Kzjc/lmSRXcuVqcHX+r+9zuv6D97fQUZnPAaKXL5KCt4LzZ/eZ3bQsAwG+8emir+esUxqTDeYMR4EglM2W/rDncMlgi2Xzj7uDCX+c9EREREREREREREREREQnhTy52wK21rlFtAAAAAElFTkSuQmCC";
   const FILE_PLACEHOLDER_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAAA3NCSVQICAjb4U/gAAAACXBIWXMAAAG7AAABuwE67OPiAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAEtQTFRF////3ubv09zp4ufws7/Lz9rm4ufv4ufwy9fky9bknay6oa+9pLK/sLzJtcDNydXjztnmz9nm09zo1d7p2uDp3OPt3ePt3uTu4ufw0km01gAAAAp0Uk5TAB86p8Dh5vD9/i9D6pkAAADNSURBVFjD7dfLEsIgDAVQKhYrSlHrI///pS4c+7LkRjLVDXefMxMumxjTp7KOktkamGpHTDwWLLEAFhwAoEAIQAIGgCAAeEECsIII4AQZwAhCIC1IgaTAA0cs8EDrocAD1wMUCAgt2oJgujgkCxgLecBIyAQGAQLBzxKmQjbwFnJX6AUF8BI0AHVagC5a4KEFaF3g4wcs/IZ1gf+/QWmhtFBaKC2UFphHDL8GSgsKwMnn77H5+vSdzJ9jnTi+b6coyn6zeL5bJ5tv6tH8Ezzc5sExY4ClAAAAAElFTkSuQmCC";
   function folderIcon() { return FOLDER_ICON; }
+  // "Show all apps" entry icon — apps grid with a plus, neutral gray.
+  const SHOW_ALL_APPS_ICON = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8a93" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>`
+  );
   // Transparent 1px GIF — cold-cache icon slot. Avoids flashing a wrong
   // placeholder glyph; patchIcons() pops the real icon in when decoded.
   const BLANK_ICON = "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
@@ -157,7 +161,7 @@
   }
 
   function rowClassName(r, isGridView) {
-    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? (r.kind === "app" ? " row-grid" : (r.role === "calculator" ? "" : " row-list")) : "");
+    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "show_all_apps") ? " row-grid" : " row-list") : "");
   }
 
   function buildSection(key, r) {
@@ -200,7 +204,12 @@
     if (i === selected) li.classList.add("selected");
 
     if (r.role !== "calculator") {
-      if (r.kind === "folder") {
+      if (r.role === "show_all_apps") {
+        const img = document.createElement("img");
+        img.className = "icon";
+        img.src = SHOW_ALL_APPS_ICON;
+        li.appendChild(img);
+      } else if (r.kind === "folder") {
         const img = document.createElement("img");
         img.className = "icon";
         img.src = folderIcon();
@@ -280,7 +289,8 @@
     const sig = rows
       .map((r) => `${r.role || ""}|${r.kind || ""}|${r.title || ""}|${r.subtitle || ""}`)
       .join(";");
-    const animating = !hasAnimatedFirstShow && sig !== lastRowSig;
+    const contentChanged = sig !== lastRowSig;
+    const animating = !hasAnimatedFirstShow && contentChanged;
     if (sig) hasAnimatedFirstShow = true;
     lastRowSig = sig;
     // Kill the CSS entrance animation for non-first renders — fresh nodes
@@ -339,6 +349,10 @@
 
     // Atomic swap — reused nodes just move, new ones are added.
     list.replaceChildren(frag);
+
+    // New result set → always start scrolled to the top; keeping the
+    // previous query's scroll offset reads as broken rendering.
+    if (contentChanged) list.scrollTop = 0;
 
     // Rebuild row map for O(1) selection toggles.
     rowMap = new Map();
@@ -481,14 +495,27 @@
   // Does NOT skip placeholder elements — on cold cache, render() creates
   // icons without src, and patchIcons() must update them all.
   function patchIcons() {
-    for (const li of list.children) {
-      const img = li.querySelector("img.icon");
-      if (!img) continue;
-      if (img.src === folderIcon()) continue;
-      const path = img.dataset.iconPath;
-      if (path && iconCache.has(path)) {
-        const dataUri = iconCache.get(path);
-        if (img.src !== dataUri) {
+    // Snapshot the work, then assign src in small per-frame batches —
+    // a large expansion would otherwise trigger hundreds of simultaneous
+    // PNG decodes and stall the renderer during the window resize.
+    requestAnimationFrame(() => {
+      const pending = [];
+      for (const li of list.children) {
+        const img = li.querySelector("img.icon");
+        if (!img) continue;
+        if (img.src === folderIcon()) continue;
+        const path = img.dataset.iconPath;
+        if (path && iconCache.has(path)) {
+          const dataUri = iconCache.get(path);
+          if (img.src !== dataUri) pending.push([img, dataUri]);
+        }
+      }
+      let i = 0;
+      const BATCH = 24;
+      function step() {
+        const end = Math.min(i + BATCH, pending.length);
+        for (; i < end; i++) {
+          const [img, dataUri] = pending[i];
           // Only animate on a real src swap; re-patches of the same URI
           // (every keystroke) stay silent.
           if (!reduceMotion) {
@@ -498,8 +525,10 @@
           }
           img.src = dataUri;
         }
+        if (i < pending.length) requestAnimationFrame(step);
       }
-    }
+      step();
+    });
   }
 
   // ── command mode ───────────────────────────────────────────
@@ -761,6 +790,8 @@
   let ctxRow = null; // the row the context menu was opened on
 
   function showContextMenu(x, y, row) {
+    // Synthetic entry — no context actions.
+    if (row.role === "show_all_apps") return;
     ctxRow = row;
     // Determine which actions are relevant
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));

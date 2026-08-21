@@ -260,6 +260,24 @@ pub fn get_quick_launch_items(
     Ok(result)
 }
 
+/// List every indexed app (id, title, path, subtitle), alphabetical.
+/// Backs the overlay's "Show all apps" full-index section.
+pub fn get_all_apps(
+    db: &Connection,
+) -> Result<Vec<(String, String, String, String)>, StoreError> {
+    let mut stmt = db.prepare(
+        "SELECT id, title, path, subtitle FROM item
+         WHERE kind = 'app'
+         ORDER BY title COLLATE NOCASE",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        result.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+    }
+    Ok(result)
+}
+
 /// Find an item by path or title (case-insensitive).
 pub fn find_item_by_path_or_title(
     db: &Connection,

@@ -45,11 +45,11 @@ use crate::runtime_index::{
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
-    filter_suppressed_uninstall_results, overlay_rows,
-    reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
+    filter_suppressed_uninstall_results, overlay_rows, overlay_rows_ext,
+    reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
-    ConfirmationKind, PendingConfirmation,
+    ConfirmationKind, PendingConfirmation, SHOW_ALL_APPS_RESULT_LIMIT,
     ACTION_POWER_CANCEL_ID, ACTION_POWER_CONFIRM_ID,
     ACTION_UNINSTALL_CANCEL_ID, ACTION_UNINSTALL_CONFIRM_ID,
     STATUS_ROW_NO_COMMAND_RESULTS, STATUS_ROW_NO_RESULTS, STATUS_ROW_TYPE_TO_SEARCH,
@@ -434,6 +434,7 @@ pub(crate) fn run_windows_runtime(
         last_memory_log: Instant::now(),
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
+        apps_expanded: None,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -548,9 +549,83 @@ struct RuntimeWorker {
     quick_launch_items: Vec<crate::overlay::model::QuickLaunchItem>,
     /// Whether Quick Launch items have been loaded for current session.
     quick_launch_loaded: bool,
+    /// Query for which the "Show all apps" expansion is active. When set,
+    /// the entry is suppressed and results are already apps-only.
+    apps_expanded: Option<String>,
 }
 
 impl RuntimeWorker {
+    /// Activate the "Show all apps" entry: re-issue the current query with
+    /// an apps-only kind filter and a larger result limit, then mark the
+    /// expansion active so the entry is suppressed in the rebuilt rows.
+    fn expand_all_apps(&mut self) {
+        let query = self.overlay.query_text().trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let mut parsed_query =
+            ParsedQuery::parse(&query, self.runtime_config.search_dsl_enabled);
+        parsed_query.kind_filter = Some("app".to_string());
+        let limit = (self.max_results as usize).max(SHOW_ALL_APPS_RESULT_LIMIT);
+        let generation = self.search_worker.send_request(
+            self.config_generation,
+            parsed_query,
+            limit,
+        );
+        self.last_sent_generation = generation;
+        self.apps_expanded = Some(query);
+    }
+
+    /// Append the full app index below the query-matched apps while the
+    /// "Show all apps" expansion is active for the current query. Apps
+    /// already present in the results are skipped; the rest are appended
+    /// directly after them (no section break), alphabetically.
+    fn append_all_apps_section(&mut self) {
+        let mut known: std::collections::HashSet<String> = self
+            .current_results
+            .iter()
+            .map(|r| r.path.replace('/', "\\").to_ascii_lowercase())
+            .collect();
+        let all_apps = {
+            let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+            match crate::index_store::get_all_apps(&guard.db_ref()) {
+                Ok(apps) => apps,
+                Err(error) => {
+                    log_warn(&format!("[nex] show-all-apps index read failed: {error}"));
+                    return;
+                }
+            }
+        };
+
+        let first_appended = self.current_results.len();
+        for (id, title, path, subtitle) in all_apps {
+            let key = path.replace('/', "\\").to_ascii_lowercase();
+            if !known.insert(key) {
+                continue;
+            }
+            self.current_results.push(
+                crate::model::SearchItem::new(&id, "app", &title, &path)
+                    .with_subtitle(&subtitle),
+            );
+        }
+        if self.current_results.len() == first_appended {
+            return;
+        }
+
+        let mut rows = std::mem::take(&mut self.current_rows);
+        for idx in first_appended..self.current_results.len() {
+            rows.push(result_row(
+                &self.current_results[idx],
+                idx,
+                OverlayRowRole::Item,
+                false,
+            ));
+        }
+        self.current_rows = rows;
+        let selected = self.selected_index;
+        self.overlay.set_results(&self.current_rows, selected);
+    }
+
     /// Load Quick Launch items from the database and config.
     /// Called every time the overlay shows idle state to ensure fresh data.
     fn load_quick_launch_items(&mut self) {
@@ -927,7 +1002,11 @@ impl RuntimeWorker {
                             if self.current_results.is_empty() {
                                 set_status_row_overlay_state(&self.overlay, STATUS_ROW_NO_RESULTS);
                             } else {
-                                let rows = overlay_rows(&self.current_results, false);
+                                let rows = overlay_rows_ext(
+                                    &self.current_results,
+                                    false,
+                                    self.apps_expanded.is_none(),
+                                );
                                 self.current_rows = rows;
                                 self.overlay.set_results(&self.current_rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
                             }
@@ -1430,6 +1509,7 @@ impl RuntimeWorker {
                         &mut self.selected_index,
                     );
                     self.pending_confirmation = None;
+                    self.apps_expanded = None;
                     self.last_query.clear();
                     self.last_sent_generation = 0;
                     self.search_session.clear();
@@ -1447,10 +1527,15 @@ impl RuntimeWorker {
                     self.last_query.clear();
                     self.last_sent_generation = self.last_sent_generation.wrapping_add(1);
                     self.pending_confirmation = None;
+                    self.apps_expanded = None;
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
                     return;
+                }
+                // New query text collapses the "Show all apps" expansion.
+                if self.apps_expanded.as_deref() != Some(trimmed) {
+                    self.apps_expanded = None;
                 }
                 apply_query_change(
                     query,
@@ -1485,7 +1570,15 @@ impl RuntimeWorker {
                     &mut self.current_rows,
                     &mut self.selected_index,
                     self.last_sent_generation,
+                    self.apps_expanded.as_deref(),
                 );
+                // "Show all apps" expansion: append the full app index
+                // below the query-matched apps.
+                if let Some(q) = self.apps_expanded.clone() {
+                    if q == self.overlay.query_text().trim() {
+                        self.append_all_apps_section();
+                    }
+                }
             }
             OverlayEvent::Submit => {
                 // Check if we're in Quick Launch mode (empty query, Quick Launch visible)
@@ -1528,6 +1621,16 @@ impl RuntimeWorker {
                             }
                             return;
                         }
+                    }
+                }
+
+                // "Show all apps" entry — re-run the query apps-only.
+                if let Some(list_selection) = self.overlay.selected_index() {
+                    if self.current_rows.get(list_selection).map(|r| r.role)
+                        == Some(OverlayRowRole::ShowAllApps)
+                    {
+                        self.expand_all_apps();
+                        return;
                     }
                 }
 
@@ -1634,9 +1737,11 @@ impl RuntimeWorker {
                                                     },
                                                 );
                                             } else {
-                                                let rows = overlay_rows(
+                                                let rows = overlay_rows_ext(
                                                     &self.current_results,
                                                     pending.previous_command_mode,
+                                                    !pending.previous_command_mode
+                                                        && self.apps_expanded.is_none(),
                                                 );
                                                 self.current_rows = rows;
                                                 self.overlay.set_results(&self.current_rows, self.selected_index);
@@ -1709,9 +1814,10 @@ impl RuntimeWorker {
                                 },
                             );
                         } else {
-                            let rows = overlay_rows(
+                            let rows = overlay_rows_ext(
                                 &self.current_results,
                                 pending.previous_command_mode,
+                                !pending.previous_command_mode && self.apps_expanded.is_none(),
                             );
                             self.current_rows = rows;
                             self.overlay.set_results(&self.current_rows, self.selected_index);
@@ -1968,6 +2074,7 @@ fn apply_search_results(
     current_rows: &mut Vec<crate::overlay::OverlayRow>,
     selected_index: &mut usize,
     last_sent_generation: u64,
+    apps_expanded_query: Option<&str>,
 ) {
     let Some(result) = search_worker.try_recv() else {
         return;
@@ -2048,7 +2155,8 @@ fn apply_search_results(
             }
         }
     } else {
-        let rows = overlay_rows(current_results, command_mode);
+        let expanded = apps_expanded_query == Some(overlay.query_text().trim());
+        let rows = overlay_rows_ext(current_results, command_mode, !command_mode && !is_idle && !expanded);
         *current_rows = rows;
         overlay.set_results(current_rows, *selected_index);
     }

@@ -226,7 +226,6 @@ pub(crate) fn run_windows_runtime(
 
     let overlay_state = OverlayState::default();
     let overlay = NativeOverlayShell::create().map_err(RuntimeError::Overlay)?;
-    overlay.set_help_config_path(runtime_config.config_path.to_string_lossy().as_ref());
     overlay.set_hotkey_hint(&runtime_config.hotkey);
     overlay.set_performance_tuning(
         runtime_config.idle_cache_trim_ms,
@@ -1378,6 +1377,8 @@ impl RuntimeWorker {
                 });
             }
             OverlayEvent::TraySignOut => {
+                // Session ends — hide the overlay before DWM teardown.
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::sign_out() {
                         log_warn(&format!("[nex] tray sign out failed: {error}"));
@@ -1385,7 +1386,11 @@ impl RuntimeWorker {
                 });
             }
             // Confirmed in the overlay — execute immediately.
+            // Hide first and wait for it: during a shutdown/restart the
+            // DWM/COM teardown can hit WebView2 with E_OUTOFMEMORY-style
+            // errors while the window is still composited.
             OverlayEvent::PowerMenuShutdown => {
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::shutdown() {
                         log_warn(&format!("[nex] power menu shutdown failed: {error}"));
@@ -1393,6 +1398,7 @@ impl RuntimeWorker {
                 });
             }
             OverlayEvent::PowerMenuRestart => {
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::restart() {
                         log_warn(&format!("[nex] power menu restart failed: {error}"));

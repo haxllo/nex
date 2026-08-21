@@ -15,14 +15,6 @@
   const searchIcon = $("search-icon");
   const bodyEl = $("body");
   const footerEl = $("footer");
-  const help = $("help");
-  const powerBtn = $("power-btn");
-  const powerMenu = $("power-menu");
-  const powerConfirm = $("power-confirm");
-  const powerConfirmTitle = $("power-confirm-title");
-  const powerConfirmYes = $("power-confirm-yes");
-  const powerPanel = $("power-panel");
-  const powerWrapTop = $("power-wrap-top");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -42,6 +34,7 @@
   let inCommandMode = false;
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
+  let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
   let pendingShow = false; // show occurred, waiting for first real results
 
@@ -281,13 +274,18 @@
     const frag = document.createDocumentFragment();
     const isGridView = list.classList.contains("grid-view");
     let animIdx = 0;
-    // Entrance stagger: animate only when content actually changed
-    // (query edits, result sets), not on selection-only re-renders.
+    // Entrance stagger: animate only the very first rows shown (initial
+    // show); later keystrokes render instantly. Selection-only
+    // re-renders (same sig) never animate.
     const sig = rows
       .map((r) => `${r.role || ""}|${r.kind || ""}|${r.title || ""}|${r.subtitle || ""}`)
       .join(";");
-    const animating = sig !== lastRowSig;
+    const animating = !hasAnimatedFirstShow && sig !== lastRowSig;
+    if (sig) hasAnimatedFirstShow = true;
     lastRowSig = sig;
+    // Kill the CSS entrance animation for non-first renders — fresh nodes
+    // would otherwise re-animate on every keystroke.
+    list.classList.toggle("no-anim", !animating);
 
     // Index live nodes by key so unchanged rows are reused in place —
     // no teardown, no image re-decode, no entrance re-animation.
@@ -359,15 +357,14 @@
 
     // Idle state: hide divider + list area and footer when no rows.
     bodyEl.classList.toggle("idle", !hasRows);
-    footerEl.classList.toggle("idle", !hasRows);
+    // Footer hints only with regular results — hidden in the idle
+    // window and in the quick-launch (pinned items) view.
+    const qlOnly =
+      hasRows && rows.every((r) => r.role === "quick_launch" || r.role === "header" || r.role === "status");
+    footerEl.classList.toggle("idle", hasRows && !qlOnly);
 
-    // Idle: the power button replaces the config button in the search row.
-    const idle = !hasRows;
-    help.classList.toggle("hidden", idle);
-    powerWrapTop.classList.toggle("hidden", !idle);
-    // Panels tied to a hidden button must close (their trigger vanished).
-    if (!idle) topPower.closeMenu();
-    if (idle) footerPower.closeMenu();
+    // Menu tied to a hidden area must close (its trigger vanished).
+    if (!hasRows) topPower.closeMenu();
 
     measure();
   }
@@ -608,13 +605,13 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Escape") {
-        if (topPower.hasConfirm() || footerPower.hasConfirm()) {
-          (topPower.hasConfirm() ? topPower : footerPower).closeConfirm();
+        if (topPower.hasConfirm()) {
+          topPower.closeConfirm();
           input.focus();
           return;
         }
-        if (topPower.isOpen() || footerPower.isOpen()) {
-          (topPower.isOpen() ? topPower : footerPower).closeMenu();
+        if (topPower.isOpen()) {
+          topPower.closeMenu();
           return;
         }
         e.preventDefault();
@@ -659,9 +656,7 @@
     debounce = setTimeout(() => post("query", query), delay);
   });
 
-  help.addEventListener("click", () => post("openConfig"));
-
-  // ── power panel (Hyprland-style circle row) ───────────────
+  // ── power panel (circle row) ────────────────────────────────
   // Factory wires one power button + in-flow panel with menu row +
   // confirm row. The panel lives in the document flow so measure()
   // grows/shrinks the overlay window with it.
@@ -751,13 +746,10 @@
     return api;
   }
 
-  const footerPower = makePowerUi(powerBtn, powerPanel, powerMenu, powerConfirm, powerConfirmTitle, powerConfirmYes);
   const topPower = makePowerUi(powerBtnTop, powerPanelTop, powerMenuTop, powerConfirmTop, powerConfirmTitleTop, powerConfirmYesTop);
 
   // Close the panel / confirm when clicking anywhere outside
   document.addEventListener("click", (e) => {
-    if (footerPower.hasConfirm() && !footerPower.isConfirmTarget(e.target)) footerPower.closeConfirm();
-    if (footerPower.isOpen() && !footerPower.isMenuTarget(e.target)) footerPower.closeMenu();
     if (topPower.hasConfirm() && !topPower.isConfirmTarget(e.target)) topPower.closeConfirm();
     if (topPower.isOpen() && !topPower.isMenuTarget(e.target)) topPower.closeMenu();
     if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
@@ -876,10 +868,8 @@
         return;
       }
 
-      // Close the power dropup / confirm whenever Rust pushes a fresh state
+      // Close the power panel / confirm whenever Rust pushes a fresh state
       // (show, hide, query change, etc.)
-      footerPower.closeMenu();
-      footerPower.closeConfirm();
       topPower.closeMenu();
       topPower.closeConfirm();
       hideContextMenu();

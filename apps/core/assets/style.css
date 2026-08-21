@@ -194,6 +194,8 @@ body {
   gap: 8px;
   scrollbar-gutter: stable;
   padding-top: 4px;
+  /* Match bottom gap to the top (divider 6px + grid top padding 4px). */
+  padding-bottom: 10px;
 }
 #list:empty {
   display: none;
@@ -223,6 +225,12 @@ body {
 }
 .row:hover {
   background: var(--hover);
+}
+/* Only the first rows ever shown animate — later keystrokes render
+   instantly (class toggled in renderRows). */
+#list.no-anim .row,
+#list.no-anim .section {
+  animation: none;
 }
 /* Quick Launch rows are persistent chrome (idle state) — they must not
    replay the entrance animation on every show. */
@@ -582,9 +590,11 @@ html[data-theme="light"] .row.selected .title {
 }
 
 /* ── footer ───────────────────────────────────────────────── */
+/* Hidden when results / quick-launch rows are shown; only the
+   idle window (no rows) carries the hint bar. */
 #footer {
   position: relative;
-  display: flex;
+  display: none;
   align-items: center;
   height: 40px;
   margin-top: 8px;
@@ -593,9 +603,10 @@ html[data-theme="light"] .row.selected .title {
   font-size: 11px;
   color: var(--text-faint);
 }
+#footer.idle {
+  display: flex;
+}
 #footer .hints {
-  /* Absolutely centered over the whole footer — the power button on the
-     right no longer pushes the hint group off-center. */
   position: absolute;
   inset: 0;
   display: flex;
@@ -614,10 +625,6 @@ html[data-theme="light"] .row.selected .title {
   opacity: 0.5;
 }
 
-#footer.idle {
-  display: none;
-}
-
 .kbd {
   display: inline-grid;
   place-items: center;
@@ -632,19 +639,12 @@ html[data-theme="light"] .row.selected .title {
   line-height: 1;
 }
 
-/* ── power button + dropup ───────────────────────────────── */
-#power-wrap {
-  position: relative;
-  flex: 0 0 auto;
-  margin-left: auto;
-}
-
+/* ── power button + menu ─────────────────────────────────── */
 #power-wrap-top {
   position: relative;
   flex: 0 0 auto;
 }
 
-#power-btn,
 #power-btn-top {
   display: grid;
   place-items: center;
@@ -657,8 +657,6 @@ html[data-theme="light"] .row.selected .title {
   cursor: pointer;
   transition: color 120ms ease, transform 120ms ease;
 }
-#power-btn:hover,
-#power-btn.open,
 #power-btn-top:hover,
 #power-btn-top.open {
   color: var(--text);
@@ -666,7 +664,7 @@ html[data-theme="light"] .row.selected .title {
   transform: scale(1.15);
 }
 
-/* ── power panel (Hyprland-style circle row) ─────────────── */
+/* ── power panel (circle row) ─────────────────────────────── */
 /* Only the power menu + its back button are visible while open. */
 #panel.power-menu-open #search-row,
 #panel.power-menu-open #body,
@@ -676,23 +674,28 @@ html[data-theme="light"] .row.selected .title {
 
 .power-panel {
   margin: 0;
-  padding: 20px 16px 22px;
+  /* Taller menu window: top 34 + tile top 14 = 48px above the icons,
+     bottom tile 18 + panel 30 = 48px below the dots. */
+  padding: 34px 16px 30px;
   border-radius: 0;
-  background: var(--bg-opaque);
+  /* Transparent — the window's acrylic backdrop shows through
+     (menu-open view hides search-row, so panel fills the window). */
+  background: transparent;
   border: none;
   box-shadow: none;
 }
 
 .power-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
   justify-items: center;
 }
 
 .power-confirm .power-row {
   display: flex;
   justify-content: center;
+  gap: 14px;
 }
 
 .power-panel .pcircle {
@@ -700,15 +703,18 @@ html[data-theme="light"] .row.selected .title {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  width: 96px;
-  padding: 14px 0 10px;
+  width: 100%;
+  max-width: 96px;
+  padding: 14px 4px 18px;
   border: none;
   border-radius: 14px;
   background: transparent;
   color: var(--c);
   cursor: pointer;
   opacity: 0;
+  transition: transform 150ms ease;
   animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
@@ -718,31 +724,59 @@ html[data-theme="light"] .row.selected .title {
 .power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
 .power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
 .power-panel .pcircle svg {
-  width: 34px;
-  height: 34px;
+  width: 56px;
+  height: 56px;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--c) 6%, transparent);
   fill: none;
   stroke: currentColor;
-  stroke-width: 2;
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  transition: transform 120ms ease;
+  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
 }
 .power-panel .pcircle span {
+  /* 10px between icon and label (8px gap + 2px margin). */
+  margin-top: 2px;
   font-size: 11px;
+  font-weight: 500;
   color: var(--text-dim);
   white-space: nowrap;
-  transition: color 120ms ease;
+  transition: color 150ms ease;
+}
+/* Accent indicator dot under the label (8px gap below). */
+.power-panel .pcircle::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--c);
+  opacity: 0.85;
+  transition: opacity 150ms ease, transform 150ms ease;
 }
 .power-panel .pcircle:hover {
-  background: var(--sel);
+  transform: scale(1.02);
 }
 .power-panel .pcircle:hover svg {
-  transform: scale(1.18);
+  transform: scale(1.05);
+  border-color: color-mix(in srgb, var(--c) 60%, transparent);
+  background: color-mix(in srgb, var(--c) 10%, transparent);
 }
 .power-panel .pcircle:hover span {
-  color: var(--c);
+  color: var(--text);
+}
+.power-panel .pcircle:hover::after {
+  opacity: 1;
+  transform: scale(1.15);
+}
+.power-panel .pcircle:active {
+  transform: scale(0.96);
 }
 .power-panel .pcircle[data-power="back"] {
+  --c: var(--text-faint);
   color: var(--text-faint);
 }
 

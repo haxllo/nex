@@ -1377,6 +1377,8 @@ impl RuntimeWorker {
                 });
             }
             OverlayEvent::TraySignOut => {
+                // Session ends — hide the overlay before DWM teardown.
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::sign_out() {
                         log_warn(&format!("[nex] tray sign out failed: {error}"));
@@ -1384,7 +1386,11 @@ impl RuntimeWorker {
                 });
             }
             // Confirmed in the overlay — execute immediately.
+            // Hide first and wait for it: during a shutdown/restart the
+            // DWM/COM teardown can hit WebView2 with E_OUTOFMEMORY-style
+            // errors while the window is still composited.
             OverlayEvent::PowerMenuShutdown => {
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::shutdown() {
                         log_warn(&format!("[nex] power menu shutdown failed: {error}"));
@@ -1392,6 +1398,7 @@ impl RuntimeWorker {
                 });
             }
             OverlayEvent::PowerMenuRestart => {
+                self.overlay.hide_sync();
                 std::thread::spawn(move || {
                     if let Err(error) = crate::power_actions::restart() {
                         log_warn(&format!("[nex] power menu restart failed: {error}"));

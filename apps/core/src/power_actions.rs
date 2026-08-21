@@ -32,44 +32,40 @@ pub fn sleep() -> Result<(), String> {
 }
 
 /// Shut down immediately (with force-if-hung).
+///
+/// Fire-and-forget spawn: `.output()` would block on the child while the
+/// OS tears down DWM/COM, surfacing E_OUTOFMEMORY-style errors in the
+/// overlay's WebView2. The reboot is queued the moment shutdown.exe runs.
 pub fn shutdown() -> Result<(), String> {
-    let output = std::process::Command::new("shutdown.exe")
+    std::process::Command::new("shutdown.exe")
         .args(&["/s", "/t", "0", "/f"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
+        .spawn()
         .map_err(|e| format!("shutdown.exe spawn failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
-    }
     Ok(())
 }
 
 /// Restart immediately (with force-if-hung).
+///
+/// Fire-and-forget spawn — see [`shutdown`].
 pub fn restart() -> Result<(), String> {
-    let output = std::process::Command::new("shutdown.exe")
+    std::process::Command::new("shutdown.exe")
         .args(&["/r", "/t", "0", "/f"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
+        .spawn()
         .map_err(|e| format!("shutdown.exe spawn failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
-    }
     Ok(())
 }
 
 /// Sign out immediately (with force-if-hung).
+///
+/// Fire-and-forget spawn — see [`shutdown`].
 pub fn sign_out() -> Result<(), String> {
-    let output = std::process::Command::new("shutdown.exe")
+    std::process::Command::new("shutdown.exe")
         .args(&["/l"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
+        .spawn()
         .map_err(|e| format!("shutdown.exe spawn failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
-    }
     Ok(())
 }
 

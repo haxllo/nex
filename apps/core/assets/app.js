@@ -226,6 +226,9 @@
         img.className = "icon";
         img.src = folderIcon();
         li.appendChild(img);
+        // Native tooltip: full folder path on hover.
+        const hint = r.filePath || r.icon || r.subtitle;
+        if (hint) li.title = hint;
       } else if (r.icon && r.kind !== "action") {
         const img = document.createElement("img");
         img.className = "icon" + (r.kind === "settings" ? " glyph" : "");

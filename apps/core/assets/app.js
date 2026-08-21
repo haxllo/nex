@@ -364,25 +364,25 @@
 
     // New result set → always start scrolled to the top; keeping the
     // previous query's scroll offset reads as broken rendering.
-    if (contentChanged) {
-      list.scrollTop = 0;
-      // The swap applied the pushed selected=0, but row hover only
-      // updates on mousemove — re-select whatever row sits under the
-      // stationary cursor so the highlight doesn't jump to the top.
-      if (lastMouseX >= 0) {
-        const el = document.elementFromPoint(lastMouseX, lastMouseY);
-        const hovered = el && el.closest ? el.closest(".row") : null;
-        if (hovered) {
-          const idx = Number(hovered.dataset.index);
-          if (idx !== selected) setSelected(idx, false);
-        }
-      }
-    }
+    if (contentChanged) list.scrollTop = 0;
 
     // Rebuild row map for O(1) selection toggles.
     rowMap = new Map();
     for (const li of list.children) {
       if (li.classList.contains("row")) rowMap.set(Number(li.dataset.index), li);
+    }
+
+    // The swap applied the pushed selected=0, but row hover only updates
+    // on mousemove — re-select whatever row sits under the stationary
+    // cursor so the highlight doesn't jump to the top. Must run AFTER the
+    // rowMap rebuild above, or setSelected resolves stale nodes.
+    if (contentChanged && lastMouseX >= 0) {
+      const el = document.elementFromPoint(lastMouseX, lastMouseY);
+      const hovered = el && el.closest ? el.closest(".row") : null;
+      if (hovered) {
+        const idx = Number(hovered.dataset.index);
+        if (idx !== selected) setSelected(idx, false);
+      }
     }
 
     // Status / empty state.

@@ -356,6 +356,12 @@ img.icon.icon-pop {
 .row.selected {
   background: var(--sel);
 }
+/* While the pointer is over the list, hover is the truth — suppress the
+   selected background so a stale selection never double-highlights
+   alongside the row actually under the cursor. */
+#list:hover .row.selected {
+  background: transparent;
+}
 
 .row .icon {
   flex: 0 0 auto;

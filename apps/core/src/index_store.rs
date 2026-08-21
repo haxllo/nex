@@ -278,6 +278,31 @@ pub fn get_all_apps(
     Ok(result)
 }
 
+/// Cheap gate for the "Show all apps" entry activation: does any indexed
+/// app title contain the query? Substring check only — fuzzy-only matches
+/// are not seen, but this runs solely to avoid a pointless expansion.
+pub fn has_app_matching(db: &Connection, query: &str) -> Result<bool, StoreError> {
+    let escaped = query
+        .trim()
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    let mut stmt = db.prepare(
+        "SELECT EXISTS(
+            SELECT 1 FROM item
+            WHERE kind = 'app' AND LOWER(title) LIKE ?1 ESCAPE '\\'
+        )",
+    )?;
+    let mut rows = stmt.query(params![pattern])?;
+    if let Some(row) = rows.next()? {
+        let exists: i64 = row.get(0)?;
+        return Ok(exists != 0);
+    }
+    Ok(false)
+}
+
 /// Find an item by path or title (case-insensitive).
 pub fn find_item_by_path_or_title(
     db: &Connection,

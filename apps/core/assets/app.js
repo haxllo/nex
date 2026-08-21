@@ -278,6 +278,7 @@
     li.addEventListener("click", () => {
       const idx = Number(li.dataset.index);
       setSelected(idx, false);
+      preGrowForExpansion(currentRows[idx]);
       post("submit", idx);
     });
     li.addEventListener("contextmenu", (e) => {
@@ -522,10 +523,11 @@
   function patchIcons() {
     // Assign every pending src synchronously so the pre-rasterized
     // viewport paints rows complete with icons before the window
-    // reveals them. The pop-in runs as ONE list-level CSS animation —
-    // the old per-image class toggle + offsetWidth read forced a sync
-    // reflow per icon, stalling the renderer on large expansions.
-    let anySwapped = false;
+    // reveals them. The pop-in runs as ONE list-level CSS animation
+    // scoped to the images actually swapped this pass — the old
+    // per-image offsetWidth read forced a sync reflow per icon,
+    // stalling the renderer on large expansions.
+    const swapped = [];
     for (const li of list.children) {
       const img = li.querySelector("img.icon");
       if (!img) continue;
@@ -535,16 +537,20 @@
         const dataUri = iconCache.get(path);
         if (img.src !== dataUri) {
           img.src = dataUri;
-          anySwapped = true;
+          img.classList.add("icon-swap");
+          swapped.push(img);
         }
       }
     }
-    if (anySwapped && !reduceMotion) {
+    if (swapped.length && !reduceMotion) {
       list.classList.remove("icons-pop");
       void list.offsetWidth;
       list.classList.add("icons-pop");
       clearTimeout(patchIcons.timer);
-      patchIcons.timer = setTimeout(() => list.classList.remove("icons-pop"), 220);
+      patchIcons.timer = setTimeout(() => {
+        list.classList.remove("icons-pop");
+        for (const img of swapped) img.classList.remove("icon-swap");
+      }, 220);
     }
   }
 
@@ -574,6 +580,16 @@
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
+  // "Show all apps" grows the window a lot via an async roundtrip —
+  // expand to max up front so the window morphs once and the results
+  // fill into an already-full window. The host clamps to its max
+  // height; the real measurement afterwards takes the shrink path.
+  function preGrowForExpansion(row) {
+    if (row && row.role === "show_all_apps") {
+      lastH = 9999;
+      post("resize", { v: 9999, immediate: true });
+    }
+  }
   function measure() {
     const h = Math.ceil(panel.getBoundingClientRect().height);
     // Shrink path: apply immediately. The WebView viewport is pinned at
@@ -649,7 +665,10 @@
         }
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (selected >= 0) post("submit", selected);
+        if (selected >= 0) {
+          preGrowForExpansion(currentRows[selected]);
+          post("submit", selected);
+        }
       } else if (e.key === "Escape") {
         if (topPower.hasConfirm()) {
           topPower.closeConfirm();

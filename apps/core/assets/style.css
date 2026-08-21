@@ -266,8 +266,8 @@ body {
 img.icon.icon-pop {
   animation: nexIconIn 120ms ease-out;
 }
-/* List-level icon pop — one animation class for the whole batch. */
-#list.icons-pop img.icon {
+/* List-level icon pop — one animation class for the swapped batch. */
+#list.icons-pop img.icon.icon-swap {
   animation: nexIconIn 120ms ease-out;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -279,6 +279,9 @@ img.icon.icon-pop {
     animation: none;
   }
   #list.icons-pop img.icon {
+    animation: none;
+  }
+  #list.icons-pop img.icon.icon-swap {
     animation: none;
   }
 #power-menu {

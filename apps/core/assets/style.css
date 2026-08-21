@@ -318,10 +318,8 @@ img.icon.icon-pop {
   background: var(--hover);
   border-color: var(--border);
 }
-.grid-view .row.row-grid.selected {
-  background: var(--sel);
-  border-color: var(--sel-border);
-}
+/* Selection is visual-only via :hover — no persistent highlight when
+   the cursor is elsewhere or outside the window. */
 
 /* Non-app rows: force full-width list layout inside grid */
 .grid-view .row.row-list {
@@ -363,21 +361,8 @@ img.icon.icon-pop {
   height: 18px;
 }
 
-.row.selected {
-  background: var(--sel);
-}
-/* While the pointer is over the list, hover is the single source of
-   visual truth: a stale .selected elsewhere paints nothing, and the
-   selected row itself only colors when actually under the cursor.
-   This makes wrong-selection paints between JS corrections invisible. */
-#list:hover .row.selected {
-  background: transparent;
-  border-color: transparent;
-}
-#list:hover .row.selected:hover {
-  background: var(--hover);
-  border-color: var(--border);
-}
+/* Selection is visual-only via :hover — no persistent highlight when
+   the cursor is elsewhere or outside the window. */
 
 .row .icon {
   flex: 0 0 auto;
@@ -450,12 +435,6 @@ html[data-theme="light"] img.icon.glyph {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
-}
-.row.selected .title {
-  color: #fff;
-}
-html[data-theme="light"] .row.selected .title {
-  color: #000;
 }
 
 .row .subtitle {
@@ -541,8 +520,7 @@ html[data-theme="light"] .row.selected .title {
   cursor: pointer;
 }
 
-.row.quick-launch:hover .pin-icon,
-.row.quick-launch.selected .pin-icon {
+.row.quick-launch:hover .pin-icon {
   opacity: 1;
 }
 
@@ -550,8 +528,7 @@ html[data-theme="light"] .row.selected .title {
   opacity: 0.7;
 }
 
-.row.quick-launch:hover .pin-icon.pinned,
-.row.quick-launch.selected .pin-icon.pinned {
+.row.quick-launch:hover .pin-icon.pinned {
   opacity: 1;
 }
 
@@ -564,8 +541,7 @@ html[data-theme="light"] .row.selected .title {
   cursor: pointer;
 }
 
-.row:hover .add-icon,
-.row.selected .add-icon {
+.row:hover .add-icon {
   opacity: 0;
 }
 
@@ -573,8 +549,7 @@ html[data-theme="light"] .row.selected .title {
   opacity: 0.7;
 }
 
-.row:hover .add-icon.pinned,
-.row.selected .add-icon.pinned {
+.row:hover .add-icon.pinned {
   opacity: 1;
 }
 

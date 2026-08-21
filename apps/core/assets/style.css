@@ -228,7 +228,6 @@ body {
 }
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
 .row .path-hint {
-  display: none;
   position: absolute;
   right: 12px;
   top: 50%;
@@ -240,7 +239,12 @@ body {
   font-size: 10.5px;
   color: var(--text-faint);
   direction: rtl; /* ellipsize the middle, keep the tail visible */
-  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 60ms ease;
+}
+.row:hover .path-hint {
+  opacity: 1;
 }
 .row:hover .path-hint {
   display: block;

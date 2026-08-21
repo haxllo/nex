@@ -333,6 +333,11 @@ impl NativeOverlayShell {
         self.post(UiCommand::Apply);
     }
 
+    /// Publish the indexed app count (rides the next state push).
+    pub fn set_apps_indexed(&self, n: usize) {
+        self.with_state(|s| s.apps_indexed = n);
+    }
+
     pub fn clear_query_text(&self) {
         self.with_state(|s| s.query.clear());
         self.post(UiCommand::Apply);

@@ -37,6 +37,7 @@
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
   let pendingShow = false; // show occurred, waiting for first real results
+  let appsIndexed = 0; // indexed app count — gates the pre-grow jump
   // Last cursor position — lets a re-render keep the selection under a
   // stationary mouse (hover only fires on mousemove).
   let lastMouseX = -1;
@@ -583,12 +584,12 @@
   // Mirrors host MAX_HEIGHT — pre-grow target for Show-all-apps.
   const PANEL_MAX_H = 530;
   // "Show all apps" grows the window a lot via an async roundtrip —
-  // expand to max up front so the window morphs once and the results
-  // fill into an already-full window. Using the real max (not a
-  // sentinel) lets measure() dedupe when the expansion lands at cap —
-  // otherwise the second resize flashes the acrylic twice.
+  // with a large index, expand to max up front so the window morphs
+  // once and results fill into an already-full window. Small indexes
+  // resize properly to their actual (smaller) height instead. Using
+  // the real max lets measure() dedupe at-cap expansions.
   function preGrowForExpansion(row) {
-    if (row && row.role === "show_all_apps") {
+    if (row && row.role === "show_all_apps" && appsIndexed > 30) {
       lastH = PANEL_MAX_H;
       post("resize", { v: PANEL_MAX_H, immediate: true });
     }
@@ -993,6 +994,7 @@
 
       rows = Array.isArray(state.rows) ? state.rows : [];
       selected = typeof state.selected === "number" ? state.selected : 0;
+      if (typeof state.appsIndexed === "number") appsIndexed = state.appsIndexed;
 
       // Store Quick Launch items if provided
       if (Array.isArray(state.quickLaunch)) {

@@ -1223,6 +1223,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "showPending": show_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
+        "appsIndexed": s.apps_indexed,
     })
     .to_string()
 }

@@ -638,6 +638,12 @@ impl RuntimeWorker {
     /// Load Quick Launch items from the database and config.
     /// Called every time the overlay shows idle state to ensure fresh data.
     fn load_quick_launch_items(&mut self) {
+        // Refresh the indexed-app count for the overlay (drives the
+        // Show-all-apps pre-grow decision). Cheap COUNT query.
+        if let Ok(guard) = self.service.try_read() {
+            let n = crate::index_store::count_apps(&guard.db_ref()).unwrap_or(0);
+            self.overlay.set_apps_indexed(n as usize);
+        }
         if !self.runtime_config.quick_launch.enabled {
             self.quick_launch_items.clear();
             self.quick_launch_loaded = true;

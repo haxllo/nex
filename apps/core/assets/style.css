@@ -241,8 +241,6 @@ body {
   color: var(--text-faint);
   direction: rtl; /* ellipsize the middle, keep the tail visible */
   text-align: left;
-  padding-left: 18px;
-  background: linear-gradient(to right, transparent, var(--bg-opaque) 22%);
 }
 .row:hover .path-hint {
   display: block;

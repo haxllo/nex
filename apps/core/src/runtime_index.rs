@@ -52,6 +52,19 @@ pub(crate) fn start_background_index_refresh(
     let result_worker = result.clone();
     let worker_config = config.clone();
     std::thread::spawn(move || {
+        // Hold off the CPU-heavy walk until the overlay UI is up. A cold
+        // WebView2 start running concurrently with this storm is what
+        // froze first runs for ~4s and delayed the first hotkey show
+        // past the point users gave up on it. Capped so a broken UI can
+        // never stall indexing forever.
+        let gate_started = Instant::now();
+        while !crate::overlay::host::UI_READY.load(Ordering::Acquire) {
+            if gate_started.elapsed() >= Duration::from_secs(10) {
+                log_warn("[nex] background indexing: UI-ready gate timed out after 10s, proceeding");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         // Catch panics so a buggy provider can never silently leave the main
         // thread waiting on a completion flag that will never flip.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

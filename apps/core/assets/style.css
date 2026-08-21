@@ -366,10 +366,14 @@ img.icon.icon-pop {
 .row.selected {
   background: var(--sel);
 }
-/* While the pointer is over the list, hover is the truth: the selected
-   row renders with the plain hover color, so a stale selection can never
-   double-highlight alongside the row actually under the cursor. */
+/* While the pointer is over the list, hover is the single source of
+   visual truth: a stale .selected elsewhere paints nothing, and the
+   selected row itself only colors when actually under the cursor.
+   This makes wrong-selection paints between JS corrections invisible. */
 #list:hover .row.selected {
+  background: transparent;
+}
+#list:hover .row.selected:hover {
   background: var(--hover);
 }
 

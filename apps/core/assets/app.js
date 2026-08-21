@@ -54,6 +54,10 @@
   const SHOW_ALL_APPS_ICON = "data:image/svg+xml," + encodeURIComponent(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8a93" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>`
   );
+  // "Show more" pagination icon — chevron down, neutral gray.
+  const SHOW_MORE_APPS_ICON = "data:image/svg+xml," + encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8a93" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`
+  );
   // Transparent 1px GIF — cold-cache icon slot. Avoids flashing a wrong
   // placeholder glyph; patchIcons() pops the real icon in when decoded.
   const BLANK_ICON = "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
@@ -161,7 +165,7 @@
   }
 
   function rowClassName(r, isGridView) {
-    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "show_all_apps") ? " row-grid" : " row-list") : "");
+    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "show_all_apps" || r.role === "show_more_apps") ? " row-grid" : " row-list") : "");
   }
 
   function buildSection(key, r) {
@@ -204,10 +208,10 @@
     if (i === selected) li.classList.add("selected");
 
     if (r.role !== "calculator") {
-      if (r.role === "show_all_apps") {
+      if (r.role === "show_all_apps" || r.role === "show_more_apps") {
         const img = document.createElement("img");
         img.className = "icon";
-        img.src = SHOW_ALL_APPS_ICON;
+        img.src = r.role === "show_more_apps" ? SHOW_MORE_APPS_ICON : SHOW_ALL_APPS_ICON;
         li.appendChild(img);
       } else if (r.kind === "folder") {
         const img = document.createElement("img");
@@ -770,8 +774,8 @@
   let ctxRow = null; // the row the context menu was opened on
 
   function showContextMenu(x, y, row) {
-    // Synthetic entry — no context actions.
-    if (row.role === "show_all_apps") return;
+    // Synthetic entries — no context actions.
+    if (row.role === "show_all_apps" || row.role === "show_more_apps") return;
     ctxRow = row;
     // Determine which actions are relevant
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));

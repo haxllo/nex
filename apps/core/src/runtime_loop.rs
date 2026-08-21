@@ -563,18 +563,6 @@ impl RuntimeWorker {
         if query.is_empty() {
             return;
         }
-        // Gate: queries that matched no apps at all would otherwise wipe
-        // the list via the empty-results web-search fallback. Cheap
-        // substring check; on DB error proceed as before.
-        let has_apps = {
-            let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
-            crate::index_store::has_app_matching(&guard.db_ref(), &query).unwrap_or(true)
-        };
-        if !has_apps {
-            self.overlay
-                .show_placeholder_hint(&format!("No apps match \"{query}\""));
-            return;
-        }
         let mut parsed_query =
             ParsedQuery::parse(&query, self.runtime_config.search_dsl_enabled);
         parsed_query.kind_filter = Some("app".to_string());

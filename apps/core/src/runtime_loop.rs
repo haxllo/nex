@@ -45,7 +45,7 @@ use crate::runtime_index::{
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
-    filter_suppressed_uninstall_results, header_row, overlay_rows, overlay_rows_ext,
+    filter_suppressed_uninstall_results, overlay_rows, overlay_rows_ext,
     reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
@@ -578,8 +578,8 @@ impl RuntimeWorker {
 
     /// Append the full app index below the query-matched apps while the
     /// "Show all apps" expansion is active for the current query. Apps
-    /// already present in the results are skipped; the rest land under an
-    /// "All Apps" header, alphabetically.
+    /// already present in the results are skipped; the rest are appended
+    /// directly after them (no section break), alphabetically.
     fn append_all_apps_section(&mut self) {
         let mut known: std::collections::HashSet<String> = self
             .current_results
@@ -613,7 +613,6 @@ impl RuntimeWorker {
         }
 
         let mut rows = std::mem::take(&mut self.current_rows);
-        rows.push(header_row("All Apps"));
         for idx in first_appended..self.current_results.len() {
             rows.push(result_row(
                 &self.current_results[idx],

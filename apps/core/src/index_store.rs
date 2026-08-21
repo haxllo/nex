@@ -278,18 +278,6 @@ pub fn get_all_apps(
     Ok(result)
 }
 
-/// Number of indexed apps — cheap gate for pre-growing the overlay on
-/// "Show all apps" (only worth the max-height jump for large indexes).
-pub fn count_apps(db: &Connection) -> Result<i64, StoreError> {
-    let mut stmt = db.prepare("SELECT COUNT(*) FROM item WHERE kind = 'app'")?;
-    let mut rows = stmt.query([])?;
-    if let Some(row) = rows.next()? {
-        let n: i64 = row.get(0)?;
-        return Ok(n);
-    }
-    Ok(0)
-}
-
 /// Find an item by path or title (case-insensitive).
 pub fn find_item_by_path_or_title(
     db: &Connection,

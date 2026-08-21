@@ -236,7 +236,7 @@ pub(crate) fn result_row(
 }
 
 #[cfg(target_os = "windows")]
-fn header_row(label: &str) -> OverlayRow {
+pub(crate) fn header_row(label: &str) -> OverlayRow {
     OverlayRow {
         role: OverlayRowRole::Header,
         // `None` signals "no backing result index"; header rows are

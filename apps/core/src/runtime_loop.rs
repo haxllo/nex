@@ -45,8 +45,8 @@ use crate::runtime_index::{
 };
 #[cfg(target_os = "windows")]
 use crate::runtime_overlay_rows::{
-    filter_suppressed_uninstall_results, overlay_rows, overlay_rows_ext,
-    reconcile_suppressed_uninstall_titles, set_idle_overlay_state,
+    filter_suppressed_uninstall_results, header_row, overlay_rows, overlay_rows_ext,
+    reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
     set_quick_launch_overlay_state, set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
     ConfirmationKind, PendingConfirmation, SHOW_ALL_APPS_RESULT_LIMIT,
@@ -574,6 +574,57 @@ impl RuntimeWorker {
         );
         self.last_sent_generation = generation;
         self.apps_expanded = Some(query);
+    }
+
+    /// Append the full app index below the query-matched apps while the
+    /// "Show all apps" expansion is active for the current query. Apps
+    /// already present in the results are skipped; the rest land under an
+    /// "All Apps" header, alphabetically.
+    fn append_all_apps_section(&mut self) {
+        let mut known: std::collections::HashSet<String> = self
+            .current_results
+            .iter()
+            .map(|r| r.path.replace('/', "\\").to_ascii_lowercase())
+            .collect();
+        let all_apps = {
+            let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+            match crate::index_store::get_all_apps(&guard.db_ref()) {
+                Ok(apps) => apps,
+                Err(error) => {
+                    log_warn(&format!("[nex] show-all-apps index read failed: {error}"));
+                    return;
+                }
+            }
+        };
+
+        let first_appended = self.current_results.len();
+        for (id, title, path, subtitle) in all_apps {
+            let key = path.replace('/', "\\").to_ascii_lowercase();
+            if !known.insert(key) {
+                continue;
+            }
+            self.current_results.push(
+                crate::model::SearchItem::new(&id, "app", &title, &path)
+                    .with_subtitle(&subtitle),
+            );
+        }
+        if self.current_results.len() == first_appended {
+            return;
+        }
+
+        let mut rows = std::mem::take(&mut self.current_rows);
+        rows.push(header_row("All Apps"));
+        for idx in first_appended..self.current_results.len() {
+            rows.push(result_row(
+                &self.current_results[idx],
+                idx,
+                OverlayRowRole::Item,
+                false,
+            ));
+        }
+        self.current_rows = rows;
+        let selected = self.selected_index;
+        self.overlay.set_results(&self.current_rows, selected);
     }
 
     /// Load Quick Launch items from the database and config.
@@ -1518,6 +1569,13 @@ impl RuntimeWorker {
                     self.last_sent_generation,
                     self.apps_expanded.as_deref(),
                 );
+                // "Show all apps" expansion: append the full app index
+                // below the query-matched apps.
+                if let Some(q) = self.apps_expanded.clone() {
+                    if q == self.overlay.query_text().trim() {
+                        self.append_all_apps_section();
+                    }
+                }
             }
             OverlayEvent::Submit => {
                 // Check if we're in Quick Launch mode (empty query, Quick Launch visible)

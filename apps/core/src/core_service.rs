@@ -932,41 +932,52 @@ impl CoreService {
 }
 
 fn open_tantivy_index(tantivy_path: &std::path::Path, db: &Connection) -> Option<TantivyIndex> {
-    match TantivyIndex::open(tantivy_path) {
-        Ok(idx) => {
-            match idx.num_docs() {
-                Ok(n) if n > 0 => {
-                    // Valid index with documents — keep it
-                    Some(idx)
-                }
-                Ok(_) => {
-                    // Empty index — re-seed from SQLite immediately so
-                    // searches never silently fall back to the cache
-                    // (cache holds files only, no folders). No clear():
-                    // committing an empty state before re-seeding risks
-                    // sealing an empty index if the process dies after.
-                    match index_store::list_items(db) {
-                        Ok(items) if !items.is_empty() => {
-                            match idx.index_items(&items) {
-                                Ok(()) => Some(idx),
-                                Err(e) => {
-                                    crate::logging::info(&format!(
-                                        "[nex] Tantivy re-seed failed: {e}"
-                                    ));
-                                    Some(idx)
-                                }
-                            }
-                        }
-                        _ => Some(idx),
-                    }
-                }
-                Err(_) => Some(idx),
+    // Transient failures (AV scanners holding new segment files, a dying
+    // process's GC racing our open) resolve within milliseconds — retry
+    // once before condemning the whole index to a destructive reset.
+    let opened = match TantivyIndex::open(tantivy_path) {
+        Ok(idx) => Ok(idx),
+        Err(first) => {
+            crate::logging::info(&format!(
+                "[nex] Tantivy open failed ({first}); retrying once"
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            match TantivyIndex::open(tantivy_path) {
+                Ok(idx) => Ok(idx),
+                Err(second) => Err(format!("{first}; retry failed: {second}")),
             }
         }
+    };
+    let idx = match opened {
+        Ok(idx) => idx,
         Err(e) => {
             crate::logging::info(&format!("[nex] Tantivy open failed: {e}"));
-            None // Schema mismatch or other error — caller will reset
+            return None; // Schema mismatch or other error — caller will reset
         }
+    };
+    match idx.num_docs() {
+        Ok(n) if n > 0 => {
+            // Valid index with documents — keep it
+            Some(idx)
+        }
+        Ok(_) => {
+            // Empty index — re-seed from SQLite immediately so
+            // searches never silently fall back to the cache
+            // (cache holds files only, no folders). No clear():
+            // committing an empty state before re-seeding risks
+            // sealing an empty index if the process dies after.
+            match index_store::list_items(db) {
+                Ok(items) if !items.is_empty() => match idx.index_items(&items) {
+                    Ok(()) => Some(idx),
+                    Err(e) => {
+                        crate::logging::info(&format!("[nex] Tantivy re-seed failed: {e}"));
+                        Some(idx)
+                    }
+                },
+                _ => Some(idx),
+            }
+        }
+        Err(_) => Some(idx),
     }
 }
 

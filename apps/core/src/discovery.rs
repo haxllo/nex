@@ -769,13 +769,16 @@ fn builtin_exclusion_roots() -> Vec<PathBuf> {
 }
 
 fn roots_change_stamp(roots: &[PathBuf]) -> String {
+    // Identity + existence only. Live per-root metadata (child counts,
+    // latest mtimes) changed constantly on busy roots, so the stamp
+    // mismatched on every startup and forced a full ~13k-file walk.
+    // Content freshness is handled by the reconcile interval and the
+    // directory watcher instead.
     let mut parts = Vec::with_capacity(roots.len());
     for root in roots {
         let normalized = normalize_root_for_stamp(root);
-        let (exists, modified_secs, child_count, child_latest_secs) = quick_path_fingerprint(root);
-        parts.push(format!(
-            "{normalized}:{exists}:{modified_secs}:{child_count}:{child_latest_secs}"
-        ));
+        let (exists, _, _, _) = quick_path_fingerprint(root);
+        parts.push(format!("{normalized}:{exists}"));
     }
     parts.join("|")
 }

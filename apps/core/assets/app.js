@@ -580,14 +580,17 @@
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
+  // Mirrors host MAX_HEIGHT — pre-grow target for Show-all-apps.
+  const PANEL_MAX_H = 530;
   // "Show all apps" grows the window a lot via an async roundtrip —
   // expand to max up front so the window morphs once and the results
-  // fill into an already-full window. The host clamps to its max
-  // height; the real measurement afterwards takes the shrink path.
+  // fill into an already-full window. Using the real max (not a
+  // sentinel) lets measure() dedupe when the expansion lands at cap —
+  // otherwise the second resize flashes the acrylic twice.
   function preGrowForExpansion(row) {
     if (row && row.role === "show_all_apps") {
-      lastH = 9999;
-      post("resize", { v: 9999, immediate: true });
+      lastH = PANEL_MAX_H;
+      post("resize", { v: PANEL_MAX_H, immediate: true });
     }
   }
   function measure() {

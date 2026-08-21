@@ -789,7 +789,6 @@ impl HotkeyListener {
         }));
         let helper_thread = if try_helper {
             let should_exit_h = should_exit.clone();
-            let thread_id_h = thread_id.clone();
             let helper_h = helper.clone();
             let event_tx_h = event_tx.clone();
             let required_mods_h = required_mods.clone();
@@ -828,19 +827,29 @@ impl HotkeyListener {
                                                 crate::overlay::hotkey::set_suppress_focus_escape(false);
                                             }
                                             Ok(_) => {} // ignore other lines
-                                            Err(_) => break, // pipe disconnected
+                                            Err(_) => {
+                                                // Pipe disconnected — helper is
+                                                // gone. Hand detection back to
+                                                // the still-running hook thread.
+                                                HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                                                break;
+                                            }
                                         }
                                     }
                                 })
                             {
                                 Ok(pipe_reader_thread) => {
                                     HELPER_ACTIVE.store(true, Ordering::SeqCst);
-                                    // Hook thread no longer needs to run; it is gated
-                                    // by HELPER_ACTIVE anyway, so asking it to exit
-                                    // just frees the low-level hook slots.
-                                    if let Some(&tid) = thread_id_h.get() {
-                                        post_quit_to_thread(tid);
-                                    }
+                                    // The hook thread stays alive as a warm
+                                    // standby: its dispatch is gated by
+                                    // HELPER_ACTIVE, so it can never double-
+                                    // toggle with the helper, and if the
+                                    // helper dies (pipe EOF flips the flag)
+                                    // Win-key detection resumes instantly
+                                    // with no handoff gap. Killing it here
+                                    // left a window — dev hotkey presses
+                                    // landed right inside it — where no
+                                    // detector was alive at all.
                                     if let Ok(mut st) = helper_h.lock() {
                                         st.active = true;
                                         st.helper_process_handle = Some(helper_handle);
@@ -893,8 +902,9 @@ impl HotkeyListener {
                 if let Ok(st) = inner.helper.lock() {
                     if st.active {
                         // Helper mode: the pipe reader is the live
-                        // detection path. The hook thread intentionally
-                        // exits after handover — its state is irrelevant.
+                        // detection path; the hook thread stays alive as
+                        // a warm standby (dispatch gated by
+                        // HELPER_ACTIVE).
                         return !inner.should_exit.load(Ordering::SeqCst)
                             && st.pipe_reader_thread
                                 .as_ref()

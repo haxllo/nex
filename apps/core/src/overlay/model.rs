@@ -69,6 +69,10 @@ pub enum OverlayEvent {
     /// Periodic 250ms heartbeat to drive config reload and dead-listener
     /// recovery even when no user events are arriving.
     Tick,
+    /// Open the settings window.
+    OpenSettings,
+    /// Settings page requested a save; payload is the raw cfg JSON.
+    SaveSettings(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

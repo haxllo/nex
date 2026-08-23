@@ -1422,6 +1422,17 @@ impl RuntimeWorker {
                 toggle_game_mode_from_tray(&self.overlay, &mut self.runtime_config);
                 let _ = self.tray_gm_tx.send(self.runtime_config.game_mode_enabled);
             }
+            OverlayEvent::OpenSettings => {
+                let snap = crate::settings_snapshot::build(&self.runtime_config);
+                self.overlay.open_settings(snap);
+            }
+            OverlayEvent::SaveSettings(raw) => {
+                match crate::settings_snapshot::apply(&self.runtime_config, &raw).and_then(|updated| crate::settings_snapshot::save(&updated)) {
+                    Ok(()) => self.overlay.settings_save_result("{\"saved\":true}".into()),
+                    Err(e) => self.overlay.settings_save_result(serde_json::json!({ "saved": false, "error": e}).to_string(),
+                    ),
+                }
+            }
             OverlayEvent::TrayCheckForUpdates => {
                 self.overlay.set_status_text("Checking for updates...");
                 let event_tx = self.event_tx.clone();

@@ -33,7 +33,7 @@ const TRAY_MENU_SLEEP: u32 = 41007;
 const TRAY_MENU_SHUTDOWN: u32 = 41008;
 const TRAY_MENU_RESTART: u32 = 41009;
 const TRAY_MENU_SIGN_OUT: u32 = 41010;
-
+const TRAY_MENU_SETTINGS: u32 = 41011;
 fn to_wide(s: &str) -> Vec<u16> {
     let mut wide: Vec<u16> = s.encode_utf16().collect();
     wide.push(0);
@@ -312,6 +312,7 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
 
     let open_text = to_wide("Open Nex");
     let config_text = to_wide("Open Config");
+    let settings_text = to_wide("Settings");
     let updates_text = to_wide("Check for Updates");
     let game_mode_text = to_wide("Game Mode");
     let lock_text = to_wide("Lock");
@@ -329,6 +330,13 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
             TRAY_MENU_OPEN_CONFIG as usize,
             config_text.as_ptr(),
         );
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            TRAY_MENU_SETTINGS as usize,
+            settings_text.as_ptr(),
+        );
+        
         AppendMenuW(
             menu,
             MF_STRING,
@@ -419,6 +427,9 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
                     SW_SHOW,
                 );
             }
+        }
+        TRAY_MENU_SETTINGS => {
+            let _ = s.event_tx.send(OverlayEvent::OpenSettings);
         }
         TRAY_MENU_CHECK_UPDATES => {
             let _ = s.event_tx.send(OverlayEvent::TrayCheckForUpdates);

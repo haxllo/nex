@@ -342,6 +342,12 @@ impl NativeOverlayShell {
     pub fn quit_if_running(&self) {
         self.post(UiCommand::Quit);
     }
+    pub fn open_settings(&self, snapshot: String) {
+        self.post(UiCommand::OpenSettings { snapshot });
+    }
+    pub fn settings_save_result(&self, json: String) {
+        self.post(UiCommand::SettingsSaveResult { json });
+    }
 
     pub fn set_results(&self, rows: &[OverlayRow], selected_index: usize) {
         self.with_state(|s| {

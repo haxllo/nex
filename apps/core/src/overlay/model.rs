@@ -73,6 +73,8 @@ pub enum OverlayEvent {
     OpenSettings,
     /// Settings page requested a save; payload is the raw cfg JSON.
     SaveSettings(String),
+    /// The settings window was closed (hidden).
+    SettingsClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

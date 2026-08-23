@@ -140,7 +140,6 @@ pub(crate) enum UiCommand {
     OpenSettings { snapshot: String },
     /// Result of a settings save attempt, pushed into the settings page.
     SettingsSaveResult { json: String },
-
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -784,6 +783,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 if Some(window_id) == settings_window_id {
                     if let Some((w, _)) = &settings_ui {
                         let _ = w.set_visible(false);
+                        let _ = event_tx.send(OverlayEvent::SettingsClosed);
+
                     }
                 }
             }

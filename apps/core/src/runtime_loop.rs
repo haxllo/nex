@@ -435,7 +435,9 @@ pub(crate) fn run_windows_runtime(
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
         apps_expanded: None,
+        settings_open: false,
         pending_show_all: None,
+
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -556,6 +558,8 @@ struct RuntimeWorker {
     /// Full expanded app list waiting to be pushed after the first page
     /// has painted (see `expand_all_apps`).
     pending_show_all: Option<Vec<crate::model::SearchItem>>,
+    /// Set while the settings window is open — hotkey toggles are ignored.
+    settings_open: bool,
 }
 
 impl RuntimeWorker {
@@ -1288,6 +1292,9 @@ impl RuntimeWorker {
         }
         match event {
             OverlayEvent::Hotkey(_) => {
+                if self.settings_open {
+                    return; // Settings owns the moment — don't summon the launcher over it
+                }
                 // Debounce: skip if we just processed a hotkey within 50ms.
                 // The WH_KEYBOARD_LL hook and WM_INPUT (raw input sink) can
                 // both fire for the same keystroke.  This deduplicates them.
@@ -1423,6 +1430,8 @@ impl RuntimeWorker {
                 let _ = self.tray_gm_tx.send(self.runtime_config.game_mode_enabled);
             }
             OverlayEvent::OpenSettings => {
+                self.overlay.hide_now();
+                self.settings_open = true;
                 let snap = crate::settings_snapshot::build(&self.runtime_config);
                 self.overlay.open_settings(snap);
             }
@@ -1432,6 +1441,9 @@ impl RuntimeWorker {
                     Err(e) => self.overlay.settings_save_result(serde_json::json!({ "saved": false, "error": e}).to_string(),
                     ),
                 }
+            }
+            OverlayEvent::SettingsClosed => {
+                self.settings_open = false;
             }
             OverlayEvent::TrayCheckForUpdates => {
                 self.overlay.set_status_text("Checking for updates...");

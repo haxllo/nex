@@ -709,9 +709,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
             },
             Event::WindowEvent {
+                window_id,
                 event: WindowEvent::Focused(focused),
                 ..
             } => {
+                // Only the launcher overlay drives focus state — the settings
+                // window must not toggle Escape-gating or hotkey-focus tracking.
+                if window_id != window.id() {
+                    return
+                };
                 crate::overlay::hotkey::set_overlay_focus(focused);
                 if let Ok(mut s) = state.lock() {
                     s.has_focus = focused;

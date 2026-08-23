@@ -47,3 +47,4 @@ pub mod uninstall_registry;
 pub mod updater;
 #[cfg(target_os = "windows")]
 pub(crate) mod overlay;
+pub(crate) mod settings_snapshot;

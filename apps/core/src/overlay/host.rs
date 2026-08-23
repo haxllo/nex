@@ -83,11 +83,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState};
 use crate::overlay::model::Theme;
+use crate::runtime::log_info;
 
 const WINDOW_WIDTH: f64 = 720.0;
 const INITIAL_HEIGHT: f64 = 60.0;
 const MAX_HEIGHT: f64 = 530.0;
 const FOCUS_GRACE_MS: u64 = 400;
+
+///Embedded UI assets for settings window
+const SETTINGS_HTML: &str= include_str!("../../assets/settings.html");
+const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
 
 /// Embedded web UI assets (premium Raycast-dark cmdk UI).
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
@@ -131,6 +136,11 @@ pub(crate) enum UiCommand {
     ApplyResize,
     /// Delayed keyboard state check (posted ~200ms after hide).
     CheckKeyboardState(Instant),
+    /// Open/show the settings window, preload with a config snapshot.
+    OpenSettings { snapshot: String },
+    /// Result of a settings save attempt, pushed into the settings page.
+    SettingsSaveResult { json: String },
+
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -201,6 +211,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             None
         }
     };
+    let mut settings_ui: Option<(tao::window::Window, wry::WebView)> = None;
+    let mut settings_window_id: Option<tao::window::WindowId>= None;
+    let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+
     if let Some(ref wv) = webview {
         subscribe_webview2_diagnostics(wv);
         // Oversize the viewport up front so the first show/grow has
@@ -297,7 +311,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
 
     LOOP_ALIVE.store(true, Ordering::SeqCst);
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        event_loop.run_return(move |event, _target, control_flow| {
+        event_loop.run_return(move |event, target, control_flow| {
             *control_flow = ControlFlow::Wait;
 
             match event {
@@ -638,6 +652,61 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                 }
+                UiCommand::OpenSettings { snapshot}=> {
+                    *last_settings_snapshot.lock().unwrap() = Some(snapshot.clone());
+                    if let Some((w, _)) = &settings_ui {
+                        //Already open just raise it
+                        let _ = w.set_visible(true);
+                        let _ = w.set_focus();
+                    } else {
+                        let sw = tao::window::WindowBuilder::new()
+                            .with_title("Nex Settings")
+                            .with_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
+                            .build(target)
+                            .expect("settings window");
+                        settings_window_id = Some(sw.id());
+                        position_window_centered(&sw);
+                        let save_tx = event_tx.clone();
+                        let snapshot_for_ipc = last_settings_snapshot.clone();
+                        let proxy_for_ipc = proxy.clone();
+                        let webview = wry::WebViewBuilder::new()
+                            .with_url("nexasset://localhost/settings.html")
+                            .with_custom_protocol("nexasset".into(),move |_id, request| {
+                                serve_asset(request)
+                            })
+                            .with_ipc_handler(move |req| {
+                                let body = req.body().clone();
+                                if body.contains("\"t\":\"save\"") {
+                                    let _ = save_tx.send(OverlayEvent::SaveSettings(body));
+                                } else if body.contains("\"t\":\"ready\"") {
+                                    let snap = snapshot_for_ipc.lock().unwrap().clone();
+                                    if let Some(snap) = snap {
+                                        let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings { snapshot: snap });
+                                    };
+                                } else {
+                                    crate::runtime::log_info(&format!("[nex] settings ipc: {body}"));
+                                }
+                            })
+                            .build(&sw)
+                            .expect("settings webview");
+
+                        let _ = sw.set_visible(true);
+                        settings_ui = Some((sw, webview));
+                    }
+                    // push config into the page (works for both fresh and warm opens)
+                    if let Some((_, wv)) = &settings_ui {
+                        let _ = wv.evaluate_script(&format!(
+                            "window.applySettings && window.applySettings({snapshot})"
+                        ));
+                    }
+                }
+                UiCommand::SettingsSaveResult { json } => {
+                    if let Some((_, wv)) = &settings_ui {
+                        let _ = wv.evaluate_script(&format!(
+                            "window.saveResult && window.saveResult({json})"
+                        ));
+                    }
+                }
             },
             Event::WindowEvent {
                 event: WindowEvent::Focused(focused),
@@ -699,6 +768,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
             }
+            Event::WindowEvent { 
+                window_id,
+                event: tao::event::WindowEvent::CloseRequested{ .. },
+                ..
+            } => {
+                //only the settings window may be "closed"; hide it instead of
+                //destroying it so repopening from the tray is instant
+                if Some(window_id) == settings_window_id {
+                    if let Some((w, _)) = &settings_ui {
+                        let _ = w.set_visible(false);
+                    }
+                }
+            }
             _ => {}
         }
     });
@@ -756,6 +838,8 @@ fn serve_asset(
         "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
+        "/settings.html" => ("text/html", SETTINGS_HTML.as_bytes().into()),
+        "/settings.js" => ("text/javascript", SETTINGS_JS.as_bytes().into()),
         _ => return not_found(),
     };
     Response::builder()
@@ -1327,6 +1411,20 @@ fn position_window(window: &Window, _hwnd: HWND) {
     let x = left + (work_w - width_phys) / 2;
     let y = top + (work_h as f32 * 0.30) as i32;
     window.set_outer_position(PhysicalPosition::new(x.max(left), y.max(top)));
+}
+/// Center a window on the cursor's monitor work area (both axes).
+fn position_window_centered(window: &Window) {
+    let Some((left, top, right, bottom)) = cursor_monitor_work_area() else {
+        return;
+    };
+    let scale = window.scale_factor();
+    let size = window.inner_size().to_logical::<f64>(scale);
+    let x = left as f64 + ((right - left) as f64 - size.width) / 2.0;
+    let y = top as f64 + ((bottom - top) as f64 - size.height) / 2.0;
+    window.set_outer_position(PhysicalPosition::new(
+        x.max(left as f64) as i32,
+        y.max(top as f64) as i32,
+    ));
 }
 
 fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {

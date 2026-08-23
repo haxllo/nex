@@ -242,10 +242,6 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert_eq!(loaded.index_max_items_per_query_seed, 5_000);
     assert!(!loaded.game_mode_enabled);
     assert_eq!(
-        loaded.search_backend,
-        nex_core::config::SearchBackend::Tantivy
-    );
-    assert_eq!(
         loaded.file_discovery_backend,
         nex_core::config::DiscoveryBackend::Auto
     );
@@ -262,7 +258,7 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));
     assert!(updated_raw.contains("\"index_max_items_per_query_seed\": 5000"));
     assert!(updated_raw.contains("\"game_mode_enabled\": false"));
-    assert!(updated_raw.contains("\"search_backend\": \"tantivy\""));
+    assert!(!updated_raw.contains("\"search_backend\""));
 
     let backups: Vec<_> = std::fs::read_dir(&config_dir)
         .unwrap()
@@ -312,7 +308,7 @@ ignore_hotkeys_on_fullscreen = true
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
     assert!(updated_raw.contains("game_mode_enabled = false"));
-    assert!(updated_raw.contains("search_backend = \"tantivy\""));
+    assert!(!updated_raw.contains("search_backend"));
     assert!(updated_raw.contains("file_discovery_backend = \"auto\""));
     assert!(!updated_raw.contains("ignore_hotkeys_on_fullscreen"));
 

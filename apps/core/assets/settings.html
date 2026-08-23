@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head><meta charset="UTF-8"><style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background: #1e1e1e;
+            color: #dddddd;
+            padding: 24px;
+        }
+        input {
+            width: 300px;
+            padding: 6px;
+            background: #2a2a2a;
+            color: #eeeeee;
+            border: 1px solid #444444;
+            border-radius: 4px;
+        }
+        button {
+            padding: 6px 14px;
+            margin-left: 8px;
+            cursor: pointer;
+        }
+        #status {
+            margin-top: 12px;
+            color: #888888;
+            font-size: 12px;
+        }
+    </style></head>
+<body>
+    <h3>Nex Settings</h3>
+
+    <div class="row">
+        <label><input type="checkbox" id="gridView"/> Show Grid View</label>
+    </div>
+    <div class="row">
+        <label><input type="checkbox" id="quickLaunchEnabled"/> Enable Quick Launch</label>
+    </div>
+
+    <div class="row">
+        <label>Max results (5-100)</label>
+        <input type="number" id="maxResults" min="5" max="100"/>
+    </div>
+    <div class="row">
+        <label>Quick Launch Max Items</label>
+        <input type="number" id="quickLaunchMaxItems" min="3" max="12"/>
+    </div>
+    <div class="row">
+        <label>Index size cap (10k–2M)</label>
+        <input type="number" id="indexMaxItemsTotal" min="10000" max="200000"/>
+    </div>
+    <div class="row">
+        <label>Hotkey</label>
+        <input type="text" id="hotkey" />
+    </div>
+    <button onclick="save(); this.blur()">Save</button>
+    <div id="status"></div>
+    <script src="/settings.js"></script>
+</body>
+</html>

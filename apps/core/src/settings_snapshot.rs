@@ -1,4 +1,4 @@
-use crate::config::{self, Config};
+use crate::{config::{self, Config}, overlay::model::Theme};
 
 pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("bad json: {e}"))?;
@@ -21,12 +21,7 @@ pub(crate) fn save(cfg: &Config) -> Result<(), String> {
 }
 
 
-
-
-
-
-
-pub(crate) fn build(cfg: &Config) -> String {
+pub(crate) fn build(cfg: &Config, theme: &str) -> String {
     serde_json::json!({
         "gridView": cfg.grid_view,
         "maxResults": cfg.max_results,
@@ -34,6 +29,7 @@ pub(crate) fn build(cfg: &Config) -> String {
         "quickLaunchMaxItems": cfg.quick_launch.max_items,
         "indexMaxItemsTotal": cfg.index_max_items_total,
         "hotkey": cfg.hotkey,
+        "theme": theme,
     })
     .to_string()
 }

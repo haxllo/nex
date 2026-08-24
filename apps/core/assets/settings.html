@@ -1,18 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
     <head><meta charset="UTF-8"><style>
+        :root { --sbg:#1e1e1e; --sfg:#dddddd; --smut:#888888; --sbin:#2a2a2a; --sbinb:#444444; }
+        html[data-theme="light"] { --sbg:#f6f6f8; --sfg:#16161a; --smut:#77777d; --sbin:#ffffff; --sbinb:#cccccc; }
         body {
             font-family: "Segoe UI", sans-serif;
-            background: #1e1e1e;
-            color: #dddddd;
+            background: var(--sbg);
+            color: var(--sfg);
             padding: 24px;
         }
         input {
             width: 300px;
             padding: 6px;
-            background: #2a2a2a;
-            color: #eeeeee;
-            border: 1px solid #444444;
+            background: var(--sbin);
+            color: var(--sfg);
+            border: 1px solid var(--sbinb);
             border-radius: 4px;
         }
         button {
@@ -22,7 +24,7 @@
         }
         #status {
             margin-top: 12px;
-            color: #888888;
+            color: var(--smut);
             font-size: 12px;
         }
         .row { 
@@ -31,7 +33,7 @@
         label {
             display: block;
             margin-bottom: 4px;
-            color: #aaa;
+            color: var(--smut);
             font-size: 12px; 
         }
         input[type="number"], input[type="text"] 

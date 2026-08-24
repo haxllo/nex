@@ -1432,7 +1432,11 @@ impl RuntimeWorker {
             OverlayEvent::OpenSettings => {
                 self.overlay.hide_now();
                 self.settings_open = true;
-                let snap = crate::settings_snapshot::build(&self.runtime_config);
+                let theme = match crate::overlay::platform::detect_system_theme() {
+                    crate::overlay::model::Theme::Light => "light",
+                    _ => "dark",
+                };
+                let snap = crate::settings_snapshot::build(&self.runtime_config, theme);
                 self.overlay.open_settings(snap);
             }
             OverlayEvent::SaveSettings(raw) => {

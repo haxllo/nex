@@ -8,6 +8,7 @@ const FIELDS = [
 ];
 
 window.applySettings = function (s) {
+  document.documentElement.dataset.theme = s.theme || "dark";
   window.currentSettings = s;
   for (const [id, kind] of FIELDS) {
     const el = document.getElementById(id);

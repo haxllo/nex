@@ -4,18 +4,19 @@ const FIELDS = [
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],
   ["indexMaxItemsTotal", "valueNumber"],
-  ["hotkey", "value"],
 ];
 
 window.applySettings = function (s) {
   document.documentElement.dataset.theme = s.theme || "dark";
   window.currentSettings = s;
+  window.pendingHotkey = null;
   for (const [id, kind] of FIELDS) {
     const el = document.getElementById(id);
     if (!el || s[id] === undefined) continue;
     el[kind === "checked" ? "checked" : "value"] = s[id];
   }
   document.getElementById("status").textContent = "";
+  showHotkey();
 };
 
 function save() {
@@ -26,43 +27,37 @@ function save() {
     else if (kind === "valueNumber") cfg[id] = Number(el.value);
     else cfg[id] = el.value.trim();
   }
+  cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
 
 window.saveResult = function (r) {
   document.getElementById("status").textContent = r.saved
-    ? "Saved ✓"
+    ? "Saved"
     : "Error: " + r.error;
 };
 
 window.chrome.webview.postMessage(JSON.stringify({ t: "ready" }));
 
-/**function send() {
-    const v =document.getElementById("val").value;
-    window.chrome.webview.postMessage(JSON.stringify({ t: "setSetting", v}));
-    document.getElementById("status").textContent = "sent: " + v;
+window.pendingHotkey = null;
+const MODS = new Set(["Control", "Alt", "Shift", "Meta"]);
+let recording = false;
+const hkbox = document.getElementById("hotkeyBox");
+
+
+function showHotkey() {
+  hkbox.textContent = window.pendingHotkey || window.currentSettings?.hotkey;
 }
-window.chrome.webview.addEventListener("message", (e) => {
-    document.getElementById("status").textContent = "host says: " + e.data.v;
+
+hkbox.addEventListener("click", () => {
+  recording = true;
+  hkbox.classList.add("recording");
+  hkbox.textContent = "Press keys...  (Esc to cancel)";
+  window.chrome.webview.postMessage(JSON.stringify({ t: "recordHotkey" }));
 });
-window.applySettings = function(s) {
-    window.currentSettings = s;
-    document.getElementById("val").value = s.hotkey;
-    document.getElementById("status").textContent = "applied settings: " + JSON.stringify(s);
-};
 
-window.saveResult = function (r) {
-    document.getElementById("status").textContent = r.saved ? "Saved ✓": "Error: " + r.error;
-};
-function save() {
-    const hotkey = document.getElementById("val").value;
-    const cfg = Object.assign({}, window.currentSettings || {}, { hotkey });
-    window.chrome.webview.postMessage(JSON.stringify({ t: "ready" }));
+window.hotkeyRecorded = function (combo) {
+  hkbox.classList.remove("recording");
+  if (combo) window.pendingHotkey = combo;
+  showHotkey();
 }
-
-function save() {
-  const cfg = Object.assign({}, window.currentSettings || {}, {
-    hotkey: document.getElementById("val").value,
-  });
-  window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
-}**/

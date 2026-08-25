@@ -40,6 +40,18 @@
         {
             width: 220px; 
         }
+        .hkbox {
+            width: 220px;
+            padding: 6px 10px;
+            background: var(--sbin);
+            color: var(--sfg);
+            border: 1px solid var(--sbinb);
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .hkbox.recording { border-color: #e05a4e; color: #e05a4e; }
     </style></head>
 <body>
     <h3>Nex Settings</h3>
@@ -64,8 +76,8 @@
         <input type="number" id="indexMaxItemsTotal" min="10000" max="200000"/>
     </div>
     <div class="row">
-        <label>Hotkey</label>
-        <input type="text" id="hotkey" />
+        <label>Hotkey (Click the box, then press the combo)</label>
+        <div class="hkbox" id="hotkeyBox" tabindex="0"></div>
     </div>
     <button onclick="save(); this.blur()">Save</button>
     <div id="status"></div>

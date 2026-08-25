@@ -63,6 +63,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::WebViewExtWindows;
 use wry::{WebView, WebViewBuilder};
@@ -83,7 +84,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState};
 use crate::overlay::model::Theme;
-use crate::runtime::log_info;
 
 const WINDOW_WIDTH: f64 = 720.0;
 const INITIAL_HEIGHT: f64 = 60.0;
@@ -140,6 +140,8 @@ pub(crate) enum UiCommand {
     OpenSettings { snapshot: String },
     /// Result of a settings save attempt, pushed into the settings page.
     SettingsSaveResult { json: String },
+    /// Push a captured hotkey combo into the settings page.
+    SettingsHotkeyRecorded { combo: String },
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -651,6 +653,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                 }
+                UiCommand::SettingsHotkeyRecorded { combo } => {
+                    if let Some((_, wv)) = &settings_ui {
+                        let _ = wv.evaluate_script(&format!(
+                            "window.hotkeyRecorded && window.hotkeyRecorded('{combo}')"
+                        ));
+                    }
+                }
                 UiCommand::OpenSettings { snapshot}=> {
                     *last_settings_snapshot.lock().unwrap() = Some(snapshot.clone());
                     if let Some((w, _)) = &settings_ui {
@@ -666,6 +675,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         settings_window_id = Some(sw.id());
                         position_window_centered(&sw);
                         let save_tx = event_tx.clone();
+                        let record_hwnd = hwnd;
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
                         let webview = wry::WebViewBuilder::new()
@@ -682,7 +692,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     if let Some(snap) = snap {
                                         let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings { snapshot: snap });
                                     };
-                                } else {
+                                } else if body.contains("\"t\":\"recordHotkey\"") {
+                                    RECORDING_HOTKEY.store(true, Ordering::SeqCst);
+                                    // Keep Start menu shut while capturing
+                                    register_raw_input_sink(record_hwnd, true);
+                                } else if body.contains("\"t\":\"cancelRecord\"") {
+                                    RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                                    // Restore normal Win routing.
+                                    register_raw_input_sink(
+                                        record_hwnd,
+                                        crate::overlay::hotkey::is_win_key_hotkey(),
+                                    );
+                                }
+                                else {
                                     crate::runtime::log_info(&format!("[nex] settings ipc: {body}"));
                                 }
                             })
@@ -1562,6 +1584,11 @@ unsafe extern "system" fn instance_signal_subclass(
                     let vk = unsafe { raw.data.keyboard.VKey };
                     let flags = unsafe { raw.data.keyboard.Flags };
                     let is_win = vk == VK_LWIN || vk == VK_RWIN;
+                    // Native hotkey recording for the settings page:
+                    // swallow keys and translate them while armed.
+                    if RECORDING_HOTKEY.load(Ordering::SeqCst) {
+                        return handle_recording_key(vk, flags, ctx);
+                    }
                     if is_win {
                         if crate::overlay::hotkey::is_win_key_hotkey() {
                             if (flags & RI_KEY_BREAK) != 0 {
@@ -1636,9 +1663,57 @@ unsafe fn install_instance_signal_subclass(
 // Raw input helpers — suppress Win-key Start while overlay is foreground.
 // ─────────────────────────────────────────────────────────────────
 
+/// While RECORDING_HOTKEY is armed, translate raw keyboard events into a
+/// canonical hotkey string and report via OverlayEvent::HotkeyRecorded.
+/// Every event is swallowed (returns 0) — nothing leaks to the OS.
+unsafe fn handle_recording_key(
+    vk: u16,
+    flags: u16,
+    ctx: &InstanceSignalCtx,
+) -> LRESULT {
+    let is_break = (flags & RI_KEY_BREAK) != 0;
+    //ESC cancels recording, any other key is a candidate.
+    let is_win = vk == VK_LWIN || vk == VK_RWIN;
+    if vk == 0x1B && !is_break {
+        RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+        let _ = ctx.event_tx.send(OverlayEvent::HotkeyRecorded(String::new()));
+        return 0;
+    }
+    let is_modifier =matches!(vk, 0xA0..=0xA5 | 0x10 | 0x11 |0x12 |0x5B | 0x5C);
+    if is_win {
+        //Commit bare "Win" on keyup only if no other jey is joined it.
+        if is_break && !RECORD_WIN_CHORD.load(Ordering::SeqCst) {
+            RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            let _ = ctx.event_tx.send(OverlayEvent::HotkeyRecorded("Win".into()));
+        }
+        return 0;
+    }
+    if !is_break && !is_modifier {
+        let mut parts: Vec<String> = Vec::new();
+        unsafe  {
+            if GetAsyncKeyState(0x11) as u16 & 0x8000 != 0 { parts.push("Ctrl".into()); }
+            if GetAsyncKeyState(0x12) as u16 & 0x8000 != 0 { parts.push("Alt".into()); }
+            if GetAsyncKeyState(0x10) as u16 & 0x8000 != 0 { parts.push("Shift".into()); }
+            if GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0 || GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0 {
+                parts.push("Win".into());
+                RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
+            }
+        }
+        if let Some(name) = vk_to_hotkey(vk) {
+            parts.push(name);
+            let combo = parts.join("+");
+            RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            let _ = ctx.event_tx.send(OverlayEvent::HotkeyRecorded(combo));
+        }
+        //unrecordable vks are swallowed silently (no beep, no OS hotkey).  The settings page
+    }
+    0
+}
+
 /// Tracks raw-input VK of held Win key so we only send one toggle per press.
 static RAW_WIN_DOWN: AtomicU32 = AtomicU32::new(0);
-
+pub(crate) static RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
+static RECORD_WIN_CHORD: AtomicBool = AtomicBool::new(false); //win+other seen
 const RID_INPUT: u32 = 0x10000003;
 const RI_KEY_BREAK: u16 = 0x0001;
 const VK_LWIN: u16 = 0x5B;
@@ -1675,8 +1750,20 @@ fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
     ok
 }
 
+fn vk_to_hotkey(vk: u16) -> Option<String> {
+    match vk {
+        0x41..=0x5A => Some (((vk as u8) as char).to_string()), // A-Z
+        0x30..=0x39 => Some(((vk as u8) as char).to_string()), // 0-9
+        0x20 => Some("Space".into()),
+        0x5B | 0x5C => Some("Win".into()),
+        0x70..=0x87 => Some(format!("F{}", vk - 0x6F)), //F1 -F24
+        _ => None,
+    }
+}
+
 /// Remove the raw input sink registration, restoring normal keyboard
 /// input routing.  Call before hiding the overlay.
+
 fn unregister_raw_input_sink() {
     let mut rid = RAWINPUTDEVICE {
         usUsagePage: 0x01,

@@ -75,6 +75,10 @@ pub enum OverlayEvent {
     SaveSettings(String),
     /// The settings window was closed (hidden).
     SettingsClosed,
+    /// A hotkey combo captured natively for the settings page.
+    /// Empty string = recording cancelled.
+    HotkeyRecorded(String),
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

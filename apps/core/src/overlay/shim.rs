@@ -348,6 +348,9 @@ impl NativeOverlayShell {
     pub fn settings_save_result(&self, json: String) {
         self.post(UiCommand::SettingsSaveResult { json });
     }
+    pub fn settings_hotkey_recorded(&self, combo: String) {
+        self.post(UiCommand::SettingsHotkeyRecorded { combo });
+    }
 
     pub fn set_results(&self, rows: &[OverlayRow], selected_index: usize) {
         self.with_state(|s| {

@@ -1437,6 +1437,7 @@ impl RuntimeWorker {
                     _ => "dark",
                 };
                 let snap = crate::settings_snapshot::build(&self.runtime_config, theme);
+                crate::runtime::log_info(&format!("[nex] settings snapshot: {snap}"));
                 self.overlay.open_settings(snap);
             }
             OverlayEvent::SaveSettings(raw) => {
@@ -1449,6 +1450,10 @@ impl RuntimeWorker {
             OverlayEvent::SettingsClosed => {
                 self.settings_open = false;
             }
+            OverlayEvent::HotkeyRecorded(combo) => {
+                self.overlay.settings_hotkey_recorded(combo);
+            }
+
             OverlayEvent::TrayCheckForUpdates => {
                 self.overlay.set_status_text("Checking for updates...");
                 let event_tx = self.event_tx.clone();

@@ -649,6 +649,66 @@ impl RuntimeWorker {
 
     /// Load Quick Launch items from the database and config.
     /// Called every time the overlay shows idle state to ensure fresh data.
+    /// Full hotkey re-registration: kill the helper and start a fresh
+    /// listener. Only used when no live helper is available — the live
+    /// path ([`crate::overlay::hotkey::update_live_hotkey`]) is preferred
+    /// because it never leaves the system without a detector.
+    fn reregister_hotkey_listener(&mut self, new_hotkey: &str) {
+        // Gate: only one re-registration at a time — drop old listener
+        // inside the gate so we don't lose it if another is in progress.
+        if RE_REGISTERING
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            log_info("[nex] hotkey re-registration already in progress, skipping");
+            return;
+        }
+        if let Ok(mut guard) = self.hotkey_listener.lock() {
+            *guard = None;
+        }
+        let new_hotkey = new_hotkey.to_string();
+        let event_tx = self.event_tx.clone();
+        let lh = self.hotkey_listener.clone();
+        std::thread::Builder::new()
+            .name("nex-hotkey-reconfig".into())
+            .spawn(move || {
+                // Stop the scheduled task and kill the helper process so the
+                // new start() can write config and re-launch a clean helper.
+                let _ = std::process::Command::new("schtasks")
+                    .args(["/end", "/tn", "NexHelperV2"])
+                    .output();
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/IM", "NexHelper.exe"])
+                    .creation_flags(0x08000000)
+                    .output();
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                match HotkeyListener::start(&new_hotkey, event_tx) {
+                    Ok(listener) => {
+                        log_info("[nex] hotkey re-registered successfully");
+                        match lh.lock() {
+                            Ok(mut guard) => {
+                                *guard = Some(listener);
+                                log_info("[nex::diag] re-registration: listener stored in hotkey_listener");
+                            }
+                            Err(_) => {
+                                log_warn("[nex::diag] re-registration: hotkey_listener mutex poisoned, listener lost!");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log_warn(&format!("[nex] hotkey re-registration failed: {error}"));
+                    }
+                }
+                RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
+            })
+            .ok();
+    }
+
     fn load_quick_launch_items(&mut self) {
         if !self.runtime_config.quick_launch.enabled {
             self.quick_launch_items.clear();
@@ -1141,6 +1201,9 @@ impl RuntimeWorker {
             .background_index_refresh
             .completed
             .load(std::sync::atomic::Ordering::Acquire);
+        // Set when a hotkey change needs the full re-registration path but
+        // the service lock is held — applied after the block above drops it.
+        let mut needs_reregister: Option<String> = None;
 
         if let Ok(svc) = self.service.try_write() {
             let hotkey_changed = maybe_apply_runtime_config_reload(
@@ -1159,61 +1222,16 @@ impl RuntimeWorker {
                     "[nex] config hotkey changed, re-registering listener for '{}'",
                     self.runtime_config.hotkey,
                 ));
-                // Gate: only one re-registration at a time — drop old
-                // listener inside the gate so we don't lose it if another
-                // re-registration is already in progress.
-                if RE_REGISTERING.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
-                    if let Ok(mut guard) = self.hotkey_listener.lock() {
-                        *guard = None;
-                    }
-                    // Re-register on a separate thread — old helper is killed
-                    // async by Drop, so the new start() may fall back to
-                    // in-process hook if the old helper's pipe lingers.
-                    let new_hotkey = self.runtime_config.hotkey.clone();
-                    let event_tx = self.event_tx.clone();
-                    let lh = self.hotkey_listener.clone();
-                    std::thread::Builder::new()
-                        .name("nex-hotkey-reconfig".into())
-                        .spawn(move || {
-                            // Stop the scheduled task and kill the helper
-                            // process so the new start() can write config
-                            // and re-launch a clean helper.
-                            let _ = std::process::Command::new("schtasks")
-                                .args(["/end", "/tn", "NexHelperV2"])
-                                .output();
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/F", "/IM", "NexHelper.exe"])
-                                .creation_flags(0x08000000)
-                                .output();
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            // start() writes helper-config.json, relaunches
-                            // the task, and connects or falls back to
-                            // in-process hook. All on this thread — runtime
-                            // worker is never blocked.
-                            match HotkeyListener::start(&new_hotkey, event_tx) {
-                                Ok(listener) => {
-                                    log_info("[nex] hotkey re-registered successfully");
-                                    match lh.lock() {
-                                        Ok(mut guard) => {
-                                            *guard = Some(listener);
-                                            log_info("[nex::diag] re-registration: listener stored in hotkey_listener");
-                                        }
-                                        Err(e) => {
-                                            log_warn("[nex::diag] re-registration: hotkey_listener mutex poisoned, listener lost!");
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    log_warn(&format!(
-                                        "[nex] hotkey re-registration failed: {error}"
-                                    ));
-                                }
-                            }
-                            RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
-                        })
-                        .ok();
+                // Fast path: an elevated helper is already running and owns
+                // detection. Rewrite its config and ring the doorbell —
+                // instant, and nothing gets killed, so the system is never
+                // left without a keyboard detector.
+                if crate::overlay::hotkey::update_live_hotkey(&self.runtime_config.hotkey) {
+                    log_info("[nex] hotkey updated live (helper reloaded config)");
                 } else {
-                    log_info("[nex] hotkey re-registration already in progress, skipping");
+                    // Deferred: `svc` holds an immutable borrow of self for
+                    // the rest of this block; re-register after it drops.
+                    needs_reregister = Some(self.runtime_config.hotkey.clone());
                 }
                 // Status text already set by maybe_apply_runtime_config_reload.
             }
@@ -1251,6 +1269,14 @@ impl RuntimeWorker {
             // index-refresh applicator, and watcher starter will
             // retry on the next event; the cost of skipping a tick
             // is bounded by the worker's per-item critical section.
+        }
+
+        // Deferred full re-registration (svc borrow dropped above).
+        if let Some(new_hotkey) = needs_reregister.take() {
+            log_info(&format!(
+                "[nex] helper unavailable — full hotkey re-registration for '{new_hotkey}'"
+            ));
+            self.reregister_hotkey_listener(&new_hotkey);
         }
 
         if !was_indexing_complete
@@ -1432,6 +1458,7 @@ impl RuntimeWorker {
             OverlayEvent::OpenSettings => {
                 self.overlay.hide_now();
                 self.settings_open = true;
+                log_info("[nex] settings open — hotkey suppressed");
                 let theme = match crate::overlay::platform::detect_system_theme() {
                     crate::overlay::model::Theme::Light => "light",
                     _ => "dark",
@@ -1441,14 +1468,64 @@ impl RuntimeWorker {
                 self.overlay.open_settings(snap);
             }
             OverlayEvent::SaveSettings(raw) => {
-                match crate::settings_snapshot::apply(&self.runtime_config, &raw).and_then(|updated| crate::settings_snapshot::save(&updated)) {
-                    Ok(()) => self.overlay.settings_save_result("{\"saved\":true}".into()),
-                    Err(e) => self.overlay.settings_save_result(serde_json::json!({ "saved": false, "error": e}).to_string(),
+                match crate::settings_snapshot::apply(&self.runtime_config, &raw) {
+                    Ok(updated) => {
+                        let hotkey_changed = updated.hotkey != self.runtime_config.hotkey;
+                        let new_hotkey = updated.hotkey.clone();
+                        match crate::settings_snapshot::save(&updated) {
+                            Ok(()) => {
+                                // Apply the hotkey now instead of waiting for
+                                // the config-file poller: that runs inside the
+                                // Tick branch behind service.try_write(), which
+                                // can stay contended for a long time while the
+                                // settings window is up (hence "needs a
+                                // restart"). The poller is idempotent — it will
+                                // see the same values and diff to nothing.
+                                if hotkey_changed {
+                                    self.runtime_config.hotkey = new_hotkey.clone();
+                                    if crate::overlay::hotkey::update_live_hotkey(&new_hotkey) {
+                                        log_info(&format!(
+                                            "[nex] hotkey applied immediately on save: '{new_hotkey}'"
+                                        ));
+                                    } else {
+                                        log_info(&format!(
+                                            "[nex] hotkey save: no live helper, full re-registration for '{new_hotkey}'"
+                                        ));
+                                        self.reregister_hotkey_listener(&new_hotkey);
+                                    }
+                                }
+                                // Adopt the saved config wholesale and sync
+                                // the watcher so the poller skips this save
+                                // (everything below already applied above).
+                                self.runtime_config = updated.clone();
+                                self.max_results = self.runtime_config.max_results as usize;
+                                if let Ok(mut cfg) = self.shared_config.write() {
+                                    *cfg = self.runtime_config.clone();
+                                }
+                                self.config_generation += 1;
+                                self.search_worker.clear_session();
+                                self.overlay.set_grid_view(self.runtime_config.grid_view);
+                                if let Ok(meta) = std::fs::metadata(&updated.config_path) {
+                                    if let Ok(mtime) = meta.modified() {
+                                        self.config_watcher.last_modified = Some(mtime);
+                                        self.config_watcher.last_checked = std::time::Instant::now();
+                                    }
+                                }
+                                self.overlay.settings_save_result("{\"saved\":true}".into())
+                            }
+                            Err(e) => self.overlay.settings_save_result(
+                                serde_json::json!({ "saved": false, "error": e }).to_string(),
+                            ),
+                        }
+                    }
+                    Err(e) => self.overlay.settings_save_result(
+                        serde_json::json!({ "saved": false, "error": e }).to_string(),
                     ),
                 }
             }
             OverlayEvent::SettingsClosed => {
                 self.settings_open = false;
+                log_info("[nex] settings closed — hotkey re-enabled");
             }
             OverlayEvent::HotkeyRecorded(combo) => {
                 self.overlay.settings_hotkey_recorded(combo);

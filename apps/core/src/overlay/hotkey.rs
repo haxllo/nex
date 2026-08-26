@@ -680,9 +680,17 @@ impl HotkeyListener {
                 // Only registered for non-Win hotkeys (Win key cannot be
                 // registered via RegisterHotKeyW).
                 let mut fallback_id: u32 = 0;
-                let ctx_ref = HOOK_CTX.lock().unwrap();
-                let ctx = ctx_ref.as_ref().unwrap();
-                if !ctx.target_is_win {
+                // Copy what we need and release HOOK_CTX immediately. The
+                // hook proc locks this same mutex on EVERY keystroke, so a
+                // guard held across the message loop below deadlocks all
+                // system input (frozen keyboard, Start menu leaking through,
+                // tray menus never opening).
+                let (target_is_win_local, target_key_local, required_mods_local) = {
+                    let g = HOOK_CTX.lock().unwrap();
+                    let c = g.as_ref().unwrap();
+                    (c.target_is_win, c.target_key, c.required_mods.clone())
+                };
+                if !target_is_win_local {
                     let mod_map: &[(u32, u32)] = &[
                         (0x11, 0x0002), // VK_CTRL  → MOD_CONTROL
                         (0x12, 0x0001), // VK_ALT   → MOD_ALT
@@ -692,12 +700,12 @@ impl HotkeyListener {
                     ];
                     let mut mods: u32 = 0;
                     for &(vk, flag) in mod_map {
-                        if ctx.required_mods.contains(&vk) { mods |= flag; }
+                        if required_mods_local.contains(&vk) { mods |= flag; }
                     }
                     // Generate a unique hotkey ID that won't collide.
                     fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
                     let ok = match register_hotkey {
-                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
+                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
                         None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
                     };
                     if ok == 0 {
@@ -819,6 +827,7 @@ impl HotkeyListener {
                                     for line in reader.lines() {
                                         match line {
                                             Ok(l) if l == "HOTKEY" => {
+                                                logging::info("[nex] pipe: HOTKEY received from helper");
                                                 let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
                                             }
                                             Ok(l) if l == "SUPPRESS_ON" => {
@@ -831,6 +840,14 @@ impl HotkeyListener {
                                             Err(_) => break, // pipe disconnected
                                         }
                                     }
+                                    // Pipe EOF/error: the helper is gone. Clear the
+                                    // flag so the next hotkey change falls back to
+                                    // full re-registration instead of signalling a
+                                    // dead process.
+                                    HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                                    logging::warn(
+                                        "[nex] helper pipe closed — live-update path disabled until a new helper connects",
+                                    );
                                 })
                             {
                                 Ok(pipe_reader_thread) => {
@@ -1044,6 +1061,129 @@ pub(crate) fn signal_overlay_ready() {
     }
 }
 
+static CONFIG_CHANGED_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
+
+/// Create the config-changed doorbell event.
+///
+/// Created by nex (Medium IL) so the High-IL helper can open it —
+/// UIPI blocks Medium→High writes, so the helper can never own this
+/// object. Mirrors [`create_overlay_event`].
+fn create_config_event() -> String {
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    let pid = std::process::id();
+    let name = format!("Global\\nex-hotkey-config-{pid}");
+    let wide = to_wide(&name);
+    let handle = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, wide.as_ptr()) };
+    if let Ok(mut guard) = CONFIG_CHANGED_EVENT.lock() {
+        *guard = handle as isize;
+    }
+    name
+}
+
+/// Tell the running helper that `helper-config.json` changed, so it can
+/// re-read the hotkey and re-register its fallback without a respawn.
+/// Returns false when no helper is connected (caller falls back to a
+/// full re-registration).
+pub(crate) fn signal_hotkey_config_changed() -> bool {
+    use windows_sys::Win32::System::Threading::SetEvent;
+    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    let handle = match CONFIG_CHANGED_EVENT.lock() {
+        Ok(g) => *g,
+        _ => 0,
+    };
+    if handle == 0 {
+        return false;
+    }
+    unsafe { SetEvent(handle as *mut core::ffi::c_void) };
+    true
+}
+
+/// Live-update the hotkey of an already-running elevated helper.
+///
+/// Rewrites `helper-config.json` (nex owns that file) and rings the
+/// config-changed doorbell the helper waits on. No `taskkill`, no
+/// `schtasks /end`, no pipe writes — so nothing can race or leave the
+/// system without a detector. Returns false when the helper isn't
+/// active, in which case the caller must do a full re-registration.
+pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
+    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    let parsed = match parse_hotkey(hotkey_str) {
+        Ok(p) => p,
+        Err(e) => {
+            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            return false;
+        }
+    };
+    let target_is_win = parsed.key.eq_ignore_ascii_case("win");
+    let target_key = if target_is_win {
+        VK_LWIN
+    } else {
+        match vk_from_key(&parsed.key) {
+            Ok(vk) => vk,
+            Err(e) => {
+                logging::warn(&format!("[nex] live hotkey update: {e}"));
+                return false;
+            }
+        }
+    };
+    let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
+        Ok(m) => m,
+        Err(e) => {
+            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            return false;
+        }
+    };
+
+    // Reuse the existing event/pipe names — the helper is already bound to
+    // them; only the key fields change.
+    let event_name = format!("Global\\nex-overlay-ready-{}", std::process::id());
+    let config_event_name = format!("Global\\nex-hotkey-config-{}", std::process::id());
+    let pipe_name = format!(r"\\.\pipe\nex-hotkey\{}", std::process::id());
+    let config_path = helper_config_path();
+    if let Err(e) = write_helper_config(
+        &config_path,
+        target_key,
+        target_is_win,
+        &required_mods,
+        hotkey_str,
+        &event_name,
+        &pipe_name,
+        &config_event_name,
+    ) {
+        logging::warn(&format!("[nex] live hotkey update: {e}"));
+        return false;
+    }
+    if !signal_hotkey_config_changed() {
+        return false;
+    }
+    // Keep nex's own view in sync. is_win_key_hotkey(), the raw-input
+    // sink's suppress_win decision, check_raw_input_hotkey() and the
+    // polling fallback all read HOOK_CTX — a stale entry here leaves the
+    // new combo undetected and breaks the settings recorder's sink state.
+    if let Ok(mut guard) = HOOK_CTX.lock() {
+        if let Some(ctx) = guard.as_mut() {
+            ctx.target_key = target_key;
+            ctx.target_is_win = target_is_win;
+            ctx.required_mods = required_mods.clone();
+        }
+    }
+    // Drop transient key state so a half-finished press of the previous
+    // hotkey can't swallow the first press of the new one.
+    CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+    CTRL_DOWN.store(false, Ordering::SeqCst);
+    ALT_DOWN.store(false, Ordering::SeqCst);
+    SHIFT_DOWN.store(false, Ordering::SeqCst);
+    crate::overlay::host::reset_raw_win_state();
+    logging::info(&format!(
+        "[nex] live hotkey update signalled helper: '{hotkey_str}'"
+    ));
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Elevated helper (scheduled task + JSON config, no UAC prompt)
 // ---------------------------------------------------------------------------
@@ -1065,10 +1205,21 @@ fn spawn_and_connect_helper(
     //    If the helper created it (High IL), nex.exe couldn't open it with
     //    EVENT_MODIFY_STATE due to UIPI write-up restriction.
     let event_name = create_overlay_event();
+    let config_event_name = create_config_event();
+    let pipe_name = format!(r"\\.\pipe\nex-hotkey\{}", std::process::id());
 
     // 2. Write JSON config for the helper (includes event name)
     let config_path = helper_config_path();
-    write_helper_config(&config_path, target_key, target_is_win, required_mods, hotkey_str, &event_name)?;
+    write_helper_config(
+        &config_path, 
+        target_key, 
+        target_is_win, 
+        required_mods, 
+        hotkey_str, 
+        &event_name, 
+        &pipe_name,
+        &config_event_name,
+    )?;
 
     // 3. Ensure scheduled task exists (one-time UAC if not yet created)
     let helper_path = find_helper_exe()?;
@@ -1078,7 +1229,7 @@ fn spawn_and_connect_helper(
     run_helper_task()?;
 
     // 5. Connect to the helper's named pipe (retry — helper may still be starting)
-    let pipe_file = connect_pipe(HELPER_PIPE_NAME)?;
+    let pipe_file = connect_pipe(&pipe_name)?;
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))
@@ -1118,6 +1269,8 @@ fn write_helper_config(
     required_mods: &[u32],
     hotkey_str: &str,
     overlay_event_name: &str,
+    pipe_name: &str,
+    config_event_name: &str,
 ) -> Result<(), String> {
     let pid = std::process::id();
     let mod_ctrl = required_mods.contains(&0x11);
@@ -1131,8 +1284,8 @@ fn write_helper_config(
     }
 
     let json = format!(
-        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}","event":"{}"}}"#,
-        HELPER_PIPE_NAME,
+        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
+        pipe_name,
         pid,
         target_key,
         if target_is_win { "true" } else { "false" },
@@ -1142,6 +1295,7 @@ fn write_helper_config(
         if mod_win { "true" } else { "false" },
         hotkey_str,
         overlay_event_name,
+        config_event_name,
     );
 
     std::fs::write(path, &json)

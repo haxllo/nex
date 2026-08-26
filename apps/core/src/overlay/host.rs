@@ -158,6 +158,9 @@ pub(crate) enum UiCommand {
     SettingsSaveResult { json: String },
     /// Push a captured hotkey combo into the settings page.
     SettingsHotkeyRecorded { combo: String },
+    /// Delayed focus re-assertion after show (fights Explorer focus theft
+    /// on Win key hotkeys).  Spawned ~250ms after Painted.
+    FocusReassert,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -663,6 +666,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
                             );
                         }
+                        focus_input(&webview);
+                        // Delayed re-assertion: Explorer re-asserts foreground
+                        // ~100-200ms after Win key-down reaches the OS.  The
+                        // initial force_foreground above often loses that race.
+                        // A second attempt after 250ms catches Explorer once
+                        // it has settled.
+                        let proxy_reassert = proxy.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(250));
+                            try_send_ui(&proxy_reassert, UiCommand::FocusReassert);
+                        });
+                    }
+                }
+                UiCommand::FocusReassert => {
+                    // Post-show delayed re-assertion — fights Explorer
+                    // focus theft on Win key hotkeys.  Same as the initial
+                    // force_foreground + focus_input, but runs after
+                    // Explorer has finished its re-assertion cycle.
+                    if state.lock().map(|s| s.visible).unwrap_or(false) {
+                        force_foreground(hwnd);
                         focus_input(&webview);
                     }
                 }

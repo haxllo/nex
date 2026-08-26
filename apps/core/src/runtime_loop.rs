@@ -699,6 +699,12 @@ impl RuntimeWorker {
                                 log_warn("[nex::diag] re-registration: hotkey_listener mutex poisoned, listener lost!");
                             }
                         }
+                        // Re-arm the raw input sink: the new hotkey may
+                        // be a Win combo requiring RIDEV_NOHOTKEYS, or a
+                        // non-Win combo where NOHOTKEYS must be cleared.
+                        // Without this, switching from non-Win to Win
+                        // mid-run leaves Start un-suppressed.
+                        crate::overlay::host::rearm_raw_input_sink();
                     }
                     Err(error) => {
                         log_warn(&format!("[nex] hotkey re-registration failed: {error}"));

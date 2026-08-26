@@ -1084,6 +1084,7 @@ fn create_config_event() -> String {
 /// re-read the hotkey and re-register its fallback without a respawn.
 /// Returns false when no helper is connected (caller falls back to a
 /// full re-registration).
+#[allow(dead_code)]
 pub(crate) fn signal_hotkey_config_changed() -> bool {
     use windows_sys::Win32::System::Threading::SetEvent;
     if !HELPER_ACTIVE.load(Ordering::SeqCst) {
@@ -1138,32 +1139,15 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
         }
     };
 
-    // Reuse the existing event/pipe names — the helper is already bound to
-    // them; only the key fields change.
-    let event_name = format!("Global\\nex-overlay-ready-{}", std::process::id());
-    let config_event_name = format!("Global\\nex-hotkey-config-{}", std::process::id());
-    let pipe_name = format!(r"\\.\pipe\nex-hotkey\{}", std::process::id());
-    let config_path = helper_config_path();
-    if let Err(e) = write_helper_config(
-        &config_path,
-        target_key,
-        target_is_win,
-        &required_mods,
-        hotkey_str,
-        &event_name,
-        &pipe_name,
-        &config_event_name,
-    ) {
-        logging::warn(&format!("[nex] live hotkey update: {e}"));
-        return false;
-    }
-    if !signal_hotkey_config_changed() {
-        return false;
-    }
+    // nex owns ALL hotkey detection now (raw input for Win, WM_INPUT
+    // chord check + RegisterHotKeyW fallback for combos). The running
+    // helper keeps its OLD combo registered — harmless: its events are
+    // deduped by the 50ms debounce and it never touches the new combo.
+    // So a live update is purely local: sync HOOK_CTX + transient state.
+    //
     // Keep nex's own view in sync. is_win_key_hotkey(), the raw-input
-    // sink's suppress_win decision, check_raw_input_hotkey() and the
-    // polling fallback all read HOOK_CTX — a stale entry here leaves the
-    // new combo undetected and breaks the settings recorder's sink state.
+    // sink's suppress decision, check_raw_input_hotkey() and the
+    // polling fallback all read HOOK_CTX.
     if let Ok(mut guard) = HOOK_CTX.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.target_key = target_key;
@@ -1179,7 +1163,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     SHIFT_DOWN.store(false, Ordering::SeqCst);
     crate::overlay::host::reset_raw_win_state();
     logging::info(&format!(
-        "[nex] live hotkey update signalled helper: '{hotkey_str}'"
+        "[nex] live hotkey update applied locally: '{hotkey_str}'"
     ));
     true
 }

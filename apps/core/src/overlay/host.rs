@@ -197,7 +197,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Task Manager, advanced settings, or other native Windows windows
     // have focus (the WH_KEYBOARD_LL hook thread may not receive events
     // for elevated/UWP windows).
-    register_raw_input_sink(hwnd, false);
+    // Win hotkey detection lives in raw input — arm NOHOTKEYS from the
+    // start so bare-Win never opens Start; nex toggles on key-up.
+    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
 
     // Start suppression is handled by RIDEV_NOHOTKEYS via
     // RegisterRawInputDevices instead of a focus-sink window.
@@ -432,13 +434,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // This prevents Start from opening during the hide
                     // transition when the Win key is still physically held.
                     crate::overlay::hotkey::hold_mask_before_hide();
-                    // Remove RIDEV_NOHOTKEYS but keep the sink registered so
-                    // the overlay always receives WM_INPUT for all keyboard
-                    // events regardless of foreground window.  This ensures
-                    // the hotkey is detected even when Task Manager, advanced
-                    // settings, or other elevated/UWP windows have focus.
-                    register_raw_input_sink(hwnd, false);
+                    // Keep NOHOTKEYS armed for Win hotkeys (bare Win = toggle,
+                    // Start must stay suppressed even while hidden); drop it
+                    // for other hotkeys so their combos reach apps normally.
+                    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     window.set_visible(false);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -485,8 +486,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::HideSync(ack) => {
                     crate::overlay::hotkey::hold_mask_before_hide();
-                    register_raw_input_sink(hwnd, false);
+                    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     window.set_visible(false);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -1589,45 +1591,34 @@ unsafe extern "system" fn instance_signal_subclass(
                     if RECORDING_HOTKEY.load(Ordering::SeqCst) {
                         return unsafe { handle_recording_key(vk, flags, ctx) };
                     }
-                    if is_win {
-                        if crate::overlay::hotkey::is_win_key_hotkey() {
-                            if (flags & RI_KEY_BREAK) != 0 {
-                                let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
-                                let chord = RAW_WIN_CHORD.swap(false, Ordering::SeqCst);
-                                // While the overlay is visible we register the
-                                // raw-input sink with RIDEV_NOHOTKEYS, which
-                                // stops WH_KEYBOARD_LL (ours *and* the
-                                // helper's) from seeing the Win key — so the
-                                // hide toggle must come from raw input here.
-                                if was_down != 0
-                                    && !chord
-                                    && OVERLAY_VISIBLE.load(Ordering::SeqCst)
-                                {
-                                    crate::runtime::log_info(
-                                        "[nex::debug] WM_INPUT bare Win key-up while visible, toggling",
-                                    );
-                                    let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
-                                }
-                            } else if RAW_WIN_DOWN
-                                .compare_exchange(
-                                    0,
-                                    vk as u32,
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
-                                )
-                                .is_ok()
-                            {
-                                RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                                // Key-down is ignored: hook/helper fires on
-                                // key-up when the overlay is hidden.
-                                crate::runtime::log_info(&format!(
-                                    "[nex::debug] WM_INPUT Win key={:?} ignoring (hook/helper fires on key-up)",
-                                    vk,
-                                ));
+                    // Win hotkey detection lives HERE (raw input receives
+                    // keys globally, even over elevated windows), not in
+                    // any hook — so it works identically whether the
+                    // helper is connected or not.
+                    if is_win && crate::overlay::hotkey::is_win_key_hotkey() {
+                        if (flags & RI_KEY_BREAK) != 0 {
+                            let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
+                            let chord = RAW_WIN_CHORD.swap(false, Ordering::SeqCst);
+                            // NOHOTKEYS is armed persistently for Win hotkeys,
+                            // so Start never appears; bare Win key-up toggles
+                            // regardless of overlay visibility.
+                            if was_down != 0 && !chord {
+                                crate::runtime::log_info(
+                                    "[nex::debug] WM_INPUT bare Win key-up, toggling",
+                                );
+                                let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
                             }
+                        } else if RAW_WIN_DOWN
+                            .compare_exchange(
+                                0,
+                                vk as u32,
+                                Ordering::SeqCst,
+                                Ordering::SeqCst,
+                            )
+                            .is_ok()
+                        {
+                            RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                         }
-                        // Always track Win key-up for mask key cleanup
-                        // even when the hotkey is not a Win key hotkey.
                         if (flags & RI_KEY_BREAK) != 0 {
                             RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                         }

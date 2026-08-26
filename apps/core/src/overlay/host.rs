@@ -805,8 +805,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 if Some(window_id) == settings_window_id {
                     if let Some((w, _)) = &settings_ui {
                         let _ = w.set_visible(false);
+                        crate::runtime::log_info("[nex] settings window hidden via X");
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
-
                     }
                 }
             }
@@ -1587,12 +1587,27 @@ unsafe extern "system" fn instance_signal_subclass(
                     // Native hotkey recording for the settings page:
                     // swallow keys and translate them while armed.
                     if RECORDING_HOTKEY.load(Ordering::SeqCst) {
-                        return handle_recording_key(vk, flags, ctx);
+                        return unsafe { handle_recording_key(vk, flags, ctx) };
                     }
                     if is_win {
                         if crate::overlay::hotkey::is_win_key_hotkey() {
                             if (flags & RI_KEY_BREAK) != 0 {
-                                RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                                let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
+                                let chord = RAW_WIN_CHORD.swap(false, Ordering::SeqCst);
+                                // While the overlay is visible we register the
+                                // raw-input sink with RIDEV_NOHOTKEYS, which
+                                // stops WH_KEYBOARD_LL (ours *and* the
+                                // helper's) from seeing the Win key — so the
+                                // hide toggle must come from raw input here.
+                                if was_down != 0
+                                    && !chord
+                                    && OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                                {
+                                    crate::runtime::log_info(
+                                        "[nex::debug] WM_INPUT bare Win key-up while visible, toggling",
+                                    );
+                                    let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                                }
                             } else if RAW_WIN_DOWN
                                 .compare_exchange(
                                     0,
@@ -1602,8 +1617,9 @@ unsafe extern "system" fn instance_signal_subclass(
                                 )
                                 .is_ok()
                             {
-                                // Ignore Win key in WM_INPUT — hook/helper fires
-                                // on key-up for both show and hide.
+                                RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+                                // Key-down is ignored: hook/helper fires on
+                                // key-up when the overlay is hidden.
                                 crate::runtime::log_info(&format!(
                                     "[nex::debug] WM_INPUT Win key={:?} ignoring (hook/helper fires on key-up)",
                                     vk,
@@ -1616,6 +1632,11 @@ unsafe extern "system" fn instance_signal_subclass(
                             RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                         }
                     } else if (flags & RI_KEY_BREAK) == 0 {
+                        // Any other key pressed while Win is held makes this a
+                        // chord (Win+E, Win+D…) — never a toggle.
+                        if RAW_WIN_DOWN.load(Ordering::SeqCst) != 0 {
+                            RAW_WIN_CHORD.store(true, Ordering::SeqCst);
+                        }
                         // Non-Win hotkey detection via raw input.
                         // WH_KEYBOARD_LL may not fire when the overlay
                         // is foreground (Chromium installs its own LL
@@ -1712,6 +1733,16 @@ unsafe fn handle_recording_key(
 
 /// Tracks raw-input VK of held Win key so we only send one toggle per press.
 static RAW_WIN_DOWN: AtomicU32 = AtomicU32::new(0);
+/// Set when another key is pressed while Win is held (Win+E, Win+D…) so the
+/// Win key-up is treated as a chord, not a bare toggle.
+static RAW_WIN_CHORD: AtomicBool = AtomicBool::new(false);
+
+/// Clear the raw-input Win tracking. Called after a live hotkey change so a
+/// half-finished press of the old combo can't swallow the new one.
+pub(crate) fn reset_raw_win_state() {
+    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+}
 pub(crate) static RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 static RECORD_WIN_CHORD: AtomicBool = AtomicBool::new(false); //win+other seen
 const RID_INPUT: u32 = 0x10000003;

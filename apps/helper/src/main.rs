@@ -43,7 +43,7 @@ static HELPER_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 // window is created with .with_visible(false) — hidden windows cannot be
 // made foreground.  Instead, AllowSetForegroundWindow (above) grants
 // nex.exe permission to call SetForegroundWindow itself after showing.)
-
+#[derive(Clone)]
 struct HotkeyConfig {
     pipe_path: String,
     #[allow(dead_code)]
@@ -57,9 +57,12 @@ struct HotkeyConfig {
     mod_win: bool,
     #[allow(dead_code)]
     event_name: String,
+    /// Name of nex's config-changed doorbell event (empty when unset).
+    #[allow(dead_code)]
+    config_event_name: String,
 }
 
-static CFG: OnceLock<HotkeyConfig> = OnceLock::new();
+static CFG: std::sync::RwLock<Option<std::sync::Arc<HotkeyConfig>>> = std::sync::RwLock::new(None);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,6 +84,12 @@ const VK_MENU_MASK: u16 = 0xE8;
 
 type PipeHandle = *mut core::ffi::c_void;
 
+#[derive(Clone, Copy)]
+struct SendHandle(isize);
+// SAFETY: these are kernel event handles — designed to be signaled
+// and waited on from any thread.
+unsafe impl Send for SendHandle {}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentThreadId() -> u32;
@@ -95,6 +104,16 @@ unsafe extern "system" {
         nDefaultTimeOut: u32,
         lpSecurityAttributes: *mut core::ffi::c_void,
     ) -> PipeHandle;
+
+    fn CreateEventW(
+        lpEventAttributes: *mut core::ffi::c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> PipeHandle;
+    fn SetEvent(hEvent: PipeHandle) -> i32;
+
+    fn GetCurrentProcess() -> PipeHandle;
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
 
@@ -155,6 +174,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     let mod_shift = json_bool(&content, "mod_shift");
     let mod_win = json_bool(&content, "mod_win");
     let event_name = json_str(&content, "event").unwrap_or("").to_string();
+    let config_event_name = json_str(&content, "config_event").unwrap_or("").to_string();
 
     if pipe_path.is_empty() {
         return Err("config: 'pipe' is required".into());
@@ -180,6 +200,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
         mod_shift,
         mod_win,
         event_name,
+        config_event_name,
     })
 }
 
@@ -254,6 +275,7 @@ fn parse_args_cli(args: &[String]) -> Result<HotkeyConfig, String> {
         mod_shift,
         mod_win,
         event_name: String::new(),
+        config_event_name: String::new(),
     })
 }
 
@@ -336,6 +358,7 @@ fn send_mask_up() {
 
 /// Write "HOTKEY\n" to the pipe. Returns Err on failure (client disconnected).
 fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
+    debug_log("firing HOTKEY to nex");
     pipe.write_all(b"HOTKEY\n")?;
     pipe.flush()?;
     Ok(())
@@ -360,9 +383,10 @@ unsafe extern "system" fn keyboard_hook_proc(
     let is_keydown = msg == 0x0100 || msg == 0x0104; // WM_KEYDOWN / WM_SYSKEYDOWN
     let is_keyup = msg == 0x0101 || msg == 0x0105;   // WM_KEYUP / WM_SYSKEYUP
 
-    let Some(ctx) = CFG.get() else {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
-    };
+    // Hot path: read the hotkey definition from atomics only. Taking a
+    // lock here would stall the whole system's input queue.
+    let target_is_win = HK_IS_WIN.load(Ordering::SeqCst);
+    let target_vk = HK_VK.load(Ordering::SeqCst);
 
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
     let vk = kb.vkCode;
@@ -382,7 +406,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     // --- Chord detection: non-mod key while Win held ---
     // Clear CONSUMED_WIN_VK so the matching Win key-up won't fire
     // the hotkey — passes Win+E/D/R through cleanly.
-    if ctx.target_is_win && !injected && is_keydown
+    if target_is_win && !injected && is_keydown
         && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
         && vk != VK_LWIN && vk != VK_RWIN
     {
@@ -398,7 +422,7 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     // --- Win key-up: fire hotkey only if no chord was detected ---
     // Chord detection clears CONSUMED_WIN_VK before we get here.
-    if ctx.target_is_win && is_keyup && !injected {
+    if target_is_win && is_keyup && !injected {
         let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
         if consumed_vk != 0 && vk == consumed_vk {
             let was_chord = CHORD_DETECTED.swap(false, Ordering::SeqCst);
@@ -420,18 +444,23 @@ unsafe extern "system" fn keyboard_hook_proc(
         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
     }
 
-    let is_target = if ctx.target_is_win {
+    let is_target = if target_is_win {
         vk == VK_LWIN || vk == VK_RWIN
     } else {
-        vk == ctx.target_vk
+        vk == target_vk
     };
 
-    if is_target && !injected && check_modifiers(ctx) {
-        if ctx.target_is_win {
+    if is_target && !injected && check_modifiers_atomic() {
+        if target_is_win {
             // First Win key-down: mark active, send mask, DON'T EAT.
             // Hotkey fires on Win key-up (no chord) to prevent race
             // between chord detection and hotkey dispatch.
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
+                debug_log(&format!(
+                    "hook: Win down consumed vk={} is_win_target={} hk_is_win={} hk_vk={}",
+                    vk, target_is_win,
+                    HK_IS_WIN.load(Ordering::SeqCst), HK_VK.load(Ordering::SeqCst),
+                ));
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);
                 send_mask_down();
@@ -440,6 +469,10 @@ unsafe extern "system" fn keyboard_hook_proc(
             return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
         }
         // Non-Win hotkey: eat key-down (prevents key from reaching focused window).
+        debug_log(&format!(
+            "hook: non-win target match vk={} (hk_vk={}) — firing",
+            vk, target_vk
+        ));
         HOTKEY_FIRED.store(true, Ordering::SeqCst);
         if let Some(tid) = HELPER_THREAD_ID.get() {
             unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
@@ -451,6 +484,60 @@ unsafe extern "system" fn keyboard_hook_proc(
 }
 
 static HOTKEY_FIRED: AtomicBool = AtomicBool::new(false);
+
+// Hot-path hotkey definition, published as plain atomics.
+//
+// `keyboard_hook_proc` runs inside the OS input pipeline for every
+// keystroke on the system: it must never take a lock. Blocking there
+// stalls all input (Windows also silently unhooks procs that exceed
+// LowLevelHooksTimeout), and a poisoned-lock `unwrap` would panic
+// inside the hook and kill the process. `CFG` stays for cold paths
+// (target_pid, event_name) that only run on the message-loop thread.
+static HK_VK: AtomicU32 = AtomicU32::new(0);
+static HK_IS_WIN: AtomicBool = AtomicBool::new(false);
+static HK_MOD_CTRL: AtomicBool = AtomicBool::new(false);
+static HK_MOD_ALT: AtomicBool = AtomicBool::new(false);
+static HK_MOD_SHIFT: AtomicBool = AtomicBool::new(false);
+static HK_MOD_WIN: AtomicBool = AtomicBool::new(false);
+
+fn publish_hotkey_atomics(cfg: &HotkeyConfig) {
+    HK_VK.store(cfg.target_vk, Ordering::SeqCst);
+    HK_IS_WIN.store(cfg.target_is_win, Ordering::SeqCst);
+    HK_MOD_CTRL.store(cfg.mod_ctrl, Ordering::SeqCst);
+    HK_MOD_ALT.store(cfg.mod_alt, Ordering::SeqCst);
+    HK_MOD_SHIFT.store(cfg.mod_shift, Ordering::SeqCst);
+    HK_MOD_WIN.store(cfg.mod_win, Ordering::SeqCst);
+}
+
+/// Lock-free modifier check for the hook proc — same logic as
+/// [`check_modifiers`], reading the published atomics.
+fn check_modifiers_atomic() -> bool {
+    if HK_MOD_CTRL.load(Ordering::SeqCst)
+        && !CTRL_DOWN.load(Ordering::SeqCst)
+        && !is_key_down(VK_LCONTROL)
+        && !is_key_down(VK_RCONTROL)
+    {
+        return false;
+    }
+    if HK_MOD_ALT.load(Ordering::SeqCst)
+        && !ALT_DOWN.load(Ordering::SeqCst)
+        && !is_key_down(VK_LMENU)
+        && !is_key_down(VK_RMENU)
+    {
+        return false;
+    }
+    if HK_MOD_SHIFT.load(Ordering::SeqCst)
+        && !SHIFT_DOWN.load(Ordering::SeqCst)
+        && !is_key_down(VK_LSHIFT)
+        && !is_key_down(VK_RSHIFT)
+    {
+        return false;
+    }
+    if HK_MOD_WIN.load(Ordering::SeqCst) && !is_key_down(VK_LWIN) && !is_key_down(VK_RWIN) {
+        return false;
+    }
+    true
+}
 
 fn check_modifiers(ctx: &HotkeyConfig) -> bool {
     if ctx.mod_ctrl
@@ -569,7 +656,7 @@ fn set_overlay_foreground() {
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
         // 1. Grant nex.exe foreground permission (backup path)
-        if let Some(cfg) = CFG.get() {
+        if let Some(cfg) = CFG.read().unwrap().as_ref() {
             let ret = AllowSetForegroundWindow(cfg.target_pid);
             debug_log(&format!("AllowSetForegroundWindow(pid={}): ret={ret}", cfg.target_pid));
         }
@@ -628,7 +715,35 @@ fn main() {
     debug_log(&format!("config parsed: event='{}'", cfg.event_name));
 
     let pipe_path = cfg.pipe_path.clone();
-    let _ = CFG.set(cfg);
+    let config_event_name = cfg.config_event_name.clone();
+    let config_file_path = std::env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--config")
+        .map(|w| w[1].clone())
+        .unwrap_or_default();
+    // Publish the hook's hot fields before the hook can ever run.
+    publish_hotkey_atomics(&cfg);
+    let watch_pid = cfg.target_pid;
+    *CFG.write().unwrap() = Some(std::sync::Arc::new(cfg));
+
+    // Watchdog: exit when nex.exe disappears — including while still
+    // blocked in wait_for_client. Without this, helpers whose client never
+    // connects linger forever and poison later pipe connections.
+    std::thread::spawn(move || {
+        let h = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(0x00100000, 0, watch_pid)
+        };
+        if h.is_null() || h as isize == -1 {
+            debug_log("watchdog: OpenProcess failed, exiting helper");
+            std::process::exit(0);
+        }
+        unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(h, u32::MAX);
+        }
+        debug_log("watchdog: nex exited, helper shutting down");
+        std::process::exit(0);
+    });
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 
@@ -651,6 +766,22 @@ fn main() {
     }
     debug_log("client connected");
 
+    // Config-changed doorbell. nex (Medium IL) creates and signals it —
+    // UIPI forbids Medium→High writes, so the helper can only open it for
+    // SYNCHRONIZE, exactly like the overlay-ready event. When it fires we
+    // re-read helper-config.json: no respawn, no pipe writes, no races.
+    let config_event = SendHandle(unsafe {
+        OpenEventW(
+            0x00100000, // SYNCHRONIZE
+            0,
+            to_wide(&config_event_name).as_ptr(),
+        )
+    } as isize);
+    if config_event.0 == 0 || config_event.0 == -1 {
+        debug_log(&format!(
+            "OpenEventW(config) failed: event='{config_event_name}'"
+        ));
+    }
     // Install WH_KEYBOARD_LL hook
     let hook_id = unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExW(
@@ -660,19 +791,18 @@ fn main() {
             0,
         )
     };
-
     if hook_id.is_null() {
-        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        let err = unsafe {
+            windows_sys::Win32::Foundation::GetLastError()
+        };
         debug_log(&format!("SetWindowsHookExW failed: err={err}"));
         eprintln!("NexHelper: SetWindowsHookExW failed");
         std::process::exit(1);
     }
-    debug_log("SetWindowsHookExW succeeded");
 
-    // Register system-level hotkey fallback via RegisterHotKeyW (non-Win hotkeys only).
-    let ctx = CFG.get().unwrap();
-    let mut fallback_id: i32 = 0;
-    if !ctx.target_is_win {
+    // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
+    fn register_fallback(ctx: &HotkeyConfig) -> i32 {
+        if ctx.target_is_win { return 0; }
         let mut mods: u32 = 0;
         if ctx.mod_ctrl {
             mods |= 0x0002; // MOD_CONTROL
@@ -686,12 +816,12 @@ fn main() {
         if ctx.mod_win {
             mods |= 0x0008; // MOD_WIN
         }
-        fallback_id = 0x4E46; // unique, different from nex.exe's ID
+        let id = 0x4E46; // unique, different from nex.exe's ID
 
         let ok = unsafe {
             windows_sys::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(
                 std::ptr::null_mut(),
-                fallback_id,
+                id,
                 mods,
                 ctx.target_vk,
             )
@@ -699,10 +829,15 @@ fn main() {
         if ok == 0 {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
-            fallback_id = 0;
+            return 0;
         }
+        id
     }
 
+    // Register system-level hotkey fallback via RegisterHotKeyW (non-Win hotkeys only).
+    let cfg_guard = CFG.read().unwrap();
+    let ctx = cfg_guard.as_ref().unwrap();
+    let mut fallback_id: i32 = register_fallback(ctx);
     // Open the overlay-ready event created by nex.exe (Medium IL).
     // The event has a Medium IL mandatory label so nex.exe can call
     // SetEvent (write-level) without UIPI blocking.
@@ -721,7 +856,6 @@ fn main() {
         std::process::exit(1);
     }
     debug_log("OpenEventW succeeded");
-
     // Open a handle to nex.exe with SYNCHRONIZE so we are notified when it
     // exits.  This lets us exit cleanly when nex quits (no hanging until
     // the next keyboard event).
@@ -750,35 +884,47 @@ fn main() {
     debug_log("helper entering message loop");
 
     // Message loop — use MsgWaitForMultipleObjects to wait on messages,
-    // the overlay-ready event, and the nex process handle.
+    // the overlay-ready event, the nex process handle, and nex's
+    // config-changed doorbell.
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_FAILED};
     use windows_sys::Win32::System::Threading::OpenEventW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MsgWaitForMultipleObjects, PeekMessageW, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
     };
+    // WAIT_OBJECT_0 + 2 (or +1): hotkey config changed mid-session —
+    // re-read the config file and re-register the RegisterHotKeyW fallback.
+    let rehotkey_wake = WAIT_OBJECT_0 + if nex_handle_valid { 2 } else { 1 };
 
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
     let handles = [
         overlay_ready_event,
         if nex_handle_valid { nex_handle } else { std::ptr::null_mut() },
+        config_event.0 as PipeHandle,
     ];
-    let n_handles: u32 = if nex_handle_valid { 2 } else { 1 };
-    let wait_forever = 0xFFFFFFFFu32;
+    let n_handles: u32 = if nex_handle_valid { 3 } else { 2 };
+    // Bounded wait: the config file is stat'd every iteration, so a missed
+    // doorbell signal still converges within this interval.
+    const WAIT_SLICE_MS: u32 = 250;
+    let mut last_config_mtime: Option<std::time::SystemTime> =
+        std::fs::metadata(&config_file_path).ok().and_then(|m| m.modified().ok());
 
     loop {
+
         // Wait for either a message, the overlay-ready event, or nex exit
         let wait_result = unsafe {
             MsgWaitForMultipleObjects(
                 n_handles,                         // number of handles to wait on
                 handles.as_ptr(),                  // handle array
                 0,                                 // fWaitAll = false (any will do)
-                wait_forever,                      // dwMilliseconds = INFINITE
+                WAIT_SLICE_MS,                     // bounded — see last_config_mtime
                 QS_ALLINPUT,                       // wake for any message
             )
         };
 
+
         if wait_result == WAIT_FAILED {
+            debug_log("MsgWaitForMultipleObjects failed, exiting loop");
             break;
         }
 
@@ -790,11 +936,85 @@ fn main() {
             set_overlay_foreground();
             debug_log("set_overlay_foreground returned");
         }
-
         // WAIT_OBJECT_0 + 1 = nex process handle signaled (nex exited)
         if nex_handle_valid && wait_result == WAIT_OBJECT_0 + 1 {
             debug_log("nex process exited, shutting down");
             break;
+        }
+        // Hotkey config changed mid-session — re-read the config file that
+        // nex just rewrote, republish the hook's atomics, and swap the
+        // RegisterHotKeyW fallback. No respawn, no cross-IL writes.
+        if wait_result == rehotkey_wake {
+            debug_log("config event received, reloading hotkey");
+            if fallback_id != 0 {
+                unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
+                }
+                fallback_id = 0;
+            }
+            if !config_file_path.is_empty() {
+                match parse_config_file(&config_file_path) {
+                    Ok(next) => {
+                        debug_log(&format!(
+                            "config event: reloaded hotkey='{}' vk={} is_win={}",
+                            next.hotkey_desc, next.target_vk, next.target_is_win,
+                        ));
+                        publish_hotkey_atomics(&next);
+                        *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
+                        // Reset the hook's transient state. A stale
+                        // CONSUMED_WIN_VK (Win key-down whose key-up was
+                        // eaten by RIDEV_NOHOTKEYS) or a mask key left held
+                        // by the old Win path makes the new combo undetectable.
+                        CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+                        CHORD_DETECTED.store(false, Ordering::SeqCst);
+                        HOTKEY_FIRED.store(false, Ordering::SeqCst);
+                        WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
+                        CTRL_DOWN.store(false, Ordering::SeqCst);
+                        ALT_DOWN.store(false, Ordering::SeqCst);
+                        SHIFT_DOWN.store(false, Ordering::SeqCst);
+                        send_mask_up();
+                    }
+                    Err(e) => debug_log(&format!("config event: reload failed: {e}")),
+                }
+            }
+            let g = CFG.read().unwrap();
+            if let Some(cfg) = g.as_ref() {
+                fallback_id = register_fallback(cfg);
+            }
+        }
+
+        // Mtime safety-net: catches a missed doorbell signal within one
+        // wait slice (250ms) no matter what.
+        if let Ok(m) = std::fs::metadata(&config_file_path) {
+            if let Ok(modt) = m.modified() {
+                if Some(modt) != last_config_mtime {
+                    last_config_mtime = Some(modt);
+                    debug_log("mtime changed, reloading hotkey");
+                    if fallback_id != 0 {
+                        unsafe {
+                            windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
+                        }
+                        fallback_id = 0;
+                    }
+                    if !config_file_path.is_empty() {
+                        match parse_config_file(&config_file_path) {
+                            Ok(next) => {
+                                publish_hotkey_atomics(&next);
+                                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
+                                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+                                CHORD_DETECTED.store(false, Ordering::SeqCst);
+                                HOTKEY_FIRED.store(false, Ordering::SeqCst);
+                                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
+                                CTRL_DOWN.store(false, Ordering::SeqCst);
+                                ALT_DOWN.store(false, Ordering::SeqCst);
+                                SHIFT_DOWN.store(false, Ordering::SeqCst);
+                                send_mask_up();
+                            }
+                            Err(e) => debug_log(&format!("reload failed: {e}")),
+                        }
+                    }
+                }
+            }
         }
 
         // Process all pending messages (may be zero if only event woke us)
@@ -810,7 +1030,7 @@ fn main() {
                 || HOTKEY_FIRED.load(Ordering::SeqCst);
 
             if will_send_hotkey {
-                if let Some(cfg) = CFG.get() {
+                if let Some(cfg) = CFG.read().unwrap().as_ref() {
                     unsafe { AllowSetForegroundWindow(cfg.target_pid); }
                 }
             }
@@ -818,6 +1038,7 @@ fn main() {
             // Process WM_HOTKEY (RegisterHotKeyW fallback)
             if msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id {
                 if write_hotkey(&mut pipe).is_err() {
+                    debug_log("write_hotkey failed — nex pipe reader gone");
                     got_quit = true;
                     break; // nex.exe disconnected
                 }
@@ -835,7 +1056,8 @@ fn main() {
 
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {
-            if let Some(cfg) = CFG.get() {
+            debug_log("hook fired: target matched, sending to nex");
+            if let Some(cfg) = CFG.read().unwrap().as_ref() {
                 if cfg.target_is_win {
                     if pipe.write_all(b"SUPPRESS_ON\n").is_err() {
                         break; // nex.exe disconnected
@@ -843,6 +1065,7 @@ fn main() {
                 }
             }
             if write_hotkey(&mut pipe).is_err() {
+                debug_log("write_hotkey failed — nex pipe reader gone");
                 break; // nex.exe disconnected
             }
         }

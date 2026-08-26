@@ -82,9 +82,8 @@ fn win_chord_held_via_async() -> bool {
 }
 
 pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
-    if HELPER_ACTIVE.load(Ordering::SeqCst) {
-        return false; // helper owns detection
-    }
+    // nex owns hotkey detection unconditionally — raw input receives keys
+    // globally regardless of which window (or integrity level) has focus.
     let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
         Some(ctx) => ctx,
         None => return false,
@@ -605,6 +604,7 @@ impl HotkeyListener {
         // --- Fallback: in-process hook thread (existing code path) ---
         let should_exit_for_thread = should_exit.clone();
         let thread_id_for_thread = thread_id.clone();
+        const WM_NEX_REREGISTER: u32 = 0x8000 + 0x4E47;
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
@@ -669,6 +669,7 @@ impl HotkeyListener {
                 }
                 let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = thread_id_for_thread.set(tid);
+                let _ = HOOK_THREAD_ID.set(tid);
                 let _ = ready_tx.send(Ok(()));
 
                 // Register system-level hotkey fallback via RegisterHotKeyW.
@@ -738,6 +739,40 @@ impl HotkeyListener {
                     // Skip if we're shutting down — WM_HOTKEY may be queued
                     // before WM_QUIT, and the global HOOK_CTX may have been
                     // overwritten by a new listener by now.
+                    if msg.message == WM_NEX_REREGISTER {
+                        // Live hotkey update: swap the RegisterHotKeyW
+                        // fallback to the freshly synced HOOK_CTX. Brief lock
+                        // on this thread is fine — it's not the input path.
+                        logging::info("[nex::debug] Hook: live re-register requested");
+                        let g = HOOK_CTX.lock().unwrap();
+                        if let Some(ctx) = g.as_ref() {
+                            if fallback_id != 0 {
+                                if let Some(f) = unregister_hotkey {
+                                    unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
+                                }
+                                fallback_id = 0;
+                            }
+                            if !ctx.target_is_win {
+                                let mod_map: &[(u32, u32)] = &[
+                                    (0x11, 0x0002), (0x12, 0x0001),
+                                    (0x10, 0x0004), (0x5B, 0x0008), (0x5C, 0x0008),
+                                ];
+                                let mut mods: u32 = 0;
+                                for &(vk, flag) in mod_map {
+                                    if ctx.required_mods.contains(&vk) { mods |= flag; }
+                                }
+                                fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
+                                let ok = match register_hotkey {
+                                    Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
+                                    None => 0,
+                                };
+                                if ok == 0 { fallback_id = 0; logging::warn("[nex::debug] Hook: live re-register FAILED"); }
+                                else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
+                            }
+                        }
+                        drop(g);
+                        continue;
+                    }
                     if msg.message == WM_HOTKEY && fallback_id != 0 && !should_exit_for_thread.load(Ordering::SeqCst) {
                         let hk_id = msg.wParam as u32;
                         if hk_id == fallback_id {
@@ -852,12 +887,15 @@ impl HotkeyListener {
                             {
                                 Ok(pipe_reader_thread) => {
                                     HELPER_ACTIVE.store(true, Ordering::SeqCst);
-                                    // Hook thread no longer needs to run; it is gated
-                                    // by HELPER_ACTIVE anyway, so asking it to exit
-                                    // just frees the low-level hook slots.
-                                    if let Some(&tid) = thread_id_h.get() {
-                                        post_quit_to_thread(tid);
-                                    }
+                                    // KEEP the hook thread alive: its LL hook
+                                    // passes everything through while
+                                    // HELPER_ACTIVE is set (no double-fire),
+                                    // but its message loop still owns the
+                                    // RegisterHotKeyW fallback registration —
+                                    // live hotkey updates swap that via
+                                    // WM_NEX_REREGISTER. Killing this thread
+                                    // left non-Win combos undetectable until
+                                    // restart.
                                     if let Ok(mut st) = helper_h.lock() {
                                         st.active = true;
                                         st.helper_process_handle = Some(helper_handle);
@@ -1063,6 +1101,27 @@ pub(crate) fn signal_overlay_ready() {
 
 static CONFIG_CHANGED_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 
+/// Cached thread id of the in-process hook thread (owns the
+/// RegisterHotKeyW fallback registration). Set once the hook thread is
+/// running; used to request a live fallback re-registration.
+pub(crate) static HOOK_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+const WM_NEX_REREGISTER: u32 = 0x8000 + 0x4E47;
+
+/// Ask the hook thread to swap its RegisterHotKeyW fallback to the current
+/// HOOK_CTX. No-op if the hook thread isn't running.
+pub(crate) fn request_fallback_reregister() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+    if let Some(tid) = HOOK_THREAD_ID.get() {
+        let ok = unsafe { PostThreadMessageW(*tid, WM_NEX_REREGISTER, 0, 0) };
+        logging::info(&format!(
+            "[nex::debug] fallback re-register posted to tid={tid}: ok={ok}"
+        ));
+    } else {
+        logging::warn("[nex::debug] fallback re-register: no hook thread id");
+    }
+}
+
 /// Create the config-changed doorbell event.
 ///
 /// Created by nex (Medium IL) so the High-IL helper can open it —
@@ -1162,6 +1221,13 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     ALT_DOWN.store(false, Ordering::SeqCst);
     SHIFT_DOWN.store(false, Ordering::SeqCst);
     crate::overlay::host::reset_raw_win_state();
+    // Swap the RegisterHotKeyW fallback to the new combo on the hook
+    // thread (raw input already covers Win + chords via synced HOOK_CTX).
+    request_fallback_reregister();
+    // Re-arm the raw-input sink: its NOHOTKEYS suppression flag depends on
+    // whether the hotkey is a Win combo, and it was registered under the
+    // previous hotkey's state.
+    crate::overlay::host::rearm_raw_input_sink();
     logging::info(&format!(
         "[nex] live hotkey update applied locally: '{hotkey_str}'"
     ));
@@ -1268,7 +1334,7 @@ fn write_helper_config(
     }
 
     let json = format!(
-        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
+        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
         pipe_name,
         pid,
         target_key,
@@ -1277,6 +1343,11 @@ fn write_helper_config(
         if mod_alt { "true" } else { "false" },
         if mod_shift { "true" } else { "false" },
         if mod_win { "true" } else { "false" },
+        // Helper detection is only needed for bare-Win combos: raw input
+        // can't see keys over elevated-TM focus, but the High-IL hook can.
+        // Non-Win combos are covered by RegisterHotKeyW + raw input, and
+        // keeping the helper inert avoids double-toggles.
+        if target_is_win { "true" } else { "false" },
         hotkey_str,
         overlay_event_name,
         config_event_name,

@@ -42,6 +42,22 @@ const RESIZE_IMMEDIATE_GROWTH: f64 = 80.0;
 /// on Win key-down (only toggle when visible; hook handles first press).
 pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
+/// The overlay window's HWND, cached at startup so other modules (e.g.
+/// live hotkey updates) can re-register the raw-input sink.
+static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Re-arm the raw-input sink with the current hotkey's suppression
+/// requirement. Called after a live hotkey update — the sink's
+/// RIDEV_NOHOTKEYS flag is chosen at registration time, so it must be
+/// refreshed whenever is_win_key_hotkey() changes.
+pub(crate) fn rearm_raw_input_sink() {
+    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
+}
+
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -200,6 +216,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Win hotkey detection lives in raw input — arm NOHOTKEYS from the
     // start so bare-Win never opens Start; nex toggles on key-up.
     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+    OVERLAY_HWND.store(hwnd as isize, Ordering::SeqCst);
 
     // Start suppression is handled by RIDEV_NOHOTKEYS via
     // RegisterRawInputDevices instead of a focus-sink window.
@@ -227,6 +244,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut ready = false;
     let mut warm_gen: u64 = 0;
     let mut was_focused = false;
+    // One-shot: a single focus re-assert after hotkey-show (fights focus
+    // theft from Task Manager / elevated windows). Reset on every Show.
+    let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
@@ -500,6 +520,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         s.has_focus = false;
                     }
                     was_focused = false;
+                    focus_reassert_used = false;
                     show_pending = false;
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
@@ -597,6 +618,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         show_pending = false;
                         last_show = Instant::now();
                         was_focused = false;
+                        focus_reassert_used = false;
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.
@@ -617,6 +639,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                         force_foreground(hwnd);
+                        // Focus the page's input — without this the first
+                        // show after launch is visible but unfocused.
+                        focus_input(&webview);
                         // Signal the elevated helper to call SetForegroundWindow
                         // from High IL (bypasses UIPI for Task Manager scenario).
                         crate::overlay::hotkey::signal_overlay_ready();
@@ -756,10 +781,42 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let state_vis = state.lock().map(|s| s.visible).unwrap_or(false);
                     if was_focused_val && !show_pending_val && !bare_win && grace_ms >= FOCUS_GRACE_MS && state_vis
                     {
+                        // Focus bounced back to the previous foreground window
+                        // (Task Manager repaints, elevated windows reassert).
+                        // One re-assert via force_foreground — if focus is
+                        // lost AGAIN after that, the deferred-hide path
+                        // below handles it as a genuine dismissal.
+                        if grace_ms < 1500 && !focus_reassert_used {
+                            focus_reassert_used = true;
+                            crate::runtime::log_info(&format!(
+                                "[nex::debug] Focused(false): re-asserting foreground (grace={}ms)",
+                                grace_ms
+                            ));
+                            force_foreground(hwnd);
+                            // Put keyboard focus back INTO the webview —
+                            // SetForeground alone leaves the page unfocusable
+                            // until clicked.
+                            focus_input(&webview);
+                            return;
+                        }
                         crate::runtime::log_info(&format!(
                             "[nex::debug] Focused(false): sending Escape (was_focused={} show_pending={} grace={}ms state_vis={})",
                             was_focused_val, show_pending_val, grace_ms, state_vis,
                         ));
+                        // PROBE: name the window that stole focus.
+                        unsafe {
+                            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                                GetForegroundWindow, GetWindowTextW,
+                            };
+                            let fg = GetForegroundWindow();
+                            let mut buf = [0u16; 128];
+                            let len = GetWindowTextW(fg, buf.as_mut_ptr(), 128);
+                            let title: String = String::from_utf16_lossy(&buf[..len as usize]);
+                            crate::runtime::log_info(&format!(
+                                "[nex::probe] focus thief: fg=0x{:x} title='{}'",
+                                fg as isize, title
+                            ));
+                        }
                         let _ = event_tx.send(OverlayEvent::Escape);
                     } else {
                         crate::runtime::log_info(&format!(
@@ -1492,12 +1549,36 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
 /// with nex.exe's PID, so `SetForegroundWindow` will succeed without it.
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    #[allow(unused_imports)]
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         ShowWindow, SW_SHOW,
     };
     unsafe {
+        // Classic foreground-lock unlock: a synthetic key event marks
+        // input as recent, satisfying the OS check that otherwise makes
+        // SetForegroundWindow silently no-op against stubborn windows.
+        let tap = |down: bool| {
+            let mut input: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT =
+                std::mem::zeroed();
+            input.r#type = windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD;
+            input.Anonymous.ki.wVk = 0x12; // VK_MENU (Alt) — harmless tap
+            input.Anonymous.ki.dwFlags = if down {
+                0
+            } else {
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_KEYUP
+            };
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::SendInput(
+                1,
+                &input,
+                std::mem::size_of::<windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT>()
+                    as i32,
+            );
+        };
+        let _ = tap(true);
+
         let fg = GetForegroundWindow();
         let cur_tid = GetCurrentThreadId();
         let fg_tid = if fg.is_null() {
@@ -1515,13 +1596,16 @@ fn force_foreground(hwnd: HWND) {
         ShowWindow(hwnd, SW_SHOW);
         BringWindowToTop(hwnd);
         SetForegroundWindow(hwnd);
-        SetFocus(hwnd);
+        // NOTE: deliberately NO SetFocus(hwnd) here — keyboard focus must
+        // land on the WebView2 CHILD window, not the container. Forcing it
+        // onto the container leaves the page unable to receive typing.
         if attached {
             // Only detach if attach succeeded (both must be attached).
             // We can't know reliably, so just try — it's harmless if
             // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
+        let _ = tap(false); // release the Alt tap
     }
 }
 

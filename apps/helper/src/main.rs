@@ -60,6 +60,9 @@ struct HotkeyConfig {
     /// Name of nex's config-changed doorbell event (empty when unset).
     #[allow(dead_code)]
     config_event_name: String,
+    /// When false, this helper does NOT detect hotkeys — nex owns
+    /// detection via raw input; the helper only assists foreground.
+    detect_enabled: bool,
 }
 
 static CFG: std::sync::RwLock<Option<std::sync::Arc<HotkeyConfig>>> = std::sync::RwLock::new(None);
@@ -175,6 +178,9 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     let mod_win = json_bool(&content, "mod_win");
     let event_name = json_str(&content, "event").unwrap_or("").to_string();
     let config_event_name = json_str(&content, "config_event").unwrap_or("").to_string();
+    // nex owns hotkey detection — the helper's hook stays disabled unless
+    // a legacy config explicitly opts in.
+    let detect_enabled = json_bool(&content, "detect");
 
     if pipe_path.is_empty() {
         return Err("config: 'pipe' is required".into());
@@ -201,6 +207,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
         mod_win,
         event_name,
         config_event_name,
+        detect_enabled,
     })
 }
 
@@ -276,6 +283,7 @@ fn parse_args_cli(args: &[String]) -> Result<HotkeyConfig, String> {
         mod_win,
         event_name: String::new(),
         config_event_name: String::new(),
+        detect_enabled: false,
     })
 }
 
@@ -346,6 +354,18 @@ fn send_mask_down() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
+fn send_alt_tap() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut inputs: [INPUT; 2] = unsafe { std::mem::zeroed() };
+    inputs[0].r#type = INPUT_KEYBOARD;
+    inputs[0].Anonymous.ki = KEYBDINPUT { wVk: 0x12, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 }; // Alt down
+    inputs[1].r#type = INPUT_KEYBOARD;
+    inputs[1].Anonymous.ki = KEYBDINPUT { wVk: 0x12, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(2, &mut inputs as *mut _ as *mut INPUT, std::mem::size_of::<INPUT>() as i32) };
+}
+
 fn send_mask_up() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -383,10 +403,11 @@ unsafe extern "system" fn keyboard_hook_proc(
     let is_keydown = msg == 0x0100 || msg == 0x0104; // WM_KEYDOWN / WM_SYSKEYDOWN
     let is_keyup = msg == 0x0101 || msg == 0x0105;   // WM_KEYUP / WM_SYSKEYUP
 
-    // Hot path: read the hotkey definition from atomics only. Taking a
-    // lock here would stall the whole system's input queue.
+    // Win mask handling runs whenever the hotkey IS Win — even though
+    // detection belongs to nex, holding the mask is what blocks Start.
     let target_is_win = HK_IS_WIN.load(Ordering::SeqCst);
     let target_vk = HK_VK.load(Ordering::SeqCst);
+    let detect_enabled = HK_ENABLED.load(Ordering::SeqCst);
 
     let kb = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
     let vk = kb.vkCode;
@@ -403,40 +424,57 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Chord detection: non-mod key while Win held ---
-    // Clear CONSUMED_WIN_VK so the matching Win key-up won't fire
-    // the hotkey — passes Win+E/D/R through cleanly.
-    if target_is_win && !injected && is_keydown
-        && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
-        && vk != VK_LWIN && vk != VK_RWIN
-    {
+    // --- Win hotkey path (mask hold + chord passthrough) ---
+    //
+    // Runs whenever the hotkey is Win, REGARDLESS of detect_enabled:
+    // holding the injected mask key while Win is physically down is what
+    // blocks the Start menu — including over Task Manager, where this
+    // High-IL hook still receives events. nex toggles via its own raw
+    // input on Win key-up; chords (Win+E, Win+D…) pass through.
+    if target_is_win && !injected {
+        let is_win_vk = vk == VK_LWIN || vk == VK_RWIN;
         let is_mod = vk == VK_LCONTROL || vk == VK_RCONTROL
             || vk == VK_LMENU || vk == VK_RMENU
             || vk == VK_LSHIFT || vk == VK_RSHIFT;
-        if !is_mod {
+
+        if is_win_vk {
+            if is_keydown {
+                if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
+                    CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
+                    CHORD_DETECTED.store(false, Ordering::SeqCst);
+                    send_mask_down();
+                }
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+            }
+            if is_keyup {
+                let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
+                if consumed_vk != 0 {
+                    CHORD_DETECTED.store(false, Ordering::SeqCst);
+                    send_mask_up();
+                    // Fire: the helper MUST report Win presses — over
+                    // Task Manager / elevated focus, nex's raw-input sink
+                    // receives nothing (UIPI), so without this the
+                    // hotkey goes dead exactly there. Normal-focus
+                    // double-fires with nex raw input are absorbed by
+                    // the runtime's 50ms debounce.
+                    HOTKEY_FIRED.store(true, Ordering::SeqCst);
+                    WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+                    if let Some(tid) = HELPER_THREAD_ID.get() {
+                        unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
+                    }
+                }
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+            }
+        }
+
+        if is_keydown && !is_mod && !is_win_vk
+            && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
+        {
+            // Chord detected — release the mask so the OS handles Win+X.
             CHORD_DETECTED.store(true, Ordering::SeqCst);
             send_mask_up();
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
         }
-    }
-
-    // --- Win key-up: fire hotkey only if no chord was detected ---
-    // Chord detection clears CONSUMED_WIN_VK before we get here.
-    if target_is_win && is_keyup && !injected {
-        let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
-        if consumed_vk != 0 && vk == consumed_vk {
-            let was_chord = CHORD_DETECTED.swap(false, Ordering::SeqCst);
-            if !was_chord {
-                // Bare Win release — fire hotkey
-                HOTKEY_FIRED.store(true, Ordering::SeqCst);
-                WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
-                if let Some(tid) = HELPER_THREAD_ID.get() {
-                    unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
-                }
-            }
-            send_mask_up();
-        }
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
     }
 
     // Only key-down triggers matter for hotkey dispatch.
@@ -450,17 +488,12 @@ unsafe extern "system" fn keyboard_hook_proc(
         vk == target_vk
     };
 
-    if is_target && !injected && check_modifiers_atomic() {
+    if is_target && !injected && detect_enabled && check_modifiers_atomic() {
         if target_is_win {
-            // First Win key-down: mark active, send mask, DON'T EAT.
-            // Hotkey fires on Win key-up (no chord) to prevent race
-            // between chord detection and hotkey dispatch.
+            // Win key-down: hold the mask (blocks Start) and DON'T EAT so
+            // Win+ chords still reach the OS. nex toggles via its own raw
+            // input on key-up — the helper no longer fires hotkey events.
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
-                debug_log(&format!(
-                    "hook: Win down consumed vk={} is_win_target={} hk_is_win={} hk_vk={}",
-                    vk, target_is_win,
-                    HK_IS_WIN.load(Ordering::SeqCst), HK_VK.load(Ordering::SeqCst),
-                ));
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);
                 send_mask_down();
@@ -499,6 +532,9 @@ static HK_MOD_CTRL: AtomicBool = AtomicBool::new(false);
 static HK_MOD_ALT: AtomicBool = AtomicBool::new(false);
 static HK_MOD_SHIFT: AtomicBool = AtomicBool::new(false);
 static HK_MOD_WIN: AtomicBool = AtomicBool::new(false);
+/// Master gate: when false, the helper's hook is pass-through (nex owns
+/// hotkey detection).
+static HK_ENABLED: AtomicBool = AtomicBool::new(false);
 
 fn publish_hotkey_atomics(cfg: &HotkeyConfig) {
     HK_VK.store(cfg.target_vk, Ordering::SeqCst);
@@ -507,6 +543,7 @@ fn publish_hotkey_atomics(cfg: &HotkeyConfig) {
     HK_MOD_ALT.store(cfg.mod_alt, Ordering::SeqCst);
     HK_MOD_SHIFT.store(cfg.mod_shift, Ordering::SeqCst);
     HK_MOD_WIN.store(cfg.mod_win, Ordering::SeqCst);
+    HK_ENABLED.store(cfg.detect_enabled, Ordering::SeqCst);
 }
 
 /// Lock-free modifier check for the hook proc — same logic as
@@ -651,7 +688,8 @@ fn set_overlay_foreground() {
     unsafe {
         use windows_sys::Win32::Foundation::GetLastError;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+            SetForegroundWindow,
         };
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
@@ -693,6 +731,40 @@ fn set_overlay_foreground() {
             let ret = AttachThreadInput(helper_tid, fg_tid, 0);
             debug_log(&format!("AttachThreadInput(detach): ret={ret} err={}", GetLastError()));
         }
+
+        // Verify + retry: Task Manager / elevated windows re-assert focus
+        // shortly after losing it, so a single call loses the race. Poll
+        // until the overlay actually owns the foreground (bounded).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
+        while unsafe { GetForegroundWindow() } != hwnd {
+            if std::time::Instant::now() > deadline {
+                debug_log("foreground verify: overlay did not win focus within 600ms");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+
+            // Re-attach each attempt — the foreground thread may change.
+            let fg = GetForegroundWindow();
+            let fg_tid = if fg as isize == 0 {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, std::ptr::null_mut())
+            };
+            let helper_tid = GetCurrentThreadId();
+            let should_attach = fg_tid != 0 && fg_tid != helper_tid;
+            if should_attach {
+                AttachThreadInput(helper_tid, fg_tid, 1);
+            }
+            // Alt-tap: synthetic input marks input as recent, satisfying
+            // the foreground-lock check that elevated TM otherwise fails.
+            send_alt_tap();
+            SetForegroundWindow(hwnd);
+            BringWindowToTop(hwnd);
+            if should_attach {
+                AttachThreadInput(helper_tid, fg_tid, 0);
+            }
+        }
+        debug_log("foreground verified: overlay owns focus");
     }
 }
 
@@ -802,7 +874,7 @@ fn main() {
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
     fn register_fallback(ctx: &HotkeyConfig) -> i32 {
-        if ctx.target_is_win { return 0; }
+        if ctx.target_is_win || !ctx.detect_enabled { return 0; }
         let mut mods: u32 = 0;
         if ctx.mod_ctrl {
             mods |= 0x0002; // MOD_CONTROL

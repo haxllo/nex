@@ -161,6 +161,8 @@ pub(crate) enum UiCommand {
     /// Delayed focus re-assertion after show (fights Explorer focus theft
     /// on Win key hotkeys).  Spawned ~250ms after Painted.
     FocusReassert,
+    /// Close (hide) the settings window via tao API.
+    CloseSettings,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -701,6 +703,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         focus_input(&webview);
                     }
                 }
+                UiCommand::CloseSettings => {
+                    if let Some((w, _)) = &settings_ui {
+                        let _ = w.set_visible(false);
+                        crate::runtime::log_info("[nex] settings window hidden via custom close");
+                        let _ = event_tx.send(OverlayEvent::SettingsClosed);
+                    }
+                }
                 UiCommand::Quit => {
                     *control_flow = ControlFlow::Exit;
                     // Post WM_QUIT to force GetMessageW in run_return to
@@ -732,6 +741,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let sw = tao::window::WindowBuilder::new()
                             .with_title("Nex Settings")
                             .with_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
+                            .with_decorations(false)
                             .build(target)
                             .expect("settings window");
                         settings_window_id = Some(sw.id());
@@ -773,6 +783,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                             unsafe { ShowWindow(h, SW_MINIMIZE); }
                                         }
                                     }
+                                } else if body.contains("\"t\":\"close\"") {
+                                    let _ = proxy_for_ipc.send_event(UiCommand::CloseSettings);
                                 }
                                 else {
                                     crate::runtime::log_info(&format!("[nex] settings ipc: {body}"));

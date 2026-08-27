@@ -1,86 +1,279 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head><meta charset="UTF-8"><style>
-        :root { --sbg:#1e1e1e; --sfg:#dddddd; --smut:#888888; --sbin:#2a2a2a; --sbinb:#444444; }
-        html[data-theme="light"] { --sbg:#f6f6f8; --sfg:#16161a; --smut:#77777d; --sbin:#ffffff; --sbinb:#cccccc; }
-        body {
-            font-family: "Segoe UI", sans-serif;
-            background: var(--sbg);
-            color: var(--sfg);
-            padding: 24px;
-        }
-        input {
-            width: 300px;
-            padding: 6px;
-            background: var(--sbin);
-            color: var(--sfg);
-            border: 1px solid var(--sbinb);
-            border-radius: 4px;
-        }
-        button {
-            padding: 6px 14px;
-            margin-left: 8px;
-            cursor: pointer;
-        }
-        #status {
-            margin-top: 12px;
-            color: var(--smut);
-            font-size: 12px;
-        }
-        .row { 
-            margin-bottom: 14px;
-        }
-        label {
-            display: block;
-            margin-bottom: 4px;
-            color: var(--smut);
-            font-size: 12px; 
-        }
-        input[type="number"], input[type="text"] 
-        {
-            width: 220px; 
-        }
-        .hkbox {
-            width: 220px;
-            padding: 6px 10px;
-            background: var(--sbin);
-            color: var(--sfg);
-            border: 1px solid var(--sbinb);
-            border-radius: 4px;
-            font-size: 13px;
-            cursor: pointer;
-            user-select: none;
-        }
-        .hkbox.recording { border-color: #e05a4e; color: #e05a4e; }
-    </style></head>
+<head>
+<meta charset="UTF-8">
+<style>
+  :root {
+    --bg: #1a1a1e;
+    --surface: #232328;
+    --border: #2e2e35;
+    --fg: #e4e4e8;
+    --mut: #8a8a95;
+    --accent: #5b8af5;
+    --accent-dim: #5b8af520;
+    --input-bg: #1a1a1e;
+    --input-border: #3a3a42;
+    --danger: #e05a4e;
+  }
+  html[data-theme="light"] {
+    --bg: #f4f4f7;
+    --surface: #ffffff;
+    --border: #e0e0e5;
+    --fg: #1a1a1e;
+    --mut: #6e6e7a;
+    --accent: #3567d4;
+    --accent-dim: #3567d418;
+    --input-bg: #f4f4f7;
+    --input-border: #d0d0d8;
+    --danger: #d4463a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 28px 32px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 28px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header svg { flex-shrink: 0; }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  /* ── Sections ── */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--mut);
+    margin-bottom: 16px;
+  }
+
+  /* ── Rows ── */
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+  }
+  .row + .row { border-top: 1px solid var(--border); }
+  .row-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+  .row-label span { font-weight: 500; }
+  .row-label small { color: var(--mut); font-size: 11px; }
+  .row-control { flex-shrink: 0; margin-left: 16px; }
+
+  /* ── Inputs ── */
+  input[type="number"], input[type="text"] {
+    width: 100px;
+    padding: 5px 8px;
+    background: var(--input-bg);
+    color: var(--fg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    text-align: right;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input[type="number"]:focus, input[type="text"]:focus {
+    border-color: var(--accent);
+  }
+
+  /* ── Toggle ── */
+  .toggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    cursor: pointer;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .slider {
+    position: absolute;
+    inset: 0;
+    background: var(--input-border);
+    border-radius: 20px;
+    transition: background 0.2s;
+  }
+  .toggle .slider::after {
+    content: "";
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+  .toggle input:checked + .slider { background: var(--accent); }
+  .toggle input:checked + .slider::after { transform: translateX(16px); }
+
+  /* ── Hotkey box ── */
+  .hkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    min-width: 120px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .hkbox:hover { border-color: var(--accent); }
+  .hkbox.recording {
+    border-color: var(--danger);
+    color: var(--danger);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  /* ── Footer ── */
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .status { color: var(--mut); font-size: 12px; }
+  .status.error { color: var(--danger); }
+  .btn-save {
+    padding: 7px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn-save:hover { opacity: 0.9; }
+  .btn-save:active { opacity: 0.8; }
+</style>
+</head>
 <body>
-    <h3>Nex Settings</h3>
 
-    <div class="row">
-        <label><input type="checkbox" id="gridView"/> Show Grid View</label>
-    </div>
-    <div class="row">
-        <label><input type="checkbox" id="quickLaunchEnabled"/> Enable Quick Launch</label>
-    </div>
+<div class="header">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+    <rect width="20" height="20" rx="5" fill="var(--accent)" opacity="0.15"/>
+    <path d="M6 10h8M10 6v8" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+  <h1>Settings</h1>
+</div>
 
-    <div class="row">
-        <label>Max results (5-100)</label>
-        <input type="number" id="maxResults" min="5" max="100"/>
+<!-- General -->
+<div class="section">
+  <div class="section-title">General</div>
+  <div class="row">
+    <div class="row-label">
+      <span>Grid View</span>
+      <small>Show results in a grid layout</small>
     </div>
-    <div class="row">
-        <label>Quick Launch Max Items</label>
-        <input type="number" id="quickLaunchMaxItems" min="3" max="12"/>
+    <label class="toggle row-control">
+      <input type="checkbox" id="gridView"/>
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
+
+<!-- Quick Launch -->
+<div class="section">
+  <div class="section-title">Quick Launch</div>
+  <div class="row">
+    <div class="row-label">
+      <span>Enable Quick Launch</span>
+      <small>Show pinned apps when the overlay opens</small>
     </div>
-    <div class="row">
-        <label>Index size cap (10k–2M)</label>
-        <input type="number" id="indexMaxItemsTotal" min="10000" max="2000000"/>
+    <label class="toggle row-control">
+      <input type="checkbox" id="quickLaunchEnabled"/>
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="row">
+    <div class="row-label">
+      <span>Max Items</span>
+      <small>Number of quick launch items to show</small>
     </div>
-    <div class="row">
-        <label>Hotkey (Click the box, then press the combo)</label>
-        <div class="hkbox" id="hotkeyBox" tabindex="0"></div>
+    <input type="number" id="quickLaunchMaxItems" min="3" max="12" class="row-control"/>
+  </div>
+</div>
+
+<!-- Search -->
+<div class="section">
+  <div class="section-title">Search</div>
+  <div class="row">
+    <div class="row-label">
+      <span>Max Results</span>
+      <small>Results shown per query (5–100)</small>
     </div>
-    <button onclick="save(); this.blur()">Save</button>
-    <div id="status"></div>
-    <script src="/settings.js"></script>
+    <input type="number" id="maxResults" min="5" max="100" class="row-control"/>
+  </div>
+  <div class="row">
+    <div class="row-label">
+      <span>Index Size Cap</span>
+      <small>Maximum items in the search index</small>
+    </div>
+    <input type="number" id="indexMaxItemsTotal" min="10000" max="2000000" class="row-control"/>
+  </div>
+</div>
+
+<!-- Hotkey -->
+<div class="section">
+  <div class="section-title">Hotkey</div>
+  <div class="row">
+    <div class="row-label">
+      <span>Toggle Shortcut</span>
+      <small>Click the box, then press your desired combo</small>
+    </div>
+    <div class="hkbox" id="hotkeyBox" tabindex="0" class="row-control"></div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  <span id="status" class="status"></span>
+  <button class="btn-save" onclick="save(); this.blur()">Save</button>
+</div>
+
+<script src="/settings.js"></script>
 </body>
 </html>

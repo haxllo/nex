@@ -16,6 +16,7 @@ window.applySettings = function (s) {
     el[kind === "checked" ? "checked" : "value"] = s[id];
   }
   document.getElementById("status").textContent = "";
+  document.getElementById("status").classList.remove("error");
   showHotkey();
 };
 
@@ -32,9 +33,9 @@ function save() {
 }
 
 window.saveResult = function (r) {
-  document.getElementById("status").textContent = r.saved
-    ? "Saved"
-    : "Error: " + r.error;
+  const el = document.getElementById("status");
+  el.textContent = r.saved ? "Saved" : "Error: " + r.error;
+  el.classList.toggle("error", !r.saved);
 };
 
 window.chrome.webview.postMessage(JSON.stringify({ t: "ready" }));

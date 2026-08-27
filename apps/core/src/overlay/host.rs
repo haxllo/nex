@@ -426,6 +426,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // trigger Escape (which would desync OverlayState from
                     // the actual window state).
                     show_pending = true;
+                    // Cancel any pending deferred-hide from a previous
+                    // focus-loss — the user意图 is to show, not hide.
+                    deferred_hide_armed.store(false, Ordering::SeqCst);
                     position_window(&window, hwnd);
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
@@ -497,6 +500,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     was_focused = false;
                     show_pending = false;
+                    // Clear deferred-hide flag — the overlay is already
+                    // hidden, no need for the thread to fire Escape.
+                    deferred_hide_armed.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state

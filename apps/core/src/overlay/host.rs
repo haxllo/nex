@@ -692,11 +692,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // focus theft on Win key hotkeys.  Same as the initial
                     // force_foreground + focus_input, but runs after
                     // Explorer has finished its re-assertion cycle.
-                    // Skip if overlay already has focus — force_foreground
-                    // sends a synthetic Alt tap that would blur the
-                    // WebView2 input.
-                    let already_focused = state.lock().map(|s| s.visible && s.has_focus).unwrap_or(false);
-                    if !already_focused {
+                    // Only fire when overlay IS visible but lost focus —
+                    // force_foreground calls ShowWindow(SW_SHOW) which
+                    // would re-show a hidden window.
+                    let should_reassert = state.lock().map(|s| s.visible && !s.has_focus).unwrap_or(false);
+                    if should_reassert {
                         force_foreground(hwnd);
                         focus_input(&webview);
                     }

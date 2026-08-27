@@ -732,7 +732,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let sw = tao::window::WindowBuilder::new()
                             .with_title("Nex Settings")
                             .with_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
-                            .with_decorations(false)
                             .build(target)
                             .expect("settings window");
                         settings_window_id = Some(sw.id());
@@ -768,22 +767,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                         crate::overlay::hotkey::is_win_key_hotkey(),
                                     );
                                 } else if body.contains("\"t\":\"minimize\"") {
-                                    // Minimize the settings window via Win32.
                                     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-                                    let hwnd = record_hwnd; // overlay HWND; we use sw_hwnd below
-                                    let _ = hwnd;
-                                    // Settings HWND is stored separately — send via proxy.
                                     if let Ok(mut slot) = settings_hwnd_for_ipc.lock() {
                                         if let Some(h) = *slot {
                                             unsafe { ShowWindow(h, SW_MINIMIZE); }
-                                        }
-                                    }
-                                } else if body.contains("\"t\":\"close\"") {
-                                    if let Ok(mut slot) = settings_hwnd_for_ipc.lock() {
-                                        if let Some(h) = *slot {
-                                            unsafe {
-                                                windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(h, 0); // SW_HIDE
-                                            }
                                         }
                                     }
                                 }

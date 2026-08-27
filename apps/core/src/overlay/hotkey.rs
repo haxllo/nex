@@ -1204,9 +1204,16 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     // deduped by the 50ms debounce and it never touches the new combo.
     // So a live update is purely local: sync HOOK_CTX + transient state.
     //
-    // Keep nex's own view in sync. is_win_key_hotkey(), the raw-input
-    // sink's suppress decision, check_raw_input_hotkey() and the
-    // polling fallback all read HOOK_CTX.
+    // BUT when target_is_win changes (Win ↔ non-Win), the helper's
+    // detect_enabled flag changes too — it must be killed and restarted
+    // with fresh config.  Return false to trigger full re-registration.
+    let old_is_win = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.target_is_win)).unwrap_or(false);
+    if old_is_win != target_is_win {
+        logging::info(&format!(
+            "[nex] live hotkey update: target_is_win changed ({old_is_win} → {target_is_win}), full re-register needed"
+        ));
+        return false;
+    }
     if let Ok(mut guard) = HOOK_CTX.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.target_key = target_key;

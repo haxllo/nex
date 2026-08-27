@@ -10,10 +10,10 @@
     --fg: #e4e4e8;
     --mut: #8a8a95;
     --accent: #5b8af5;
-    --accent-dim: #5b8af520;
     --input-bg: #1a1a1e;
     --input-border: #3a3a42;
     --danger: #e05a4e;
+    --titlebar: #161619;
   }
   html[data-theme="light"] {
     --bg: #f4f4f7;
@@ -22,35 +22,68 @@
     --fg: #1a1a1e;
     --mut: #6e6e7a;
     --accent: #3567d4;
-    --accent-dim: #3567d418;
     --input-bg: #f4f4f7;
     --input-border: #d0d0d8;
     --danger: #d4463a;
+    --titlebar: #eaeaef;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     font-family: "Segoe UI", system-ui, sans-serif;
     background: var(--bg);
     color: var(--fg);
-    padding: 28px 32px;
     font-size: 13px;
     line-height: 1.5;
+    overflow: hidden;
+    user-select: none;
   }
 
-  /* ── Header ── */
-  .header {
+  /* ── Title Bar ── */
+  .titlebar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 28px;
-    padding-bottom: 16px;
+    height: 36px;
+    padding: 0 8px 0 14px;
+    background: var(--titlebar);
     border-bottom: 1px solid var(--border);
+    -webkit-app-region: drag;
   }
-  .header svg { flex-shrink: 0; }
-  .header h1 {
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
+  .titlebar-title {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--mut);
+    letter-spacing: 0.02em;
+  }
+  .titlebar-btn {
+    -webkit-app-region: no-drag;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 28px;
+    border: none;
+    background: transparent;
+    color: var(--mut);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .titlebar-btn:hover { background: var(--border); color: var(--fg); }
+  .titlebar-btn.close:hover { background: var(--danger); color: #fff; }
+  .titlebar-btn svg { width: 14px; height: 14px; }
+
+  /* ── Content ── */
+  .content {
+    padding: 20px 24px;
+    height: calc(100vh - 36px - 52px);
+    overflow-y: auto;
+    user-select: auto;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
   }
 
   /* ── Sections ── */
@@ -58,8 +91,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 20px 22px;
-    margin-bottom: 16px;
+    padding: 18px 20px;
   }
   .section-title {
     font-size: 11px;
@@ -67,7 +99,7 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--mut);
-    margin-bottom: 16px;
+    margin-bottom: 14px;
   }
 
   /* ── Rows ── */
@@ -75,23 +107,23 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 0;
+    padding: 9px 0;
   }
   .row + .row { border-top: 1px solid var(--border); }
   .row-label {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     flex: 1;
     min-width: 0;
   }
-  .row-label span { font-weight: 500; }
+  .row-label span { font-weight: 500; font-size: 13px; }
   .row-label small { color: var(--mut); font-size: 11px; }
-  .row-control { flex-shrink: 0; margin-left: 16px; }
+  .row-control { flex-shrink: 0; margin-left: 14px; }
 
   /* ── Inputs ── */
   input[type="number"], input[type="text"] {
-    width: 100px;
+    width: 90px;
     padding: 5px 8px;
     background: var(--input-bg);
     color: var(--fg);
@@ -140,9 +172,8 @@
   .hkbox {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
     padding: 5px 12px;
-    min-width: 120px;
+    min-width: 110px;
     background: var(--input-bg);
     border: 1px solid var(--input-border);
     border-radius: 6px;
@@ -168,14 +199,15 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: 24px;
-    padding-top: 16px;
+    height: 52px;
+    padding: 0 24px;
     border-top: 1px solid var(--border);
+    background: var(--titlebar);
   }
   .status { color: var(--mut); font-size: 12px; }
   .status.error { color: var(--danger); }
   .btn-save {
-    padding: 7px 20px;
+    padding: 7px 22px;
     background: var(--accent);
     color: #fff;
     border: none;
@@ -192,79 +224,92 @@
 </head>
 <body>
 
-<div class="header">
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-    <rect width="20" height="20" rx="5" fill="var(--accent)" opacity="0.15"/>
-    <path d="M6 10h8M10 6v8" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
-  </svg>
-  <h1>Settings</h1>
+<!-- Title Bar -->
+<div class="titlebar">
+  <span class="titlebar-title">Nex Settings</span>
+  <button class="titlebar-btn" onclick="post('minimize')" title="Minimize">
+    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
+      <line x1="3" y1="7" x2="11" y2="7"/>
+    </svg>
+  </button>
+  <button class="titlebar-btn close" onclick="post('close')" title="Close">
+    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
+      <line x1="3.5" y1="3.5" x2="10.5" y2="10.5"/>
+      <line x1="10.5" y1="3.5" x2="3.5" y2="10.5"/>
+    </svg>
+  </button>
 </div>
 
-<!-- General -->
-<div class="section">
-  <div class="section-title">General</div>
-  <div class="row">
-    <div class="row-label">
-      <span>Grid View</span>
-      <small>Show results in a grid layout</small>
-    </div>
-    <label class="toggle row-control">
-      <input type="checkbox" id="gridView"/>
-      <span class="slider"></span>
-    </label>
-  </div>
-</div>
+<!-- Content -->
+<div class="content">
+  <div class="grid">
 
-<!-- Quick Launch -->
-<div class="section">
-  <div class="section-title">Quick Launch</div>
-  <div class="row">
-    <div class="row-label">
-      <span>Enable Quick Launch</span>
-      <small>Show pinned apps when the overlay opens</small>
+    <!-- Left Column -->
+    <div class="section">
+      <div class="section-title">General</div>
+      <div class="row">
+        <div class="row-label">
+          <span>Grid View</span>
+          <small>Show results in a grid layout</small>
+        </div>
+        <label class="toggle row-control">
+          <input type="checkbox" id="gridView"/>
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
-    <label class="toggle row-control">
-      <input type="checkbox" id="quickLaunchEnabled"/>
-      <span class="slider"></span>
-    </label>
-  </div>
-  <div class="row">
-    <div class="row-label">
-      <span>Max Items</span>
-      <small>Number of quick launch items to show</small>
-    </div>
-    <input type="number" id="quickLaunchMaxItems" min="3" max="12" class="row-control"/>
-  </div>
-</div>
 
-<!-- Search -->
-<div class="section">
-  <div class="section-title">Search</div>
-  <div class="row">
-    <div class="row-label">
-      <span>Max Results</span>
-      <small>Results shown per query (5–100)</small>
+    <div class="section">
+      <div class="section-title">Quick Launch</div>
+      <div class="row">
+        <div class="row-label">
+          <span>Enable</span>
+          <small>Show pinned apps when overlay opens</small>
+        </div>
+        <label class="toggle row-control">
+          <input type="checkbox" id="quickLaunchEnabled"/>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="row">
+        <div class="row-label">
+          <span>Max Items</span>
+          <small>Items to display (3–12)</small>
+        </div>
+        <input type="number" id="quickLaunchMaxItems" min="3" max="12" class="row-control"/>
+      </div>
     </div>
-    <input type="number" id="maxResults" min="5" max="100" class="row-control"/>
-  </div>
-  <div class="row">
-    <div class="row-label">
-      <span>Index Size Cap</span>
-      <small>Maximum items in the search index</small>
-    </div>
-    <input type="number" id="indexMaxItemsTotal" min="10000" max="2000000" class="row-control"/>
-  </div>
-</div>
 
-<!-- Hotkey -->
-<div class="section">
-  <div class="section-title">Hotkey</div>
-  <div class="row">
-    <div class="row-label">
-      <span>Toggle Shortcut</span>
-      <small>Click the box, then press your desired combo</small>
+    <!-- Right Column -->
+    <div class="section">
+      <div class="section-title">Search</div>
+      <div class="row">
+        <div class="row-label">
+          <span>Max Results</span>
+          <small>Results per query (5–100)</small>
+        </div>
+        <input type="number" id="maxResults" min="5" max="100" class="row-control"/>
+      </div>
+      <div class="row">
+        <div class="row-label">
+          <span>Index Size Cap</span>
+          <small>Maximum items indexed</small>
+        </div>
+        <input type="number" id="indexMaxItemsTotal" min="10000" max="2000000" class="row-control"/>
+      </div>
     </div>
-    <div class="hkbox" id="hotkeyBox" tabindex="0" class="row-control"></div>
+
+    <div class="section">
+      <div class="section-title">Hotkey</div>
+      <div class="row">
+        <div class="row-label">
+          <span>Toggle Shortcut</span>
+          <small>Click, then press your combo</small>
+        </div>
+        <div class="hkbox" id="hotkeyBox" tabindex="0"></div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -275,5 +320,10 @@
 </div>
 
 <script src="/settings.js"></script>
+<script>
+  function post(t) {
+    window.chrome.webview.postMessage(JSON.stringify({ t }));
+  }
+</script>
 </body>
 </html>

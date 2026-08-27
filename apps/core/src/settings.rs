@@ -11,13 +11,6 @@ pub const SAFE_HOTKEY_PRESETS: [&str; 8] = [
     "Ctrl+Shift+O",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettingsDraft {
-    pub hotkey: String,
-    pub max_results: u16,
-    pub launch_at_startup: bool,
-}
-
 pub fn validate_hotkey(input: &str) -> Result<String, String> {
     let raw_parts: Vec<&str> = input
         .split('+')

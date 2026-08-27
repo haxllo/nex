@@ -56,6 +56,18 @@ hkbox.addEventListener("click", () => {
   window.chrome.webview.postMessage(JSON.stringify({ t: "recordHotkey" }));
 });
 
+document.addEventListener("keydown", (e) => {
+  if (!recording) return;
+  if (e.key === "Escape") {
+    recording = false;
+    hkbox.classList.remove("recording");
+    window.chrome.webview.postMessage(JSON.stringify({ t: "cancelRecord" }));
+    showHotkey();
+  }
+  e.preventDefault();
+  e.stopPropagation();
+});
+
 window.hotkeyRecorded = function (combo) {
   hkbox.classList.remove("recording");
   if (combo) window.pendingHotkey = combo;

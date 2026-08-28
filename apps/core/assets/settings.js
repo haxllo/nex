@@ -4,6 +4,7 @@ const FIELDS = [
   ["showFolders", "checked"],
   ["launchAtStartup", "checked"],
   ["quickLaunchEnabled", "checked"],
+  ["quickLaunchAutoFill", "checked"],
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],
   ["indexMaxItemsTotal", "valueNumber"],

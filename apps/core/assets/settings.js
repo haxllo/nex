@@ -8,6 +8,8 @@ const FIELDS = [
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],
   ["indexMaxItemsTotal", "valueNumber"],
+  ["searchModeDefault", "valueSelect"],
+  ["searchDslEnabled", "checked"],
 ];
 
 window.applySettings = function (s) {
@@ -17,7 +19,10 @@ window.applySettings = function (s) {
   for (const [id, kind] of FIELDS) {
     const el = document.getElementById(id);
     if (!el || s[id] === undefined) continue;
-    el[kind === "checked" ? "checked" : "value"] = s[id];
+    if (kind === "checked") el.checked = s[id];
+    else if (kind === "valueNumber") el.value = s[id];
+    else if (kind === "valueSelect") el.value = s[id];
+    else el.value = s[id];
   }
   const statusEl = document.getElementById("status");
   statusEl.classList.remove("error", "ok");
@@ -31,6 +36,7 @@ function save() {
     const el = document.getElementById(id);
     if (kind === "checked") cfg[id] = el.checked;
     else if (kind === "valueNumber") cfg[id] = Number(el.value);
+    else if (kind === "valueSelect") cfg[id] = el.value;
     else cfg[id] = el.value.trim();
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;

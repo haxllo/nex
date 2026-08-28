@@ -643,11 +643,14 @@ html[data-theme="light"] img.icon.glyph {
 #footer.ql .hints {
   display: none;
 }
+#footer.ql .footer-settings {
+  display: none;
+}
 #footer .hints {
   position: absolute;
-  top: 40%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  top: 50%;
+  left: var(--pad-x);
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 6px;

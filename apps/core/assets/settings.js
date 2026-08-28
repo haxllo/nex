@@ -1,5 +1,8 @@
 const FIELDS = [
   ["gridView", "checked"],
+  ["showFiles", "checked"],
+  ["showFolders", "checked"],
+  ["launchAtStartup", "checked"],
   ["quickLaunchEnabled", "checked"],
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],

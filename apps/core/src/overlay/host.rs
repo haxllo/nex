@@ -740,7 +740,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     } else {
                         let sw = tao::window::WindowBuilder::new()
                             .with_title("Nex Settings")
-                            .with_inner_size(tao::dpi::LogicalSize::new(720.0, 480.0))
+                            .with_inner_size(tao::dpi::LogicalSize::new(790.0, 560.0))
                             .with_decorations(false)
                             .build(target)
                             .expect("settings window");

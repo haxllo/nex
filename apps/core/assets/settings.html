@@ -12,8 +12,8 @@
     --fg: #e2e2e6;
     --fg-dim: #9898a0;
     --fg-muted: #65656e;
-    --accent: #5b8af5;
-    --accent-dim: #5b8af518;
+    --accent: #e2e2e6;
+    --accent-dim: rgba(226, 226, 230, 0.1);
     --input-bg: #141417;
     --input-border: #333340;
     --danger: #e05a4e;
@@ -29,8 +29,8 @@
     --fg: #1a1a1e;
     --fg-dim: #5e5e68;
     --fg-muted: #9a9aa4;
-    --accent: #3567d4;
-    --accent-dim: #3567d412;
+    --accent: #1a1a1e;
+    --accent-dim: rgba(26, 26, 30, 0.08);
     --input-bg: #f0f0f3;
     --input-border: #cdcdd5;
     --danger: #d4463a;
@@ -169,16 +169,26 @@
   /* ── Inputs ── */
   input[type="number"], input[type="text"] {
     width: 88px;
-    padding: 5px 8px;
-    background: var(--input-bg);
+    padding: 4px 0;
+    background: transparent;
     color: var(--fg);
-    border: 1px solid var(--input-border);
-    border-radius: 5px;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
     font-size: 13px;
     font-family: inherit;
     text-align: right;
     outline: none;
-    transition: border-color 0.15s;
+    transition: border-color 0.2s;
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"]:hover, input[type="text"]:hover {
+    border-color: var(--fg-muted);
   }
   input[type="number"]:focus, input[type="text"]:focus {
     border-color: var(--accent);
@@ -195,7 +205,7 @@
   .toggle .slider {
     position: absolute;
     inset: 0;
-    background: var(--input-border);
+    background: var(--border);
     border-radius: 18px;
     transition: background 0.2s;
   }
@@ -206,7 +216,7 @@
     height: 12px;
     left: 3px;
     top: 3px;
-    background: #fff;
+    background: var(--bg);
     border-radius: 50%;
     transition: transform 0.2s;
   }
@@ -217,18 +227,18 @@
   .hkbox {
     display: inline-flex;
     align-items: center;
-    padding: 5px 12px;
+    padding: 4px 12px;
     min-width: 120px;
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
+    background: transparent;
+    border: 1px solid var(--border);
     border-radius: 5px;
     font-size: 13px;
     font-family: inherit;
     cursor: pointer;
     user-select: none;
-    transition: border-color 0.15s, color 0.15s;
+    transition: border-color 0.2s, color 0.2s;
   }
-  .hkbox:hover { border-color: var(--accent); }
+  .hkbox:hover { border-color: var(--fg-muted); }
   .hkbox.recording {
     border-color: var(--danger);
     color: var(--danger);
@@ -254,7 +264,7 @@
   .btn-save {
     padding: 6px 20px;
     background: var(--accent);
-    color: #fff;
+    color: var(--bg);
     border: none;
     border-radius: 5px;
     font-size: 12.5px;

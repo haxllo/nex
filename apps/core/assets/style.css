@@ -622,7 +622,6 @@ html[data-theme="light"] img.icon.glyph {
   position: relative;
   display: none;
   align-items: center;
-  justify-content: center;
   height: 48px;
   margin-top: 0;
   padding: 0 var(--pad-x);
@@ -645,16 +644,34 @@ html[data-theme="light"] img.icon.glyph {
   display: none;
 }
 #footer .hints {
-  position: absolute;
-  top: 40%;
-  left: 50%;
-  transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
   pointer-events: none;
   white-space: nowrap;
+}
+.footer-settings {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  pointer-events: auto;
+}
+.footer-settings:hover {
+  background: var(--kbd-bg);
+  color: var(--text);
+}
+.footer-settings svg {
+  width: 14px;
+  height: 14px;
 }
 .hint {
   display: inline-flex;

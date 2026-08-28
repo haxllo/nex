@@ -648,7 +648,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 #footer .hints {
   position: absolute;
-  top: 50%;
+  top: 40%;
   left: var(--pad-x);
   transform: translateY(-50%);
   display: flex;
@@ -660,7 +660,7 @@ html[data-theme="light"] img.icon.glyph {
 .footer-settings {
   position: absolute;
   right: var(--pad-x);
-  top: 50%;
+  top: 40%;
   transform: translateY(-50%);
   display: flex;
   align-items: center;

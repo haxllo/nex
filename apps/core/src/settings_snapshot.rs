@@ -23,6 +23,11 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
         }
     }
     cfg.search_dsl_enabled = get_bool("searchDslEnabled", cfg.search_dsl_enabled);
+    if let Some(s) = get_str("webSearchProvider") {
+        if let Some(p) = config::WebSearchProvider::parse(&s) {
+            cfg.web_search_provider = p;
+        }
+    }
     Ok(cfg)
 }
 
@@ -47,6 +52,7 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "launchAtStartup": cfg.launch_at_startup,
         "searchModeDefault": cfg.search_mode_default.as_str(),
         "searchDslEnabled": cfg.search_dsl_enabled,
+        "webSearchProvider": cfg.web_search_provider.as_str(),
     })
     .to_string()
 }

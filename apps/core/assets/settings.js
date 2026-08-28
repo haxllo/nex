@@ -10,6 +10,7 @@ const FIELDS = [
   ["indexMaxItemsTotal", "valueNumber"],
   ["searchModeDefault", "valueSelect"],
   ["searchDslEnabled", "checked"],
+  ["webSearchProvider", "valueSelect"],
 ];
 
 window.applySettings = function (s) {

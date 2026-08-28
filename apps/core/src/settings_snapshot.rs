@@ -11,6 +11,7 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     cfg.max_results = get_u64("maxResults", cfg.max_results as u64) as u16;
     cfg.quick_launch.enabled = get_bool("quickLaunchEnabled", cfg.quick_launch.enabled);
     cfg.quick_launch.max_items = get_u64("quickLaunchMaxItems", cfg.quick_launch.max_items as u64) as u8;
+    cfg.quick_launch.auto_fill = get_bool("quickLaunchAutoFill", cfg.quick_launch.auto_fill);
     cfg.index_max_items_total = get_u64("indexMaxItemsTotal", cfg.index_max_items_total as u64) as u32;
     cfg.show_files = get_bool("showFiles", cfg.show_files);
     cfg.show_folders = get_bool("showFolders", cfg.show_folders);
@@ -30,6 +31,7 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "maxResults": cfg.max_results,
         "quickLaunchEnabled": cfg.quick_launch.enabled,
         "quickLaunchMaxItems": cfg.quick_launch.max_items,
+        "quickLaunchAutoFill": cfg.quick_launch.auto_fill,
         "indexMaxItemsTotal": cfg.index_max_items_total,
         "hotkey": cfg.hotkey,
         "theme": theme,

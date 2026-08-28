@@ -430,6 +430,7 @@
     const qlOnly =
       hasRows && rows.every((r) => r.role === "quick_launch" || r.role === "header" || r.role === "status");
     footerEl.classList.toggle("idle", hasRows && !qlOnly);
+    footerEl.classList.toggle("ql", hasRows && qlOnly);
 
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();

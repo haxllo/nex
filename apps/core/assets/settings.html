@@ -690,6 +690,26 @@
       <!-- General -->
       <div class="page active" id="page-general">
         <div class="group">
+          <div class="group-rows">
+            <div class="row">
+              <div class="row-label">
+                <span class="name">Launch at Startup</span>
+              </div>
+              <label class="toggle row-control">
+                <input type="checkbox" id="launchAtStartup"/>
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="row-label">
+                <span class="name">Hotkey</span>
+                <span class="hint" id="hotkeyHint">Click the chip, then press your desired combo</span>
+              </div>
+              <div class="hkbox row-control field-wrap hk-wrap" id="hotkeyBox" tabindex="0" role="button" aria-label="Hotkey"></div>
+            </div>
+          </div>
+        </div>
+        <div class="group">
           <div class="group-label">Display</div>
           <div class="group-rows">
             <div class="row">
@@ -718,32 +738,6 @@
                 <input type="checkbox" id="showFolders"/>
                 <span class="slider"></span>
               </label>
-            </div>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-label">System</div>
-          <div class="group-rows">
-            <div class="row">
-              <div class="row-label">
-                <span class="name">Launch at Startup</span>
-              </div>
-              <label class="toggle row-control">
-                <input type="checkbox" id="launchAtStartup"/>
-                <span class="slider"></span>
-              </label>
-            </div>
-          </div>
-        </div>
-        <div class="group">
-          <div class="group-label">Shortcut</div>
-          <div class="group-rows">
-            <div class="row">
-              <div class="row-label">
-                <span class="name">Hotkey</span>
-                <span class="hint" id="hotkeyHint">Click the chip, then press your desired combo</span>
-              </div>
-              <div class="hkbox row-control field-wrap hk-wrap" id="hotkeyBox" tabindex="0" role="button" aria-label="Hotkey"></div>
             </div>
           </div>
         </div>

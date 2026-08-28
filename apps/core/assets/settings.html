@@ -209,13 +209,14 @@
     min-width: 0;
     overflow-y: auto;
     background: var(--bg);
+    padding: 6px 6px 0 6px;
   }
   .page { display: none; padding: 0; }
   .page.active { display: block; }
 
   /* ── Group / Sections ── */
   .group {
-    padding: 6px 28px;
+    padding: 6px;
   }
   .group + .group {
     padding-top: 6px;
@@ -224,7 +225,7 @@
     font-size: 10.5px;
     font-weight: 600;
     letter-spacing: 0.10em;
-    text-transform: uppercase;
+    text-transform: capitalize;
     color: var(--fg-faint);
     margin: 8px 0 4px;
     padding: 0 2px;

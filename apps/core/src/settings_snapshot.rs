@@ -6,7 +6,8 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     let mut cfg = base.clone();
     let get_bool = |k: &str, cur: bool| cfg_obj.get(k).and_then(|x| x.as_bool()).unwrap_or(cur);
     let get_u64 = |k: &str, cur: u64| cfg_obj.get(k).and_then(|x| x.as_u64()).unwrap_or(cur);
-    cfg.hotkey = cfg_obj.get("hotkey").and_then(|x| x.as_str()).map(String::from).unwrap_or(cfg.hotkey.clone());
+    let get_str = |k: &str| cfg_obj.get(k).and_then(|x| x.as_str()).map(String::from);
+    cfg.hotkey = get_str("hotkey").unwrap_or(cfg.hotkey);
     cfg.grid_view = get_bool("gridView", cfg.grid_view);
     cfg.max_results = get_u64("maxResults", cfg.max_results as u64) as u16;
     cfg.quick_launch.enabled = get_bool("quickLaunchEnabled", cfg.quick_launch.enabled);
@@ -16,6 +17,12 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     cfg.show_files = get_bool("showFiles", cfg.show_files);
     cfg.show_folders = get_bool("showFolders", cfg.show_folders);
     cfg.launch_at_startup = get_bool("launchAtStartup", cfg.launch_at_startup);
+    if let Some(s) = get_str("searchModeDefault") {
+        if let Some(mode) = config::SearchMode::parse(&s) {
+            cfg.search_mode_default = mode;
+        }
+    }
+    cfg.search_dsl_enabled = get_bool("searchDslEnabled", cfg.search_dsl_enabled);
     Ok(cfg)
 }
 
@@ -38,6 +45,8 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "showFiles": cfg.show_files,
         "showFolders": cfg.show_folders,
         "launchAtStartup": cfg.launch_at_startup,
+        "searchModeDefault": cfg.search_mode_default.as_str(),
+        "searchDslEnabled": cfg.search_dsl_enabled,
     })
     .to_string()
 }

@@ -81,6 +81,16 @@ impl SearchMode {
             _ => None,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Apps => "apps",
+            Self::Files => "files",
+            Self::Actions => "actions",
+            Self::Clipboard => "clipboard",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

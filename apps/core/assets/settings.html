@@ -11,12 +11,12 @@
   }
   :root {
     --bg: #1F1F1F;
-    --bg-2: #1A1A1A;
-    --surface: #232323;
+    --bg-2: #1F1F1F;
+    --surface: #1F1F1F;
     --surface-2: #2A2A2A;
     --surface-hover: #2E2E2E;
     --surface-active: #343434;
-    --row: #262626;
+    --row: #242424;
     --row-hover: #2C2C2C;
     --border: #2F2F2F;
     --border-soft: #2A2A2A;
@@ -244,12 +244,13 @@
     gap: 16px;
     height: var(--row-h);
     padding: 0 14px;
+    background: var(--row);
     transition: background 0.10s ease;
   }
   .row + .row {
     border-top: 1px solid var(--border-soft);
   }
-  .row:hover { background: transparent; }
+  .row:hover { background: var(--row-hover); }
   .row-label {
     display: flex;
     flex-direction: column;
@@ -343,7 +344,9 @@
     -webkit-appearance: none;
     -moz-appearance: none;
     appearance: none;
-    padding-right: 14px;
+    padding: 0 18px 0 0;
+    width: auto;
+    min-width: 70px;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0 center;
@@ -575,15 +578,6 @@
         </svg>
         Search
       </div>
-      <div class="nav-item" data-page="hotkey">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="1.5" y="4.5" width="13" height="7" rx="1.4"/>
-          <line x1="4.2" y1="8" x2="5.8" y2="8"/>
-          <line x1="4.2" y1="10.3" x2="11.8" y2="10.3"/>
-          <line x1="9" y1="8" x2="11.8" y2="8"/>
-        </svg>
-        Hotkey
-      </div>
 
       <div class="nav-spacer"></div>
     </div>
@@ -640,6 +634,18 @@
                 <input type="checkbox" id="launchAtStartup"/>
                 <span class="slider"></span>
               </label>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-label">Shortcut</div>
+          <div class="group-rows">
+            <div class="row">
+              <div class="row-label">
+                <span class="name">Hotkey</span>
+                <span class="hint" id="hotkeyHint">Click the chip, then press your desired combo</span>
+              </div>
+              <div class="hkbox row-control field-wrap hk-wrap" id="hotkeyBox" tabindex="0" role="button" aria-label="Hotkey"></div>
             </div>
           </div>
         </div>
@@ -755,22 +761,6 @@
                 <input type="number" id="indexMaxItemsTotal" min="10000" max="2000000"/>
                 <span class="unit">items</span>
               </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Hotkey -->
-      <div class="page" id="page-hotkey">
-        <div class="group">
-          <div class="group-label">Toggle</div>
-          <div class="group-rows">
-            <div class="row">
-              <div class="row-label">
-                <span class="name">Toggle Shortcut</span>
-                <span class="hint" id="hotkeyHint">Click the chip, then press your desired combo</span>
-              </div>
-              <div class="hkbox row-control field-wrap hk-wrap" id="hotkeyBox" tabindex="0" role="button" aria-label="Toggle shortcut"></div>
             </div>
           </div>
         </div>

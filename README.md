@@ -37,8 +37,8 @@ Download the latest installer from the [Releases page](https://github.com/haxllo
 ```bash
 git clone https://github.com/haxllo/nex.git
 cd nex
-cargo build --release
-# Binary: target/release/nex.exe
+cargo build --release --bin Nex --bin NexHelper
+./target/release/Nex.exe
 ```
 
 **Requirements:** Windows 10/11 (64-bit), Rust 1.85+
@@ -138,9 +138,9 @@ Nex renders its overlay as a native Windows popup using **tao** (window manageme
 ## Building & Testing
 
 ```bash
-cargo build --bin nex              # Debug
-cargo build --release --bin nex    # Release
-cargo test -p nex                  # Tests (broken on Windows — hangs)
+cargo build --bin Nex --bin NexHelper              # Debug
+cargo build --release --bin Nex --bin NexHelper    # Release
+cargo test -p Nex                  # Tests (broken on Windows — hangs)
 ```
 
 ## Documentation

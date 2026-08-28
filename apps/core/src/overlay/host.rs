@@ -742,6 +742,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             .with_title("Nex Settings")
                             .with_inner_size(tao::dpi::LogicalSize::new(790.0, 560.0))
                             .with_decorations(false)
+                            .with_visible(false)
                             .build(target)
                             .expect("settings window");
                         settings_window_id = Some(sw.id());
@@ -752,6 +753,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
                         let webview = wry::WebViewBuilder::new()
+                            .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
                                 serve_asset(request)

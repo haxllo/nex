@@ -205,6 +205,34 @@ impl WebSearchProvider {
             Self::Custom => "Custom",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "duckduckgo" | "duck" => Some(Self::Duckduckgo),
+            "google" => Some(Self::Google),
+            "bing" => Some(Self::Bing),
+            "brave" => Some(Self::Brave),
+            "startpage" => Some(Self::Startpage),
+            "ecosia" => Some(Self::Ecosia),
+            "yahoo" => Some(Self::Yahoo),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Duckduckgo => "duckduckgo",
+            Self::Google => "google",
+            Self::Bing => "bing",
+            Self::Brave => "brave",
+            Self::Startpage => "startpage",
+            Self::Ecosia => "ecosia",
+            Self::Yahoo => "yahoo",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -105,3 +105,18 @@ Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + ma
 - No clippy, no formatter enforced in CI
 - Most platform gating: `#[cfg(target_os = "windows")]` on Windows-specific modules/functions
 - Legacy name "SwiftFind" still appears in some env var/constant names — don't rename unless explicitly asked
+
+## Git Commit Author
+
+All commits MUST use the repo owner's identity. Never commit with a bot/AI name.
+
+```bash
+git config user.name "haxllo"
+git config user.email "your-email@example.com"  # use actual email
+```
+
+Or amend each commit:
+
+```bash
+git commit --author="haxllo <your-email>" -m "message"
+```

@@ -1087,6 +1087,11 @@
   // renders the pushed state, otherwise the window appears blank.
   post("ready");
 
+  // ── settings button ─────────────────────────────────────────
+  document.getElementById("footer-settings-btn").addEventListener("click", () => {
+    post("settings");
+  });
+
   // ── scrollbar idle fade ────────────────────────────────────
   // Thumb fades out after 1.4s without scroll/hover over the list;
   // reappears on activity.

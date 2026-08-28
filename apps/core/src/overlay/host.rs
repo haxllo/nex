@@ -1139,6 +1139,9 @@ fn handle_ipc(
             let path = value.get("v").and_then(|v| v.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
             let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
         }
+        "settings" => {
+            let _ = event_tx.send(OverlayEvent::OpenSettings);
+        }
         _ => {}
     }
 }

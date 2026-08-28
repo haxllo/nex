@@ -644,6 +644,10 @@ html[data-theme="light"] img.icon.glyph {
   display: none;
 }
 #footer .hints {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -651,7 +655,10 @@ html[data-theme="light"] img.icon.glyph {
   white-space: nowrap;
 }
 .footer-settings {
-  margin-left: auto;
+  position: absolute;
+  right: var(--pad-x);
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   justify-content: center;

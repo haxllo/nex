@@ -63,6 +63,7 @@ html[data-theme="light"] {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  outline: none;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -177,7 +178,7 @@ body {
   list-style: none;
   max-height: 416px;
   overflow-y: auto;
-  padding: 0 8px 6px;
+  padding: 0 6px;
   scroll-behavior: smooth;
   /* Modern scrollbar API: thumb fades out while idle (class toggled in
      JS); Chromium WebView2 supports scrollbar-color + transitions. */
@@ -194,8 +195,7 @@ body {
   gap: 0;
   scrollbar-gutter: stable;
   padding-top: 4px;
-  /* Match bottom gap to the top (divider 6px + grid top padding 4px). */
-  padding-bottom: 10px;
+  padding-bottom: 2px;
 }
 #list:empty {
   display: none;
@@ -593,7 +593,7 @@ html[data-theme="light"] img.icon.glyph {
 /* Toast notification */
 /* section header */
 .section {
-  padding: 12px 12px 6px;
+  padding: 6px 12px 6px;
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.6px;
@@ -616,8 +616,9 @@ html[data-theme="light"] img.icon.glyph {
   position: relative;
   display: none;
   align-items: center;
-  height: 40px;
-  margin-top: 8px;
+  justify-content: center;
+  height: 48px;
+  margin-top: 0;
   padding: 0 var(--pad-x);
   border-top: 1px solid var(--divider);
   font-size: 11px;
@@ -625,15 +626,29 @@ html[data-theme="light"] img.icon.glyph {
 }
 #footer.idle {
   display: flex;
+  margin-top: 6px;
+}
+#footer.ql {
+  display: flex;
+  height: 6px;
+  margin-top: 0;
+  border-top: none;
+  padding: 0;
+}
+#footer.ql .hints {
+  display: none;
 }
 #footer .hints {
   position: absolute;
-  inset: 0;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   pointer-events: none;
+  white-space: nowrap;
 }
 #footer .hint {
   display: flex;

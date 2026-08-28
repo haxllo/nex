@@ -332,28 +332,126 @@
     min-width: 38px;
     text-align: left;
   }
-  .field select {
+  /* ── Dropdown (custom popup) ── */
+  .dropdown {
+    position: relative;
+    min-width: 116px;
+    padding: 0 8px 0 10px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .dropdown .dd-trigger {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 100%;
     background: transparent;
-    color: var(--fg);
     border: none;
     outline: none;
+    color: var(--fg);
     font-size: 12.5px;
     font-family: inherit;
     line-height: 1;
     cursor: pointer;
-    -webkit-appearance: none;
-    -moz-appearance: none;
-    appearance: none;
-    padding: 0 20px 0 0;
-    width: auto;
-    min-width: 70px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 2px center;
+    padding: 0;
+    text-align: left;
   }
-  .field select option {
-    background: var(--surface-2);
+  .dropdown .dd-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dropdown .dd-caret {
+    flex-shrink: 0;
+    width: 8px;
+    height: 5px;
+    color: var(--fg-faint);
+    transition: transform 0.15s ease, color 0.15s ease;
+  }
+  .dropdown:hover .dd-caret { color: var(--fg-dim); }
+  .dropdown.open .dd-caret {
+    transform: rotate(180deg);
     color: var(--fg);
+  }
+  .dropdown.open {
+    border-color: var(--field-focus-border);
+    box-shadow: inset 0 0 0 1px var(--field-focus-inner);
+  }
+
+  .dd-popup {
+    position: fixed;
+    min-width: 160px;
+    max-width: 240px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px;
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.18),
+      0 8px 24px rgba(0, 0, 0, 0.32),
+      0 16px 48px rgba(0, 0, 0, 0.24);
+    z-index: 10000;
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+    transform-origin: top right;
+    pointer-events: none;
+    transition: opacity 0.12s ease, transform 0.12s ease;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  .dd-popup::-webkit-scrollbar { width: 6px; }
+  .dd-popup::-webkit-scrollbar-track { background: transparent; }
+  .dd-popup::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 3px;
+  }
+  .dropdown.open .dd-popup {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+  }
+  .dd-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px 7px 30px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    line-height: 1.2;
+    color: var(--fg-dim);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.08s ease, color 0.08s ease;
+  }
+  .dd-item:hover,
+  .dd-item.active {
+    background: var(--surface-hover);
+    color: var(--fg);
+  }
+  .dd-item.selected {
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .dd-item .dd-check {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
+    height: 12px;
+    color: var(--fg);
+    opacity: 0;
+  }
+  .dd-item.selected .dd-check { opacity: 1; }
+  .dd-item .dd-label-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* ── Toggle (monochrome) ── */
@@ -697,14 +795,14 @@
               <div class="row-label">
                 <span class="name">Default Mode</span>
               </div>
-              <div class="field row-control field-wrap">
-                <select id="searchModeDefault">
-                  <option value="all">All</option>
-                  <option value="apps">Apps</option>
-                  <option value="files">Files</option>
-                  <option value="actions">Actions</option>
-                  <option value="clipboard">Clipboard</option>
-                </select>
+              <div class="field row-control field-wrap dropdown" id="searchModeDefault"
+                   data-options='[{"v":"all","l":"All"},{"v":"apps","l":"Apps"},{"v":"files","l":"Files"},{"v":"actions","l":"Actions"},{"v":"clipboard","l":"Clipboard"}]'>
+                <input type="hidden" value="all">
+                <button type="button" class="dd-trigger" tabindex="0">
+                  <span class="dd-label">All</span>
+                  <svg class="dd-caret" viewBox="0 0 8 5" fill="currentColor" aria-hidden="true"><path d="M0 0l4 5 4-5z"/></svg>
+                </button>
+                <div class="dd-popup" role="listbox"></div>
               </div>
             </div>
             <div class="row">
@@ -720,16 +818,14 @@
               <div class="row-label">
                 <span class="name">Web Search Provider</span>
               </div>
-              <div class="field row-control field-wrap">
-                <select id="webSearchProvider">
-                  <option value="google">Google</option>
-                  <option value="duckduckgo">DuckDuckGo</option>
-                  <option value="bing">Bing</option>
-                  <option value="brave">Brave</option>
-                  <option value="startpage">Startpage</option>
-                  <option value="ecosia">Ecosia</option>
-                  <option value="yahoo">Yahoo</option>
-                </select>
+              <div class="field row-control field-wrap dropdown" id="webSearchProvider"
+                   data-options='[{"v":"google","l":"Google"},{"v":"duckduckgo","l":"DuckDuckGo"},{"v":"bing","l":"Bing"},{"v":"brave","l":"Brave"},{"v":"startpage","l":"Startpage"},{"v":"ecosia","l":"Ecosia"},{"v":"yahoo","l":"Yahoo"}]'>
+                <input type="hidden" value="google">
+                <button type="button" class="dd-trigger" tabindex="0">
+                  <span class="dd-label">Google</span>
+                  <svg class="dd-caret" viewBox="0 0 8 5" fill="currentColor" aria-hidden="true"><path d="M0 0l4 5 4-5z"/></svg>
+                </button>
+                <div class="dd-popup" role="listbox"></div>
               </div>
             </div>
           </div>

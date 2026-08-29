@@ -90,7 +90,7 @@ cargo build --release --bin Nex --bin NexHelper
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
 
-# 3. write release notes to docs/releases/v<ver>-notes.md (copy from RELEASE-TEMPLATE.md)
+# 3. write release notes to docs/releases/v<ver>-notes.md (copy from docs\releases\RELEASE-TEMPLATE.md)
 
 # 4. push + create GitHub release
 git push origin master --tags

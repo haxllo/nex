@@ -622,7 +622,7 @@ html[data-theme="light"] img.icon.glyph {
   position: relative;
   display: none;
   align-items: center;
-  height: 48px;
+  height: 46px;
   margin-top: 0;
   padding: 0 var(--pad-x);
   border-top: 1px solid var(--divider);
@@ -631,7 +631,6 @@ html[data-theme="light"] img.icon.glyph {
 }
 #footer.idle {
   display: flex;
-  margin-top: 6px;
 }
 #footer.ql {
   display: flex;

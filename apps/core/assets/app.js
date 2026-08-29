@@ -431,6 +431,13 @@
       hasRows && rows.every((r) => r.role === "quick_launch" || r.role === "header" || r.role === "status");
     footerEl.classList.toggle("idle", hasRows && !qlOnly);
     footerEl.classList.toggle("ql", hasRows && qlOnly);
+    // Web search only: no local results, just the search web action.
+    // Override idle margin-top to avoid 6px jump.
+    const webSearchOnly = hasRows && !qlOnly && rows.every((r) =>
+      r.role === "quick_launch" || r.role === "header" || r.role === "status" ||
+      (r.kind === "action" && r.title && r.title.startsWith("Search Web"))
+    );
+    footerEl.classList.toggle("websearch", webSearchOnly);
 
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();

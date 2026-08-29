@@ -360,7 +360,7 @@ try {
   }
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
-  $args = @("/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/SP-")
+  $args = @()
   if ($needsElevation) {
     $proc = Start-Process -FilePath $setupPath -ArgumentList $args -Verb RunAs -PassThru -Wait
   }

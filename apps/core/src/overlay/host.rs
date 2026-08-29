@@ -705,6 +705,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::CloseSettings => {
                     if let Some((w, _)) = &settings_ui {
+                        animate_window_close(w.hwnd() as HWND);
                         let _ = w.set_visible(false);
                         crate::runtime::log_info("[nex] settings window hidden via custom close");
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
@@ -796,6 +797,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             .expect("settings webview");
 
                         let _ = sw.set_visible(true);
+                        animate_window_open(sw.hwnd() as HWND);
                         settings_ui = Some((sw, webview));
                     }
                     // push config into the page (works for both fresh and warm opens)
@@ -920,6 +922,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 //destroying it so repopening from the tray is instant
                 if Some(window_id) == settings_window_id {
                     if let Some((w, _)) = &settings_ui {
+                        animate_window_close(w.hwnd() as HWND);
                         let _ = w.set_visible(false);
                         crate::runtime::log_info("[nex] settings window hidden via X");
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
@@ -1573,6 +1576,20 @@ fn position_window_centered(window: &Window) {
         x.max(left as f64) as i32,
         y.max(top as f64) as i32,
     ));
+}
+
+fn animate_window_open(hwnd: HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::AnimateWindow;
+    const AW_BLEND: u32 = 0x00080000;
+    const AW_ACTIVATE: u32 = 0x00020000;
+    unsafe { AnimateWindow(hwnd, 200, AW_BLEND | AW_ACTIVATE); }
+}
+
+fn animate_window_close(hwnd: HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::AnimateWindow;
+    const AW_BLEND: u32 = 0x00080000;
+    const AW_HIDE: u32 = 0x00100000;
+    unsafe { AnimateWindow(hwnd, 200, AW_BLEND | AW_HIDE); }
 }
 
 fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {

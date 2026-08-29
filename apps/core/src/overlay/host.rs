@@ -198,10 +198,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .with_always_on_top(true)
         .with_visible(false)
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT))
-        .with_skip_taskbar(true)
         .with_window_classname("NexOverlayWindowClass");
-    if !recording {
+    if recording {
+        // Recording mode: keep on taskbar (helps capture APIs enumerate the window),
+        // skip transparent + no-redirection-bitmap so recorders see solid content.
+        builder = builder;
+    } else {
         builder = builder
+            .with_skip_taskbar(true)
             .with_transparent(true)
             .with_no_redirection_bitmap(true);
     }

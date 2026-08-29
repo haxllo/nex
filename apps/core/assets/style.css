@@ -631,7 +631,6 @@ html[data-theme="light"] img.icon.glyph {
 }
 #footer.idle {
   display: flex;
-  margin-top: 6px;
 }
 #footer.ql {
   display: flex;

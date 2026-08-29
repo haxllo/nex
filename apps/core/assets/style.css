@@ -633,9 +633,6 @@ html[data-theme="light"] img.icon.glyph {
   display: flex;
   margin-top: 6px;
 }
-#footer.websearch {
-  margin-top: 0;
-}
 #footer.ql {
   display: flex;
   height: 6px;

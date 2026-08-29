@@ -43,7 +43,7 @@ CloseApplications=no
 RestartApplications=no
 UninstallDisplayIcon={app}\bin\Nex.exe
 SetupIconFile={#SetupIconPath}
-LicenseFile=LICENSE
+LicenseFile=..\..\LICENSE
 
 [Files]
 Source: "{#StageDir}\bin\Nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion

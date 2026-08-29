@@ -190,17 +190,22 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         *slot = Some(proxy.clone());
     }
 
-    let window = WindowBuilder::new()
+    let recording = is_recording_mode();
+    let mut builder = WindowBuilder::new()
         .with_title("Nex")
         .with_decorations(false)
-        .with_transparent(true)
         .with_resizable(false)
         .with_always_on_top(true)
         .with_visible(false)
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT))
         .with_skip_taskbar(true)
-        .with_window_classname("NexOverlayWindowClass")
-        .with_no_redirection_bitmap(true)
+        .with_window_classname("NexOverlayWindowClass");
+    if !recording {
+        builder = builder
+            .with_transparent(true)
+            .with_no_redirection_bitmap(true);
+    }
+    let window = builder
         .build(&event_loop)
         .map_err(|e| format!("failed to create overlay window: {e}"))?;
 
@@ -739,13 +744,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = w.set_visible(true);
                         let _ = w.set_focus();
                     } else {
-                        let sw = tao::window::WindowBuilder::new()
+                        let rec = is_recording_mode();
+                        let sw_builder = tao::window::WindowBuilder::new()
                             .with_title("Nex Settings")
                             .with_inner_size(tao::dpi::LogicalSize::new(790.0, 560.0))
                             .with_decorations(false)
-                            .with_visible(false)
-                            .build(target)
-                            .expect("settings window");
+                            .with_visible(false);
+                        let sw = if rec {
+                            sw_builder.build(target)
+                        } else {
+                            sw_builder.with_transparent(true).build(target)
+                        }.expect("settings window");
                         settings_window_id = Some(sw.id());
                         position_window_centered(&sw);
                         let settings_hwnd_for_ipc: Arc<Mutex<Option<HWND>>> = Arc::new(Mutex::new(Some(sw.hwnd() as HWND)));
@@ -753,8 +762,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let record_hwnd = hwnd;
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
+                        let settings_bg = if rec { (0x1F, 0x1F, 0x1F, 0xFF) } else { (0, 0, 0, 0) };
                         let webview = wry::WebViewBuilder::new()
-                            .with_background_color((0, 0, 0, 0))
+                            .with_background_color(settings_bg)
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
                                 serve_asset(request)
@@ -961,17 +971,28 @@ fn build_webview(
     let ipc_state = state.clone();
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
+    let recording = is_recording_mode();
+    // Dark theme background #1A1A1A; light theme #F5F5F7.
+    let bg = if recording {
+        let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
+        if dark { (0x1A, 0x1A, 0x1A, 0xFF) } else { (0xF5, 0xF5, 0xF7, 0xFF) }
+    } else {
+        (0, 0, 0, 0)
+    };
 
-    WebViewBuilder::new()
-        .with_transparent(true)
-        .with_background_color((0, 0, 0, 0))
+    let mut builder = WebViewBuilder::new()
+        .with_background_color(bg)
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
             serve_asset(request)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
-        })
+        });
+    if !recording {
+        builder = builder.with_transparent(true);
+    }
+    builder
         .build(window)
         .map_err(|e| format!("{e}"))
 }
@@ -1503,6 +1524,15 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // ─────────────────────────────────────────────────────────────────
 
 /// Apply acrylic backdrop. CSS handles border-radius + box-shadow on #panel.
+/// Returns true if NEX_RECORDING_MODE is set to "1" or "true".
+/// In recording mode, the overlay uses an opaque background and skips
+/// WS_EX_NOREDIRECTIONBITMAP so screen recorders can capture it.
+fn is_recording_mode() -> bool {
+    std::env::var("NEX_RECORDING_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
     // Disable DWM transition animation (zoom-out+fade) so hide is instant.
@@ -1515,6 +1545,10 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
             &disabled as *const i32 as *const std::ffi::c_void,
             std::mem::size_of::<i32>() as u32,
         );
+    }
+    // In recording mode, skip acrylic so screen recorders can capture the window.
+    if is_recording_mode() {
+        return;
     }
     // Acrylic blur behind the (transparent) WebView. Falls back to a
     // CSS-painted panel if the OS refuses (window-vibrancy returns Err).

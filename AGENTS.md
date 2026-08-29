@@ -111,5 +111,5 @@ Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + ma
 All commits MUST use the repo owner's identity. Never commit with a bot/AI name.
 
 ```bash
-git commit --author="haxllo <mshabeeburrahman786@gmail.com>" -m "message"
+git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ```

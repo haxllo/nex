@@ -196,15 +196,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .with_decorations(false)
         .with_resizable(false)
         .with_always_on_top(true)
-        .with_visible(false)
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, INITIAL_HEIGHT))
         .with_window_classname("NexOverlayWindowClass");
     if recording {
-        // Recording mode: keep on taskbar (helps capture APIs enumerate the window),
-        // skip transparent + no-redirection-bitmap so recorders see solid content.
-        builder = builder;
+        // Recording mode: opaque, visible immediately, on taskbar —
+        // so screen recorders (Recordly, OBS, etc.) can enumerate and capture it.
+        builder = builder.with_visible(true);
     } else {
         builder = builder
+            .with_visible(false)
             .with_skip_taskbar(true)
             .with_transparent(true)
             .with_no_redirection_bitmap(true);
@@ -464,6 +464,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     focus_input(&webview);
                 }
                 UiCommand::Hide => {
+                    // In recording mode, never hide — keep overlay visible for capture.
+                    if is_recording_mode() {
+                        return;
+                    }
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
                     // RIT to register it, so that when RIDEV_NOHOTKEYS is
                     // removed and the window is hidden, the newly-foreground
@@ -525,6 +529,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
                 }
                 UiCommand::HideSync(ack) => {
+                    if is_recording_mode() {
+                        let _ = ack.send(());
+                        return;
+                    }
                     crate::overlay::hotkey::hold_mask_before_hide();
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
@@ -1529,8 +1537,9 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 
 /// Apply acrylic backdrop. CSS handles border-radius + box-shadow on #panel.
 /// Returns true if NEX_RECORDING_MODE is set to "1" or "true".
-/// In recording mode, the overlay uses an opaque background and skips
-/// WS_EX_NOREDIRECTIONBITMAP so screen recorders can capture it.
+/// In recording mode, the overlay uses an opaque background, skips
+/// WS_EX_NOREDIRECTIONBITMAP, stays visible, and uses a standard
+/// window so screen recorders can capture it.
 fn is_recording_mode() -> bool {
     std::env::var("NEX_RECORDING_MODE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

@@ -113,3 +113,5 @@ All commits MUST use the repo owner's identity. Never commit with a bot/AI name.
 ```bash
 git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ```
+
+**Note**: Use this identity for any git operation that requires an author (commits, amends, rebases, etc.).

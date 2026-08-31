@@ -106,6 +106,19 @@ const INITIAL_HEIGHT: f64 = 60.0;
 const MAX_HEIGHT: f64 = 530.0;
 const FOCUS_GRACE_MS: u64 = 400;
 
+/// How long after a Show completes focus-loss is treated as a flap-pair
+/// rather than a genuine dismissal. During this window we always defer
+/// to the 150ms deferred-hide path, which checks `has_focus` after
+/// WebView2 settles and only fires Escape if focus did not come back.
+///
+/// This is the fix for the "first press after long idle flashes then
+/// hides" bug: after `ui_warm_release_ms` (5s) of idle the user can be
+/// well outside the old 1500ms re-assert window, so a single focus-flap
+/// from WebView2 acquiring its input element fires Escape immediately.
+/// 2000ms covers typical Explorer/Task Manager re-assertion cycles while
+/// still feeling snappy on a real outside click.
+const POST_SHOW_QUIESCENCE_MS: u64 = 2000;
+
 ///Embedded UI assets for settings window
 const SETTINGS_HTML: &str= include_str!("../../assets/settings.html");
 const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
@@ -858,25 +871,70 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             focus_input(&webview);
                             return;
                         }
-                        crate::runtime::log_info(&format!(
-                            "[nex::debug] Focused(false): sending Escape (was_focused={} show_pending={} grace={}ms state_vis={})",
-                            was_focused_val, show_pending_val, grace_ms, state_vis,
-                        ));
-                        // PROBE: name the window that stole focus.
-                        unsafe {
-                            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                                GetForegroundWindow, GetWindowTextW,
-                            };
-                            let fg = GetForegroundWindow();
-                            let mut buf = [0u16; 128];
-                            let len = GetWindowTextW(fg, buf.as_mut_ptr(), 128);
-                            let title: String = String::from_utf16_lossy(&buf[..len as usize]);
+                        // Within the post-show quiescence window a focus loss
+                        // is almost always a WebView2 flap-pair (Chromium
+                        // moving focus from container HWND into its input
+                        // element) rather than a real outside click. Defer
+                        // to the 150ms thread below which checks has_focus
+                        // after settling. Without this, the first show after
+                        // a long idle (grace_ms > 1500) fires Escape on the
+                        // first flap and the overlay flashes then hides.
+                        if grace_ms < POST_SHOW_QUIESCENCE_MS {
                             crate::runtime::log_info(&format!(
-                                "[nex::probe] focus thief: fg=0x{:x} title='{}'",
-                                fg as isize, title
+                                "[nex::debug] Focused(false): deferring to quiescence check (grace={}ms)",
+                                grace_ms
                             ));
+                            // Reset the re-assert slot so a second flap-pair
+                            // inside the quiescence window gets another
+                            // re-assert attempt.
+                            focus_reassert_used = false;
+                            // Arm the deferred-hide thread inline. The 150ms
+                            // window is enough for WebView2 to finish moving
+                            // focus into its input element and post a
+                            // Focused(true) back; if focus does NOT return
+                            // we treat it as a genuine dismissal.
+                            if !deferred_hide_armed.swap(true, Ordering::SeqCst) {
+                                let state_clone = state.clone();
+                                let tx_clone = event_tx.clone();
+                                let armed = deferred_hide_armed.clone();
+                                std::thread::Builder::new()
+                                    .name("nex-deferred-hide".into())
+                                    .spawn(move || {
+                                        std::thread::sleep(Duration::from_millis(150));
+                                        if let Ok(s) = state_clone.lock() {
+                                            if s.visible
+                                                && !s.has_focus
+                                                && !crate::overlay::hotkey::is_bare_win_press_active()
+                                            {
+                                                let _ = tx_clone.send(OverlayEvent::Escape);
+                                            }
+                                        }
+                                        armed.store(false, Ordering::SeqCst);
+                                    })
+                                    .ok();
+                            }
+                            return;
+                        } else {
+                            crate::runtime::log_info(&format!(
+                                "[nex::debug] Focused(false): sending Escape (was_focused={} show_pending={} grace={}ms state_vis={})",
+                                was_focused_val, show_pending_val, grace_ms, state_vis,
+                            ));
+                            // PROBE: name the window that stole focus.
+                            unsafe {
+                                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                                    GetForegroundWindow, GetWindowTextW,
+                                };
+                                let fg = GetForegroundWindow();
+                                let mut buf = [0u16; 128];
+                                let len = GetWindowTextW(fg, buf.as_mut_ptr(), 128);
+                                let title: String = String::from_utf16_lossy(&buf[..len as usize]);
+                                crate::runtime::log_info(&format!(
+                                    "[nex::probe] focus thief: fg=0x{:x} title='{}'",
+                                    fg as isize, title
+                                ));
+                            }
+                            let _ = event_tx.send(OverlayEvent::Escape);
                         }
-                        let _ = event_tx.send(OverlayEvent::Escape);
                     } else {
                         crate::runtime::log_info(&format!(
                             "[nex::debug] Focused(false): BLOCKED Escape (was_focused={} show_pending={} bare_win={} grace={}ms state_vis={})",

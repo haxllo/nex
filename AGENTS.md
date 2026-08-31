@@ -115,3 +115,7 @@ git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ```
 
 **Note**: Use this identity for any git operation that requires an author (commits, amends, rebases, etc.).
+
+## Commit Message Content
+
+Commit message bodies MUST contain NO AI agent embedded names. This means absolutely NO `Co-authored-by:` trailers referencing any bot or AI, NO bot signatures, NO mentions of AI assistants, and NO references to agent systems. This applies to commit messages, tag messages, branch descriptions, and any other git-related text.

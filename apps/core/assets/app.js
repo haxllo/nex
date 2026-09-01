@@ -50,6 +50,74 @@
     { passive: true }
   );
 
+  // Drag the overlay by holding anywhere that isn't interactive
+  // (input, button, row, context-menu, power menu, etc.). Position resets
+  // to the default anchor on every show — only the current show's drag
+  // sticks. JS captures the gesture, posts dx/dy to Rust, Rust calls
+  // window.set_outer_position. No native Win32 drag plumbing required.
+  const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, .power-panel, .power-confirm";
+  let dragStartScreenX = 0;
+  let dragStartScreenY = 0;
+  let dragLastScreenX = 0;
+  let dragLastScreenY = 0;
+  let dragging = false;
+  function beginDrag(clientX, clientY, target) {
+    if (target.closest(DRAG_BLOCKED)) return false;
+    if (target.isContentEditable) return false;
+    dragStartScreenX = clientX;
+    dragStartScreenY = clientY;
+    dragLastScreenX = clientX;
+    dragLastScreenY = clientY;
+    dragging = true;
+    post("dragStart");
+    return true;
+  }
+  function continueDrag(clientX, clientY) {
+    if (!dragging) return;
+    const dx = clientX - dragLastScreenX;
+    const dy = clientY - dragLastScreenY;
+    dragLastScreenX = clientX;
+    dragLastScreenY = clientY;
+    if (dx === 0 && dy === 0) return;
+    post("drag", { dx, dy });
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    post("dragEnd");
+  }
+  panel.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    beginDrag(e.clientX, e.clientY, e.target);
+  });
+  // Listen on document so we don't lose capture if the cursor leaves
+  // the panel mid-drag (e.g. user drags up off the panel while there
+  // are no rows). mouseup on document guarantees release.
+  document.addEventListener("mousemove", (e) => {
+    if (dragging) continueDrag(e.clientX, e.clientY);
+  });
+  document.addEventListener("mouseup", () => {
+    endDrag();
+  });
+  // Esc / window-blur during drag should also release — otherwise the
+  // next show sees a stale drag-active flag and skips re-center.
+  window.addEventListener("blur", () => endDrag());
+  // Block the native click default while a drag is in flight so a row
+  // mousedown doesn't bubble through as a click after the user has
+  // already moved the window. Click events on rows are gated by the
+  // browser's own threshold (no significant motion = click fires),
+  // but starting a drag preventsDefault to be explicit about the intent.
+  panel.addEventListener(
+    "mousedown",
+    (e) => {
+      if (dragging) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    true
+  );
+
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
   const iconCache = new Map();

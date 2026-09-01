@@ -58,6 +58,12 @@ pub(crate) fn rearm_raw_input_sink() {
     register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
 }
 
+/// True while the user is dragging the overlay. While true, [`UiCommand::Show`]
+/// skips `position_window` so the next show does not yank a mid-drag window
+/// back to its default anchor. Set by `DragStart`, cleared by `DragEnd` or by
+/// the hide paths (Escape / focus-loss / HideSync).
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -176,6 +182,14 @@ pub(crate) enum UiCommand {
     FocusReassert,
     /// Close (hide) the settings window via tao API.
     CloseSettings,
+    /// Begin a user drag on the overlay. Latches DRAG_ACTIVE so the
+    /// next Show won't re-center while the user is mid-drag.
+    DragStart,
+    /// Relative window move (CSS pixels). Applied as a delta against
+    /// the current outer position. JS posts this on each mousemove.
+    DragMove { dx: i32, dy: i32 },
+    /// End the drag. DRAG_ACTIVE resets so the next Show re-centers.
+    DragEnd,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -444,7 +458,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
-                    position_window(&window, hwnd);
+                    // Skip the default-position anchor if the user is
+                    // mid-drag — pulling the window back to the center
+                    // while they're still holding it would yank it out
+                    // from under their cursor.
+                    if !DRAG_ACTIVE.load(Ordering::SeqCst) {
+                        position_window(&window, hwnd);
+                    }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
@@ -518,6 +538,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
+                    // Drop any in-flight drag so the next show re-centers.
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -546,6 +568,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     focus_reassert_used = false;
                     show_pending = false;
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -715,6 +738,31 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         force_foreground(hwnd);
                         focus_input(&webview);
                     }
+                }
+                UiCommand::DragStart => {
+                    // User mousedown on a non-interactive region. Latch so
+                    // the next Show (which can race with the drag if the
+                    // user is fast) doesn't re-center the window.
+                    DRAG_ACTIVE.store(true, Ordering::SeqCst);
+                }
+                UiCommand::DragMove { dx, dy } => {
+                    if !DRAG_ACTIVE.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // JS sends CSS-px deltas; the window is sized and
+                    // positioned in physical pixels via tao. Scale both
+                    // axes by the current scale factor so a HiDPI display
+                    // moves 1:1 with the cursor instead of lagging.
+                    let scale = window.scale_factor();
+                    let cur = window
+                        .outer_position()
+                        .unwrap_or(PhysicalPosition::new(0, 0));
+                    let nx = cur.x + (dx as f64 * scale).round() as i32;
+                    let ny = cur.y + (dy as f64 * scale).round() as i32;
+                    window.set_outer_position(PhysicalPosition::new(nx, ny));
+                }
+                UiCommand::DragEnd => {
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                 }
                 UiCommand::CloseSettings => {
                     if let Some((w, _)) = &settings_ui {
@@ -1202,6 +1250,24 @@ fn handle_ipc(
         }
         "settings" => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
+        }
+        "dragStart" => {
+            try_send_ui(proxy, UiCommand::DragStart);
+        }
+        "drag" => {
+            // JS sends {t:"drag", v:{dx,dy}} as CSS-pixel deltas since the
+            // last mousemove. Rust applies a scale-corrected physical
+            // move on the event-loop thread (tao outer_position).
+            let obj = match value.get("v") {
+                Some(serde_json::Value::Object(o) ) => o,
+                _ => return,
+            };
+            let dx = obj.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let dy = obj.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            try_send_ui(proxy, UiCommand::DragMove { dx, dy });
+        }
+        "dragEnd" => {
+            try_send_ui(proxy, UiCommand::DragEnd);
         }
         _ => {}
     }

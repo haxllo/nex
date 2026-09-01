@@ -33,6 +33,7 @@
   --kbd-cap-bg: rgba(255, 255, 255, 0.10);
   --kbd-cap-border: rgba(0, 0, 0, 0.35);
   --icon-bg: rgba(255, 255, 255, 0.06);
+  --text-select: rgba(255, 255, 255, 0.28);
   --lock: #6ea8fe;
   --logout: #ffb454;
   --sleep: #b07cff;
@@ -58,6 +59,7 @@ html[data-theme="light"] {
   --kbd-cap-bg: #FFFFFF;
   --kbd-cap-border: rgba(0, 0, 0, 0.15);
   --icon-bg: rgba(0, 0, 0, 0.05);
+  --text-select: rgba(0, 0, 0, 0.18);
   --lock: #2f6bff;
   --logout: #d97706;
   --sleep: #8b5cf6;
@@ -134,6 +136,17 @@ body {
 #query::placeholder {
   color: var(--text-dim);
   font-weight: 300;
+}
+
+/* Grey text selection in the query input — subtle, theme-aware.
+   Works with select-all on Tab / click / drag. */
+#query::selection {
+  background: var(--text-select);
+  color: var(--text);
+}
+#query::-moz-selection {
+  background: var(--text-select);
+  color: var(--text);
 }
 
 #help {

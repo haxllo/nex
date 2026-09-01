@@ -58,6 +58,21 @@ pub(crate) fn rearm_raw_input_sink() {
     register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
 }
 
+/// True while the user is mid native caption-drag of the overlay.
+/// Flipped on `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` by the root
+/// subclass. While true, [`UiCommand::Show`] skips `position_window`
+/// so the next show doesn't yank a still-held window back to center.
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Cached display scale factor for the overlay window. Read once on
+/// the first drag move, reused for the lifetime of the process.
+static DRAG_CACHED_SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Previous window top-left in physical pixels. Seeded on the first
+/// move of each drag with the live `GetWindowRect`; subsequent moves
+/// are pure delta-add so we never round-trip Win32 per move.
+static DRAG_LAST_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+static DRAG_LAST_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -93,8 +108,8 @@ use windows_sys::Win32::UI::Input::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, RegisterWindowMessageW, SetWindowPos,
-    WM_INPUT,
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_INPUT,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE,
 };
 
 use crate::overlay::icons::IconCache;
@@ -176,6 +191,15 @@ pub(crate) enum UiCommand {
     FocusReassert,
     /// Close (hide) the settings window via tao API.
     CloseSettings,
+    /// JS drag began. Latches DRAG_ACTIVE so the next Show skips
+    /// position_window (don't yank a held window back to center).
+    DragStart,
+    /// JS drag — cumulative CSS-pixel delta since last dispatch.
+    /// Applied in handle_ipc directly via SetWindowPos on OVERLAY_HWND
+    /// (no event-loop hop — wry's IPC thread serves the move).
+    DragMove { dx: i32, dy: i32 },
+    /// JS drag ended. Clears DRAG_ACTIVE.
+    DragEnd,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -444,7 +468,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
-                    position_window(&window, hwnd);
+                    // If the user is mid native drag (caption-drag of a
+                    // borderless popup), don't re-center the window — that
+                    // would yank it from under their cursor. The drag will
+                    // finish naturally; the next show after that resets.
+                    if !DRAG_ACTIVE.load(Ordering::SeqCst) {
+                        position_window(&window, hwnd);
+                    }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
@@ -518,6 +548,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
+                    // Drop any in-flight drag so the next show re-centers.
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -546,6 +578,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     focus_reassert_used = false;
                     show_pending = false;
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -724,6 +757,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
                     }
                 }
+                UiCommand::DragStart => {
+                    DRAG_ACTIVE.store(true, Ordering::SeqCst);
+                    // Force re-seed of the cached previous position on
+                    // the first move of this drag.
+                    DRAG_LAST_X.store(i32::MIN, Ordering::Relaxed);
+                    DRAG_LAST_Y.store(i32::MIN, Ordering::Relaxed);
+                    DRAG_CACHED_SCALE.store(0, Ordering::Relaxed);
+                }
+                UiCommand::DragEnd => {
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
+                }
                 UiCommand::Quit => {
                     *control_flow = ControlFlow::Exit;
                     // Post WM_QUIT to force GetMessageW in run_return to
@@ -826,6 +870,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             "window.saveResult && window.saveResult({json})"
                         ));
                     }
+                }
+                UiCommand::DragMove { .. } => {
+                    // Applied in-place in handle_ipc on the wry IPC thread
+                    // to avoid the event-loop hop that caused jitter.
+                    // This arm is defensive — DragMove should never reach
+                    // the event loop.
                 }
             },
             Event::WindowEvent {
@@ -1202,6 +1252,28 @@ fn handle_ipc(
         }
         "settings" => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
+        }
+        "dragStart" => {
+            // Latch on the main thread via the event-loop proxy so the
+            // Show arm sees DRAG_ACTIVE and skips position_window.
+            // The actual move path runs directly in handle_ipc on the
+            // wry IPC thread — no event-loop hop for individual moves.
+            try_send_ui(proxy, UiCommand::DragStart);
+        }
+        "drag" => {
+            // Apply the move directly here on the wry IPC thread to
+            // avoid the event-loop dispatch latency that caused the
+            // first-pass jitter. JS coalesces mousemove into one rAF.
+            let obj = match value.get("v") {
+                Some(serde_json::Value::Object(o)) => o,
+                _ => return,
+            };
+            let dx = obj.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let dy = obj.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            apply_drag_delta(dx, dy);
+        }
+        "dragEnd" => {
+            try_send_ui(proxy, UiCommand::DragEnd);
         }
         _ => {}
     }
@@ -1604,6 +1676,69 @@ fn apply_window_height(window: &Window, webview: Option<&WebView>, h: f64) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
+    }
+}
+
+/// Apply a CSS-pixel drag delta as a physical-pixel move on the
+/// cached overlay HWND. Called from the wry IPC thread (no event-loop
+/// hop) so high-rate move dispatch stays under one frame of latency.
+///
+/// We track the previous physical position in atomics so each move
+/// is a pure delta-add without a `GetWindowRect` round-trip — that
+/// extra Win32 call was the dominant source of lag. JS already
+/// sends CSS-pixel deltas; multiply by DPI scale for physical.
+fn apply_drag_delta(cx: i32, cy: i32) {
+    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    let scale_bits = DRAG_CACHED_SCALE.load(Ordering::Relaxed);
+    let scale = if scale_bits != 0 {
+        f64::from_bits(scale_bits)
+    } else {
+        let dpi = unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) } as i32;
+        let s = if dpi > 0 { dpi as f64 / 96.0 } else { 1.0 };
+        DRAG_CACHED_SCALE.store(s.to_bits(), Ordering::Relaxed);
+        s
+    };
+    let prev_x = DRAG_LAST_X.load(Ordering::Relaxed);
+    let prev_y = DRAG_LAST_Y.load(Ordering::Relaxed);
+    let (nx, ny) = if prev_x == i32::MIN {
+        let mut rect = std::mem::MaybeUninit::<windows_sys::Win32::Foundation::RECT>::uninit();
+        let ok = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                hwnd,
+                rect.as_mut_ptr(),
+            )
+        };
+        if ok == 0 {
+            return;
+        }
+        let rect = unsafe { rect.assume_init() };
+        DRAG_LAST_X.store(rect.left, Ordering::Relaxed);
+        DRAG_LAST_Y.store(rect.top, Ordering::Relaxed);
+        (
+            rect.left + (cx as f64 * scale).round() as i32,
+            rect.top + (cy as f64 * scale).round() as i32,
+        )
+    } else {
+        (
+            prev_x + (cx as f64 * scale).round() as i32,
+            prev_y + (cy as f64 * scale).round() as i32,
+        )
+    };
+    DRAG_LAST_X.store(nx, Ordering::Relaxed);
+    DRAG_LAST_Y.store(ny, Ordering::Relaxed);
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            nx,
+            ny,
+            0,
+            0,
+            SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 

@@ -366,7 +366,6 @@ img.icon.icon-pop {
 }
 .grid-view .row.row-grid:hover {
   background: var(--hover);
-  border-color: var(--border);
 }
 /* Selection is visual-only via :hover — no persistent highlight when
    the cursor is elsewhere or outside the window. */

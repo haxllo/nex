@@ -24,7 +24,6 @@ const TRAY_ICON_ID: u32 = 1;
 const TRAY_MESSAGE_CLASS: &str = "NexTrayMessageWindow";
 
 const TRAY_MENU_SHOW: u32 = 41001;
-const TRAY_MENU_OPEN_CONFIG: u32 = 41002;
 const TRAY_MENU_CHECK_UPDATES: u32 = 41003;
 const TRAY_MENU_GAME_MODE: u32 = 41004;
 const TRAY_MENU_QUIT: u32 = 41005;
@@ -311,7 +310,6 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
     }
 
     let open_text = to_wide("Open Nex");
-    let config_text = to_wide("Open Config");
     let settings_text = to_wide("Settings");
     let updates_text = to_wide("Check for Updates");
     let game_mode_text = to_wide("Game Mode");
@@ -324,12 +322,6 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
 
     unsafe {
         AppendMenuW(menu, MF_STRING, TRAY_MENU_SHOW as usize, open_text.as_ptr());
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            TRAY_MENU_OPEN_CONFIG as usize,
-            config_text.as_ptr(),
-        );
         AppendMenuW(
             menu,
             MF_STRING,
@@ -414,19 +406,6 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
         0 => {}
         TRAY_MENU_SHOW => {
             let _ = s.event_tx.send(OverlayEvent::ExternalShow);
-        }
-        TRAY_MENU_OPEN_CONFIG => {
-            let config_path = to_wide(&s.config_path);
-            unsafe {
-                ShellExecuteW(
-                    std::ptr::null_mut(),
-                    to_wide("open").as_ptr(),
-                    config_path.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    SW_SHOW,
-                );
-            }
         }
         TRAY_MENU_SETTINGS => {
             let _ = s.event_tx.send(OverlayEvent::OpenSettings);

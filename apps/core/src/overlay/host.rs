@@ -58,6 +58,12 @@ pub(crate) fn rearm_raw_input_sink() {
     register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
 }
 
+/// True while the user is mid native caption-drag of the overlay.
+/// Flipped around the modal move loop in [`UiCommand::DragStart`].
+/// While true, [`UiCommand::Show`] skips `position_window`
+/// so the next show doesn't yank a still-held window back to center.
+static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -93,8 +99,7 @@ use windows_sys::Win32::UI::Input::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, RegisterWindowMessageW, SetWindowPos,
-    WM_INPUT,
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    WM_INPUT, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE,
 };
 
 use crate::overlay::icons::IconCache;
@@ -176,6 +181,11 @@ pub(crate) enum UiCommand {
     FocusReassert,
     /// Close (hide) the settings window via tao API.
     CloseSettings,
+    /// JS drag began. Latches DRAG_ACTIVE, then enters the native
+    /// caption-drag modal loop (WM_NCLBUTTONDOWN + HTCAPTION) — the OS
+    /// moves the window in lockstep with the cursor, so there is no
+    /// per-move IPC, no delta math, no lag, and no ghost frames.
+    DragStart,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -444,7 +454,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
-                    position_window(&window, hwnd);
+                    // If the user is mid native drag (caption-drag of a
+                    // borderless popup), don't re-center the window — that
+                    // would yank it from under their cursor. The drag will
+                    // finish naturally; the next show after that resets.
+                    if !DRAG_ACTIVE.load(Ordering::SeqCst) {
+                        position_window(&window, hwnd);
+                    }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
@@ -518,6 +534,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
+                    // Drop any in-flight drag so the next show re-centers.
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -546,6 +564,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     focus_reassert_used = false;
                     show_pending = false;
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -723,6 +742,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         crate::runtime::log_info("[nex] settings window hidden via custom close");
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
                     }
+                }
+                UiCommand::DragStart => {
+                    // Latches so the next Show skips position_window,
+                    // then enters the native modal move loop. The
+                    // loop returns when the user releases the button,
+                    // so clearing the latch here is correct.
+                    DRAG_ACTIVE.store(true, Ordering::SeqCst);
+                    unsafe { begin_native_drag(hwnd); }
+                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                 }
                 UiCommand::Quit => {
                     *control_flow = ControlFlow::Exit;
@@ -1203,6 +1231,13 @@ fn handle_ipc(
         "settings" => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
         }
+        "dragStart" => {
+            // Latch + enter the native caption-drag modal loop on the
+            // UI thread. The loop blocks the event loop until button
+            // release — no per-move IPC at all, so the window tracks
+            // the cursor 1:1 with no lag and no ghost frames.
+            try_send_ui(proxy, UiCommand::DragStart);
+        }
         _ => {}
     }
 }
@@ -1605,6 +1640,30 @@ fn apply_window_height(window: &Window, webview: Option<&WebView>, h: f64) {
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
     }
+}
+
+/// Enter the native caption-drag modal move loop. The OS drives the
+/// move from the actual cursor position — zero IPC, zero delta math —
+/// so the window tracks the cursor 1:1 with no ghost frames (the old
+/// per-mousemove `SetWindowPos` loop repainted the transparent,
+/// no-redirection-bitmap surface faster than DWM recomposed it).
+///
+/// Returns when the user releases the left button. Must run on the
+/// UI thread (blocks the event loop for the duration of the drag).
+unsafe fn begin_native_drag(hwnd: HWND) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, HTCAPTION, SC_MOVE, WM_SYSCOMMAND,
+    };
+    // The blessed winit/tao sequence for a caption drag:
+    // ReleaseCapture first — the WebView2 child holds the mouse capture
+    // from the mousedown that triggered this — then WM_SYSCOMMAND with
+    // SC_MOVE | HTCAPTION starts the modal move loop and takes capture
+    // itself. (WM_NCLBUTTONDOWN + HTCAPTION does NOT work here: the
+    // child's capture swallows the NC hit-test and the loop never gets
+    // WM_MOUSEMOVE.)
+    let _ = ReleaseCapture();
+    SendMessageW(hwnd, WM_SYSCOMMAND, (SC_MOVE | HTCAPTION) as WPARAM, 0);
 }
 
 /// Center the window horizontally on the monitor under the cursor and

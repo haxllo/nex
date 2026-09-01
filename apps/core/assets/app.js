@@ -50,6 +50,27 @@
     { passive: true }
   );
 
+  // Drag the overlay by holding anywhere that isn't interactive
+  // (input, button, row, context-menu, power menu, etc.). Position
+  // resets to the default anchor on every show — only the current
+  // show's drag sticks. On mousedown we post a single `dragStart`;
+  // Rust enters the native caption-drag modal loop (WM_SYSCOMMAND
+  // + SC_MOVE | HTCAPTION) and the OS moves the window in lockstep
+  // with the cursor — no per-move IPC, no delta math, no ghost
+  // frames. Clicking any draggable (non-interactive) spot also
+  // focuses the input and selects its content so the user can type
+  // a fresh query without clearing the old one by hand.
+  const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, .power-panel, .power-confirm";
+  panel.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest(DRAG_BLOCKED)) return;
+    if (e.target.isContentEditable) return;
+    e.preventDefault();
+    input.focus();
+    input.select();
+    post("dragStart");
+  });
+
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).
   const iconCache = new Map();
@@ -700,6 +721,12 @@
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
+      } else if (e.key === "Tab") {
+        // Tab focuses the search input and selects its content so
+        // typing replaces the existing query — no manual erase.
+        e.preventDefault();
+        input.focus();
+        input.select();
       } else if (e.key === "Escape") {
         if (topPower.hasConfirm()) {
           topPower.closeConfirm();

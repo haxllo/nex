@@ -213,7 +213,12 @@
     li.setAttribute("role", "option");
     li.dataset.key = key;
     li.dataset.index = String(i);
-    if (i === selected) li.classList.add("selected");
+    if (i === selected) {
+      li.classList.add("selected");
+      li.setAttribute("aria-selected", "true");
+    } else {
+      li.setAttribute("aria-selected", "false");
+    }
 
     if (r.role !== "calculator") {
       if (r.role === "show_all_apps") {
@@ -443,9 +448,19 @@
     const prev = selected;
     selected = i;
     const prevEl = rowMap.get(prev);
-    if (prevEl) prevEl.classList.remove("selected");
+    if (prevEl) {
+      prevEl.classList.remove("selected");
+      prevEl.setAttribute("aria-selected", "false");
+    }
     const nextEl = rowMap.get(selected);
-    if (nextEl) nextEl.classList.add("selected");
+    if (nextEl) {
+      nextEl.classList.add("selected");
+      nextEl.setAttribute("aria-selected", "true");
+      list.setAttribute("aria-activedescendant", nextEl.id || `row-${nextEl.dataset.index}`);
+      if (!nextEl.id) nextEl.id = `row-${nextEl.dataset.index}`;
+    } else {
+      list.removeAttribute("aria-activedescendant");
+    }
     if (scroll) scrollToSelected();
     post("select", selected);
   }

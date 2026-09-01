@@ -232,6 +232,15 @@ body {
 .row:hover {
   background: var(--hover);
 }
+/* Keyboard/click selection — must win over :hover so the user can see
+   which row is active when the cursor is parked elsewhere. */
+.row.selected {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+}
+.row.selected:hover {
+  background: var(--hover);
+}
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
 .row .path-hint {
   position: absolute;

@@ -53,83 +53,17 @@
   // Drag the overlay by holding anywhere that isn't interactive
   // (input, button, row, context-menu, power menu, etc.). Position
   // resets to the default anchor on every show — only the current
-  // show's drag sticks. JS captures the gesture, posts CSS-px deltas
-  // to Rust; Rust applies via SetWindowPos on the wry IPC thread
-  // (no event-loop hop).
-  //
-  // We tried two intermediate buffering strategies:
-  //  1. requestAnimationFrame coalescing — caps dispatch at the
-  //     WebView2 compositor's paint rate, which can lag the cursor
-  //     on busy machines and is not synchronized to mouse input.
-  //  2. setTimeout coalescing — same lag, plus adds wake latency.
-  // Both made the window visibly trail the cursor. The fastest
-  // path is the dumb one: post every mousemove immediately.
-  // window.ipc.postMessage queues async into wry's IPC thread, and
-  // SetWindowPos is cheap native Win32 — it keeps up with 1000-Hz
-  // mice. If a frame is missed the next move just overwrites the
-  // prior target position; there's no buffering needed because the
-  // window's final position is determined by the latest move, not
-  // by the sum of deltas.
+  // show's drag sticks. On mousedown we post a single `dragStart`;
+  // Rust enters the native caption-drag modal loop (WM_NCLBUTTONDOWN
+  // + HTCAPTION) and the OS moves the window in lockstep with the
+  // cursor — no per-move IPC, no delta math, no ghost frames.
   const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, .power-panel, .power-confirm";
-  let dragging = false;
-  let dragLastX = 0;
-  let dragLastY = 0;
-  function beginDrag(clientX, clientY, target) {
-    if (target.closest(DRAG_BLOCKED)) return false;
-    if (target.isContentEditable) return false;
-    dragging = true;
-    dragLastX = clientX;
-    dragLastY = clientY;
-    post("dragStart");
-    return true;
-  }
-  function continueDrag(clientX, clientY) {
-    if (!dragging) return;
-    // Cumulative CSS-pixel delta since last post. Out-of-order IPC
-    // delivery on the wry thread is harmless: each move carries its
-    // own delta, and SetWindowPos is idempotent on the resulting
-    // window rect.
-    const dx = clientX - dragLastX;
-    const dy = clientY - dragLastY;
-    dragLastX = clientX;
-    dragLastY = clientY;
-    if (dx === 0 && dy === 0) return;
-    post("drag", { dx, dy });
-  }
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    post("dragEnd");
-  }
   panel.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
-    beginDrag(e.clientX, e.clientY, e.target);
+    if (e.target.closest(DRAG_BLOCKED)) return;
+    if (e.target.isContentEditable) return;
+    post("dragStart");
   });
-  // Document-level mousemove so we keep receiving events if the cursor
-  // leaves the panel mid-drag (e.g. user drags upward off the search
-  // row while there are no results to hover).
-  document.addEventListener("mousemove", (e) => {
-    if (dragging) continueDrag(e.clientX, e.clientY);
-  });
-  // mouseup on document guarantees release even if the cursor ends up
-  // outside the window.
-  document.addEventListener("mouseup", () => endDrag());
-  // Window blur also releases — Escape + auto-hide can fire while the
-  // mouse is still down, leaving the latch stuck.
-  window.addEventListener("blur", () => endDrag());
-  // While a drag is in flight, swallow the default mousedown behavior
-  // on the panel so a stray click can't fire (e.g. text selection
-  // starting inside a row while the user is moving it).
-  panel.addEventListener(
-    "mousedown",
-    (e) => {
-      if (dragging) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    },
-    true
-  );
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.
   // Key: icon path (string), Value: data URI (string).

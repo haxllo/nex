@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -278,6 +278,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut last_show = Instant::now();
     let mut show_pending = false;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
+    // Epoch counter: incremented on every Show so stale deferred-hide
+    // threads from a previous cycle can detect they are outdated and
+    // skip firing Escape.
+    let deferred_hide_epoch = Arc::new(AtomicU64::new(0));
 
     // Resize debounce state. Growth requests go through a debounce
     // timer (UiCommand::Resize stores the target height and arms the
@@ -453,7 +457,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     show_pending = true;
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
+                    // Bump the epoch so any in-flight deferred-hide thread
+                    // from the previous cycle detects it is stale.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
+                    deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
                     // If the user is mid native drag (caption-drag of a
                     // borderless popup), don't re-center the window — that
                     // would yank it from under their cursor. The drag will
@@ -534,6 +541,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
+                    deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
                     // Drop any in-flight drag so the next show re-centers.
                     DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
@@ -925,10 +933,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 let state_clone = state.clone();
                                 let tx_clone = event_tx.clone();
                                 let armed = deferred_hide_armed.clone();
+                                let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
+                                let epoch_clone = deferred_hide_epoch.clone();
                                 std::thread::Builder::new()
                                     .name("nex-deferred-hide".into())
                                     .spawn(move || {
                                         std::thread::sleep(Duration::from_millis(150));
+                                        // If a new Show happened during the
+                                        // sleep, the epoch will have advanced —
+                                        // skip firing Escape.
+                                        if epoch_clone.load(Ordering::SeqCst) != my_epoch {
+                                            armed.store(false, Ordering::SeqCst);
+                                            return;
+                                        }
                                         if let Ok(s) = state_clone.lock() {
                                             if s.visible
                                                 && !s.has_focus
@@ -980,10 +997,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             let state_clone = state.clone();
                             let tx_clone = event_tx.clone();
                             let armed = deferred_hide_armed.clone();
+                            let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
+                            let epoch_clone = deferred_hide_epoch.clone();
                             std::thread::Builder::new()
                                 .name("nex-deferred-hide".into())
                                 .spawn(move || {
                                     std::thread::sleep(Duration::from_millis(150));
+                                    // If a new Show happened during the
+                                    // sleep, the epoch will have advanced —
+                                    // skip firing Escape.
+                                    if epoch_clone.load(Ordering::SeqCst) != my_epoch {
+                                        armed.store(false, Ordering::SeqCst);
+                                        return;
+                                    }
                                     if let Ok(s) = state_clone.lock() {
                                         if s.visible
                                             && !s.has_focus

@@ -1380,7 +1380,7 @@ impl RuntimeWorker {
                     action, self.overlay.has_focus(),
                 ));
                 match action {
-                    HotkeyAction::ShowAndFocus | HotkeyAction::FocusExisting => {
+                    HotkeyAction::ShowAndFocus => {
                         // Warm search indexes synchronously before showing the
                         // overlay.  The user can't type until the window appears
                         // (~160ms animation) and the IPC channel is live, so
@@ -1404,6 +1404,13 @@ impl RuntimeWorker {
                         if self.runtime_config.clipboard_enabled {
                             let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
                         }
+                    }
+                    HotkeyAction::FocusExisting => {
+                        // Overlay is visible but lost focus (e.g. Explorer
+                        // reasserted foreground). Refocus the input without
+                        // re-sending the Show command — avoids triggering a
+                        // second show cycle and the associated focus-flap.
+                        self.overlay.focus_search_input();
                     }
                     HotkeyAction::Hide => {
                         self.overlay.hide();

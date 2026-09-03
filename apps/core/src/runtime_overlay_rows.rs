@@ -1,8 +1,10 @@
+use crate::clipboard_history::{ClipboardContentType, ClipboardEntry};
 use crate::model::{self, SearchItem};
 use crate::runtime::log_warn;
 use crate::uninstall_registry;
 #[cfg(target_os = "windows")]
 use crate::overlay::{NativeOverlayShell, OverlayRow, OverlayRowRole};
+use crate::overlay::model::TileSize;
 
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
@@ -151,6 +153,9 @@ pub(crate) fn overlay_rows_ext(
             title: "Show all apps".to_string(),
             path: String::new(),
             icon_path: String::new(),
+            clipboard_thumbnail: None,
+            clipboard_full_image: None,
+            tile_size: None,
         });
     }
     append_group_rows(&mut rows, "Folders", &kind_buckets[1], results, command_mode);
@@ -232,6 +237,9 @@ pub(crate) fn result_row(
         title: item.title.clone(),
         path: overlay_subtitle(item, command_mode),
         icon_path: item.path.clone(),
+        clipboard_thumbnail: None,
+        clipboard_full_image: None,
+        tile_size: None,
     }
 }
 
@@ -247,6 +255,9 @@ pub(crate) fn header_row(label: &str) -> OverlayRow {
         title: label.to_string(),
         path: String::new(),
         icon_path: String::new(),
+        clipboard_thumbnail: None,
+        clipboard_full_image: None,
+        tile_size: None,
     }
 }
 
@@ -622,6 +633,9 @@ pub(crate) fn build_quick_launch_rows(
             title: item.title.clone(),
             path: quick_launch_subtitle(&item.subtitle),
             icon_path: item.icon_path.clone(),
+            clipboard_thumbnail: None,
+            clipboard_full_image: None,
+            tile_size: None,
         })
         .collect()
 }
@@ -638,6 +652,86 @@ pub(crate) fn set_quick_launch_overlay_state(
     overlay.set_status_text("");
 }
 
+/// Determine tile size based on clipboard entry content.
+fn tile_size_for_entry(entry: &ClipboardEntry) -> TileSize {
+    match entry.content_type {
+        ClipboardContentType::Image => TileSize::Large,
+        ClipboardContentType::Text => {
+            let len = entry.text.len();
+            if len < 80 {
+                TileSize::Small
+            } else if len < 240 {
+                TileSize::Medium
+            } else {
+                TileSize::Large
+            }
+        }
+    }
+}
+
+/// Build bento grid rows for clipboard history view.
+/// Each entry becomes a tile with variable size based on content type and length.
+#[cfg(target_os = "windows")]
+pub(crate) fn build_clipboard_bento_rows(entries: &[ClipboardEntry]) -> Vec<OverlayRow> {
+    entries
+        .iter()
+        .map(|entry| {
+            let tile_size = tile_size_for_entry(entry);
+            let (title, thumbnail, full_image) = match entry.content_type {
+                ClipboardContentType::Image => {
+                    let thumb = entry
+                        .thumbnail_data
+                        .as_ref()
+                        .map(|d| format!("data:image/png;base64,{}", base64_encode(d)));
+                    let full = entry
+                        .image_data
+                        .as_ref()
+                        .map(|d| format!("data:image/png;base64,{}", base64_encode(d)));
+                    (String::new(), thumb, full)
+                }
+                ClipboardContentType::Text => (entry.text.clone(), None, None),
+            };
+
+            OverlayRow {
+                role: OverlayRowRole::ClipboardHistory,
+                result_index: None,
+                kind: "clipboard_history".to_string(),
+                title,
+                path: entry.id.clone(),
+                icon_path: String::new(),
+                clipboard_thumbnail: thumbnail,
+                clipboard_full_image: full_image,
+                tile_size: Some(tile_size),
+            }
+        })
+        .collect()
+}
+
+/// Encode bytes as base64 string (standard alphabet, with padding).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() >= 2 {
+            out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(CHARS[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message: &str) {
     overlay.clear_placeholder_hint();
@@ -648,6 +742,9 @@ pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message
         title: message.to_string(),
         path: String::new(),
         icon_path: String::new(),
+        clipboard_thumbnail: None,
+        clipboard_full_image: None,
+        tile_size: None,
     }];
     overlay.set_results(&rows, 0);
     overlay.set_status_text("");

@@ -1,11 +1,13 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::time::UNIX_EPOCH;
 
 use crate::action_registry::{
-    ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_DIAGNOSTICS_BUNDLE_ID,
-    ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_REBUILD_INDEX_ID,
-    ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID,
-    ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX, ACTION_OPEN_URL_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
+    ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_CLIPBOARD_HISTORY_ID,
+    ACTION_DIAGNOSTICS_BUNDLE_ID, ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID,
+    ACTION_REBUILD_INDEX_ID, ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID,
+    ACTION_SLEEP_ID, ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX,
+    ACTION_OPEN_URL_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::Config;
@@ -81,6 +83,8 @@ pub(crate) fn power_confirmation_results(kind: ConfirmationKind) -> Vec<SearchIt
     ]
 }
 
+/// Returns Ok(reset_session) where reset_session=false means the action
+/// set up a special view that should not be cleared by the post-action reset.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn launch_overlay_selection(
     service: &CoreService,
@@ -89,7 +93,8 @@ pub(crate) fn launch_overlay_selection(
     results: &[SearchItem],
     selected_index: usize,
     query_text: &str,
-) -> Result<(), String> {
+    overlay: &crate::overlay::shim::NativeOverlayShell,
+) -> Result<bool, String> {
     if results.is_empty() {
         return Err("no result selected".to_string());
     }
@@ -103,10 +108,11 @@ pub(crate) fn launch_overlay_selection(
 
     let selected = &results[selected_index];
     if selected.kind.eq_ignore_ascii_case("action") {
-        return execute_action_selection(service, cfg, plugins, selected);
+        return execute_action_selection(service, cfg, plugins, selected, overlay);
     }
     if selected.kind.eq_ignore_ascii_case("clipboard") {
-        return clipboard_history::copy_result_to_clipboard(cfg, &selected.id);
+        return clipboard_history::copy_result_to_clipboard(cfg, &selected.id)
+            .map(|_| true);
     }
 
     let parsed_query = ParsedQuery::parse(query_text.trim(), cfg.search_dsl_enabled);
@@ -118,7 +124,7 @@ pub(crate) fn launch_overlay_selection(
     // Record the launch for Quick Launch usage tracking
     if selected.kind.eq_ignore_ascii_case("app") {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let db = service.db_ref();
@@ -127,26 +133,32 @@ pub(crate) fn launch_overlay_selection(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
+/// Returns Ok(reset_session) where reset_session=false means the action
+/// set up a special view (e.g. clipboard history bento) that should not
+/// be cleared by the post-action session reset.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn execute_action_selection(
     service: &CoreService,
     cfg: &Config,
     plugins: &PluginRegistry,
     selected: &SearchItem,
-) -> Result<(), String> {
+    overlay: &crate::overlay::shim::NativeOverlayShell,
+) -> Result<bool, String> {
     if selected
         .id
         .starts_with(crate::uninstall_registry::ACTION_UNINSTALL_PREFIX)
     {
         return crate::uninstall_registry::execute_uninstall_action(&selected.id)
+            .map(|_| true)
             .map_err(|error| format!("uninstall launch failed: {error}"));
     }
 
     if selected.id.starts_with(ACTION_WEB_SEARCH_PREFIX) {
         return crate::action_executor::launch_open_target(selected.path.trim())
+            .map(|_| true)
             .map_err(|error| format!("web search launch failed: {error}"));
     }
 
@@ -154,12 +166,14 @@ pub(crate) fn execute_action_selection(
         let target = std::path::PathBuf::from(selected.path.trim());
         if target.exists() {
             return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+                .map(|_| true)
                 .map_err(|error| format!("open folder failed: {error}"));
         }
         std::fs::create_dir_all(&target)
             .map_err(|error| format!("create folder failed: {error}"))?;
         log_info(&format!("[nex] created folder {}", target.display()));
         return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+            .map(|_| true)
             .map_err(|error| format!("reveal folder failed: {error}"));
     }
 
@@ -168,6 +182,7 @@ pub(crate) fn execute_action_selection(
         if target.exists() {
             // Row said "Open file" — launch it.
             return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+                .map(|_| true)
                 .map_err(|error| format!("open file failed: {error}"));
         }
         // Row said "Create file" — create_new never overwrites an
@@ -179,16 +194,19 @@ pub(crate) fn execute_action_selection(
             .map_err(|error| format!("create file failed: {error}"))?;
         log_info(&format!("[nex] created file {}", target.display()));
         return crate::action_executor::launch_path(target.to_string_lossy().as_ref())
+            .map(|_| true)
             .map_err(|error| format!("open created file failed: {error}"));
     }
 
     if selected.id.starts_with(ACTION_OPEN_URL_PREFIX) {
         return crate::action_executor::launch_open_target(selected.path.trim())
+            .map(|_| true)
             .map_err(|error| format!("open url failed: {error}"));
     }
 
     match selected.id.as_str() {
         ACTION_OPEN_LOGS_ID => crate::logging::open_logs_folder()
+            .map(|_| true)
             .map_err(|error| format!("open logs folder failed: {error}")),
         ACTION_REBUILD_INDEX_ID => {
             let report = service
@@ -201,11 +219,19 @@ pub(crate) fn execute_action_selection(
                 report.upserted_total,
                 report.removed_total
             ));
-            Ok(())
+            Ok(true)
         }
-        ACTION_CLEAR_CLIPBOARD_ID => clipboard_history::clear_history(cfg),
+        ACTION_CLEAR_CLIPBOARD_ID => clipboard_history::clear_history(cfg).map(|_| true),
+        ACTION_CLIPBOARD_HISTORY_ID => {
+            let entries = clipboard_history::load_all_entries(cfg);
+            let rows = crate::runtime_overlay_rows::build_clipboard_bento_rows(&entries);
+            overlay.show_clipboard_history(rows);
+            // Don't reset session — we just set up the bento view
+            return Ok(false);
+        }
         ACTION_OPEN_CONFIG_ID => {
             crate::action_executor::launch_path(cfg.config_path.to_string_lossy().as_ref())
+                .map(|_| true)
                 .map_err(|error| format!("open config failed: {error}"))
         }
         ACTION_DIAGNOSTICS_BUNDLE_ID => {
@@ -215,36 +241,36 @@ pub(crate) fn execute_action_selection(
                 "[nex] diagnostics bundle written to {}",
                 output_dir.display()
             ));
-            Ok(())
+            Ok(true)
         }
         ACTION_CHECK_UPDATES_ID => crate::runtime_process::launch_stable_updater()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("check for updates failed: {error}")),
         ACTION_TRIM_MEMORY_ID => {
             log_info("[nex] trim memory action invoked");
-            Ok(())
+            Ok(true)
         }
         #[cfg(target_os = "windows")]
         ACTION_LOCK_ID => power_actions::lock()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("lock failed: {error}")),
         #[cfg(target_os = "windows")]
         ACTION_SLEEP_ID => power_actions::sleep()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("sleep failed: {error}")),
         #[cfg(target_os = "windows")]
         ACTION_SHUTDOWN_ID => power_actions::shutdown()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("shutdown failed: {error}")),
         #[cfg(target_os = "windows")]
         ACTION_RESTART_ID => power_actions::restart()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("restart failed: {error}")),
         #[cfg(target_os = "windows")]
         ACTION_SIGN_OUT_ID => power_actions::sign_out()
-            .map(|_| ())
+            .map(|_| true)
             .map_err(|error| format!("sign out failed: {error}")),
-        _ => execute_plugin_action(cfg, plugins, &selected.id),
+        _ => execute_plugin_action(cfg, plugins, &selected.id).map(|_| true),
     }
 }
 

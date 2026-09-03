@@ -10,14 +10,42 @@ const MAX_CLIPBOARD_ENTRIES: usize = 500;
 /// Magic bytes prefixing DPAPI-encrypted clipboard history files so we can
 /// distinguish them from plaintext JSON (legacy format) on read.
 const DPAPI_MAGIC: &[u8; 8] = b"NXCLPDPA";
+/// Max dimension for stored full-resolution images (keeps storage bounded).
+const MAX_IMAGE_DIM: u32 = 1280;
+/// Max dimension for thumbnails shown in the bento grid.
+const MAX_THUMBNAIL_DIM: u32 = 256;
 
 static CLIPBOARD_CACHE: Mutex<Option<Vec<ClipboardEntry>>> = Mutex::new(None);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ClipboardContentType {
+    Text,
+    Image,
+}
+
+impl Default for ClipboardContentType {
+    fn default() -> Self {
+        Self::Text
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClipboardEntry {
     pub id: String,
     pub text: String,
     pub captured_epoch_secs: i64,
+    #[serde(default)]
+    pub content_type: ClipboardContentType,
+    /// Full-resolution PNG bytes (populated when content_type == Image).
+    #[serde(default)]
+    pub image_data: Option<Vec<u8>>,
+    /// Compressed thumbnail PNG bytes for grid display.
+    #[serde(default)]
+    pub thumbnail_data: Option<Vec<u8>>,
+    #[serde(default)]
+    pub image_width: Option<u32>,
+    #[serde(default)]
+    pub image_height: Option<u32>,
 }
 
 pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
@@ -25,6 +53,44 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
         return Ok(false);
     }
 
+    let mut entries = load_entries(cfg);
+    let now = now_epoch_secs();
+
+    // Try image capture first (images take priority over text)
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(image) = read_system_clipboard_image()? {
+            let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
+            let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
+            let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
+            let full_encoded = encode_png(&full.data, full.width, full.height);
+
+            let entry = ClipboardEntry {
+                id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
+                text: String::new(),
+                captured_epoch_secs: now,
+                content_type: ClipboardContentType::Image,
+                image_data: Some(full_encoded),
+                thumbnail_data: Some(thumbnail_encoded),
+                image_width: Some(image.width),
+                image_height: Some(image.height),
+            };
+
+            if entries.first().is_some_and(|e| {
+                e.content_type == ClipboardContentType::Image
+                    && e.image_data == entry.image_data
+            }) {
+                return Ok(false);
+            }
+
+            entries.insert(0, entry);
+            prune_entries(cfg, &mut entries, now);
+            save_entries(cfg, &entries)?;
+            return Ok(true);
+        }
+    }
+
+    // Fall back to text capture
     let Some(raw) = read_system_clipboard_text()? else {
         return Ok(false);
     };
@@ -37,23 +103,62 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let mut entries = load_entries(cfg);
     if entries.first().is_some_and(|entry| entry.text == text) {
         return Ok(false);
     }
 
-    let now = now_epoch_secs();
     entries.insert(
         0,
         ClipboardEntry {
             id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
             text,
             captured_epoch_secs: now,
+            content_type: ClipboardContentType::Text,
+            image_data: None,
+            thumbnail_data: None,
+            image_width: None,
+            image_height: None,
         },
     );
     prune_entries(cfg, &mut entries, now);
     save_entries(cfg, &entries)?;
     Ok(true)
+}
+
+/// Load all clipboard entries (for bento history view). Returns entries
+/// ordered newest-first, with expired entries pruned.
+pub fn load_all_entries(cfg: &Config) -> Vec<ClipboardEntry> {
+    if !cfg.clipboard_enabled {
+        return Vec::new();
+    }
+    let mut entries = load_entries(cfg);
+    let now = now_epoch_secs();
+    let before_len = entries.len();
+    prune_entries(cfg, &mut entries, now);
+    if entries.len() != before_len {
+        let _ = save_entries(cfg, &entries);
+    }
+    entries
+}
+
+/// Copy a clipboard entry back to the system clipboard by ID.
+/// Handles both text and image entries.
+pub fn copy_entry_to_clipboard(cfg: &Config, entry_id: &str) -> Result<(), String> {
+    let entry = load_entries(cfg)
+        .into_iter()
+        .find(|e| e.id == entry_id)
+        .ok_or_else(|| "clipboard entry not found".to_string())?;
+
+    match entry.content_type {
+        ClipboardContentType::Text => write_system_clipboard_text(&entry.text),
+        ClipboardContentType::Image => {
+            if let Some(data) = &entry.image_data {
+                write_system_clipboard_image(data)
+            } else {
+                Err("image entry has no data".to_string())
+            }
+        }
+    }
 }
 
 pub fn clear_history(cfg: &Config) -> Result<(), String> {
@@ -104,18 +209,10 @@ pub fn search_history(
 }
 
 pub fn copy_result_to_clipboard(cfg: &Config, result_id: &str) -> Result<(), String> {
-    let Some(text) = resolve_text_for_result(cfg, result_id) else {
-        return Err("clipboard entry not found".to_string());
-    };
-    write_system_clipboard_text(&text)
-}
-
-fn resolve_text_for_result(cfg: &Config, result_id: &str) -> Option<String> {
-    let entry_id = result_id.strip_prefix("clipboard:")?;
-    load_entries(cfg)
-        .into_iter()
-        .find(|entry| entry.id == entry_id)
-        .map(|entry| entry.text)
+    let entry_id = result_id
+        .strip_prefix("clipboard:")
+        .ok_or_else(|| "invalid clipboard result ID".to_string())?;
+    copy_entry_to_clipboard(cfg, entry_id)
 }
 
 fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
@@ -436,6 +533,218 @@ fn write_system_clipboard_text(value: &str) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 fn write_system_clipboard_text(_value: &str) -> Result<(), String> {
     Err("clipboard copy is unsupported on this platform".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Image clipboard support
+// ---------------------------------------------------------------------------
+
+/// Raw RGBA image data extracted from the clipboard.
+struct RawImage {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Read a DIB (Device Independent Bitmap) image from the system clipboard.
+/// Returns `None` if no image is available or on read failure.
+#[cfg(target_os = "windows")]
+fn read_system_clipboard_image() -> Result<Option<RawImage>, String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Ole::CF_DIB;
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Ok(None);
+        }
+
+        // CF_DIB = 8, CF_DIBV5 = 17. Prefer CF_DIB for compatibility.
+        let format = u32::from(CF_DIB);
+        if IsClipboardFormatAvailable(format) == 0 {
+            CloseClipboard();
+            return Ok(None);
+        }
+
+        let handle = GetClipboardData(format);
+        if handle.is_null() {
+            CloseClipboard();
+            return Ok(None);
+        }
+
+        let ptr = GlobalLock(handle) as *const u8;
+        if ptr.is_null() {
+            CloseClipboard();
+            return Ok(None);
+        }
+
+        // Parse BITMAPINFOHEADER to get dimensions and pixel data offset.
+        let header_size = *(ptr as *const u32);
+        let width = (*(ptr.add(4) as *const i32)).unsigned_abs();
+        let height_raw = *(ptr.add(8) as *const i32);
+        let height = height_raw.unsigned_abs();
+        let bpp = *(ptr.add(14) as *const u16);
+
+        if header_size < 40 || width == 0 || height == 0 || bpp != 24 && bpp != 32 {
+            GlobalUnlock(handle);
+            CloseClipboard();
+            return Ok(None);
+        }
+
+        // Pixel data starts after the color table (none for 24/32bpp BI_RGB).
+        let pixel_offset = header_size as usize;
+        let row_size = ((width as usize * bpp as usize + 31) / 32) * 4;
+        let pixel_bytes = row_size * height as usize;
+
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+
+        let top_down = height_raw < 0;
+        for row in 0..height {
+            let src_row = if top_down { row } else { height - 1 - row };
+            let src = ptr.add(pixel_offset + src_row as usize * row_size);
+            for col in 0..width {
+                let offset = col as usize * bpp as usize / 8;
+                let b = *src.add(offset);
+                let g = *src.add(offset + 1);
+                let r = *src.add(offset + 2);
+                let a = if bpp == 32 { *src.add(offset + 3) } else { 255 };
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(a);
+            }
+        }
+
+        GlobalUnlock(handle);
+        CloseClipboard();
+
+        Ok(Some(RawImage {
+            data: rgba,
+            width,
+            height,
+        }))
+    }
+}
+
+/// Resize RGBA image data to fit within `max_dim` (preserving aspect ratio).
+fn resize_image_data(data: &[u8], width: u32, height: u32, max_dim: u32) -> RawImage {
+    if width <= max_dim && height <= max_dim {
+        return RawImage {
+            data: data.to_vec(),
+            width,
+            height,
+        };
+    }
+
+    let scale = (max_dim as f32 / width as f32).min(max_dim as f32 / height as f32);
+    let new_width = (width as f32 * scale).max(1.0) as u32;
+    let new_height = (height as f32 * scale).max(1.0) as u32;
+
+    let img = image::RgbaImage::from_raw(width, height, data.to_vec())
+        .map(image::DynamicImage::ImageRgba8)
+        .unwrap_or_else(|| image::DynamicImage::new_rgba8(1, 1));
+
+    let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
+    let rgba = resized.to_rgba8();
+
+    RawImage {
+        data: rgba.into_raw(),
+        width: new_width,
+        height: new_height,
+    }
+}
+
+/// Encode RGBA pixel data as PNG bytes.
+fn encode_png(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let Some(img) = image::RgbaImage::from_raw(width, height, data.to_vec()) else {
+        return Vec::new();
+    };
+    let mut buf = Vec::new();
+    let _ = image::DynamicImage::ImageRgba8(img).write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Png,
+    );
+    buf
+}
+
+/// Write PNG image data back to the system clipboard as a DIB.
+#[cfg(target_os = "windows")]
+fn write_system_clipboard_image(png_data: &[u8]) -> Result<(), String> {
+    let img = image::load_from_memory(png_data).map_err(|e| format!("failed to decode PNG: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+
+    // Build a BITMAPINFOHEADER + pixel data (BGR, bottom-up, 24bpp).
+    let row_size = ((width * 24 + 31) / 32) * 4;
+    let pixel_data_size = row_size * height;
+    let header_size: u32 = 40;
+    let total_size = header_size as u32 + pixel_data_size;
+
+    let mut dib = vec![0u8; total_size as usize];
+
+    // BITMAPINFOHEADER
+    dib[0..4].copy_from_slice(&header_size.to_le_bytes());
+    dib[4..8].copy_from_slice(&(width as i32).to_le_bytes());
+    dib[8..12].copy_from_slice(&(height as i32).to_le_bytes());
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+    dib[14..16].copy_from_slice(&24u16.to_le_bytes()); // bpp
+
+    // Pixel data: convert RGBA to BGR bottom-up.
+    let pixel_data = rgba.as_raw();
+    for y in 0..height {
+        let dst_row = height - 1 - y;
+        for x in 0..width {
+            let src_idx = ((y * width + x) * 4) as usize;
+            let dst_idx = (header_size as usize + dst_row as usize * row_size as usize
+                + x as usize * 3);
+            dib[dst_idx] = pixel_data[src_idx + 2]; // B
+            dib[dst_idx + 1] = pixel_data[src_idx + 1]; // G
+            dib[dst_idx + 2] = pixel_data[src_idx]; // R
+        }
+    }
+
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::System::Ole::CF_DIB;
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("failed to open clipboard".to_string());
+        }
+        if EmptyClipboard() == 0 {
+            CloseClipboard();
+            return Err("failed to clear clipboard".to_string());
+        }
+
+        let mem = GlobalAlloc(GMEM_MOVEABLE, total_size as usize);
+        if mem.is_null() {
+            CloseClipboard();
+            return Err("failed to allocate clipboard memory".to_string());
+        }
+
+        let ptr = GlobalLock(mem) as *mut u8;
+        if ptr.is_null() {
+            GlobalFree(mem);
+            CloseClipboard();
+            return Err("failed to lock clipboard memory".to_string());
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr, dib.len());
+        GlobalUnlock(mem);
+
+        if SetClipboardData(u32::from(CF_DIB), mem).is_null() {
+            GlobalFree(mem);
+            CloseClipboard();
+            return Err("failed to set clipboard image".to_string());
+        }
+
+        CloseClipboard();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

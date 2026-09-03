@@ -231,6 +231,8 @@ impl NativeOverlayShell {
             s.query.clear();
             s.rows.clear();
             s.selected = 0;
+            s.bento_view = false;
+            s.placeholder_hint = None;
         });
         crate::overlay::hotkey::set_overlay_visible(false);
         self.post(UiCommand::Hide);
@@ -249,6 +251,11 @@ impl NativeOverlayShell {
         self.with_state(|s| {
             s.visible = false;
             s.has_focus = false;
+            s.query.clear();
+            s.rows.clear();
+            s.selected = 0;
+            s.bento_view = false;
+            s.placeholder_hint = None;
         });
         crate::overlay::hotkey::set_overlay_visible(false);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -311,6 +318,27 @@ impl NativeOverlayShell {
 
     pub fn set_grid_view(&self, enabled: bool) {
         self.with_state(|s| s.grid_view = enabled);
+        self.post(UiCommand::Apply);
+    }
+
+    /// Show clipboard history in bento grid view.
+    pub fn show_clipboard_history(&self, rows: Vec<OverlayRow>) {
+        self.with_state(|s| {
+            s.rows = rows;
+            s.selected = 0;
+            s.bento_view = true;
+            s.grid_view = false;
+            s.placeholder_hint = None;
+        });
+        self.post(UiCommand::Apply);
+    }
+
+    /// Exit bento grid view and return to normal search.
+    pub fn exit_bento_view(&self) {
+        self.with_state(|s| {
+            s.bento_view = false;
+            s.rows.clear();
+        });
         self.post(UiCommand::Apply);
     }
 

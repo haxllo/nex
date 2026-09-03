@@ -46,7 +46,6 @@ static HELPER_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 #[derive(Clone)]
 struct HotkeyConfig {
     pipe_path: String,
-    #[allow(dead_code)]
     hotkey_desc: String,
     target_pid: u32,
     target_vk: u32,
@@ -55,10 +54,8 @@ struct HotkeyConfig {
     mod_alt: bool,
     mod_shift: bool,
     mod_win: bool,
-    #[allow(dead_code)]
     event_name: String,
     /// Name of nex's config-changed doorbell event (empty when unset).
-    #[allow(dead_code)]
     config_event_name: String,
     /// When false, this helper does NOT detect hotkeys — nex owns
     /// detection via raw input; the helper only assists foreground.

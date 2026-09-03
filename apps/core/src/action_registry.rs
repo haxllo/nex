@@ -5,6 +5,7 @@ use crate::uninstall_registry::{has_uninstall_intent, search_uninstall_actions};
 pub const ACTION_OPEN_LOGS_ID: &str = "__nex_action_open_logs__";
 pub const ACTION_REBUILD_INDEX_ID: &str = "__nex_action_rebuild_index__";
 pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__nex_action_clear_clipboard__";
+pub const ACTION_CLIPBOARD_HISTORY_ID: &str = "__nex_action_clipboard_history__";
 pub const ACTION_OPEN_CONFIG_ID: &str = "__nex_action_open_config__";
 pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle__";
 pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
@@ -46,6 +47,12 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
             title: "Clear Clipboard History",
             subtitle: "Delete local clipboard history entries",
             keywords: &["clipboard", "clear", "history"],
+        },
+        BuiltInAction {
+            id: ACTION_CLIPBOARD_HISTORY_ID,
+            title: "Show Clipboard History",
+            subtitle: "View clipboard history in a bento grid",
+            keywords: &["clipboard", "history", "clip", "paste", "bento"],
         },
         BuiltInAction {
             id: ACTION_OPEN_CONFIG_ID,

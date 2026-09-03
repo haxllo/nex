@@ -22,7 +22,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterWindowMessageW,
 };
 
-use crate::overlay::model::OverlayEvent;
 use crate::overlay::model::Theme;
 
 const CLASS_NAME: &str = "NexOverlayWindowClass";
@@ -222,19 +221,6 @@ fn find_hwnd_by_pids(target_pids: &[u32]) -> HWND {
     }
     ctx.found_hwnd
 }
-
-/// Map a Win32 hotkey ID to the legacy `OverlayEvent` hotkey ID. The
-/// legacy module used a single hard-coded `1` for the primary
-/// `Ctrl+Space` hotkey, so we just return `1` here.
-pub(crate) fn hotkey_id_for(_vk: u32) -> i32 {
-    1
-}
-
-/// Suppress a lint about unused `OverlayEvent` and `HWND` — they are
-/// imported because the next phase will add functions that need
-/// them.
-#[allow(dead_code)]
-fn _phantom(_e: OverlayEvent, _h: HWND) {}
 
 #[cfg(test)]
 mod tests {

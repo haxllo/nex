@@ -1534,17 +1534,6 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
         .collect()
 }
 
-#[allow(dead_code)]
-fn filter_file_items(items: &[SearchItem]) -> Vec<SearchItem> {
-    items
-        .iter()
-        .filter(|item| {
-            !item.kind.eq_ignore_ascii_case("file") && !item.kind.eq_ignore_ascii_case("folder")
-        })
-        .cloned()
-        .collect()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CacheCompactionSummary {
     input_total: usize,

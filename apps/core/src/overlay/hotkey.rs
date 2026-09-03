@@ -1139,27 +1139,6 @@ fn create_config_event() -> String {
     name
 }
 
-/// Tell the running helper that `helper-config.json` changed, so it can
-/// re-read the hotkey and re-register its fallback without a respawn.
-/// Returns false when no helper is connected (caller falls back to a
-/// full re-registration).
-#[allow(dead_code)]
-pub(crate) fn signal_hotkey_config_changed() -> bool {
-    use windows_sys::Win32::System::Threading::SetEvent;
-    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
-        return false;
-    }
-    let handle = match CONFIG_CHANGED_EVENT.lock() {
-        Ok(g) => *g,
-        _ => 0,
-    };
-    if handle == 0 {
-        return false;
-    }
-    unsafe { SetEvent(handle as *mut core::ffi::c_void) };
-    true
-}
-
 /// Live-update the hotkey of an already-running elevated helper.
 ///
 /// Rewrites `helper-config.json` (nex owns that file) and rings the

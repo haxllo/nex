@@ -194,6 +194,10 @@
   }
 
   function rowClassName(r, isGridView) {
+    if (r.role === "clipboard_history") {
+      const size = r.tileSize || "small";
+      return "row clipboard-tile tile-" + size;
+    }
     return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "show_all_apps") ? " row-grid" : " row-list") : "");
   }
 
@@ -239,6 +243,33 @@
       li.setAttribute("aria-selected", "true");
     } else {
       li.setAttribute("aria-selected", "false");
+    }
+
+    // Clipboard history tile (image or text)
+    if (r.role === "clipboard_history") {
+      if (r.clipboardThumbnail) {
+        // Image tile
+        const img = document.createElement("img");
+        img.className = "tile-image";
+        img.src = r.clipboardThumbnail;
+        li.appendChild(img);
+        li.addEventListener("click", () => {
+          if (r.clipboardFullImage) expandImage(r.clipboardFullImage);
+        });
+      } else {
+        // Text tile
+        const content = document.createElement("div");
+        content.className = "tile-content";
+        content.textContent = r.title;
+        li.appendChild(content);
+        li.addEventListener("click", () => {
+          const idx = Number(li.dataset.index);
+          setSelected(idx, false);
+          post("submit", idx);
+        });
+      }
+      li.addEventListener("mousemove", () => setSelected(Number(li.dataset.index), false));
+      return li;
     }
 
     if (r.role !== "calculator") {
@@ -1023,6 +1054,11 @@
         list.classList.toggle("grid-view", state.gridView);
       }
 
+      // Toggle bento view for clipboard history
+      if (typeof state.bentoView === "boolean") {
+        list.classList.toggle("bento-view", state.bentoView);
+      }
+
       // Only overwrite the input if Rust changed it out from under us
       // (e.g. clear on hide, quick-shortcut expansion).
       if (typeof state.query === "string") {
@@ -1122,6 +1158,17 @@
       input.select();
     },
   };
+
+  // Expand a clipboard image to full view in an overlay.
+  function expandImage(dataUri) {
+    const overlay = document.createElement("div");
+    overlay.id = "image-expand-overlay";
+    const img = document.createElement("img");
+    img.src = dataUri;
+    overlay.appendChild(img);
+    overlay.addEventListener("click", () => overlay.remove());
+    document.body.appendChild(overlay);
+  }
 
   // Tell Rust the page is ready to receive state.
   // Do NOT call measure() here — it posts "painted" which races with

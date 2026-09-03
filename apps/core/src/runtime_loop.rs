@@ -1784,6 +1784,42 @@ impl RuntimeWorker {
                     }
                 }
 
+                // Bento tile click — copy clipboard entry to system clipboard.
+                if let Some(list_selection) = self.overlay.selected_index() {
+                    if self.current_rows.get(list_selection).map(|r| r.role)
+                        == Some(OverlayRowRole::ClipboardHistory)
+                    {
+                        if let Some(row) = self.current_rows.get(list_selection) {
+                            let entry_id = row.path.clone();
+                            self.overlay.hide();
+                            self.overlay_state.on_escape();
+                            match clipboard_history::copy_result_to_clipboard(
+                                &self.runtime_config,
+                                &format!("clipboard:{entry_id}"),
+                            ) {
+                                Ok(()) => {
+                                    self.overlay.set_status_text("Copied to clipboard");
+                                }
+                                Err(error) => {
+                                    self.overlay.show_and_focus();
+                                    self.overlay
+                                        .set_status_text(&format!("Copy failed: {error}"));
+                                }
+                            }
+                            reset_overlay_session(
+                                &self.overlay,
+                                &mut self.current_results,
+                                &mut self.selected_index,
+                            );
+                            self.last_query.clear();
+                            self.last_sent_generation = 0;
+                            self.search_session.clear();
+                            self.search_worker.clear_session();
+                            return;
+                        }
+                    }
+                }
+
                 if self.current_results.is_empty() {
                     if self.overlay.query_text().trim().is_empty() {
                         set_idle_overlay_state(&self.overlay);
@@ -1839,8 +1875,9 @@ impl RuntimeWorker {
                                     &self.runtime_config,
                                     &self.plugin_registry,
                                     uninstall_action,
+                                    &self.overlay,
                                 ) {
-                                    Ok(()) => {
+                                    Ok(reset) => {
                                         track_uninstall_title_suppression(
                                             &mut self.suppressed_uninstall_titles,
                                             uninstall_action.title.as_str(),
@@ -1853,15 +1890,17 @@ impl RuntimeWorker {
                                             }
                                         }
                                         self.overlay.set_status_text("");
-                                        reset_overlay_session(
-                                            &self.overlay,
-                                            &mut self.current_results,
-                                            &mut self.selected_index,
-                                        );
-                                        self.last_query.clear();
-                                        self.last_sent_generation = 0;
-                                        self.search_session.clear();
-                                        self.search_worker.clear_session();
+                                        if reset {
+                                            reset_overlay_session(
+                                                &self.overlay,
+                                                &mut self.current_results,
+                                                &mut self.selected_index,
+                                            );
+                                            self.last_query.clear();
+                                            self.last_sent_generation = 0;
+                                            self.search_session.clear();
+                                            self.search_worker.clear_session();
+                                        }
                                     }
                                     Err(error) => {
                                         if should_suppress_failed_uninstall(error.as_str()) {
@@ -1923,17 +1962,20 @@ impl RuntimeWorker {
                                     &self.runtime_config,
                                     &self.plugin_registry,
                                     &power_item,
+                                    &self.overlay,
                                 ) {
-                                    Ok(()) => {
-                                        reset_overlay_session(
-                                            &self.overlay,
-                                            &mut self.current_results,
-                                            &mut self.selected_index,
-                                        );
-                                        self.last_query.clear();
-                                        self.last_sent_generation = 0;
-                                        self.search_session.clear();
-                                        self.search_worker.clear_session();
+                                    Ok(reset) => {
+                                        if reset {
+                                            reset_overlay_session(
+                                                &self.overlay,
+                                                &mut self.current_results,
+                                                &mut self.selected_index,
+                                            );
+                                            self.last_query.clear();
+                                            self.last_sent_generation = 0;
+                                            self.search_session.clear();
+                                            self.search_worker.clear_session();
+                                        }
                                     }
                                     Err(_) => {
                                         self.pending_confirmation = Some(pending);
@@ -2047,17 +2089,20 @@ impl RuntimeWorker {
                         &self.runtime_config,
                         &self.plugin_registry,
                         selected,
+                        &self.overlay,
                     ) {
-                        Ok(()) => {
-                            reset_overlay_session(
-                                &self.overlay,
-                                &mut self.current_results,
-                                &mut self.selected_index,
-                            );
-                            self.last_query.clear();
-                            self.last_sent_generation = 0;
-                            self.search_session.clear();
-                            self.search_worker.clear_session();
+                        Ok(reset) => {
+                            if reset {
+                                reset_overlay_session(
+                                    &self.overlay,
+                                    &mut self.current_results,
+                                    &mut self.selected_index,
+                                );
+                                self.last_query.clear();
+                                self.last_sent_generation = 0;
+                                self.search_session.clear();
+                                self.search_worker.clear_session();
+                            }
                         }
                         Err(error) => {
                             self.overlay.show_and_focus();
@@ -2074,6 +2119,37 @@ impl RuntimeWorker {
                     return;
                 }
 
+                if selected.id == crate::action_registry::ACTION_CLIPBOARD_HISTORY_ID {
+                    self.overlay_state.on_escape();
+                    match execute_action_selection(
+                        &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                        &self.runtime_config,
+                        &self.plugin_registry,
+                        selected,
+                        &self.overlay,
+                    ) {
+                        Ok(reset) => {
+                            if reset {
+                                self.overlay.set_status_text("");
+                                reset_overlay_session(
+                                    &self.overlay,
+                                    &mut self.current_results,
+                                    &mut self.selected_index,
+                                );
+                                self.last_query.clear();
+                                self.last_sent_generation = 0;
+                                self.search_session.clear();
+                                self.search_worker.clear_session();
+                            }
+                        }
+                        Err(error) => {
+                            self.overlay
+                                .set_status_text(&format!("Action failed: {error}"));
+                        }
+                    }
+                    return;
+                }
+
                 self.overlay.hide_sync();
                 self.overlay_state.on_escape();
                 match launch_overlay_selection(
@@ -2083,19 +2159,22 @@ impl RuntimeWorker {
                     &self.current_results,
                     self.selected_index,
                     self.last_query.as_str(),
+                    &self.overlay,
                 ) {
-                    Ok(()) => {
-                        self.overlay.set_status_text("");
-                        reset_overlay_session(
-                            &self.overlay,
-                            &mut self.current_results,
-                            &mut self.selected_index,
-                        );
-                        self.pending_confirmation = None;
-                        self.last_query.clear();
-                        self.last_sent_generation = 0;
-                        self.search_session.clear();
-                        self.search_worker.clear_session();
+                    Ok(reset) => {
+                        if reset {
+                            self.overlay.set_status_text("");
+                            reset_overlay_session(
+                                &self.overlay,
+                                &mut self.current_results,
+                                &mut self.selected_index,
+                            );
+                            self.pending_confirmation = None;
+                            self.last_query.clear();
+                            self.last_sent_generation = 0;
+                            self.search_session.clear();
+                            self.search_worker.clear_session();
+                        }
                     }
                     Err(error) => {
                         self.overlay
@@ -2182,6 +2261,9 @@ fn apply_query_change(
                         title: format!("= {expr}"),
                         path: display,
                         icon_path: String::new(),
+                        clipboard_thumbnail: None,
+                        clipboard_full_image: None,
+                        tile_size: None,
                     };
                     overlay.set_results(&[row], 0);
                 }
@@ -2193,6 +2275,9 @@ fn apply_query_change(
                         title: format!("{error}"),
                         path: String::new(),
                         icon_path: String::new(),
+                        clipboard_thumbnail: None,
+                        clipboard_full_image: None,
+                        tile_size: None,
                     };
                     overlay.set_results(&[row], 0);
                 }

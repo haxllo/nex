@@ -846,13 +846,6 @@ fn extract_base_name(path: &str) -> String {
     normalize_for_search(stem)
 }
 
-#[allow(dead_code)]
-fn same_base_name(a: &str, b: &str) -> bool {
-    let base_a = extract_base_name(a);
-    let base_b = extract_base_name(b);
-    base_a == base_b
-}
-
 fn now_epoch_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

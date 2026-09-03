@@ -943,3 +943,82 @@ html[data-theme="light"] img.icon.glyph {
 .hidden {
   display: none !important;
 }
+
+/* ── clipboard history bento grid ─────────────────────────── */
+#list.bento-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-auto-rows: minmax(72px, auto);
+  gap: 8px;
+  padding: 8px;
+  scrollbar-gutter: stable;
+}
+
+#list.bento-view .row {
+  display: flex;
+  flex-direction: column;
+  height: auto;
+  min-height: 72px;
+  padding: 0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+/* Bento tile sizes */
+#list.bento-view .row.tile-small {
+  grid-column: span 1;
+  grid-row: span 1;
+}
+#list.bento-view .row.tile-medium {
+  grid-column: span 2;
+  grid-row: span 1;
+}
+#list.bento-view .row.tile-large {
+  grid-column: span 2;
+  grid-row: span 2;
+}
+
+/* Text tile content */
+#list.bento-view .row .tile-content {
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+  max-height: 100%;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+}
+
+#list.bento-view .row.tile-large .tile-content {
+  -webkit-line-clamp: 12;
+}
+
+/* Image tile */
+#list.bento-view .row .tile-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  min-height: 72px;
+}
+
+/* Image expand overlay */
+#image-expand-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: pointer;
+}
+
+#image-expand-overlay img {
+  max-width: 90%;
+  max-height: 90%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}

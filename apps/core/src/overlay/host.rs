@@ -103,7 +103,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::overlay::icons::IconCache;
-use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState};
+use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState, TileSize};
 use crate::overlay::model::Theme;
 
 const WINDOW_WIDTH: f64 = 720.0;
@@ -1483,6 +1483,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 OverlayRowRole::Calculator => "calculator",
                 OverlayRowRole::QuickLaunch => "quick_launch",
                 OverlayRowRole::ShowAllApps => "show_all_apps",
+                OverlayRowRole::ClipboardHistory => "clipboard_history",
                 OverlayRowRole::TopHit | OverlayRowRole::Item => "item",
             };
             let selectable = matches!(
@@ -1492,6 +1493,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                     | OverlayRowRole::Calculator
                     | OverlayRowRole::QuickLaunch
                     | OverlayRowRole::ShowAllApps
+                    | OverlayRowRole::ClipboardHistory
             );
             let icon = if r.icon_path.is_empty() {
                 serde_json::Value::Null
@@ -1505,6 +1507,11 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
             } else {
                 serde_json::Value::String(r.icon_path.clone())
             };
+            let tile_size = r.tile_size.as_ref().map(|t| match t {
+                TileSize::Small => "small",
+                TileSize::Medium => "medium",
+                TileSize::Large => "large",
+            });
             serde_json::json!({
                 "role": role,
                 "title": r.title,
@@ -1514,6 +1521,9 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 "filePath": file_path,
                 "selectable": selectable,
                 "resultIndex": r.result_index,
+                "clipboardThumbnail": r.clipboard_thumbnail,
+                "clipboardFullImage": r.clipboard_full_image,
+                "tileSize": tile_size,
             })
         })
         .collect();
@@ -1548,6 +1558,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "theme": theme,
         "accent": s.accent_color,
         "gridView": s.grid_view,
+        "bentoView": s.bento_view,
         "showPending": show_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
@@ -1744,8 +1755,6 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    #[allow(unused_imports)]
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         ShowWindow, SW_SHOW,

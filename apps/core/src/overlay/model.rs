@@ -16,6 +16,20 @@ pub struct OverlayRow {
     pub title: String,
     pub path: String,
     pub icon_path: String,
+    /// Base64 data URI for clipboard image thumbnails.
+    pub clipboard_thumbnail: Option<String>,
+    /// Base64 data URI for full clipboard image (sent on expand).
+    pub clipboard_full_image: Option<String>,
+    /// Tile size for bento grid layout.
+    pub tile_size: Option<TileSize>,
+}
+
+/// Tile sizes for the clipboard history bento grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSize {
+    Small,
+    Medium,
+    Large,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +41,8 @@ pub enum OverlayRowRole {
     Calculator,
     QuickLaunch,
     ShowAllApps,
+    /// Clipboard history bento grid item.
+    ClipboardHistory,
 }
 
 /// Events the runtime callback receives on the worker thread.
@@ -127,6 +143,8 @@ pub struct ShimState {
     pub quick_launch_items: Vec<QuickLaunchItem>,
     /// Whether Quick Launch is visible (query is empty).
     pub quick_launch_visible: bool,
+    /// Whether the bento grid view is active (clipboard history).
+    pub bento_view: bool,
 }
 
 impl Default for ShimState {
@@ -151,6 +169,7 @@ impl Default for ShimState {
             ui_warm_release_ms: 5_000,
             quick_launch_items: Vec::new(),
             quick_launch_visible: false,
+            bento_view: false,
         }
     }
 }

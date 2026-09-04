@@ -982,8 +982,8 @@ html[data-theme="light"] img.icon.glyph {
 /* ── clipboard history bento grid ─────────────────────────── */
 #list.bento-view {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  grid-auto-rows: minmax(72px, auto);
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: 90px;
   gap: 8px;
   padding: 8px;
   scrollbar-gutter: stable;
@@ -993,7 +993,6 @@ html[data-theme="light"] img.icon.glyph {
   display: flex;
   flex-direction: column;
   height: auto;
-  min-height: 72px;
   padding: 0;
   border-radius: 12px;
   overflow: hidden;
@@ -1007,7 +1006,7 @@ html[data-theme="light"] img.icon.glyph {
   border-color: var(--border-strong);
 }
 
-/* Bento tile sizes */
+/* Bento tile sizes — asymmetric layout */
 #list.bento-view .row.tile-small {
   grid-column: span 1;
   grid-row: span 1;
@@ -1023,25 +1022,36 @@ html[data-theme="light"] img.icon.glyph {
 
 /* Text tile content */
 #list.bento-view .row .tile-content {
-  padding: 10px;
+  padding: 12px;
   font-size: 12px;
   line-height: 1.4;
   word-break: break-word;
   max-height: 100%;
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 6;
+  -webkit-line-clamp: 5;
   -webkit-box-orient: vertical;
+  color: var(--text);
+}
+
+#list.bento-view .row.tile-medium .tile-content {
+  -webkit-line-clamp: 4;
 }
 
 #list.bento-view .row.tile-large .tile-content {
-  -webkit-line-clamp: 12;
+  -webkit-line-clamp: 10;
+  font-size: 13px;
 }
 
-/* Image tile */
+/* Image tile — fills the tile, border on the outside */
 #list.bento-view .row .tile-image {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  min-height: 72px;
+}
+
+/* Image tiles: no padding, fills the cell */
+#list.bento-view .row:has(.tile-image) {
+  padding: 0;
 }

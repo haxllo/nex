@@ -662,7 +662,7 @@
         // stroke-width 2, which would outline-draw the @ glyph and make
         // it look thick/squashed.
         searchIcon.innerHTML =
-          '<text x="12" y="13" font-size="18" font-weight="400" fill="var(--text-faint)" stroke="none" text-anchor="middle" dominant-baseline="central" font-family="InterVariable, Inter, system-ui, -apple-system, sans-serif">@</text>';
+          '<text x="12" y="12" font-size="20" font-weight="400" fill="var(--text-faint)" stroke="none" text-anchor="middle" dominant-baseline="central" font-family="InterVariable, Inter, system-ui, -apple-system, sans-serif">@</text>';
       } else {
         searchIcon.innerHTML =
           '<circle cx="11" cy="11" r="7" fill="none" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></circle><line x1="21" y1="21" x2="16.65" y2="16.65" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></line>';

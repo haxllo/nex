@@ -589,7 +589,7 @@ use xxhash_rust::xxh3::xxh3_64;
 /// Max dimension accepted from the clipboard (reject before any alloc).
 const MAX_CAPTURE_DIM: u32 = 2560;
 /// Thumbnail size for bento grid display.
-const MAX_THUMBNAIL_DIM: u32 = 256;
+const MAX_THUMBNAIL_DIM: u32 = 512;
 /// Max number of full-res image files in the cache.
 const IMAGE_CACHE_MAX_ITEMS: usize = 50;
 /// Max total disk usage for full-res images (bytes).
@@ -789,7 +789,10 @@ fn capture_clipboard_thumbnail_png(
 
         let old_dst = SelectObject(dst_dc, dst_bmp as _);
 
-        // 8. StretchBlt: hardware-accelerated resize
+        // 8. Set HALFTONE stretch mode for bilinear interpolation quality,
+        //    then StretchBlt: hardware-accelerated resize.
+        use windows_sys::Win32::Graphics::Gdi::SetStretchBltMode;
+        SetStretchBltMode(dst_dc, 4); // HALFTONE = 4
         StretchBlt(
             dst_dc,
             0,
@@ -805,14 +808,16 @@ fn capture_clipboard_thumbnail_png(
         );
 
         // 9. Read back thumbnail pixels (BGRA → RGBA)
+        //    Force alpha to 255 — clipboard DIBs (screenshots) often have
+        //    alpha=0 in the 32bpp format even though the image is opaque.
         let pixel_count = (thumb_w * thumb_h) as usize;
         let bgra = std::slice::from_raw_parts(dst_bits as *const u8, pixel_count * 4);
-        let mut rgba = vec![0u8; pixel_count * 4]; // ~256KB max
+        let mut rgba = vec![0u8; pixel_count * 4];
         for (i, chunk) in bgra.chunks_exact(4).enumerate() {
             rgba[i * 4] = chunk[2]; // R ← B
             rgba[i * 4 + 1] = chunk[1]; // G
             rgba[i * 4 + 2] = chunk[0]; // B ← R
-            rgba[i * 4 + 3] = chunk[3]; // A
+            rgba[i * 4 + 3] = 255; // A — always opaque
         }
 
         // 10. Stream full-res to disk WHILE clipboard is still locked
@@ -880,7 +885,7 @@ fn stream_fullres_to_disk(
                 let b = *src.add(off);
                 let g = *src.add(off + 1);
                 let r = *src.add(off + 2);
-                let a = if bpp == 32 { *src.add(off + 3) } else { 255 };
+                let a = 255u8; // always opaque — clipboard DIBs have alpha=0
                 let di = dst_offset + col as usize * 4;
                 rgba[di] = r;
                 rgba[di + 1] = g;

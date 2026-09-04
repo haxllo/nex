@@ -341,7 +341,9 @@ impl NativeOverlayShell {
             s.rows = rows;
             s.selected = 0;
             s.bento_view = true;
+            s.grid_view = false;
             s.placeholder_hint = None;
+            s.status_text.clear();
         });
         self.post(UiCommand::Apply);
     }

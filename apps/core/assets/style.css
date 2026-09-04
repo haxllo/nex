@@ -997,6 +997,14 @@ html[data-theme="light"] img.icon.glyph {
   padding: 0;
   border-radius: 12px;
   overflow: hidden;
+  background: var(--sel);
+  border: 1px solid var(--border);
+  transition: background 100ms ease, border-color 100ms ease;
+}
+
+#list.bento-view .row:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
 }
 
 /* Bento tile sizes */

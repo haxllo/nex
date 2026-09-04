@@ -659,13 +659,22 @@
         // stroke-width 2, which would outline-draw the @ glyph and make
         // it look thick/squashed.
         searchIcon.innerHTML =
-          '<text x="11" y="17" font-size="20" font-weight="400" fill="var(--text-faint)" stroke="none" text-anchor="middle" font-family="monospace">@</text>';
+          '<text x="12" y="13" font-size="18" font-weight="400" fill="var(--text-faint)" stroke="none" text-anchor="middle" dominant-baseline="central" font-family="InterVariable, Inter, system-ui, -apple-system, sans-serif">@</text>';
       } else {
         searchIcon.innerHTML =
           '<circle cx="11" cy="11" r="7" fill="none" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></circle><line x1="21" y1="21" x2="16.65" y2="16.65" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></line>';
       }
       searchIcon.style.opacity = "1";
     }, 130);
+  }
+
+  // Measure text width using a reusable canvas context.
+  const _measureCanvas = document.createElement("canvas");
+  const _measureCtx = _measureCanvas.getContext("2d");
+  function measureTextWidth(text) {
+    const cs = getComputedStyle(input);
+    _measureCtx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    return _measureCtx.measureText(text).width;
   }
 
   // ── command autofill (dim remainder + Tab completion) ──────
@@ -695,7 +704,10 @@
       return;
     }
     completionEl.textContent = completion.slice(input.value.length);
-    // Keep the dim text aligned with the input's scrolled content.
+    // Position the suffix right after the typed text so it reads as a
+    // continuous hint — measure the typed width and offset the element.
+    const typedWidth = measureTextWidth(input.value);
+    completionEl.style.left = typedWidth + "px";
     completionEl.style.transform =
       `translateY(calc(-50% - 1px)) translateX(${-input.scrollLeft}px)`;
     hintComplete.classList.remove("hidden");

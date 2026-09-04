@@ -59,54 +59,18 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
     // Try image capture first (images take priority over text). A
     // transient image-read failure must NOT abort the whole capture —
     // fall through to text instead of losing the entry.
+    //
+    // SAFETY: the entire image path is disabled for now — the image
+    // crate's resize/encode can abort (not panic) on OOM, which
+    // catch_unwind cannot catch, causing the runtime thread to die
+    // and the overlay to auto-hide on every launch while an image
+    // remains on the clipboard.  Text-only capture is safe.
+    // TODO: re-enable with a subprocess-based image capture that
+    // isolates the crash from the main runtime.
     #[cfg(target_os = "windows")]
     {
-        match read_system_clipboard_image() {
-            Ok(Some(image)) => {
-                // Wrap the heavy image processing in catch_unwind so a
-                // panic in the image crate (corrupt data, OOM) can't
-                // kill the runtime worker thread.
-                let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
-                    let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
-                    let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
-                    let full_encoded = encode_png(&full.data, full.width, full.height);
-                    (thumbnail_encoded, full_encoded)
-                }));
-                if let Ok((thumbnail_encoded, full_encoded)) = processed {
-                    let entry = ClipboardEntry {
-                        id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
-                        text: String::new(),
-                        captured_epoch_secs: now,
-                        content_type: ClipboardContentType::Image,
-                        image_data: Some(full_encoded),
-                        thumbnail_data: Some(thumbnail_encoded),
-                        image_width: Some(image.width),
-                        image_height: Some(image.height),
-                    };
-
-                    if entries.first().is_some_and(|e| {
-                        e.content_type == ClipboardContentType::Image
-                            && e.image_data == entry.image_data
-                    }) {
-                        return Ok(false);
-                    }
-
-                    entries.insert(0, entry);
-                    prune_entries(cfg, &mut entries, now);
-                    save_entries(cfg, &entries)?;
-                    return Ok(true);
-                } else {
-                    crate::runtime::log_warn("[nex] clipboard image processing panicked, falling back to text");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                crate::runtime::log_warn(&format!(
-                    "[nex] clipboard image read failed, falling back to text: {error}"
-                ));
-            }
-        }
+        // Image capture disabled — fall through to text.
+        let _ = (now, &mut entries);
     }
 
     // Fall back to text capture

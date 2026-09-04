@@ -63,33 +63,42 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
     {
         match read_system_clipboard_image() {
             Ok(Some(image)) => {
-                let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
-                let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
-                let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
-                let full_encoded = encode_png(&full.data, full.width, full.height);
+                // Wrap the heavy image processing in catch_unwind so a
+                // panic in the image crate (corrupt data, OOM) can't
+                // kill the runtime worker thread.
+                let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
+                    let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
+                    let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
+                    let full_encoded = encode_png(&full.data, full.width, full.height);
+                    (thumbnail_encoded, full_encoded)
+                }));
+                if let Ok((thumbnail_encoded, full_encoded)) = processed {
+                    let entry = ClipboardEntry {
+                        id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
+                        text: String::new(),
+                        captured_epoch_secs: now,
+                        content_type: ClipboardContentType::Image,
+                        image_data: Some(full_encoded),
+                        thumbnail_data: Some(thumbnail_encoded),
+                        image_width: Some(image.width),
+                        image_height: Some(image.height),
+                    };
 
-                let entry = ClipboardEntry {
-                    id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
-                    text: String::new(),
-                    captured_epoch_secs: now,
-                    content_type: ClipboardContentType::Image,
-                    image_data: Some(full_encoded),
-                    thumbnail_data: Some(thumbnail_encoded),
-                    image_width: Some(image.width),
-                    image_height: Some(image.height),
-                };
+                    if entries.first().is_some_and(|e| {
+                        e.content_type == ClipboardContentType::Image
+                            && e.image_data == entry.image_data
+                    }) {
+                        return Ok(false);
+                    }
 
-                if entries.first().is_some_and(|e| {
-                    e.content_type == ClipboardContentType::Image
-                        && e.image_data == entry.image_data
-                }) {
-                    return Ok(false);
+                    entries.insert(0, entry);
+                    prune_entries(cfg, &mut entries, now);
+                    save_entries(cfg, &entries)?;
+                    return Ok(true);
+                } else {
+                    crate::runtime::log_warn("[nex] clipboard image processing panicked, falling back to text");
                 }
-
-                entries.insert(0, entry);
-                prune_entries(cfg, &mut entries, now);
-                save_entries(cfg, &entries)?;
-                return Ok(true);
             }
             Ok(None) => {}
             Err(error) => {
@@ -598,6 +607,17 @@ fn read_system_clipboard_image() -> Result<Option<RawImage>, String> {
         let bpp = *(ptr.add(14) as *const u16);
 
         if header_size < 40 || width == 0 || height == 0 || bpp != 24 && bpp != 32 {
+            GlobalUnlock(handle);
+            CloseClipboard();
+            return Ok(None);
+        }
+
+        // Reject absurdly large clipboard images — reading them into
+        // RGBA would allocate hundreds of MB and can panic/OOM the
+        // runtime, causing the overlay to auto-hide on every launch
+        // (the image stays on the clipboard and re-triggers the crash).
+        const MAX_CLIP_DIM: u32 = 4096;
+        if width > MAX_CLIP_DIM || height > MAX_CLIP_DIM {
             GlobalUnlock(handle);
             CloseClipboard();
             return Ok(None);

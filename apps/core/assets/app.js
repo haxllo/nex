@@ -473,6 +473,7 @@
 
     // Status / empty state.
     const hasRows = rows.some((r) => r.role !== "status");
+    const hasStatusRows = rows.some((r) => r.role === "status");
     if (!hasRows && statusEl.dataset.text) {
       statusEl.textContent = statusEl.dataset.text;
       statusEl.classList.remove("hidden");
@@ -481,7 +482,9 @@
     }
 
     // Idle state: hide divider + list area and footer when no rows.
-    bodyEl.classList.toggle("idle", !hasRows);
+    // Keep the body visible when status rows are present (e.g.
+    // "Clipboard history is empty") so the message is actually rendered.
+    bodyEl.classList.toggle("idle", !hasRows && !hasStatusRows);
     // Footer hints only with regular results — hidden in the idle
     // window and in the quick-launch (pinned items) view.
     const qlOnly =

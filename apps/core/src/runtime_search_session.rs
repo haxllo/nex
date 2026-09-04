@@ -395,11 +395,13 @@ pub(crate) fn maybe_expand_uninstall_quick_shortcut(
     last_query: &str,
 ) -> Option<String> {
     let raw = query.trim_start();
-    let remainder = raw.strip_prefix('>')?;
+    let prefix = raw.chars().next().filter(|c| matches!(c, '>' | '@'))?;
+    let remainder = raw[1..].trim_start();
     if remainder.eq_ignore_ascii_case("u") {
         let last_trimmed = last_query.trim();
-        if last_trimmed.is_empty() || last_trimmed == ">" {
-            return Some(">u ".to_string());
+        let last_prefix_only = last_trimmed == ">" || last_trimmed == "@";
+        if last_trimmed.is_empty() || last_prefix_only {
+            return Some(format!("{prefix}u "));
         }
     }
     None

@@ -145,6 +145,10 @@ pub struct ShimState {
     pub quick_launch_visible: bool,
     /// Whether the bento grid view is active (clipboard history).
     pub bento_view: bool,
+    /// Command-mode autofill: full title of the top matching command.
+    /// The page renders the untyped remainder dimmed inside the input
+    /// and Tab fills it in. `None` outside command mode.
+    pub completion: Option<String>,
 }
 
 impl Default for ShimState {
@@ -170,6 +174,7 @@ impl Default for ShimState {
             quick_launch_items: Vec::new(),
             quick_launch_visible: false,
             bento_view: false,
+            completion: None,
         }
     }
 }

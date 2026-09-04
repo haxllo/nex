@@ -573,7 +573,7 @@ fn looks_like_app_intent_query(raw_query: &str, normalized_query: &str, mode: Se
     }
 
     let trimmed = raw_query.trim();
-    if trimmed.is_empty() || trimmed.starts_with('>') {
+    if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with('@') {
         return false;
     }
 

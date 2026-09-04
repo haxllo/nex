@@ -390,12 +390,21 @@ mod tests {
         let parsed = ParsedQuery::parse("code", true);
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
+        let overlay = test_overlay_shell();
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
-        launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "launch target")
+        launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "launch target", &overlay)
             .expect("launch should succeed");
 
         std::fs::remove_file(&launch_path).expect("temp launch file should be removed");
+    }
+
+    /// Headless overlay shell for tests: `launch_overlay_selection`
+    /// requires the host parameter, but the test selections (app/file
+    /// launches and validation errors) never touch it.
+    fn test_overlay_shell() -> crate::overlay::shim::NativeOverlayShell {
+        crate::overlay::shim::NativeOverlayShell::create()
+            .expect("overlay shell should construct in tests")
     }
 
     #[test]
@@ -421,7 +430,8 @@ mod tests {
         let results = vec![item];
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
-        let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "missing")
+        let overlay = test_overlay_shell();
+        let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "missing", &overlay)
             .expect_err("launch should fail");
 
         assert!(error.contains("launch failed:"));
@@ -435,7 +445,8 @@ mod tests {
 
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
-        let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 1, "out")
+        let overlay = test_overlay_shell();
+        let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 1, "out", &overlay)
             .expect_err("selection should fail");
 
         assert!(error.contains("selected index out of range"));
@@ -448,7 +459,8 @@ mod tests {
 
         let cfg = Config::default();
         let plugins = PluginRegistry::default();
-        let error = launch_overlay_selection(&service, &cfg, &plugins, &[], 0, "")
+        let overlay = test_overlay_shell();
+        let error = launch_overlay_selection(&service, &cfg, &plugins, &[], 0, "", &overlay)
             .expect_err("empty selection should fail");
 
         assert_eq!(error, "no result selected");

@@ -223,7 +223,22 @@ pub(crate) fn execute_action_selection(
         }
         ACTION_CLEAR_CLIPBOARD_ID => clipboard_history::clear_history(cfg).map(|_| true),
         ACTION_CLIPBOARD_HISTORY_ID => {
+            // Capture whatever is on the system clipboard right now, so a
+            // copy made while the overlay was open (or a capture that
+            // failed transiently on show) still appears in the grid.
+            if let Err(error) = clipboard_history::maybe_capture_latest(cfg) {
+                log_warn(&format!(
+                    "[nex] clipboard capture before history view failed: {error}"
+                ));
+            }
             let entries = clipboard_history::load_all_entries(cfg);
+            if entries.is_empty() {
+                crate::runtime_overlay_rows::set_status_row_overlay_state(
+                    overlay,
+                    "Clipboard history is empty — copy something first",
+                );
+                return Ok(false);
+            }
             let rows = crate::runtime_overlay_rows::build_clipboard_bento_rows(&entries);
             overlay.show_clipboard_history(rows);
             // Don't reset session — we just set up the bento view

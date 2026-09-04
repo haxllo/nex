@@ -35,6 +35,7 @@
   let lastQuerySent = "";
   let inCommandMode = false;
   let completion = ""; // Rust-pushed command-mode autofill title
+  let pushedPlaceholder = ""; // last placeholder Rust pushed (null-safe)
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
@@ -654,8 +655,11 @@
     searchIcon.style.opacity = "0";
     setTimeout(() => {
       if (inCommandMode) {
+        // stroke="none" is required: #search-icon carries fill:none +
+        // stroke-width 2, which would outline-draw the @ glyph and make
+        // it look thick/squashed.
         searchIcon.innerHTML =
-          '<text x="11" y="17" font-size="20" font-weight="400" fill="var(--text-faint)" text-anchor="middle" font-family="monospace">@</text>';
+          '<text x="11" y="17" font-size="20" font-weight="400" fill="var(--text-faint)" stroke="none" text-anchor="middle" font-family="monospace">@</text>';
       } else {
         searchIcon.innerHTML =
           '<circle cx="11" cy="11" r="7" fill="none" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></circle><line x1="21" y1="21" x2="16.65" y2="16.65" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></line>';
@@ -670,26 +674,32 @@
   // input; Tab fills the full title in. Both are gated on the typed
   // text being a case-insensitive prefix of the completion, so a stale
   // completion can never clobber what the user actually typed.
+  //
+  // This also owns the input placeholder — one source of truth so the
+  // mode-specific text can't race with Rust state pushes. While a
+  // completion suffix is showing, the placeholder is cleared entirely
+  // (the suffix replaces it); otherwise command mode gets its own hint
+  // and normal mode uses the pushed placeholder or the default.
   function renderCompletion() {
-    if (!inCommandMode || !completion) {
+    const showSuffix =
+      inCommandMode &&
+      !!completion &&
+      completion.toLowerCase().startsWith(input.value.toLowerCase()) &&
+      input.value.length < completion.length;
+    if (!showSuffix) {
       completionEl.textContent = "";
       hintComplete.classList.add("hidden");
+      input.placeholder = inCommandMode
+        ? "Type a command…"
+        : pushedPlaceholder || "Search for apps, files and actions…";
       return;
     }
-    const typed = input.value;
-    if (
-      !completion.toLowerCase().startsWith(typed.toLowerCase()) ||
-      typed.length >= completion.length
-    ) {
-      completionEl.textContent = "";
-      hintComplete.classList.add("hidden");
-      return;
-    }
-    completionEl.textContent = completion.slice(typed.length);
+    completionEl.textContent = completion.slice(input.value.length);
     // Keep the dim text aligned with the input's scrolled content.
     completionEl.style.transform =
       `translateY(calc(-50% - 1px)) translateX(${-input.scrollLeft}px)`;
     hintComplete.classList.remove("hidden");
+    input.placeholder = "";
   }
 
   function tryCompleteCommand() {
@@ -763,7 +773,6 @@
         inCommandMode = true;
         input.value = "";
         queryEcho = "";
-        input.placeholder = "Type a command…";
         updateSearchIcon();
         renderCompletion();
         post("query", "@");
@@ -772,7 +781,6 @@
       if (e.key === "Backspace" && inCommandMode && input.value === "") {
         e.preventDefault();
         inCommandMode = false;
-        input.placeholder = "Search for apps, files and actions…";
         updateSearchIcon();
         renderCompletion();
         post("query", "");
@@ -1156,11 +1164,9 @@
         quickLaunchItems = state.quickLaunch;
       }
 
-      if (state.placeholder) {
-        input.placeholder = state.placeholder;
-      } else {
-        input.placeholder = "Search for apps, files and actions…";
-      }
+      // Placeholder is applied by renderCompletion() (single source of
+      // truth, mode-aware) — here we only remember what Rust pushed.
+      pushedPlaceholder = typeof state.placeholder === "string" ? state.placeholder : "";
 
       statusEl.dataset.text = state.status || "";
 

@@ -56,37 +56,47 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
     let mut entries = load_entries(cfg);
     let now = now_epoch_secs();
 
-    // Try image capture first (images take priority over text)
+    // Try image capture first (images take priority over text). A
+    // transient image-read failure must NOT abort the whole capture —
+    // fall through to text instead of losing the entry.
     #[cfg(target_os = "windows")]
     {
-        if let Some(image) = read_system_clipboard_image()? {
-            let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
-            let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
-            let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
-            let full_encoded = encode_png(&full.data, full.width, full.height);
+        match read_system_clipboard_image() {
+            Ok(Some(image)) => {
+                let thumbnail = resize_image_data(&image.data, image.width, image.height, MAX_THUMBNAIL_DIM);
+                let full = resize_image_data(&image.data, image.width, image.height, MAX_IMAGE_DIM);
+                let thumbnail_encoded = encode_png(&thumbnail.data, thumbnail.width, thumbnail.height);
+                let full_encoded = encode_png(&full.data, full.width, full.height);
 
-            let entry = ClipboardEntry {
-                id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
-                text: String::new(),
-                captured_epoch_secs: now,
-                content_type: ClipboardContentType::Image,
-                image_data: Some(full_encoded),
-                thumbnail_data: Some(thumbnail_encoded),
-                image_width: Some(image.width),
-                image_height: Some(image.height),
-            };
+                let entry = ClipboardEntry {
+                    id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
+                    text: String::new(),
+                    captured_epoch_secs: now,
+                    content_type: ClipboardContentType::Image,
+                    image_data: Some(full_encoded),
+                    thumbnail_data: Some(thumbnail_encoded),
+                    image_width: Some(image.width),
+                    image_height: Some(image.height),
+                };
 
-            if entries.first().is_some_and(|e| {
-                e.content_type == ClipboardContentType::Image
-                    && e.image_data == entry.image_data
-            }) {
-                return Ok(false);
+                if entries.first().is_some_and(|e| {
+                    e.content_type == ClipboardContentType::Image
+                        && e.image_data == entry.image_data
+                }) {
+                    return Ok(false);
+                }
+
+                entries.insert(0, entry);
+                prune_entries(cfg, &mut entries, now);
+                save_entries(cfg, &entries)?;
+                return Ok(true);
             }
-
-            entries.insert(0, entry);
-            prune_entries(cfg, &mut entries, now);
-            save_entries(cfg, &entries)?;
-            return Ok(true);
+            Ok(None) => {}
+            Err(error) => {
+                crate::runtime::log_warn(&format!(
+                    "[nex] clipboard image read failed, falling back to text: {error}"
+                ));
+            }
         }
     }
 

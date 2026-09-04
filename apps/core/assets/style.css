@@ -133,8 +133,9 @@ body {
   max-width: 100%;
   overflow: hidden;
   white-space: pre;
+  /* Identical to #query::placeholder so the suffix reads as one
+     continuous hint (same color, size, weight, family). */
   color: var(--text-dim);
-  opacity: 0.55;
   font-size: 21px;
   font-family: inherit;
   font-weight: 300;

@@ -10,10 +10,6 @@ const MAX_CLIPBOARD_ENTRIES: usize = 500;
 /// Magic bytes prefixing DPAPI-encrypted clipboard history files so we can
 /// distinguish them from plaintext JSON (legacy format) on read.
 const DPAPI_MAGIC: &[u8; 8] = b"NXCLPDPA";
-/// Max dimension for stored full-resolution images (keeps storage bounded).
-const MAX_IMAGE_DIM: u32 = 1280;
-/// Max dimension for thumbnails shown in the bento grid.
-const MAX_THUMBNAIL_DIM: u32 = 256;
 
 static CLIPBOARD_CACHE: Mutex<Option<Vec<ClipboardEntry>>> = Mutex::new(None);
 
@@ -46,6 +42,9 @@ pub struct ClipboardEntry {
     pub image_width: Option<u32>,
     #[serde(default)]
     pub image_height: Option<u32>,
+    /// xxHash3 of raw DIB pixel data — used for dedup and full-res file lookup.
+    #[serde(default)]
+    pub image_hash: Option<u64>,
 }
 
 pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
@@ -59,18 +58,57 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
     // Try image capture first (images take priority over text). A
     // transient image-read failure must NOT abort the whole capture —
     // fall through to text instead of losing the entry.
-    //
-    // SAFETY: the entire image path is disabled for now — the image
-    // crate's resize/encode can abort (not panic) on OOM, which
-    // catch_unwind cannot catch, causing the runtime thread to die
-    // and the overlay to auto-hide on every launch while an image
-    // remains on the clipboard.  Text-only capture is safe.
-    // TODO: re-enable with a subprocess-based image capture that
-    // isolates the crash from the main runtime.
     #[cfg(target_os = "windows")]
     {
-        // Image capture disabled — fall through to text.
-        let _ = (now, &mut entries);
+        let img_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_clipboard_thumbnail_png(cfg)
+        }));
+        match img_result {
+            Ok(Ok(Some((thumbnail_png, hash)))) => {
+                // Dedup: skip if same image as previous entry
+                if entries.first().is_some_and(|e| {
+                    e.content_type == ClipboardContentType::Image
+                        && e.image_hash == Some(hash)
+                }) {
+                    return Ok(false);
+                }
+                entries.insert(
+                    0,
+                    ClipboardEntry {
+                        id: format!("clip-{now}-{}", now_nanos() % 1_000_000),
+                        text: String::new(),
+                        captured_epoch_secs: now,
+                        content_type: ClipboardContentType::Image,
+                        image_data: None, // full-res lives on disk
+                        thumbnail_data: Some(thumbnail_png),
+                        image_width: None,
+                        image_height: None,
+                        image_hash: Some(hash),
+                    },
+                );
+                let hashes: Vec<u64> = entries
+                    .iter()
+                    .filter_map(|e| e.image_hash)
+                    .collect();
+                prune_entries(cfg, &mut entries, now);
+                prune_image_cache(cfg, &hashes);
+                save_entries(cfg, &entries)?;
+                return Ok(true);
+            }
+            Ok(Ok(None)) => {
+                // No image on clipboard — fall through to text
+            }
+            Ok(Err(error)) => {
+                crate::runtime::log_warn(&format!(
+                    "[nex] clipboard image capture failed, falling back to text: {error}"
+                ));
+            }
+            Err(_) => {
+                crate::runtime::log_warn(
+                    "[nex] clipboard image capture panicked, falling back to text",
+                );
+            }
+        }
     }
 
     // Fall back to text capture
@@ -101,6 +139,7 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
             thumbnail_data: None,
             image_width: None,
             image_height: None,
+            image_hash: None,
         },
     );
     prune_entries(cfg, &mut entries, now);
@@ -135,10 +174,16 @@ pub fn copy_entry_to_clipboard(cfg: &Config, entry_id: &str) -> Result<(), Strin
     match entry.content_type {
         ClipboardContentType::Text => write_system_clipboard_text(&entry.text),
         ClipboardContentType::Image => {
-            if let Some(data) = &entry.image_data {
-                write_system_clipboard_image(data)
-            } else {
-                Err("image entry has no data".to_string())
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(hash) = entry.image_hash {
+                    return write_fullres_to_clipboard(cfg, hash);
+                }
+                Err("image entry has no hash — cannot locate full-res file".into())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Err("clipboard image copy is unsupported on this platform".into())
             }
         }
     }
@@ -146,10 +191,16 @@ pub fn copy_entry_to_clipboard(cfg: &Config, entry_id: &str) -> Result<(), Strin
 
 pub fn clear_history(cfg: &Config) -> Result<(), String> {
     let path = history_path(cfg);
-    if !path.exists() {
-        return Ok(());
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("failed to clear clipboard history: {e}"))?;
     }
-    std::fs::remove_file(path).map_err(|e| format!("failed to clear clipboard history: {e}"))
+    // Also clear the full-res image cache
+    let cache_dir = image_cache_dir(cfg);
+    if cache_dir.exists() {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+    Ok(())
 }
 
 pub fn search_history(
@@ -519,20 +570,82 @@ fn write_system_clipboard_text(_value: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Image clipboard support
+// Image clipboard support — GDI-based, zero-abort pipeline
 // ---------------------------------------------------------------------------
+//
+// The `image` crate's resize/encode can abort (not panic) on OOM.
+// This module replaces all `image` crate usage in the clipboard path
+// with Windows GDI (CreateDIBSection + StretchBlt) for resize and the
+// `png` crate for scanline-streamed encoding. Peak RAM < 1MB.
+//
+// Full-resolution images are streamed to disk as `full_{xxh3}.png`
+// inside `%APPDATA%\Nex\image_cache\`. Thumbnails (256px) are kept
+// in memory as `ClipboardEntry.thumbnail_data` for the bento grid.
 
-/// Raw RGBA image data extracted from the clipboard.
-struct RawImage {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
+use std::io::BufWriter;
+
+use xxhash_rust::xxh3::xxh3_64;
+
+/// Max dimension accepted from the clipboard (reject before any alloc).
+const MAX_CAPTURE_DIM: u32 = 2560;
+/// Thumbnail size for bento grid display.
+const MAX_THUMBNAIL_DIM: u32 = 256;
+/// Max number of full-res image files in the cache.
+const IMAGE_CACHE_MAX_ITEMS: usize = 50;
+/// Max total disk usage for full-res images (bytes).
+const IMAGE_CACHE_MAX_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Directory for full-res image files.
+fn image_cache_dir(cfg: &Config) -> PathBuf {
+    cfg.config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("image_cache")
 }
 
-/// Read a DIB (Device Independent Bitmap) image from the system clipboard.
-/// Returns `None` if no image is available or on read failure.
+/// Full-res file path for a given xxh3 hash.
+fn fullres_path(cfg: &Config, hash: u64) -> PathBuf {
+    image_cache_dir(cfg).join(format!("full_{hash:016x}.png"))
+}
+
+/// Encode RGBA pixels as PNG using the `png` crate.
+/// Scanline-by-scanline — only needs ~width*4 bytes intermediate buffer.
+fn encode_thumbnail_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(BufWriter::new(&mut buf), width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG header error: {e}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| format!("PNG encode error: {e}"))?;
+    }
+    Ok(buf)
+}
+
+/// Capture a clipboard image as a thumbnail PNG + stream full-res to disk.
+///
+/// Returns `Ok(Some((thumbnail_png, xxh3_hash)))` on success.
+/// Returns `Ok(None)` if no image is on the clipboard.
+/// Returns `Err(...)` on processing failure (caller should fall through
+/// to text capture).
+///
+/// Safety: GDI's `CreateDIBSection` returns NULL on OOM instead of
+/// aborting. The only Rust heap allocation is the ~256KB thumbnail
+/// readback buffer. Full-res is streamed row-by-row to disk.
 #[cfg(target_os = "windows")]
-fn read_system_clipboard_image() -> Result<Option<RawImage>, String> {
+fn capture_clipboard_thumbnail_png(
+    cfg: &Config,
+) -> Result<Option<(Vec<u8>, u64)>, String> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+        SelectObject, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, SRCCOPY,
+    };
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     };
@@ -540,162 +653,345 @@ fn read_system_clipboard_image() -> Result<Option<RawImage>, String> {
     use windows_sys::Win32::System::Ole::CF_DIB;
 
     unsafe {
+        // 1. Open clipboard and get DIB handle
         if OpenClipboard(std::ptr::null_mut()) == 0 {
             return Ok(None);
         }
-
-        // CF_DIB = 8, CF_DIBV5 = 17. Prefer CF_DIB for compatibility.
         let format = u32::from(CF_DIB);
         if IsClipboardFormatAvailable(format) == 0 {
             CloseClipboard();
             return Ok(None);
         }
-
-        let handle = GetClipboardData(format);
-        if handle.is_null() {
+        let clip_handle = GetClipboardData(format);
+        if clip_handle.is_null() {
+            CloseClipboard();
+            return Ok(None);
+        }
+        let dib_ptr = GlobalLock(clip_handle) as *const u8;
+        if dib_ptr.is_null() {
             CloseClipboard();
             return Ok(None);
         }
 
-        let ptr = GlobalLock(handle) as *const u8;
-        if ptr.is_null() {
-            CloseClipboard();
-            return Ok(None);
-        }
-
-        // Parse BITMAPINFOHEADER to get dimensions and pixel data offset.
-        let header_size = *(ptr as *const u32);
-        let width = (*(ptr.add(4) as *const i32)).unsigned_abs();
-        let height_raw = *(ptr.add(8) as *const i32);
+        // 2. Parse BITMAPINFOHEADER
+        let header_size = *(dib_ptr as *const u32);
+        let width = (*(dib_ptr.add(4) as *const i32)).unsigned_abs();
+        let height_raw = *(dib_ptr.add(8) as *const i32);
         let height = height_raw.unsigned_abs();
-        let bpp = *(ptr.add(14) as *const u16);
+        let bpp = *(dib_ptr.add(14) as *const u16);
 
-        if header_size < 40 || width == 0 || height == 0 || bpp != 24 && bpp != 32 {
-            GlobalUnlock(handle);
+        if header_size < 40
+            || width == 0
+            || height == 0
+            || (bpp != 24 && bpp != 32)
+        {
+            GlobalUnlock(clip_handle);
             CloseClipboard();
             return Ok(None);
         }
 
-        // Reject absurdly large clipboard images — reading them into
-        // RGBA would allocate hundreds of MB and can panic/OOM the
-        // runtime, causing the overlay to auto-hide on every launch
-        // (the image stays on the clipboard and re-triggers the crash).
-        const MAX_CLIP_DIM: u32 = 4096;
-        if width > MAX_CLIP_DIM || height > MAX_CLIP_DIM {
-            GlobalUnlock(handle);
+        // 3. Reject oversized images before any alloc
+        if width > MAX_CAPTURE_DIM || height > MAX_CAPTURE_DIM {
+            GlobalUnlock(clip_handle);
             CloseClipboard();
             return Ok(None);
         }
 
-        // Pixel data starts after the color table (none for 24/32bpp BI_RGB).
+        // 4. Compute xxh3 hash over raw pixel data (for dedup + file naming)
         let pixel_offset = header_size as usize;
-        let row_size = ((width as usize * bpp as usize + 31) / 32) * 4;
-        let pixel_bytes = row_size * height as usize;
+        let row_bytes = ((width as usize * bpp as usize + 31) / 32) * 4;
+        let total_pixel_bytes = row_bytes * height as usize;
+        let pixel_slice =
+            std::slice::from_raw_parts(dib_ptr.add(pixel_offset), total_pixel_bytes);
+        let hash = xxh3_64(pixel_slice);
 
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-
-        let top_down = height_raw < 0;
-        for row in 0..height {
-            let src_row = if top_down { row } else { height - 1 - row };
-            let src = ptr.add(pixel_offset + src_row as usize * row_size);
-            for col in 0..width {
-                let offset = col as usize * bpp as usize / 8;
-                let b = *src.add(offset);
-                let g = *src.add(offset + 1);
-                let r = *src.add(offset + 2);
-                let a = if bpp == 32 { *src.add(offset + 3) } else { 255 };
-                rgba.push(r);
-                rgba.push(g);
-                rgba.push(b);
-                rgba.push(a);
-            }
+        // 5. Create source HBITMAP from clipboard DIB
+        let bmi_ptr = dib_ptr as *const BITMAPINFO;
+        let screen_dc = GetDC(std::ptr::null_mut());
+        let src_dc = CreateCompatibleDC(screen_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+        if src_dc.is_null() {
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Err("CreateCompatibleDC(src) failed".into());
         }
 
-        GlobalUnlock(handle);
+        let mut src_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let src_bmp = CreateDIBSection(
+            src_dc,
+            bmi_ptr,
+            DIB_RGB_COLORS,
+            &mut src_bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if src_bmp.is_null() || src_bits.is_null() {
+            DeleteDC(src_dc);
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Err("CreateDIBSection(src) failed — OOM or invalid DIB".into());
+        }
+
+        // Copy clipboard pixel data into source bitmap
+        std::ptr::copy_nonoverlapping(
+            dib_ptr.add(pixel_offset),
+            src_bits as *mut u8,
+            total_pixel_bytes,
+        );
+        let old_src = SelectObject(src_dc, src_bmp as _);
+
+        // 6. Compute thumbnail dimensions (preserve aspect ratio)
+        let scale = (MAX_THUMBNAIL_DIM as f64 / width as f64)
+            .min(MAX_THUMBNAIL_DIM as f64 / height as f64);
+        let thumb_w = ((width as f64 * scale).max(1.0)) as i32;
+        let thumb_h = ((height as f64 * scale).max(1.0)) as i32;
+
+        // 7. Create destination DIBSection at thumbnail size (32bpp BGRA, top-down)
+        let dst_dc = CreateCompatibleDC(std::ptr::null_mut());
+        if dst_dc.is_null() {
+            SelectObject(src_dc, old_src);
+            DeleteObject(src_bmp as _);
+            DeleteDC(src_dc);
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Err("CreateCompatibleDC(dst) failed".into());
+        }
+
+        let mut dst_header: BITMAPINFOHEADER = std::mem::zeroed();
+        dst_header.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        dst_header.biWidth = thumb_w;
+        dst_header.biHeight = -thumb_h; // negative = top-down
+        dst_header.biPlanes = 1;
+        dst_header.biBitCount = 32;
+        dst_header.biCompression = BI_RGB;
+
+        let mut dst_bmi: BITMAPINFO = std::mem::zeroed();
+        dst_bmi.bmiHeader = dst_header;
+
+        let mut dst_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let dst_bmp = CreateDIBSection(
+            dst_dc,
+            &dst_bmi,
+            DIB_RGB_COLORS,
+            &mut dst_bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if dst_bmp.is_null() || dst_bits.is_null() {
+            SelectObject(src_dc, old_src);
+            DeleteObject(src_bmp as _);
+            DeleteDC(src_dc);
+            DeleteDC(dst_dc);
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Err("CreateDIBSection(dst) failed — OOM".into());
+        }
+
+        let old_dst = SelectObject(dst_dc, dst_bmp as _);
+
+        // 8. StretchBlt: hardware-accelerated resize
+        StretchBlt(
+            dst_dc,
+            0,
+            0,
+            thumb_w,
+            thumb_h,
+            src_dc,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            SRCCOPY,
+        );
+
+        // 9. Read back thumbnail pixels (BGRA → RGBA)
+        let pixel_count = (thumb_w * thumb_h) as usize;
+        let bgra = std::slice::from_raw_parts(dst_bits as *const u8, pixel_count * 4);
+        let mut rgba = vec![0u8; pixel_count * 4]; // ~256KB max
+        for (i, chunk) in bgra.chunks_exact(4).enumerate() {
+            rgba[i * 4] = chunk[2]; // R ← B
+            rgba[i * 4 + 1] = chunk[1]; // G
+            rgba[i * 4 + 2] = chunk[0]; // B ← R
+            rgba[i * 4 + 3] = chunk[3]; // A
+        }
+
+        // 10. Stream full-res to disk WHILE clipboard is still locked
+        //     (dib_ptr is only valid between GlobalLock and GlobalUnlock)
+        stream_fullres_to_disk(cfg, hash, dib_ptr, header_size, width, height, bpp, row_bytes)?;
+
+        // 11. Cleanup GDI resources and release clipboard
+        SelectObject(src_dc, old_src);
+        SelectObject(dst_dc, old_dst);
+        DeleteObject(src_bmp as _);
+        DeleteObject(dst_bmp as _);
+        DeleteDC(src_dc);
+        DeleteDC(dst_dc);
+        GlobalUnlock(clip_handle);
         CloseClipboard();
 
-        Ok(Some(RawImage {
-            data: rgba,
-            width,
-            height,
-        }))
+        // 12. Encode thumbnail as PNG (pure in-memory, no clipboard needed)
+        let thumbnail_png = encode_thumbnail_png(&rgba, thumb_w as u32, thumb_h as u32)?;
+
+        Ok(Some((thumbnail_png, hash)))
     }
 }
 
-/// Resize RGBA image data to fit within `max_dim` (preserving aspect ratio).
-fn resize_image_data(data: &[u8], width: u32, height: u32, max_dim: u32) -> RawImage {
-    if width <= max_dim && height <= max_dim {
-        return RawImage {
-            data: data.to_vec(),
-            width,
-            height,
-        };
-    }
-
-    let scale = (max_dim as f32 / width as f32).min(max_dim as f32 / height as f32);
-    let new_width = (width as f32 * scale).max(1.0) as u32;
-    let new_height = (height as f32 * scale).max(1.0) as u32;
-
-    let img = image::RgbaImage::from_raw(width, height, data.to_vec())
-        .map(image::DynamicImage::ImageRgba8)
-        .unwrap_or_else(|| image::DynamicImage::new_rgba8(1, 1));
-
-    let resized = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
-    let rgba = resized.to_rgba8();
-
-    RawImage {
-        data: rgba.into_raw(),
-        width: new_width,
-        height: new_height,
-    }
-}
-
-/// Encode RGBA pixel data as PNG bytes.
-fn encode_png(data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let Some(img) = image::RgbaImage::from_raw(width, height, data.to_vec()) else {
-        return Vec::new();
-    };
-    let mut buf = Vec::new();
-    let _ = image::DynamicImage::ImageRgba8(img).write_to(
-        &mut std::io::Cursor::new(&mut buf),
-        image::ImageFormat::Png,
-    );
-    buf
-}
-
-/// Write PNG image data back to the system clipboard as a DIB.
+/// Encode full-resolution PNG to disk from clipboard DIB.
+/// Collects all rows into a single RGBA buffer for the png crate.
+/// The DIB pointer must still be valid (clipboard locked).
 #[cfg(target_os = "windows")]
-fn write_system_clipboard_image(png_data: &[u8]) -> Result<(), String> {
-    let img = image::load_from_memory(png_data).map_err(|e| format!("failed to decode PNG: {e}"))?;
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
+fn stream_fullres_to_disk(
+    cfg: &Config,
+    hash: u64,
+    dib_ptr: *const u8,
+    header_size: u32,
+    width: u32,
+    height: u32,
+    bpp: u16,
+    row_bytes: usize,
+) -> Result<(), String> {
+    let dir = image_cache_dir(cfg);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create image cache dir: {e}"))?;
 
-    // Build a BITMAPINFOHEADER + pixel data (BGR, bottom-up, 24bpp).
+    let path = fullres_path(cfg, hash);
+    let file = std::fs::File::create(&path)
+        .map_err(|e| format!("failed to create full-res PNG: {e}"))?;
+
+    let pixel_offset = header_size as usize;
+    let top_down = unsafe { (*(dib_ptr.add(8) as *const i32)) < 0 };
+
+    // Collect all rows into a single RGBA buffer.
+    // png::Encoder::write_image_data requires the full image in one call.
+    let pixel_count = width as usize * height as usize;
+    let mut rgba = vec![0u8; pixel_count * 4];
+
+    for row in 0..height {
+        let src_row = if top_down {
+            row
+        } else {
+            height - 1 - row
+        };
+        let dst_offset = row as usize * width as usize * 4;
+        unsafe {
+            let src = dib_ptr.add(pixel_offset + src_row as usize * row_bytes);
+            for col in 0..width {
+                let off = col as usize * bpp as usize / 8;
+                let b = *src.add(off);
+                let g = *src.add(off + 1);
+                let r = *src.add(off + 2);
+                let a = if bpp == 32 { *src.add(off + 3) } else { 255 };
+                let di = dst_offset + col as usize * 4;
+                rgba[di] = r;
+                rgba[di + 1] = g;
+                rgba[di + 2] = b;
+                rgba[di + 3] = a;
+            }
+        }
+    }
+
+    let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("PNG header error: {e}"))?;
+    writer
+        .write_image_data(&rgba)
+        .map_err(|e| format!("PNG write error: {e}"))?;
+
+    Ok(())
+}
+
+/// Prune the image cache directory — enforce item count and total size limits.
+fn prune_image_cache(cfg: &Config, keep_hashes: &[u64]) {
+    let dir = image_cache_dir(cfg);
+    let Ok(mut files) = std::fs::read_dir(&dir) else {
+        return;
+    };
+
+    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    while let Some(Ok(entry)) = files.next() {
+        let path = entry.path();
+        if path.extension().map_or(true, |e| e != "png") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        // Extract hash from filename to check if it should be kept
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if let Some(hex) = stem.strip_prefix("full_") {
+            if let Ok(h) = u64::from_str_radix(hex, 16) {
+                if keep_hashes.contains(&h) {
+                    entries.push((path, meta.len(), meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+                    continue;
+                }
+            }
+        }
+        entries.push((path, meta.len(), meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+    }
+
+    // Sort oldest first (LRU eviction)
+    entries.sort_by_key(|e| e.2);
+
+    let mut total_bytes: u64 = entries.iter().map(|e| e.1).sum();
+    let mut count = entries.len();
+
+    // Evict oldest until within limits
+    for (path, size, _) in &entries {
+        if count <= IMAGE_CACHE_MAX_ITEMS && total_bytes <= IMAGE_CACHE_MAX_BYTES {
+            break;
+        }
+        let _ = std::fs::remove_file(path);
+        total_bytes -= size;
+        count -= 1;
+    }
+}
+
+/// Write a full-res PNG from disk back to the system clipboard as a DIB.
+#[cfg(target_os = "windows")]
+fn write_fullres_to_clipboard(cfg: &Config, hash: u64) -> Result<(), String> {
+    let path = fullres_path(cfg, hash);
+    let png_bytes = std::fs::read(&path)
+        .map_err(|e| format!("failed to read full-res PNG: {e}"))?;
+
+    // Decode PNG using the png crate
+    let decoder = png::Decoder::new(std::io::Cursor::new(&png_bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("PNG decode error: {e}"))?;
+    let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("PNG frame error: {e}"))?;
+    let rgba = &buf[..info.buffer_size()];
+    let width = info.width;
+    let height = info.height;
+
+    // Build a BITMAPINFOHEADER + BGR pixel data (bottom-up, 24bpp)
     let row_size = ((width * 24 + 31) / 32) * 4;
     let pixel_data_size = row_size * height;
     let header_size: u32 = 40;
-    let total_size = header_size as u32 + pixel_data_size;
+    let total_size = header_size + pixel_data_size;
 
     let mut dib = vec![0u8; total_size as usize];
-
-    // BITMAPINFOHEADER
     dib[0..4].copy_from_slice(&header_size.to_le_bytes());
     dib[4..8].copy_from_slice(&(width as i32).to_le_bytes());
     dib[8..12].copy_from_slice(&(height as i32).to_le_bytes());
-    dib[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
-    dib[14..16].copy_from_slice(&24u16.to_le_bytes()); // bpp
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+    dib[14..16].copy_from_slice(&24u16.to_le_bytes());
 
-    // Pixel data: convert RGBA to BGR bottom-up.
-    let pixel_data = rgba.as_raw();
     for y in 0..height {
         let dst_row = height - 1 - y;
         for x in 0..width {
             let src_idx = ((y * width + x) * 4) as usize;
             let dst_idx = (header_size as usize + dst_row as usize * row_size as usize
                 + x as usize * 3);
-            dib[dst_idx] = pixel_data[src_idx + 2]; // B
-            dib[dst_idx + 1] = pixel_data[src_idx + 1]; // G
-            dib[dst_idx + 2] = pixel_data[src_idx]; // R
+            dib[dst_idx] = rgba[src_idx + 2]; // B
+            dib[dst_idx + 1] = rgba[src_idx + 1]; // G
+            dib[dst_idx + 2] = rgba[src_idx]; // R
         }
     }
 
@@ -708,34 +1004,30 @@ fn write_system_clipboard_image(png_data: &[u8]) -> Result<(), String> {
 
     unsafe {
         if OpenClipboard(std::ptr::null_mut()) == 0 {
-            return Err("failed to open clipboard".to_string());
+            return Err("failed to open clipboard".into());
         }
         if EmptyClipboard() == 0 {
             CloseClipboard();
-            return Err("failed to clear clipboard".to_string());
+            return Err("failed to clear clipboard".into());
         }
-
         let mem = GlobalAlloc(GMEM_MOVEABLE, total_size as usize);
         if mem.is_null() {
             CloseClipboard();
-            return Err("failed to allocate clipboard memory".to_string());
+            return Err("failed to allocate clipboard memory".into());
         }
-
         let ptr = GlobalLock(mem) as *mut u8;
         if ptr.is_null() {
             GlobalFree(mem);
             CloseClipboard();
-            return Err("failed to lock clipboard memory".to_string());
+            return Err("failed to lock clipboard memory".into());
         }
         std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr, dib.len());
         GlobalUnlock(mem);
-
         if SetClipboardData(u32::from(CF_DIB), mem).is_null() {
             GlobalFree(mem);
             CloseClipboard();
-            return Err("failed to set clipboard image".to_string());
+            return Err("failed to set clipboard image".into());
         }
-
         CloseClipboard();
     }
     Ok(())

@@ -1623,6 +1623,7 @@ dependencies = [
  "json5",
  "lru 0.12.5",
  "once_cell",
+ "png",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1637,6 +1638,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winres",
  "wry",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3917,6 +3919,12 @@ dependencies = [
  "once_cell",
  "pkg-config",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yoke"

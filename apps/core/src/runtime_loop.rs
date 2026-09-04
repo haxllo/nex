@@ -1406,7 +1406,13 @@ impl RuntimeWorker {
                         }
                         self.overlay.show_and_focus();
                         if self.runtime_config.clipboard_enabled {
-                            let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
+                            let cfg = self.runtime_config.clone();
+                            std::thread::Builder::new()
+                                .name("nex-clipboard-capture".into())
+                                .spawn(move || {
+                                    let _ = clipboard_history::maybe_capture_latest(&cfg);
+                                })
+                                .ok();
                         }
                     }
                     HotkeyAction::Hide => {
@@ -1449,7 +1455,13 @@ impl RuntimeWorker {
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
                 if self.runtime_config.clipboard_enabled {
-                    let _ = clipboard_history::maybe_capture_latest(&self.runtime_config);
+                    let cfg = self.runtime_config.clone();
+                    std::thread::Builder::new()
+                        .name("nex-clipboard-capture".into())
+                        .spawn(move || {
+                            let _ = clipboard_history::maybe_capture_latest(&cfg);
+                        })
+                        .ok();
                 }
             }
             OverlayEvent::ExternalQuit => {

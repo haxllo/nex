@@ -60,6 +60,15 @@ impl ParsedQuery {
         if let Some(rest) = working.strip_prefix('>') {
             command_mode = true;
             working = rest.trim_start().to_string();
+        } else if let Some(rest) = working.strip_prefix('@') {
+            // `@` is the command-mode prefix, but a leading mode token
+            // (`@apps`, `@files`, `@clipboard`, …) keeps its existing
+            // meaning — only non-mode `@…` queries enter command mode.
+            let first = rest.split_whitespace().next().unwrap_or("");
+            if SearchMode::parse(first).is_none() {
+                command_mode = true;
+                working = rest.trim_start().to_string();
+            }
         }
 
         let tokens = tokenize(&working);
@@ -269,6 +278,26 @@ mod tests {
         assert!(parsed.command_mode);
         assert_eq!(parsed.mode_override, Some(SearchMode::Actions));
         assert_eq!(parsed.free_text, "logs");
+    }
+
+    #[test]
+    fn at_symbol_enters_command_mode() {
+        let parsed = ParsedQuery::parse("@clip", true);
+        assert!(parsed.command_mode);
+        assert_eq!(parsed.mode_override, Some(SearchMode::Actions));
+        assert_eq!(parsed.free_text, "clip");
+    }
+
+    #[test]
+    fn at_mode_token_still_wins_over_command_mode() {
+        let parsed = ParsedQuery::parse("@apps", true);
+        assert!(!parsed.command_mode);
+        assert_eq!(parsed.mode_override, Some(SearchMode::Apps));
+
+        let parsed = ParsedQuery::parse("@clipboard history", true);
+        assert!(!parsed.command_mode);
+        assert_eq!(parsed.mode_override, Some(SearchMode::Clipboard));
+        assert_eq!(parsed.free_text, "history");
     }
 
     #[test]

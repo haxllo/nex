@@ -117,6 +117,40 @@ body {
   transition: opacity 120ms ease;
 }
 
+#query-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+#completion {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(calc(-50% - 1px));
+  max-width: 100%;
+  overflow: hidden;
+  white-space: pre;
+  color: var(--text-dim);
+  opacity: 0.55;
+  font-size: 21px;
+  font-family: inherit;
+  font-weight: 300;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
+}
+
+#query-wrap #query {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 #query {
   flex: 1 1 auto;
   border: none;
@@ -1001,24 +1035,4 @@ html[data-theme="light"] img.icon.glyph {
   height: 100%;
   object-fit: cover;
   min-height: 72px;
-}
-
-/* Image expand overlay */
-#image-expand-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  cursor: pointer;
-}
-
-#image-expand-overlay img {
-  max-width: 90%;
-  max-height: 90%;
-  object-fit: contain;
-  border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }

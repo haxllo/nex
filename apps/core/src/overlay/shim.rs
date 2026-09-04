@@ -233,6 +233,8 @@ impl NativeOverlayShell {
             s.selected = 0;
             s.bento_view = false;
             s.placeholder_hint = None;
+            s.status_text.clear();
+            s.completion = None;
         });
         crate::overlay::hotkey::set_overlay_visible(false);
         self.post(UiCommand::Hide);
@@ -242,6 +244,16 @@ impl NativeOverlayShell {
         self.with_state(|s| {
             s.visible = false;
             s.has_focus = false;
+            // Full cleanup, same as hide(): hide_now callers (settings
+            // open, lock/sleep) do not reset the session afterwards, so a
+            // stale query/rows/bento would still be on screen next show.
+            s.query.clear();
+            s.rows.clear();
+            s.selected = 0;
+            s.bento_view = false;
+            s.placeholder_hint = None;
+            s.status_text.clear();
+            s.completion = None;
         });
         crate::overlay::hotkey::set_overlay_visible(false);
         self.post(UiCommand::Hide);
@@ -256,6 +268,8 @@ impl NativeOverlayShell {
             s.selected = 0;
             s.bento_view = false;
             s.placeholder_hint = None;
+            s.status_text.clear();
+            s.completion = None;
         });
         crate::overlay::hotkey::set_overlay_visible(false);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -327,10 +341,49 @@ impl NativeOverlayShell {
             s.rows = rows;
             s.selected = 0;
             s.bento_view = true;
-            s.grid_view = false;
             s.placeholder_hint = None;
         });
         self.post(UiCommand::Apply);
+    }
+
+    /// True while the clipboard bento grid owns the result list.
+    pub fn is_bento_view(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.bento_view)
+            .unwrap_or(false)
+    }
+
+    /// Current rows as pushed to the page (mirror of what the web UI
+    /// renders). Runtime submit handling reads this for bento clicks —
+    /// `current_rows` only tracks regular search results.
+    pub fn rows(&self) -> Vec<OverlayRow> {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.rows.clone())
+            .unwrap_or_default()
+    }
+
+    /// Set the command-mode autofill title (`None` clears it). Only
+    /// re-renders when the value actually changed so per-keystroke
+    /// updates stay cheap.
+    pub fn set_completion(&self, completion: Option<&str>) {
+        let changed = self
+            .inner
+            .state
+            .lock()
+            .map(|mut s| {
+                let next = completion.map(|c| c.to_string());
+                let changed = s.completion != next;
+                s.completion = next;
+                changed
+            })
+            .unwrap_or(false);
+        if changed {
+            self.post(UiCommand::Apply);
+        }
     }
 
     /// Exit bento grid view and return to normal search.
@@ -385,6 +438,10 @@ impl NativeOverlayShell {
             s.rows = rows.to_vec();
             s.selected = selected_index.min(s.rows.len().saturating_sub(1));
             s.placeholder_hint = None;
+            // Any regular results push replaces the clipboard bento grid —
+            // leaving the flag on would render plain rows inside the grid
+            // layout (the "bento stuck" broken-UI bug).
+            s.bento_view = false;
             // Update quick_launch_visible based on whether we're showing Quick Launch rows
             s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });

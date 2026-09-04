@@ -13,15 +13,18 @@
           <circle cx="11" cy="11" r="7"></circle>
           <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
         </svg>
-        <input
-          id="query"
-          type="text"
-          autocomplete="off"
-          autocorrect="off"
-          autocapitalize="off"
-          spellcheck="false"
-          placeholder="Search for apps, files and actions…"
-        />
+        <div id="query-wrap">
+          <span id="completion" aria-hidden="true"></span>
+          <input
+            id="query"
+            type="text"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="Search for apps, files and actions…"
+          />
+        </div>
         <div id="power-wrap-top">
           <button type="button" id="power-btn-top" title="Power options" aria-label="Power options">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -77,6 +80,7 @@
       <footer id="footer">
         <div class="hints">
           <div class="hint"><span class="kbd">↵</span><span class="lbl">Open</span></div>
+          <div class="hint hidden" id="hint-complete"><span class="kbd">tab</span><span class="lbl">Complete</span></div>
           <div class="hint"><span class="kbd">esc</span><span class="lbl">Close</span></div>
         </div>
         <button type="button" class="footer-settings" id="footer-settings-btn" title="Settings">

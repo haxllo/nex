@@ -22,6 +22,8 @@
   const powerConfirmYesTop = $("power-confirm-yes-top");
   const powerPanelTop = $("power-panel-top");
   const contextMenu = $("context-menu");
+  const completionEl = $("completion");
+  const hintComplete = $("hint-complete");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -32,6 +34,7 @@
   let queryEcho = ""; // last query Rust pushed back (avoid input clobber)
   let lastQuerySent = "";
   let inCommandMode = false;
+  let completion = ""; // Rust-pushed command-mode autofill title
   let rowMap = new Map(); // index → HTMLElement for O(1) selection toggle
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
@@ -245,29 +248,25 @@
       li.setAttribute("aria-selected", "false");
     }
 
-    // Clipboard history tile (image or text)
+    // Clipboard history tile (image or text) — clicking copies the
+    // entry to the system clipboard, exactly like Enter on the row.
     if (r.role === "clipboard_history") {
       if (r.clipboardThumbnail) {
-        // Image tile
         const img = document.createElement("img");
         img.className = "tile-image";
         img.src = r.clipboardThumbnail;
         li.appendChild(img);
-        li.addEventListener("click", () => {
-          if (r.clipboardFullImage) expandImage(r.clipboardFullImage);
-        });
       } else {
-        // Text tile
         const content = document.createElement("div");
         content.className = "tile-content";
         content.textContent = r.title;
         li.appendChild(content);
-        li.addEventListener("click", () => {
-          const idx = Number(li.dataset.index);
-          setSelected(idx, false);
-          post("submit", idx);
-        });
       }
+      li.addEventListener("click", () => {
+        const idx = Number(li.dataset.index);
+        setSelected(idx, false);
+        post("submit", idx);
+      });
       li.addEventListener("mousemove", () => setSelected(Number(li.dataset.index), false));
       return li;
     }
@@ -656,13 +655,58 @@
     setTimeout(() => {
       if (inCommandMode) {
         searchIcon.innerHTML =
-          '<text x="11" y="17" font-size="20" font-weight="400" fill="var(--text-faint)" text-anchor="middle" font-family="monospace">></text>';
+          '<text x="11" y="17" font-size="20" font-weight="400" fill="var(--text-faint)" text-anchor="middle" font-family="monospace">@</text>';
       } else {
         searchIcon.innerHTML =
           '<circle cx="11" cy="11" r="7" fill="none" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></circle><line x1="21" y1="21" x2="16.65" y2="16.65" stroke="var(--text-faint)" stroke-width="2" stroke-linecap="round"></line>';
       }
       searchIcon.style.opacity = "1";
     }, 130);
+  }
+
+  // ── command autofill (dim remainder + Tab completion) ──────
+  // Rust pushes `completion` = the full title of the best matching
+  // command. Only the untyped remainder is rendered dimmed inside the
+  // input; Tab fills the full title in. Both are gated on the typed
+  // text being a case-insensitive prefix of the completion, so a stale
+  // completion can never clobber what the user actually typed.
+  function renderCompletion() {
+    if (!inCommandMode || !completion) {
+      completionEl.textContent = "";
+      hintComplete.classList.add("hidden");
+      return;
+    }
+    const typed = input.value;
+    if (
+      !completion.toLowerCase().startsWith(typed.toLowerCase()) ||
+      typed.length >= completion.length
+    ) {
+      completionEl.textContent = "";
+      hintComplete.classList.add("hidden");
+      return;
+    }
+    completionEl.textContent = completion.slice(typed.length);
+    // Keep the dim text aligned with the input's scrolled content.
+    completionEl.style.transform =
+      `translateY(calc(-50% - 1px)) translateX(${-input.scrollLeft}px)`;
+    hintComplete.classList.remove("hidden");
+  }
+
+  function tryCompleteCommand() {
+    if (!inCommandMode || !completion) return false;
+    const typed = input.value;
+    if (
+      !completion.toLowerCase().startsWith(typed.toLowerCase()) ||
+      typed.length >= completion.length
+    ) {
+      return false;
+    }
+    input.value = completion;
+    queryEcho = completion;
+    lastQuerySent = "@" + completion;
+    post("query", lastQuerySent);
+    renderCompletion();
+    return true;
   }
 
   // ── height measurement + painted notification ──
@@ -712,47 +756,56 @@
   window.addEventListener(
     "keydown",
     (e) => {
-      // ── command mode: `>` to enter, backspace-on-empty to exit ──
-      if (e.key === ">" && !inCommandMode && document.activeElement === input) {
+      // ── command mode: `@` to enter (legacy `>` still accepted),
+      // backspace-on-empty to exit ──
+      if ((e.key === "@" || e.key === ">") && !inCommandMode && document.activeElement === input) {
         e.preventDefault();
         inCommandMode = true;
         input.value = "";
         queryEcho = "";
+        input.placeholder = "Type a command…";
         updateSearchIcon();
-        post("query", ">");
+        renderCompletion();
+        post("query", "@");
         return;
       }
       if (e.key === "Backspace" && inCommandMode && input.value === "") {
         e.preventDefault();
         inCommandMode = false;
+        input.placeholder = "Search for apps, files and actions…";
         updateSearchIcon();
+        renderCompletion();
         post("query", "");
         return;
       }
 
       if (e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "J"))) {
         e.preventDefault();
-        if (list.classList.contains("grid-view")) {
+        if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(1);
         } else {
           moveSelection(1);
         }
       } else if (e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
         e.preventDefault();
-        if (list.classList.contains("grid-view")) {
+        if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(-1);
         } else {
           moveSelection(-1);
         }
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
-        if (list.classList.contains("grid-view")) {
+        if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGrid(e.key === "ArrowLeft" ? -1 : 1, 0);
         }
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Tab") {
+        if (tryCompleteCommand()) {
+          e.preventDefault();
+          return;
+        }
         // Tab focuses the search input and selects its content so
         // typing replaces the existing query — no manual erase.
         e.preventDefault();
@@ -791,15 +844,16 @@
   let lastInputTime = 0;
   input.addEventListener("input", () => {
     let raw = input.value;
-    // In command mode the `>` prefix is kept out of the display
+    // In command mode the `@` prefix is kept out of the display
     // input — keydown handles enter/exit, `input` just sends
-    // the text content.
-    if (raw.startsWith(">")) {
+    // the text content (paste / IME also land here).
+    if (raw.startsWith("@") || raw.startsWith(">")) {
       inCommandMode = true;
       raw = raw.slice(1);
       input.value = raw;
     }
-    const query = inCommandMode ? ">" + raw : raw;
+    const query = inCommandMode ? "@" + raw : raw;
+    renderCompletion();
     if (raw === queryEcho && query === lastQuerySent) return;
     lastQuerySent = query;
 
@@ -809,6 +863,9 @@
     clearTimeout(debounce);
     debounce = setTimeout(() => post("query", query), delay);
   });
+  // The dim completion suffix must track the input's horizontal scroll
+  // (selection drag / arrow keys scroll long queries).
+  input.addEventListener("scroll", renderCompletion, { passive: true });
 
   // ── power panel (circle row) ────────────────────────────────
   // Factory wires one power button + in-flow panel with menu row +
@@ -1064,14 +1121,23 @@
       if (typeof state.query === "string") {
         let display = state.query;
         let wasCmd = inCommandMode;
-        if (display.startsWith(">")) { inCommandMode = true; display = display.slice(1); }
-        else { inCommandMode = false; }
+        if (display.startsWith("@") || display.startsWith(">")) {
+          inCommandMode = true;
+          display = display.slice(1);
+        } else {
+          inCommandMode = false;
+        }
         if (wasCmd !== inCommandMode) updateSearchIcon();
         if (display !== input.value) {
           queryEcho = display;
           input.value = display;
         }
       }
+
+      // Command-mode autofill title pushed by Rust (null outside
+      // command mode). renderCompletion gates it against the typed
+      // text, so stale values can never overwrite the input.
+      completion = typeof state.completion === "string" ? state.completion : "";
 
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
@@ -1147,6 +1213,8 @@
         requestAnimationFrame(() => { scrollToInstant(0); });
         // Scroll to top — selected item starts at index 0, already in view.
       }
+
+      renderCompletion();
     },
 
     focus() {
@@ -1158,17 +1226,6 @@
       input.select();
     },
   };
-
-  // Expand a clipboard image to full view in an overlay.
-  function expandImage(dataUri) {
-    const overlay = document.createElement("div");
-    overlay.id = "image-expand-overlay";
-    const img = document.createElement("img");
-    img.src = dataUri;
-    overlay.appendChild(img);
-    overlay.addEventListener("click", () => overlay.remove());
-    document.body.appendChild(overlay);
-  }
 
   // Tell Rust the page is ready to receive state.
   // Do NOT call measure() here — it posts "painted" which races with

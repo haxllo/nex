@@ -437,7 +437,7 @@ pub(crate) fn run_windows_runtime(
         apps_expanded: None,
         settings_open: false,
         pending_show_all: None,
-
+        bento_query: None,
     };
 
     let worker_overlay_for_panic = overlay.clone();
@@ -558,6 +558,10 @@ struct RuntimeWorker {
     /// Full expanded app list waiting to be pushed after the first page
     /// has painted (see `expand_all_apps`).
     pending_show_all: Option<Vec<crate::model::SearchItem>>,
+    /// Query text that opened the clipboard bento grid. While the grid
+    /// is active, async search results for this same query must be
+    /// dropped — they would clobber the grid with stale rows.
+    bento_query: Option<String>,
     /// Set while the settings window is open — hotkey toggles are ignored.
     settings_open: bool,
 }
@@ -1407,6 +1411,7 @@ impl RuntimeWorker {
                     }
                     HotkeyAction::Hide => {
                         self.overlay.hide();
+                        self.bento_query = None;
                         reset_overlay_session(
                             &self.overlay,
                             &mut self.current_results,
@@ -1629,6 +1634,7 @@ impl RuntimeWorker {
                 ));
                 if action {
                     self.overlay.hide();
+                    self.bento_query = None;
                     let after_shim = self.overlay.is_visible();
                     let after_overlay = self.overlay_state.is_visible();
                     log_info(&format!(
@@ -1662,6 +1668,7 @@ impl RuntimeWorker {
                     self.pending_confirmation = None;
                     self.apps_expanded = None;
                     self.pending_show_all = None;
+                    self.overlay.set_completion(None);
                     // Reload Quick Launch items to ensure fresh data
                     self.load_quick_launch_items();
                     self.show_idle_or_quick_launch();
@@ -1686,6 +1693,18 @@ impl RuntimeWorker {
                 );
             }
             OverlayEvent::SearchResultsReady => {
+                // The clipboard bento grid owns the list: drop async search
+                // results still arriving for the query that opened it
+                // (they rendered before the grid was set up). A keystroke
+                // changes query_text, which routes results normally and
+                // exits bento via set_results.
+                if self.overlay.is_bento_view()
+                    && self.overlay.query_text().trim()
+                        == self.bento_query.as_deref().unwrap_or("")
+                {
+                    let _ = self.search_worker.try_recv();
+                    return;
+                }
                 // Don't apply results from stale pre-hide searches
                 // that complete after the overlay is re-shown with
                 // an empty query.
@@ -1785,21 +1804,25 @@ impl RuntimeWorker {
                 }
 
                 // Bento tile click — copy clipboard entry to system clipboard.
+                // Rows come from the overlay itself: show_clipboard_history
+                // bypasses `current_rows` (which only tracks search results).
                 if let Some(list_selection) = self.overlay.selected_index() {
-                    if self.current_rows.get(list_selection).map(|r| r.role)
+                    let overlay_rows = self.overlay.rows();
+                    if overlay_rows
+                        .get(list_selection)
+                        .map(|r| r.role)
                         == Some(OverlayRowRole::ClipboardHistory)
                     {
-                        if let Some(row) = self.current_rows.get(list_selection) {
+                        if let Some(row) = overlay_rows.get(list_selection) {
                             let entry_id = row.path.clone();
                             self.overlay.hide();
                             self.overlay_state.on_escape();
+                            self.bento_query = None;
                             match clipboard_history::copy_result_to_clipboard(
                                 &self.runtime_config,
                                 &format!("clipboard:{entry_id}"),
                             ) {
-                                Ok(()) => {
-                                    self.overlay.set_status_text("Copied to clipboard");
-                                }
+                                Ok(()) => {}
                                 Err(error) => {
                                     self.overlay.show_and_focus();
                                     self.overlay
@@ -2120,7 +2143,11 @@ impl RuntimeWorker {
                 }
 
                 if selected.id == crate::action_registry::ACTION_CLIPBOARD_HISTORY_ID {
-                    self.overlay_state.on_escape();
+                    // The overlay stays visible showing the bento grid, so
+                    // OverlayState must keep tracking it as visible —
+                    // flipping it here desyncs Escape/hotkey handling while
+                    // the grid is up.
+                    let opening_query = self.overlay.query_text().trim().to_string();
                     match execute_action_selection(
                         &*self.service.write().unwrap_or_else(|e| e.into_inner()),
                         &self.runtime_config,
@@ -2140,6 +2167,8 @@ impl RuntimeWorker {
                                 self.last_sent_generation = 0;
                                 self.search_session.clear();
                                 self.search_worker.clear_session();
+                            } else {
+                                self.bento_query = Some(opening_query);
                             }
                         }
                         Err(error) => {
@@ -2239,6 +2268,7 @@ fn apply_query_change(
         last_query.clear();
         *last_sent_generation = last_sent_generation.wrapping_add(1);
         *pending_confirmation = None;
+        overlay.set_completion(None);
         set_idle_overlay_state(overlay);
         return;
     }
@@ -2251,6 +2281,7 @@ fn apply_query_change(
             *last_sent_generation = last_sent_generation.wrapping_add(1);
             current_results.clear();
             *selected_index = 0;
+            overlay.set_completion(None);
             match crate::calculator::evaluate(expr) {
                 Ok(value) => {
                     let display = format_result(value);
@@ -2326,6 +2357,7 @@ fn apply_search_results(
         current_rows.clear();
         *selected_index = 0;
         overlay.set_results(&[], 0);
+        overlay.set_completion(None);
         overlay.set_status_text(&format!("Search error: {error}"));
         return;
     }
@@ -2407,6 +2439,41 @@ fn apply_search_results(
             overlay.set_results(current_rows, *selected_index);
         }
     }
+
+    // Command-mode autofill: the first fixed-command row whose title
+    // extends what the user typed. The page shows the untyped remainder
+    // dimmed and Tab fills it in. `None` outside command mode (and for
+    // dynamic rows like web search / uninstall, which cannot be completed).
+    let completion = if command_mode && !current_results.is_empty() {
+        let typed = overlay
+            .query_text()
+            .trim()
+            .trim_start_matches(['@', '>'])
+            .to_ascii_lowercase();
+        current_results
+            .iter()
+            .find(|r| {
+                is_fixed_command_action(r)
+                    && r.title.trim().to_ascii_lowercase().starts_with(&typed)
+            })
+            .map(|r| r.title.trim().to_string())
+    } else {
+        None
+    };
+    overlay.set_completion(completion.as_deref());
+}
+
+/// True when a result is a concrete named command (built-in action or
+/// plugin action) as opposed to a dynamic entry (web search, create
+/// file/folder, open URL, uninstall) whose title depends on the query.
+fn is_fixed_command_action(item: &crate::model::SearchItem) -> bool {
+    if !item.kind.eq_ignore_ascii_case("action") {
+        return false;
+    }
+    if item.id.starts_with("__nex_") {
+        return !item.id.contains(':');
+    }
+    true // plugin actions carry a fixed title from their manifest
 }
 
 #[cfg(target_os = "windows")]

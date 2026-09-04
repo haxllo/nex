@@ -1559,6 +1559,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "accent": s.accent_color,
         "gridView": s.grid_view,
         "bentoView": s.bento_view,
+        "completion": s.completion,
         "showPending": show_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,

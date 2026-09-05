@@ -25,13 +25,17 @@ impl OverlayState {
         self.visible
     }
 
-    pub fn on_hotkey(&mut self, _has_focus: bool) -> HotkeyAction {
+    pub fn on_hotkey(&mut self, has_focus: bool) -> HotkeyAction {
         if !self.visible {
             self.visible = true;
             return HotkeyAction::ShowAndFocus;
         }
-        self.visible = false;
-        HotkeyAction::Hide
+        if has_focus {
+            self.visible = false;
+            HotkeyAction::Hide
+        } else {
+            HotkeyAction::FocusExisting
+        }
     }
 
     pub fn on_escape(&mut self) -> bool {

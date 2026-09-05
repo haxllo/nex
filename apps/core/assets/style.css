@@ -131,7 +131,7 @@ body {
   top: 50%;
   transform: translateY(calc(-50% - 1px));
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
   white-space: pre;
   /* Identical to #query::placeholder so the suffix reads as one
      continuous hint (same color, size, weight, family). */

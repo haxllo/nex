@@ -196,16 +196,8 @@ pub(crate) fn search_overlay_results_with_session(
     let action_count = action_results.len();
     merged.extend(action_results);
 
-    let mut clipboard_ms = 0_u128;
-    let mut clipboard_count = 0_usize;
-    if !short_query_app_bias {
-        let clipboard_started = Instant::now();
-        let clipboard_results =
-            clipboard_history::search_history(cfg, text_query, &filter, candidate_limit.min(120));
-        clipboard_ms = clipboard_started.elapsed().as_millis();
-        clipboard_count = clipboard_results.len();
-        merged.extend(clipboard_results);
-    }
+    // Clipboard text entries are NOT shown in regular search results.
+    // They only appear in the bento grid after clicking the "Clipboard" action.
 
     // Creation affordance: (a) empty result set with trailing slash or backslash
     // signals explicit create-folder intent; (b) non-empty result set where no
@@ -275,12 +267,27 @@ pub(crate) fn search_overlay_results_with_session(
     }
 
     let rank_started = Instant::now();
-    let ranked = search_with_filter(&merged, text_query, result_limit, &filter);
+    let mut ranked = search_with_filter(&merged, text_query, candidate_limit, &filter);
+
+    // When query prefix-matches a built-in action title, pin it to the top
+    // so it's never buried by apps/files that score higher on usage data.
+    if normalized_query.len() >= 2 {
+        if let Some(action) = crate::action_registry::built_in_actions().iter().find(|a| {
+            let a_norm = crate::model::normalize_for_search(a.title);
+            a_norm.starts_with(&normalized_query)
+        }) {
+            if let Some(pos) = ranked.iter().position(|r| r.id == action.id) {
+                let item = ranked.remove(pos);
+                ranked.insert(0, item);
+            }
+        }
+    }
+    ranked.truncate(result_limit);
     let rank_ms = rank_started.elapsed().as_millis();
     let total_ms = search_started.elapsed().as_millis();
     if total_ms >= QUERY_PROFILE_LOG_THRESHOLD_MS {
         log_info(&format!(
-            "[nex] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} clipboard_count={} clipboard_ms={} rank_ms={} total_ms={}",
+            "[nex] query_profile q=\"{}\" mode={} candidate_limit={} indexed_seed_limit={} short_query_app_bias={} indexed_cache_hit={} indexed_count={} indexed_ms={} provider_count={} provider_ms={} action_count={} action_ms={} built_in_actions={} plugin_actions={} rank_ms={} total_ms={}",
             sanitize_query_for_profile_log(text_query),
             format!("{:?}", filter.mode).to_ascii_lowercase(),
             candidate_limit,
@@ -295,8 +302,6 @@ pub(crate) fn search_overlay_results_with_session(
             actions_ms,
             built_in_actions_count,
             plugin_action_count,
-            clipboard_count,
-            clipboard_ms,
             rank_ms,
             total_ms
         ));

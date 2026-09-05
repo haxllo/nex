@@ -3,12 +3,10 @@ use crate::model::{normalize_for_search, SearchItem};
 use crate::uninstall_registry::{has_uninstall_intent, search_uninstall_actions};
 
 pub const ACTION_OPEN_LOGS_ID: &str = "__nex_action_open_logs__";
-pub const ACTION_REBUILD_INDEX_ID: &str = "__nex_action_rebuild_index__";
-pub const ACTION_CLEAR_CLIPBOARD_ID: &str = "__nex_action_clear_clipboard__";
+
 pub const ACTION_CLIPBOARD_HISTORY_ID: &str = "__nex_action_clipboard_history__";
 pub const ACTION_OPEN_CONFIG_ID: &str = "__nex_action_open_config__";
-pub const ACTION_DIAGNOSTICS_BUNDLE_ID: &str = "__nex_action_diagnostics_bundle__";
-pub const ACTION_TRIM_MEMORY_ID: &str = "__nex_action_trim_memory__";
+
 pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
 pub const ACTION_CREATE_FOLDER_PREFIX: &str = "__nex_action_create_folder__:";
@@ -32,81 +30,27 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
     &[
         BuiltInAction {
             id: ACTION_OPEN_LOGS_ID,
-            title: "Open Nex Logs Folder",
+            title: "Open Logs",
             subtitle: "Open logs directory in File Explorer",
             keywords: &["logs", "log", "debug"],
         },
         BuiltInAction {
-            id: ACTION_REBUILD_INDEX_ID,
-            title: "Rebuild Search Index",
-            subtitle: "Force a full refresh of indexed items",
-            keywords: &["rebuild", "index", "refresh"],
-        },
-        BuiltInAction {
-            id: ACTION_CLEAR_CLIPBOARD_ID,
-            title: "Clear Clipboard History",
-            subtitle: "Delete local clipboard history entries",
-            keywords: &["clipboard", "clear", "history"],
-        },
-        BuiltInAction {
             id: ACTION_CLIPBOARD_HISTORY_ID,
-            title: "Show Clipboard History",
-            subtitle: "View clipboard history in a bento grid",
+            title: "Clipboard",
+            subtitle: "View clipboard history",
             keywords: &["clipboard", "history", "clip", "paste", "bento"],
         },
         BuiltInAction {
             id: ACTION_OPEN_CONFIG_ID,
-            title: "Open Nex Config",
+            title: "Open Config",
             subtitle: "Open config.toml",
             keywords: &["config", "settings", "preferences"],
         },
         BuiltInAction {
-            id: ACTION_DIAGNOSTICS_BUNDLE_ID,
-            title: "Create Diagnostics Bundle",
-            subtitle: "Export logs and sanitized config for support",
-            keywords: &["diagnostics", "support", "bundle", "debug"],
-        },
-        BuiltInAction {
             id: ACTION_CHECK_UPDATES_ID,
-            title: "Check for Updates",
+            title: "Check Updates",
             subtitle: "Run the stable Windows updater",
             keywords: &["update", "upgrade", "stable", "install latest"],
-        },
-        BuiltInAction {
-            id: ACTION_TRIM_MEMORY_ID,
-            title: "Trim Memory Now",
-            subtitle: "Clear overlay icon/query caches and log memory snapshot",
-            keywords: &["memory", "trim", "cache", "compact"],
-        },
-        BuiltInAction {
-            id: ACTION_LOCK_ID,
-            title: "Lock",
-            subtitle: "Lock your workstation",
-            keywords: &["lock", "workstation", "secure"],
-        },
-        BuiltInAction {
-            id: ACTION_SLEEP_ID,
-            title: "Sleep",
-            subtitle: "Put your computer to sleep",
-            keywords: &["sleep", "suspend", "hibernate"],
-        },
-        BuiltInAction {
-            id: ACTION_SHUTDOWN_ID,
-            title: "Shutdown",
-            subtitle: "Power off your computer",
-            keywords: &["shutdown", "power", "off"],
-        },
-        BuiltInAction {
-            id: ACTION_RESTART_ID,
-            title: "Restart",
-            subtitle: "Restart your computer",
-            keywords: &["restart", "reboot", "reset"],
-        },
-        BuiltInAction {
-            id: ACTION_SIGN_OUT_ID,
-            title: "Sign Out",
-            subtitle: "Sign out of your account",
-            keywords: &["signout", "logout", "log out", "sign out"],
         },
     ]
 }

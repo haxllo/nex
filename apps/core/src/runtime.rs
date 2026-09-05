@@ -318,7 +318,7 @@ mod tests {
         INDEXED_PREFIX_CACHE_MAX_SEED_LIMIT, INDEXED_PREFIX_CACHE_MIN_SEED_LIMIT,
         UNINSTALL_QUERY_RESULT_LIMIT,
     };
-    use crate::action_registry::{ACTION_DIAGNOSTICS_BUNDLE_ID, ACTION_WEB_SEARCH_PREFIX};
+    use crate::action_registry::ACTION_WEB_SEARCH_PREFIX;
     use crate::config::{Config, SearchMode};
     use crate::core_service::CoreService;
     use crate::index_store::open_memory;
@@ -852,19 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn command_mode_returns_action_results() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
-            .expect("service should initialize");
-        let cfg = Config::default();
-        let plugins = PluginRegistry::default();
-        let parsed = ParsedQuery::parse(">diag", true);
-        let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 10)
-            .expect("search should succeed");
-        assert!(results
-            .iter()
-            .any(|item| item.id == ACTION_DIAGNOSTICS_BUNDLE_ID));
-    }
-
     #[test]
     fn command_mode_includes_web_search_action() {
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())

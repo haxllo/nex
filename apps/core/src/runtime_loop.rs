@@ -2154,13 +2154,6 @@ impl RuntimeWorker {
                     return;
                 }
 
-                if selected.id == crate::action_registry::ACTION_TRIM_MEMORY_ID {
-                    self.search_session.clear();
-                    self.overlay.trim_runtime_memory();
-                    self.overlay.set_status_text("Memory caches trimmed");
-                    return;
-                }
-
                 if selected.id == crate::action_registry::ACTION_CLIPBOARD_HISTORY_ID {
                     // The overlay stays visible showing the bento grid, so
                     // OverlayState must keep tracking it as visible —

@@ -3,11 +3,10 @@ use std::os::windows::process::CommandExt;
 use std::time::UNIX_EPOCH;
 
 use crate::action_registry::{
-    ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_CLIPBOARD_ID, ACTION_CLIPBOARD_HISTORY_ID,
-    ACTION_DIAGNOSTICS_BUNDLE_ID, ACTION_LOCK_ID, ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID,
-    ACTION_REBUILD_INDEX_ID, ACTION_RESTART_ID, ACTION_SHUTDOWN_ID, ACTION_SIGN_OUT_ID,
-    ACTION_SLEEP_ID, ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX,
-    ACTION_OPEN_URL_PREFIX, ACTION_TRIM_MEMORY_ID, ACTION_WEB_SEARCH_PREFIX,
+    ACTION_CHECK_UPDATES_ID, ACTION_CLIPBOARD_HISTORY_ID, ACTION_LOCK_ID,
+    ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_RESTART_ID, ACTION_SHUTDOWN_ID,
+    ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID, ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX,
+    ACTION_OPEN_URL_PREFIX, ACTION_WEB_SEARCH_PREFIX,
 };
 use crate::clipboard_history;
 use crate::config::Config;
@@ -208,20 +207,7 @@ pub(crate) fn execute_action_selection(
         ACTION_OPEN_LOGS_ID => crate::logging::open_logs_folder()
             .map(|_| true)
             .map_err(|error| format!("open logs folder failed: {error}")),
-        ACTION_REBUILD_INDEX_ID => {
-            let report = service
-                .rebuild_index_with_report()
-                .map_err(|error| format!("rebuild index failed: {error}"))?;
-            log_info(&format!(
-                "[nex] action_rebuild_index indexed={} discovered={} upserted={} removed={}",
-                report.indexed_total,
-                report.discovered_total,
-                report.upserted_total,
-                report.removed_total
-            ));
-            Ok(true)
-        }
-        ACTION_CLEAR_CLIPBOARD_ID => clipboard_history::clear_history(cfg).map(|_| true),
+
         ACTION_CLIPBOARD_HISTORY_ID => {
             // Capture whatever is on the system clipboard right now, so a
             // copy made while the overlay was open (or a capture that
@@ -249,22 +235,9 @@ pub(crate) fn execute_action_selection(
                 .map(|_| true)
                 .map_err(|error| format!("open config failed: {error}"))
         }
-        ACTION_DIAGNOSTICS_BUNDLE_ID => {
-            let output_dir = crate::runtime::write_diagnostics_bundle(cfg)
-                .map_err(|error| format!("diagnostics bundle failed: {error}"))?;
-            log_info(&format!(
-                "[nex] diagnostics bundle written to {}",
-                output_dir.display()
-            ));
-            Ok(true)
-        }
         ACTION_CHECK_UPDATES_ID => crate::runtime_process::launch_stable_updater()
             .map(|_| true)
             .map_err(|error| format!("check for updates failed: {error}")),
-        ACTION_TRIM_MEMORY_ID => {
-            log_info("[nex] trim memory action invoked");
-            Ok(true)
-        }
         #[cfg(target_os = "windows")]
         ACTION_LOCK_ID => power_actions::lock()
             .map(|_| true)

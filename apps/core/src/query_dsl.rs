@@ -61,11 +61,16 @@ impl ParsedQuery {
             command_mode = true;
             working = rest.trim_start().to_string();
         } else if let Some(rest) = working.strip_prefix('@') {
-            // `@` is the command-mode prefix, but a leading mode token
-            // (`@apps`, `@files`, `@clipboard`, …) keeps its existing
-            // meaning — only non-mode `@…` queries enter command mode.
+            // `@` enters command mode. A leading mode token with trailing
+            // text (`@apps foo`, `@files .rs`) overrides search mode instead,
+            // but bare `@clip` / `@clipboard` with no space is still
+            // command mode (user is typing a command name).
             let first = rest.split_whitespace().next().unwrap_or("");
-            if SearchMode::parse(first).is_none() {
+            let has_space = rest.contains(char::is_whitespace);
+            if SearchMode::parse(first).is_some() && has_space {
+                // Explicit mode override with query text (e.g. `@apps vivaldi`)
+                // — don't enter command mode, let mode_override handle it.
+            } else {
                 command_mode = true;
                 working = rest.trim_start().to_string();
             }
@@ -290,10 +295,14 @@ mod tests {
 
     #[test]
     fn at_mode_token_still_wins_over_command_mode() {
+        // `@apps` alone (no trailing text) enters command mode — user
+        // is typing a command, not filtering by mode.
         let parsed = ParsedQuery::parse("@apps", true);
-        assert!(!parsed.command_mode);
-        assert_eq!(parsed.mode_override, Some(SearchMode::Apps));
+        assert!(parsed.command_mode);
+        assert_eq!(parsed.mode_override, Some(SearchMode::Actions));
+        assert_eq!(parsed.free_text, "apps");
 
+        // `@clipboard history` (space + query) is a mode filter.
         let parsed = ParsedQuery::parse("@clipboard history", true);
         assert!(!parsed.command_mode);
         assert_eq!(parsed.mode_override, Some(SearchMode::Clipboard));

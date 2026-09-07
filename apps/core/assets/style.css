@@ -282,11 +282,59 @@ body {
   border-radius: var(--row-radius);
   cursor: pointer;
   position: relative;
-  transition: background 100ms ease, transform 100ms ease;
+  border: 1px solid transparent;
+  transition: none;
   animation: nexRowIn 150ms ease-out backwards;
 }
+.row::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 24% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 58%),
+    linear-gradient(145deg, color-mix(in srgb, var(--hover) 88%, white 12%), var(--hover));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 14%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, black 18%, transparent),
+    0 3px 10px color-mix(in srgb, black 18%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+.row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--accent) 42%, transparent), transparent 42%, color-mix(in srgb, white 12%, transparent)) border-box;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) padding-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+.row > * {
+  position: relative;
+  z-index: 1;
+}
 .row:hover {
-  background: var(--hover);
+  border-color: transparent;
+}
+.row:hover::before,
+.row:hover::after {
+  opacity: 1;
+  transition: opacity 120ms ease-out;
+}
+.row:hover::before {
+  transition: opacity 120ms ease-out;
 }
 /* Keyboard/click selection — must win over :hover so the user can see
    which row is active when the cursor is parked elsewhere. */
@@ -294,7 +342,7 @@ body {
   background: var(--sel);
 }
 .row.selected:hover {
-  background: var(--hover);
+  border-color: transparent;
 }
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
 .row .path-hint {
@@ -408,7 +456,7 @@ img.icon.icon-pop {
   height: 96px;
 }
 .grid-view .row.row-grid:hover {
-  background: var(--hover);
+  border-color: transparent;
 }
 /* Selection is visual-only via :hover — no persistent highlight when
    the cursor is elsewhere or outside the window. */
@@ -830,7 +878,7 @@ html[data-theme="light"] img.icon.glyph {
 .power-row {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
-  gap: 8px;
+  gap: 6px;
   justify-items: center;
 }
 
@@ -849,14 +897,17 @@ html[data-theme="light"] img.icon.glyph {
   gap: 8px;
   width: 100%;
   max-width: 96px;
-  padding: 14px 4px 18px;
-  border: none;
-  border-radius: 14px;
-  background: transparent;
+  padding: 12px 4px 16px;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-opaque) 52%, transparent);
   color: var(--c);
   cursor: pointer;
   opacity: 0;
-  transition: transform 150ms ease;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 9%, transparent),
+    0 2px 7px rgba(0, 0, 0, 0.14);
+  transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
   animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
@@ -866,13 +917,13 @@ html[data-theme="light"] img.icon.glyph {
 .power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
 .power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
 .power-panel .pcircle svg {
-  width: 56px;
-  height: 56px;
+  width: 50px;
+  height: 50px;
   box-sizing: border-box;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--c) 6%, transparent);
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--c) 9%, var(--bg-opaque));
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
@@ -881,11 +932,11 @@ html[data-theme="light"] img.icon.glyph {
   transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
 }
 .power-panel .pcircle span {
-  /* 10px between icon and label (8px gap + 2px margin). */
-  margin-top: 2px;
+  margin-top: 1px;
   font-size: 11px;
-  font-weight: 500;
-  color: var(--text-dim);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.1px;
   white-space: nowrap;
   transition: color 150ms ease;
 }
@@ -900,12 +951,18 @@ html[data-theme="light"] img.icon.glyph {
   transition: opacity 150ms ease, transform 150ms ease;
 }
 .power-panel .pcircle:hover {
-  transform: scale(1.02);
+  background: color-mix(in srgb, white 7%, var(--bg-opaque));
+  border-color: transparent;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 12%, transparent),
+    0 5px 14px rgba(0, 0, 0, 0.18);
+  transform: translateY(-1px);
 }
 .power-panel .pcircle:hover svg {
-  transform: scale(1.05);
-  border-color: color-mix(in srgb, var(--c) 60%, transparent);
-  background: color-mix(in srgb, var(--c) 10%, transparent);
+  transform: scale(1.06);
+  border-color: transparent;
+  background: color-mix(in srgb, white 10%, var(--bg-opaque));
+  filter: brightness(1.16);
 }
 .power-panel .pcircle:hover span {
   color: var(--text);

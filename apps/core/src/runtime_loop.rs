@@ -2363,6 +2363,12 @@ fn apply_search_results(
     }
 
     let command_mode = result.command_mode;
+    let explicit_mode = ParsedQuery::parse(
+        overlay.query_text().trim(),
+        _runtime_config.search_dsl_enabled,
+    )
+    .mode_override
+    .is_some();
 
     if let Some(error) = result.error {
         current_results.clear();
@@ -2441,7 +2447,11 @@ fn apply_search_results(
         }
     } else {
         let expanded = apps_expanded_query == Some(overlay.query_text().trim());
-        let rows = overlay_rows_ext(current_results, command_mode, !command_mode && !is_idle && !expanded);
+        let rows = overlay_rows_ext(
+            current_results,
+            command_mode,
+            !command_mode && !explicit_mode && !is_idle && !expanded,
+        );
         *current_rows = rows;
         // During expansion the intermediate apps-only view is NOT pushed —
         // it's smaller than the pre-click list, so pushing it would make

@@ -240,6 +240,14 @@ body {
   scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
   transition: scrollbar-color 300ms ease;
 }
+#list.list-results {
+  max-height: 410px;
+  margin-bottom: 6px;
+}
+#list.grid-results {
+  max-height: 410px;
+  margin-bottom: 6px;
+}
 #list.scroll-idle {
   scrollbar-color: transparent transparent;
 }

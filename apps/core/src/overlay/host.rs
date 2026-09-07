@@ -106,7 +106,7 @@ use crate::overlay::icons::IconCache;
 use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState, TileSize};
 use crate::overlay::model::Theme;
 
-const WINDOW_WIDTH: f64 = 720.0;
+const WINDOW_WIDTH: f64 = 700.0;
 const INITIAL_HEIGHT: f64 = 60.0;
 const MAX_HEIGHT: f64 = 530.0;
 const FOCUS_GRACE_MS: u64 = 400;

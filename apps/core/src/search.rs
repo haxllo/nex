@@ -62,7 +62,6 @@ struct TextScore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchFilter {
     pub mode: SearchMode,
-    pub kind_filter: Option<String>,
     pub extension_filter: Option<String>,
     pub include_files: bool,
     pub include_folders: bool,
@@ -76,7 +75,6 @@ impl Default for SearchFilter {
     fn default() -> Self {
         Self {
             mode: SearchMode::All,
-            kind_filter: None,
             extension_filter: None,
             include_files: true,
             include_folders: true,
@@ -249,11 +247,6 @@ fn score_item(
     if !matches_mode(item, filter.mode) {
         return None;
     }
-    if let Some(kind) = &filter.kind_filter {
-        if !matches_kind_filter(item, kind) {
-            return None;
-        }
-    }
     if let Some(extension) = &filter.extension_filter {
         if !matches_extension_filter(item, extension) {
             return None;
@@ -384,12 +377,8 @@ fn mode_bonus(item: &SearchItem, mode: SearchMode) -> i64 {
     match mode {
         SearchMode::All => 0,
         SearchMode::Apps if item.kind.eq_ignore_ascii_case("app") => 550,
-        SearchMode::Files
-            if item.kind.eq_ignore_ascii_case("file")
-                || item.kind.eq_ignore_ascii_case("folder") =>
-        {
-            550
-        }
+        SearchMode::Files if item.kind.eq_ignore_ascii_case("file") => 550,
+        SearchMode::Folders if item.kind.eq_ignore_ascii_case("folder") => 550,
         SearchMode::Actions if item.kind.eq_ignore_ascii_case("action") => 550,
         SearchMode::Clipboard if item.kind.eq_ignore_ascii_case("clipboard") => 550,
         _ => -2_500,
@@ -587,7 +576,6 @@ fn looks_like_app_intent_query(raw_query: &str, normalized_query: &str, mode: Se
 
 fn is_default_filter(filter: &SearchFilter) -> bool {
     filter.mode == SearchMode::All
-        && filter.kind_filter.is_none()
         && filter.extension_filter.is_none()
         && filter.include_files
         && filter.include_folders
@@ -601,35 +589,11 @@ fn matches_mode(item: &SearchItem, mode: SearchMode) -> bool {
     match mode {
         SearchMode::All => true,
         SearchMode::Apps => item.kind.eq_ignore_ascii_case("app"),
-        SearchMode::Files => {
-            item.kind.eq_ignore_ascii_case("file") || item.kind.eq_ignore_ascii_case("folder")
-        }
+        SearchMode::Files => item.kind.eq_ignore_ascii_case("file"),
+        SearchMode::Folders => item.kind.eq_ignore_ascii_case("folder"),
         SearchMode::Actions => item.kind.eq_ignore_ascii_case("action"),
         SearchMode::Clipboard => item.kind.eq_ignore_ascii_case("clipboard"),
     }
-}
-
-fn matches_kind_filter(item: &SearchItem, kind_filter: &str) -> bool {
-    let normalized = kind_filter.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return true;
-    }
-    if normalized == "app" || normalized == "apps" {
-        return item.kind.eq_ignore_ascii_case("app");
-    }
-    if normalized == "file" || normalized == "files" {
-        return item.kind.eq_ignore_ascii_case("file");
-    }
-    if normalized == "folder" || normalized == "folders" {
-        return item.kind.eq_ignore_ascii_case("folder");
-    }
-    if normalized == "action" || normalized == "actions" {
-        return item.kind.eq_ignore_ascii_case("action");
-    }
-    if normalized == "clipboard" {
-        return item.kind.eq_ignore_ascii_case("clipboard");
-    }
-    item.kind.eq_ignore_ascii_case(&normalized)
 }
 
 fn matches_visibility(item: &SearchItem, filter: &SearchFilter) -> bool {

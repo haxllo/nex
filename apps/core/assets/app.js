@@ -694,7 +694,6 @@
   // and normal mode uses the pushed placeholder or the default.
   function renderCompletion() {
     const showSuffix =
-      inCommandMode &&
       !!completion &&
       completion.toLowerCase().startsWith(input.value.toLowerCase()) &&
       input.value.length < completion.length;
@@ -718,7 +717,7 @@
   }
 
   function tryCompleteCommand() {
-    if (!inCommandMode || !completion) return false;
+    if (!completion) return false;
     const typed = input.value;
     if (
       !completion.toLowerCase().startsWith(typed.toLowerCase()) ||
@@ -728,7 +727,7 @@
     }
     input.value = completion;
     queryEcho = completion;
-    lastQuerySent = "@" + completion;
+    lastQuerySent = completion.startsWith("@") ? completion : "@" + completion;
     post("query", lastQuerySent);
     renderCompletion();
     return true;

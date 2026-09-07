@@ -1742,6 +1742,7 @@ fn search_mode_key(mode: SearchMode) -> &'static str {
         SearchMode::All => "all",
         SearchMode::Apps => "apps",
         SearchMode::Files => "files",
+        SearchMode::Folders => "folders",
         SearchMode::Actions => "actions",
         SearchMode::Clipboard => "clipboard",
     }

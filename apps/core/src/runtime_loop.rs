@@ -2472,7 +2472,26 @@ fn apply_search_results(
     } else {
         None
     };
-    overlay.set_completion(completion.as_deref());
+
+    // Mode token autocomplete: input hides leading @, so publish only the
+    // mode suffix (e.g. @ap -> apps). Tab handler adds @ back to query.
+    let mode_completion = {
+        let raw_text = overlay.query_text();
+        let raw = raw_text.trim();
+        if raw.starts_with('@') {
+            let after_at = &raw[1..];
+            let typed = after_at.trim().to_ascii_lowercase();
+            const MODES: &[&str] = &["apps", "files", "folders", "all", "actions", "clipboard"];
+            MODES.iter()
+                .find(|m| typed.is_empty() || (m.starts_with(&typed) && *m != &typed))
+                .map(|m| (*m).to_string())
+        } else {
+            None
+        }
+    };
+
+    let final_completion = completion.or(mode_completion);
+    overlay.set_completion(final_completion.as_deref());
 }
 
 /// True when a result is a concrete named command (built-in action or

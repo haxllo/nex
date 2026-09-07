@@ -65,6 +65,7 @@ pub enum SearchMode {
     All,
     Apps,
     Files,
+    Folders,
     Actions,
     Clipboard,
 }
@@ -76,6 +77,7 @@ impl SearchMode {
             "all" => Some(Self::All),
             "apps" | "app" => Some(Self::Apps),
             "files" | "file" => Some(Self::Files),
+            "folders" | "folder" => Some(Self::Folders),
             "actions" | "action" => Some(Self::Actions),
             "clipboard" | "clip" => Some(Self::Clipboard),
             _ => None,
@@ -87,6 +89,7 @@ impl SearchMode {
             Self::All => "all",
             Self::Apps => "apps",
             Self::Files => "files",
+            Self::Folders => "folders",
             Self::Actions => "actions",
             Self::Clipboard => "clipboard",
         }
@@ -695,12 +698,13 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(if cfg.show_folders { "true" } else { "false" });
     text.push_str("\n\n");
 
-    text.push_str("# Search mode default: all | apps | files | actions | clipboard\n");
+    text.push_str("# Search mode default: all | apps | files | folders | actions | clipboard\n");
     text.push_str("search_mode_default = ");
     text.push_str(&json_string(match cfg.search_mode_default {
         SearchMode::All => "all",
         SearchMode::Apps => "apps",
         SearchMode::Files => "files",
+        SearchMode::Folders => "folders",
         SearchMode::Actions => "actions",
         SearchMode::Clipboard => "clipboard",
     }));

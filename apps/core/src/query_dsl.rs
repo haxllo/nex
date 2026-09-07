@@ -13,7 +13,6 @@ pub struct ParsedQuery {
     pub raw: String,
     pub free_text: String,
     pub mode_override: Option<SearchMode>,
-    pub kind_filter: Option<String>,
     pub extension_filter: Option<String>,
     pub include_groups: Vec<Vec<String>>,
     pub exclude_terms: Vec<String>,
@@ -30,7 +29,6 @@ impl ParsedQuery {
                 raw,
                 free_text: String::new(),
                 mode_override: None,
-                kind_filter: None,
                 extension_filter: None,
                 include_groups: Vec::new(),
                 exclude_terms: Vec::new(),
@@ -45,7 +43,6 @@ impl ParsedQuery {
                 free_text: raw.clone(),
                 raw,
                 mode_override: None,
-                kind_filter: None,
                 extension_filter: None,
                 include_groups: Vec::new(),
                 exclude_terms: Vec::new(),
@@ -61,16 +58,30 @@ impl ParsedQuery {
             command_mode = true;
             working = rest.trim_start().to_string();
         } else if let Some(rest) = working.strip_prefix('@') {
-            // `@` enters command mode. A leading mode token with trailing
-            // text (`@apps foo`, `@files .rs`) overrides search mode instead,
-            // but bare `@clip` / `@clipboard` with no space is still
-            // command mode (user is typing a command name).
+            // `@` prefix: bare mode tokens (@apps, @files, @folders, @all)
+            // filter by mode. Bare @clip / @clipboard / @actions enter
+            // command mode (action list). With trailing text, all modes
+            // are mode filters.
             let first = rest.split_whitespace().next().unwrap_or("");
             let has_space = rest.contains(char::is_whitespace);
-            if SearchMode::parse(first).is_some() && has_space {
-                // Explicit mode override with query text (e.g. `@apps vivaldi`)
-                // — don't enter command mode, let mode_override handle it.
+            if let Some(mode) = SearchMode::parse(first) {
+                match mode {
+                    SearchMode::Actions | SearchMode::Clipboard => {
+                        if has_space {
+                            // `@clipboard history` → mode filter
+                        } else {
+                            // Bare `@clip` / `@actions` → command mode
+                            command_mode = true;
+                            working = rest.trim_start().to_string();
+                        }
+                    }
+                    _ => {
+                        // Searchable categories (apps, files, folders, all):
+                        // always mode filter.
+                    }
+                }
             } else {
+                // Unknown token after @: command mode
                 command_mode = true;
                 working = rest.trim_start().to_string();
             }
@@ -82,7 +93,6 @@ impl ParsedQuery {
         } else {
             None
         };
-        let mut kind_filter: Option<String> = None;
         let mut extension_filter: Option<String> = None;
         let mut include_groups: Vec<Vec<String>> = vec![Vec::new()];
         let mut exclude_terms = Vec::new();
@@ -120,14 +130,6 @@ impl ParsedQuery {
             if let Some(value) = parse_prefixed(token_trimmed, "mode:") {
                 if let Some(mode) = SearchMode::parse(value) {
                     mode_override = Some(mode);
-                }
-                expect_not = false;
-                continue;
-            }
-            if let Some(value) = parse_prefixed(token_trimmed, "kind:") {
-                let normalized = value.trim().to_ascii_lowercase();
-                if !normalized.is_empty() {
-                    kind_filter = Some(normalized);
                 }
                 expect_not = false;
                 continue;
@@ -186,7 +188,6 @@ impl ParsedQuery {
             raw,
             free_text,
             mode_override,
-            kind_filter,
             extension_filter,
             include_groups,
             exclude_terms,
@@ -263,13 +264,12 @@ mod tests {
     use crate::config::SearchMode;
 
     #[test]
-    fn parses_mode_kind_and_filters() {
+    fn parses_mode_and_filters() {
         let parsed = ParsedQuery::parse(
-            r#"@apps kind:file ext:md report OR notes NOT draft -temp modified:week"#,
+            r#"@apps ext:md report OR notes NOT draft -temp modified:week"#,
             true,
         );
         assert_eq!(parsed.mode_override, Some(SearchMode::Apps));
-        assert_eq!(parsed.kind_filter.as_deref(), Some("file"));
         assert_eq!(parsed.extension_filter.as_deref(), Some("md"));
         assert_eq!(parsed.modified_within, Some(TimeFilterWindow::Week));
         assert_eq!(parsed.include_groups.len(), 2);
@@ -294,13 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn at_mode_token_still_wins_over_command_mode() {
-        // `@apps` alone (no trailing text) enters command mode — user
-        // is typing a command, not filtering by mode.
+    fn at_mode_token_filters_by_mode() {
+        // Searchable modes (@apps, @files, @folders, @all) filter by mode,
+        // even without trailing text.
         let parsed = ParsedQuery::parse("@apps", true);
+        assert!(!parsed.command_mode);
+        assert_eq!(parsed.mode_override, Some(SearchMode::Apps));
+        assert_eq!(parsed.free_text, "");
+
+        // Action-type modes (@clip, @clipboard) enter command mode.
+        let parsed = ParsedQuery::parse("@clip", true);
         assert!(parsed.command_mode);
         assert_eq!(parsed.mode_override, Some(SearchMode::Actions));
-        assert_eq!(parsed.free_text, "apps");
 
         // `@clipboard history` (space + query) is a mode filter.
         let parsed = ParsedQuery::parse("@clipboard history", true);

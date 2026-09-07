@@ -314,7 +314,6 @@ pub(crate) fn build_search_filter(cfg: &Config, parsed_query: &ParsedQuery) -> S
     let mode = resolved_mode_for_query(cfg, parsed_query);
     SearchFilter {
         mode,
-        kind_filter: parsed_query.kind_filter.clone(),
         extension_filter: parsed_query.extension_filter.clone(),
         include_files: cfg.show_files,
         include_folders: cfg.show_folders,
@@ -353,8 +352,7 @@ pub(crate) fn should_use_short_query_app_mode(
     if filter.mode != crate::config::SearchMode::All {
         return false;
     }
-    parsed_query.kind_filter.is_none()
-        && parsed_query.extension_filter.is_none()
+    parsed_query.extension_filter.is_none()
         && parsed_query.exclude_terms.is_empty()
         && parsed_query.modified_within.is_none()
         && parsed_query.created_within.is_none()
@@ -373,8 +371,7 @@ pub(crate) fn should_skip_non_searchable_query(
     if parsed_query.mode_override.is_some() {
         return false;
     }
-    parsed_query.kind_filter.is_none()
-        && parsed_query.extension_filter.is_none()
+    parsed_query.extension_filter.is_none()
         && parsed_query.include_groups.is_empty()
         && parsed_query.exclude_terms.is_empty()
         && parsed_query.modified_within.is_none()
@@ -443,7 +440,7 @@ pub(crate) fn candidate_limit_for_query(
                 .max(45)
                 .min(96)
                 .max(result_limit),
-            crate::config::SearchMode::Files => result_limit
+            crate::config::SearchMode::Files | crate::config::SearchMode::Folders => result_limit
                 .saturating_mul(5)
                 .max(70)
                 .min(200)
@@ -460,7 +457,7 @@ pub(crate) fn candidate_limit_for_query(
                 .max(56)
                 .min(140)
                 .max(result_limit),
-            crate::config::SearchMode::Files => result_limit
+            crate::config::SearchMode::Files | crate::config::SearchMode::Folders => result_limit
                 .saturating_mul(5)
                 .max(70)
                 .min(200)
@@ -529,10 +526,9 @@ pub(crate) fn final_query_cache_key(
     result_limit: usize,
 ) -> String {
     format!(
-        "q={};mode={:?};kind={};ext={};include={};exclude={};modified={:?};created={:?};cmd={};limit={}",
+        "q={};mode={:?};ext={};include={};exclude={};modified={:?};created={:?};cmd={};limit={}",
         normalized_query,
         filter.mode,
-        filter.kind_filter.as_deref().unwrap_or("-"),
         filter.extension_filter.as_deref().unwrap_or("-"),
         encode_term_groups(&filter.include_groups),
         filter.exclude_terms.join(","),
@@ -621,7 +617,6 @@ pub(crate) fn can_use_indexed_prefix_cache(
 
 pub(crate) fn indexed_filter_matches_for_prefix_cache(a: &SearchFilter, b: &SearchFilter) -> bool {
     a.mode == b.mode
-        && a.kind_filter == b.kind_filter
         && a.extension_filter == b.extension_filter
         && a.modified_within == b.modified_within
         && a.created_within == b.created_within
@@ -635,7 +630,6 @@ pub(crate) fn is_prefix_cache_eligible_query(
         return false;
     }
     if parsed_query.mode_override.is_some()
-        || parsed_query.kind_filter.is_some()
         || parsed_query.extension_filter.is_some()
         || !parsed_query.exclude_terms.is_empty()
         || parsed_query.modified_within.is_some()

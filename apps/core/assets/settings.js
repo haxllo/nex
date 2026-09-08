@@ -184,9 +184,43 @@ window.applySettings = function (s) {
   statusEl.classList.remove("error", "ok");
   statusEl.querySelector(".status-text").textContent = "Ready";
   showHotkey();
+  window.settingsBaseline = settingsState();
+  window.settingsDirty = false;
+  window.closeAfterSave = false;
 };
 
-function save() {
+function settingsState() {
+  const cfg = {};
+  for (const [id, kind] of FIELDS) {
+    const el = document.getElementById(id);
+    if (kind === "checked") cfg[id] = el.checked;
+    else if (kind === "valueNumber") cfg[id] = Number(el.value);
+    else if (kind === "valueSelect") cfg[id] = el.querySelector('input[type="hidden"]')?.value || el.value;
+  }
+  cfg.hotkey = window.pendingHotkey || window.currentSettings?.hotkey || "";
+  return JSON.stringify(cfg);
+}
+
+function refreshDirty() {
+  window.settingsDirty = window.settingsBaseline !== settingsState();
+}
+
+window.requestCloseSettings = function () {
+  refreshDirty();
+  if (window.settingsDirty) {
+    document.getElementById("unsaved-dialog")?.classList.remove("hidden");
+    return;
+  }
+  window.chrome.webview.postMessage(JSON.stringify({ t: "close" }));
+};
+
+function discardSettings() {
+  window.closeAfterSave = false;
+  document.getElementById("unsaved-dialog")?.classList.add("hidden");
+  window.chrome.webview.postMessage(JSON.stringify({ t: "close" }));
+}
+
+function save(closeAfterSave = false) {
   const cfg = {};
   for (const [id, kind] of FIELDS) {
     const el = document.getElementById(id);
@@ -199,6 +233,7 @@ function save() {
     } else cfg[id] = el.value.trim();
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;
+  window.closeAfterSave = closeAfterSave;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
 
@@ -208,10 +243,27 @@ window.saveResult = function (r) {
   if (r.saved) {
     el.classList.add("ok");
     el.querySelector(".status-text").textContent = "Saved";
+    window.currentSettings = { ...window.currentSettings, ...readSettingsForBaseline() };
+    window.settingsBaseline = settingsState();
+    window.settingsDirty = false;
+    if (window.closeAfterSave) {
+      window.closeAfterSave = false;
+      window.chrome.webview.postMessage(JSON.stringify({ t: "close" }));
+    }
   } else {
     el.classList.add("error");
     el.querySelector(".status-text").textContent = "Error: " + r.error;
   }
+};
+
+function readSettingsForBaseline() {
+  const raw = JSON.parse(settingsState());
+  return raw;
+}
+
+window.confirmSaveAndClose = function () {
+  document.getElementById("unsaved-dialog")?.classList.add("hidden");
+  save(true);
 };
 
 initDropdowns();

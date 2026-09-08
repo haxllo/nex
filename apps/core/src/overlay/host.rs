@@ -1033,11 +1033,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 //only the settings window may be "closed"; hide it instead of
                 //destroying it so repopening from the tray is instant
                 if Some(window_id) == settings_window_id {
-                    if let Some((w, _)) = &settings_ui {
-                        animate_window_close(w.hwnd() as HWND);
-                        let _ = w.set_visible(false);
-                        crate::runtime::log_info("[nex] settings window hidden via X");
-                        let _ = event_tx.send(OverlayEvent::SettingsClosed);
+                    if let Some((_, wv)) = &settings_ui {
+                        let _ = wv.evaluate_script("window.requestCloseSettings && window.requestCloseSettings()");
                     }
                 }
             }

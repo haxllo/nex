@@ -615,6 +615,43 @@
   }
   .btn-primary:hover { background: var(--accent); opacity: 0.92; }
   .btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+  .unsaved-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.46);
+  }
+  .unsaved-dialog.hidden { display: none; }
+  .unsaved-card {
+    width: min(360px, 100%);
+    padding: 24px;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+  }
+  .unsaved-icon {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    margin-bottom: 14px;
+    border-radius: 50%;
+    background: var(--danger);
+    color: #fff;
+    font-weight: 700;
+  }
+  .unsaved-card h2 { margin-bottom: 6px; font-size: 16px; }
+  .unsaved-card p { color: var(--fg-dim); font-size: 12px; }
+  .unsaved-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 22px;
+  }
 
   /* ── Scrollbars ── */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -639,7 +676,7 @@
         <line x1="0.5" y1="5" x2="9.5" y2="5"/>
       </svg>
     </button>
-    <button class="titlebar-btn close" onclick="post('close')" title="Close" aria-label="Close">
+                    <button class="titlebar-btn close" onclick="requestCloseSettings()" title="Close" aria-label="Close">
       <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="square">
         <line x1="1" y1="1" x2="9" y2="9"/>
         <line x1="9" y1="1" x2="1" y2="9"/>
@@ -856,8 +893,19 @@
   <div class="footer">
     <div id="status" class="status"><span class="dot"></span><span class="status-text">Ready</span></div>
     <div class="footer-actions">
-      <button class="btn" onclick="post('close')">Cancel</button>
       <button class="btn btn-primary" onclick="save(); this.blur()">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<div id="unsaved-dialog" class="unsaved-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="unsaved-title">
+  <div class="unsaved-card">
+    <div class="unsaved-icon">!</div>
+    <h2 id="unsaved-title">Unsaved changes</h2>
+    <p>Your settings changes have not been saved.</p>
+    <div class="unsaved-actions">
+      <button class="btn" onclick="discardSettings()">Don't save</button>
+      <button class="btn btn-primary" onclick="confirmSaveAndClose()">Save changes</button>
     </div>
   </div>
 </div>
@@ -896,4 +944,3 @@
 </script>
 </body>
 </html>
-

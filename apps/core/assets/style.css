@@ -301,7 +301,7 @@ body {
     0 3px 10px color-mix(in srgb, black 18%, transparent);
   opacity: 0;
   pointer-events: none;
-  transition: none;
+  transition: opacity 80ms ease-out;
 }
 .row::after {
   content: "";
@@ -319,7 +319,7 @@ body {
   mask-composite: exclude;
   opacity: 0;
   pointer-events: none;
-  transition: none;
+  transition: opacity 80ms ease-out;
 }
 .row > * {
   position: relative;
@@ -331,15 +331,16 @@ body {
 .row:hover::before,
 .row:hover::after {
   opacity: 1;
-  transition: opacity 120ms ease-out;
-}
-.row:hover::before {
-  transition: opacity 120ms ease-out;
 }
 /* Keyboard/click selection — must win over :hover so the user can see
    which row is active when the cursor is parked elsewhere. */
 .row.selected {
-  background: var(--sel);
+  background: transparent;
+  border-color: transparent;
+}
+.row.selected::before,
+.row.selected::after {
+  opacity: 1;
 }
 .row.selected:hover {
   border-color: transparent;

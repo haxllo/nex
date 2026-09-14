@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DestroyMenu, DestroyWindow, GetCursorPos, GetWindowLongPtrW, RegisterClassW,
     SetForegroundWindow, SetWindowLongPtrW, TrackPopupMenu, GWLP_USERDATA, HWND_MESSAGE, MF_CHECKED,
     MF_SEPARATOR, MF_STRING, MF_UNCHECKED, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_APP, WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
+    WM_APP, WM_CREATE, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
 };
 
 use crate::overlay::model::OverlayEvent;
@@ -284,7 +284,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 }
             };
             show_context_menu(hwnd, &snapshot);
-        } else if lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK {
+        } else if lp == WM_LBUTTONUP {
             let _ = state.lock().unwrap_or_else(|e| e.into_inner()).event_tx.send(OverlayEvent::ExternalShow);
         }
         return 0;

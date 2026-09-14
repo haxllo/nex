@@ -240,6 +240,7 @@
     li.className = rowClassName(r, isGridView);
     if (animDelay) li.style.animationDelay = animDelay;
     li.setAttribute("role", "option");
+    li.id = `row-${i}`;
     li.dataset.key = key;
     li.dataset.index = String(i);
     if (i === selected) {

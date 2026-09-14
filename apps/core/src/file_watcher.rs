@@ -34,7 +34,6 @@ pub enum WatcherEventKind {
     Added,
     Modified,
     Removed,
-    Renamed,
     RenameOld,
     RenameNew,
 }

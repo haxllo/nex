@@ -261,7 +261,7 @@ fn apply_event_to_pending(
         WatcherEventKind::RenameOld => {
             pending_removed.insert(event.path);
         }
-        WatcherEventKind::RenameNew | WatcherEventKind::Renamed => {
+        WatcherEventKind::RenameNew => {
             pending_added.insert(event.path, ());
         }
     }
@@ -510,7 +510,7 @@ mod tests {
         let mut added = HashMap::new();
         let mut removed = HashSet::new();
         apply_event_to_pending(
-            evt(WatcherEventKind::Renamed, "/a/new"),
+            evt(WatcherEventKind::RenameNew, "/a/new"),
             &mut added,
             &mut removed,
         );

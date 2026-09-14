@@ -1720,13 +1720,12 @@ fn position_window_centered(window: &Window) {
     let Some((left, top, right, bottom)) = cursor_monitor_work_area() else {
         return;
     };
-    let scale = window.scale_factor();
-    let size = window.inner_size().to_logical::<f64>(scale);
-    let x = left as f64 + ((right - left) as f64 - size.width) / 2.0;
-    let y = top as f64 + ((bottom - top) as f64 - size.height) / 2.0;
+    let size = window.inner_size();
+    let x = left + (right - left - size.width as i32) / 2;
+    let y = top + (bottom - top - size.height as i32) / 2;
     window.set_outer_position(PhysicalPosition::new(
-        x.max(left as f64) as i32,
-        y.max(top as f64) as i32,
+        x.max(left),
+        y.max(top),
     ));
 }
 

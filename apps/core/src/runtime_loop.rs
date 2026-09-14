@@ -1216,6 +1216,7 @@ impl RuntimeWorker {
         let mut needs_reregister: Option<String> = None;
 
         if let Ok(svc) = self.service.try_write() {
+            let previous_config = self.runtime_config.clone();
             let hotkey_changed = maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
@@ -1257,8 +1258,11 @@ impl RuntimeWorker {
             // the worker picks up the new show_files, show_folders, dsl,
             // and plugin toggles right away instead of serving stale
             // results from the previous session.
-            self.config_generation += 1;
-            self.search_worker.clear_session();
+            if self.runtime_config != previous_config {
+                self.config_generation = self.config_generation.wrapping_add(1);
+                self.search_worker.clear_session();
+                self.last_sent_generation = 0;
+            }
             maybe_apply_background_index_refresh(
                 &*svc,
                 &mut self.background_index_refresh,
@@ -1742,6 +1746,7 @@ impl RuntimeWorker {
                     &mut self.current_rows,
                     &mut self.selected_index,
                     self.last_sent_generation,
+                    self.config_generation,
                     self.apps_expanded.as_deref(),
                 );
             }
@@ -2352,6 +2357,7 @@ fn apply_search_results(
     current_rows: &mut Vec<crate::overlay::OverlayRow>,
     selected_index: &mut usize,
     last_sent_generation: u64,
+    config_generation: u64,
     apps_expanded_query: Option<&str>,
 ) {
     let Some(result) = search_worker.try_recv() else {
@@ -2359,6 +2365,9 @@ fn apply_search_results(
     };
 
     if result.generation < last_sent_generation {
+        return;
+    }
+    if result.config_generation != config_generation {
         return;
     }
 

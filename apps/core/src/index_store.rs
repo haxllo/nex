@@ -207,6 +207,9 @@ pub fn get_quick_launch_items(
 
     // First: add pinned apps (in the order specified by the user)
     for pinned_path in pinned_paths {
+        if result.len() >= max_items {
+            break;
+        }
         let trimmed = pinned_path.trim();
         if trimmed.is_empty() {
             continue;
@@ -221,12 +224,6 @@ pub fn get_quick_launch_items(
         }
     }
 
-    // If pinned items exist, ONLY show pinned items (no auto-fill)
-    if !result.is_empty() {
-        return Ok(result);
-    }
-
-    // No pinned items: only auto-fill from usage if configured
     if !auto_fill {
         return Ok(result);
     }

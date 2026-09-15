@@ -16,13 +16,15 @@
         Id="CloseNex"
         Target="Nex.exe"
         CloseMessage="yes"
-        TerminateProcess="yes"
+        RebootPrompt="no"
+        TerminateProcess="1"
         Timeout="5" />
     <util:CloseApplication
         Id="CloseNexHelper"
         Target="NexHelper.exe"
         CloseMessage="yes"
-        TerminateProcess="yes"
+        RebootPrompt="no"
+        TerminateProcess="1"
         Timeout="5" />
 
     <StandardDirectory Id="ProgramFiles64Folder">

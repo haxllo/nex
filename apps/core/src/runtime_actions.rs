@@ -113,6 +113,11 @@ pub(crate) fn launch_overlay_selection(
         return clipboard_history::copy_result_to_clipboard(cfg, &selected.id)
             .map(|_| true);
     }
+    if selected.kind.eq_ignore_ascii_case(crate::bookmarks::BOOKMARK_KIND) {
+        return crate::action_executor::launch_open_target(selected.path.trim())
+            .map(|_| true)
+            .map_err(|error| format!("bookmark launch failed: {error}"));
+    }
 
     let parsed_query = ParsedQuery::parse(query_text.trim(), cfg.search_dsl_enabled);
     let mode = resolved_mode_for_query(cfg, &parsed_query);

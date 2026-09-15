@@ -999,6 +999,19 @@
   // ── context menu ──────────────────────────────────────────
   let ctxRow = null; // the row the context menu was opened on
 
+  // Capture before WebView2/Chromium can open its native menu. Row-local
+  // handlers remain for selection, but this guarantees reused/child nodes
+  // cannot leak the browser context menu.
+  document.addEventListener("contextmenu", (e) => {
+    const row = e.target.closest?.(".row");
+    if (!row) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const idx = Number(row.dataset.index);
+    setSelected(idx, false);
+    showContextMenu(e.clientX, e.clientY, currentRows[idx]);
+  }, true);
+
   function showContextMenu(x, y, row) {
     // Synthetic entry — no context actions.
     if (row.role === "show_all_apps") return;

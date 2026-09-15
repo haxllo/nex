@@ -3,7 +3,10 @@ param(
   [ValidateSet("stable", "beta")]
   [string]$Channel = "stable",
   [string]$OutputRoot = "artifacts/windows",
-  [string]$InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+  [ValidateSet("inno", "wix")]
+  [string]$InstallerEngine = "inno",
+  [string]$InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+  [string]$WixConfiguration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,10 +49,17 @@ $artifactName = "nex-$Version-windows-x64"
 $stageDir = Join-Path $outputRootAbs "$artifactName-stage"
 $issPath = Join-Path $repoRoot "scripts/windows/nex.iss"
 $setupIconPath = Join-Path $repoRoot "apps/assets/nex.ico"
+$wixMsiProject = Join-Path $repoRoot "installer/wix/NexMsi.wixproj"
+$wixBundleProject = Join-Path $repoRoot "installer/wix/NexBundle.wixproj"
 
 Write-Host "== Building Nex Setup.exe for $Version ==" -ForegroundColor Cyan
 
-if (-not (Test-Path $InnoCompiler)) {
+if ($InstallerEngine -eq "wix") {
+  if (-not (Test-Path $wixMsiProject) -or -not (Test-Path $wixBundleProject)) {
+    throw "WiX projects not found under '$repoRoot/installer/wix'."
+  }
+}
+elseif (-not (Test-Path $InnoCompiler)) {
   $resolvedInno = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
   if (-not $resolvedInno) {
     $candidates = @(
@@ -69,7 +79,7 @@ if (-not (Test-Path $InnoCompiler)) {
   }
 }
 
-if (-not (Test-Path $issPath)) {
+if ($InstallerEngine -eq "inno" -and -not (Test-Path $issPath)) {
   throw "Installer spec not found at '$issPath'."
 }
 
@@ -90,9 +100,39 @@ if (-not (Test-Path (Join-Path $stageDir "bin/Nex.exe"))) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputRootAbs | Out-Null
-& $InnoCompiler "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DSetupIconPath=$setupIconPath" "/O$outputRootAbs" $issPath
-if ($LASTEXITCODE -ne 0) {
-  throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
+if ($InstallerEngine -eq "wix") {
+  $msiPath = Join-Path $outputRootAbs "$artifactName.msi"
+  & dotnet build $wixMsiProject -c $WixConfiguration `
+    "-p:AppVersion=$Version" "-p:StageDir=$stageDir" "-p:OutputPath=$outputRootAbs"
+  if ($LASTEXITCODE -ne 0) {
+    throw "WiX MSI compilation failed with exit code $LASTEXITCODE."
+  }
+
+  $builtMsi = Join-Path $outputRootAbs "NexMsi.msi"
+  if (-not (Test-Path $builtMsi)) {
+    throw "WiX MSI was not generated at '$builtMsi'."
+  }
+  Copy-Item $builtMsi $msiPath -Force
+
+  & dotnet build $wixBundleProject -c $WixConfiguration `
+    "-p:AppVersion=$Version" "-p:MsiPath=$msiPath" "-p:OutputPath=$outputRootAbs"
+  if ($LASTEXITCODE -ne 0) {
+    throw "WiX Burn compilation failed with exit code $LASTEXITCODE."
+  }
+
+  $builtBundle = Join-Path $outputRootAbs "NexBundle.exe"
+  if (-not (Test-Path $builtBundle)) {
+    throw "WiX Burn bundle was not generated at '$builtBundle'."
+  }
+  $setupPath = Join-Path $outputRootAbs "nex-$Version-windows-x64-setup.exe"
+  Copy-Item $builtBundle $setupPath -Force
+  Write-Host "Created WiX MSI: $msiPath" -ForegroundColor Green
+}
+else {
+  & $InnoCompiler "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DSetupIconPath=$setupIconPath" "/O$outputRootAbs" $issPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
+  }
 }
 
 $setupPath = Join-Path $outputRootAbs "nex-$Version-windows-x64-setup.exe"

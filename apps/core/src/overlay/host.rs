@@ -88,7 +88,7 @@ use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::WebViewExtWindows;
-use wry::{WebView, WebViewBuilder};
+use wry::{WebContext, WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
@@ -254,7 +254,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  The WebView
     // stays resident; only the icon cache is released on idle.
-    let mut webview = match build_webview(&window, &state, &proxy, &event_tx) {
+    let webview_data_dir = webview_data_dir();
+    let mut web_context = WebContext::new(Some(webview_data_dir.join("launcher")));
+    let mut settings_context = WebContext::new(Some(webview_data_dir.join("settings")));
+    let mut webview = match build_webview(
+        &window,
+        &mut web_context,
+        &state,
+        &proxy,
+        &event_tx,
+    ) {
         Ok(wv) => Some(wv),
         Err(e) => {
             crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -433,7 +442,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
                         show_pending = true;
-                        match build_webview(&window, &state, &proxy, &event_tx) {
+                            match build_webview(
+                                &window,
+                                &mut web_context,
+                                &state,
+                                &proxy,
+                                &event_tx,
+                            ) {
                             Ok(wv) => {
                                 subscribe_webview2_diagnostics(&wv);
                                 webview = Some(wv);
@@ -831,7 +846,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let record_hwnd = hwnd;
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
-                        let webview = wry::WebViewBuilder::new()
+                        let webview = wry::WebViewBuilder::new_with_web_context(&mut settings_context)
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
@@ -1092,6 +1107,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
 /// Build a WebView on `window` with the custom protocol + IPC handler.
 fn build_webview(
     window: &Window,
+    web_context: &mut WebContext,
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
@@ -1100,7 +1116,7 @@ fn build_webview(
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
 
-    WebViewBuilder::new()
+    WebViewBuilder::new_with_web_context(web_context)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0))
         .with_url("nexasset://localhost/")
@@ -1112,6 +1128,20 @@ fn build_webview(
         })
         .build(window)
         .map_err(|e| format!("{e}"))
+}
+
+fn webview_data_dir() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("AppData")
+                .join("Local")
+        })
+        .join("Nex")
+        .join("WebView2")
 }
 
 /// Serve embedded UI assets.

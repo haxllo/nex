@@ -206,6 +206,9 @@ catch {
 if (Test-Path "apps/assets/nex.svg") {
   Copy-Item "apps/assets/nex.svg" (Join-Path $stageDir "assets/nex.svg") -Force
 }
+if (Test-Path "apps/assets/nex.ico") {
+  Copy-Item "apps/assets/nex.ico" (Join-Path $stageDir "nex.ico") -Force
+}
 if (Test-Path "apps/assets/fonts/Inter") {
   New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets/fonts") | Out-Null
   Copy-Item "apps/assets/fonts/Inter" (Join-Path $stageDir "assets/fonts/Inter") -Recurse -Force

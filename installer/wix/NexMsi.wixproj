@@ -6,7 +6,7 @@
     <OutputPath>$(MSBuildThisFileDirectory)..\..\artifacts\windows\</OutputPath>
     <AppVersion Condition="'$(AppVersion)' == ''">0.0.0-local</AppVersion>
     <StageDir Condition="'$(StageDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\windows\nex-$(AppVersion)-windows-x64-stage</StageDir>
-    <DefineConstants>AppVersion=$(AppVersion);StageDir=$(StageDir)</DefineConstants>
+    <DefineConstants>AppVersion=$(AppVersion);StageDir=$(StageDir);SetupIconPath=$(StageDir)\nex.ico</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />

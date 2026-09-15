@@ -7,7 +7,12 @@
       Version="$(var.AppVersion)"
       UpgradeCode="E3A739E3-FAF7-4E18-BD8B-01744C9E7C27">
     <BootstrapperApplication>
-      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" />
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl=""
+          LaunchTarget="C:\Program Files\Nex\bin\Nex.exe"
+          LaunchArguments="--background"
+          LaunchHidden="yes" />
     </BootstrapperApplication>
     <Chain>
       <MsiPackage SourceFile="$(var.MsiPath)" Visible="no" />

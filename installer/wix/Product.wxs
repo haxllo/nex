@@ -8,6 +8,8 @@
       UpgradeCode="E3A739E3-FAF7-4E18-BD8B-01744C9E7C27"
       Scope="perMachine">
     <SummaryInformation Description="Keyboard-first launcher for Windows" />
+    <Icon Id="NexIcon" SourceFile="$(var.SetupIconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="NexIcon" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of Nex is already installed." />
     <MediaTemplate EmbedCab="yes" />
 

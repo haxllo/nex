@@ -1602,6 +1602,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
             serde_json::json!({
                 "title": item.title,
                 "path": item.path,
+                "url": if item.kind.eq_ignore_ascii_case("bookmark") { item.path.clone() } else { String::new() },
+                "kind": item.kind,
                 "icon": item.icon_path,
                 "pinned": item.is_pinned,
             })

@@ -949,6 +949,40 @@ impl RuntimeWorker {
         Ok(())
     }
 
+    fn bookmark_url(&mut self, title: &str, url: &str, remove: bool) {
+        let Ok(normalized_url) = crate::config::normalize_bookmark_url(url) else {
+            self.overlay.set_status_text("Invalid bookmark URL");
+            return;
+        };
+        if remove {
+            self.runtime_config
+                .web_bookmarks
+                .retain(|bookmark| !bookmark.url.eq_ignore_ascii_case(&normalized_url));
+        } else if !self
+            .runtime_config
+            .web_bookmarks
+            .iter()
+            .any(|bookmark| bookmark.url.eq_ignore_ascii_case(&normalized_url))
+        {
+            match crate::config::WebBookmark::new(title, &normalized_url) {
+                Ok(bookmark) => self.runtime_config.web_bookmarks.push(bookmark),
+                Err(error) => {
+                    self.overlay.set_status_text(&error);
+                    return;
+                }
+            }
+        }
+        if let Err(error) = self.save_config_and_prevent_reload() {
+            self.overlay.set_status_text(&format!("Bookmark save failed: {error}"));
+        } else {
+            self.overlay.set_status_text(if remove {
+                "Bookmark removed"
+            } else {
+                "Bookmark saved"
+            });
+        }
+    }
+
     /// Add an app to Quick Launch by path (from search results).
     fn add_to_quick_launch(&mut self, path: &str) {
         let trimmed = path.trim();
@@ -2233,6 +2267,9 @@ impl RuntimeWorker {
             }
             OverlayEvent::UnpinApp(title) => {
                 self.unpin_app_from_quick_launch(&title);
+            }
+            OverlayEvent::Bookmark(title, url, remove) => {
+                self.bookmark_url(&title, &url, remove);
             }
             OverlayEvent::AddToQuickLaunch(path) => {
                 self.add_to_quick_launch(&path);

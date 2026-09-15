@@ -1251,6 +1251,13 @@ fn handle_ipc(
                 let _ = event_tx.send(OverlayEvent::UnpinApp(title.to_string()));
             }
         }
+        "bookmark" => {
+            let payload = value.get("v").cloned().unwrap_or_default();
+            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let remove = payload.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+            let _ = event_tx.send(OverlayEvent::Bookmark(title.to_string(), url.to_string(), remove));
+        }
         "addToQuickLaunch" => {
             if let Some(path) = value.get("v").and_then(|v| v.as_str()) {
                 let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
@@ -1564,6 +1571,13 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 "title": r.title,
                 "subtitle": r.path,
                 "kind": r.kind,
+                "url": if r.kind.eq_ignore_ascii_case("bookmark")
+                    || (r.kind.eq_ignore_ascii_case("action") && r.path.starts_with("http"))
+                {
+                    serde_json::Value::String(r.path.clone())
+                } else {
+                    serde_json::Value::Null
+                },
                 "icon": icon,
                 "filePath": file_path,
                 "selectable": selectable,

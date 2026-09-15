@@ -1021,6 +1021,7 @@
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
     const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.subtitle || "");
+    const isBookmarkAction = isWebAction || isBookmark;
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");
@@ -1040,6 +1041,10 @@
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
       if ((isBookmark || isWebAction) && action !== "open") b.classList.add("hidden");
+      if (action === "bookmark") {
+        b.textContent = isBookmark ? "Remove Bookmark" : "Bookmark";
+        b.classList.toggle("hidden", !isBookmarkAction);
+      }
     });
 
     // Hide dividers whose adjacent sections are empty (e.g. pin/uninstall
@@ -1088,6 +1093,13 @@
     if (action === "open") {
       hideContextMenu();
       post("submit", selected);
+    } else if (action === "bookmark") {
+      hideContextMenu();
+      post("bookmark", {
+        title,
+        url: ctxRow.url || path,
+        remove: ctxRow.kind === "bookmark",
+      });
     } else if (action === "pin") {
       hideContextMenu();
       if (pinned) {

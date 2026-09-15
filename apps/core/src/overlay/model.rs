@@ -78,6 +78,7 @@ pub enum OverlayEvent {
     PinApp(String),
     /// Unpin an app from Quick Launch by title.
     UnpinApp(String),
+    Bookmark(String, String, bool),
     /// Add an app to Quick Launch by path.
     AddToQuickLaunch(String),
     /// Context menu action: { action, title, path }.

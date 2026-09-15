@@ -1017,10 +1017,10 @@
     if (row.role === "show_all_apps") return;
     ctxRow = row;
     // Determine which actions are relevant
-    const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
+    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.url || row.subtitle || "");
+    const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !isWebAction && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
-    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.url || row.subtitle || "");
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");

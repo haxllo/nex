@@ -493,8 +493,20 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::FocusInput => {
+                    if unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
+                    } == 0 {
+                        window.set_visible(true);
+                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
+                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        force_foreground(hwnd);
+                    }
                     window.set_focus();
                     focus_input(&webview);
+                    crate::overlay::hotkey::set_overlay_focus(true);
+                    if let Ok(mut s) = state.lock() {
+                        s.has_focus = true;
+                    }
                 }
                 UiCommand::Hide => {
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the

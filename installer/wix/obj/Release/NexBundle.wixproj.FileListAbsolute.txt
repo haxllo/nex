@@ -1,0 +1,6 @@
+C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexBundle.wixproj.CoreCompileInputs.cache
+C:\Users\mshab\Projects\nex\artifacts\windows\NexBundle.exe
+C:\Users\mshab\Projects\nex\artifacts\windows\NexBundle.wixpdb
+C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexBundle.exe
+C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexBundle.wixpdb
+C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexBundle.wixproj.BindTracking.txt

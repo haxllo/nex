@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package
+      Name="Nex"
+      Manufacturer="Haxllo"
+      Version="$(var.AppVersion)"
+      UpgradeCode="E3A739E3-FAF7-4E18-BD8B-01744C9E7C27"
+      Scope="perMachine">
+    <SummaryInformation Description="Keyboard-first launcher for Windows" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Nex is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Nex">
+        <Directory Id="BINFOLDER" Name="bin" />
+        <Directory Id="ASSETSFOLDER" Name="assets" />
+        <Directory Id="SCRIPTSFOLDER" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Nex" Level="1">
+      <ComponentGroupRef Id="MainFiles" />
+      <ComponentGroupRef Id="AssetFiles" />
+      <ComponentGroupRef Id="ScriptFiles" />
+      <ComponentRef Id="StartupRegistry" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+      <ComponentGroup Id="MainFiles" Directory="BINFOLDER">
+        <Component Id="NexExecutable">
+          <File Source="$(var.StageDir)\bin\Nex.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="NexHelperExecutable">
+          <File Source="$(var.StageDir)\bin\NexHelper.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="EverythingDll">
+          <File Source="$(var.StageDir)\bin\Everything64.dll" KeyPath="yes" />
+        </Component>
+      </ComponentGroup>
+
+      <ComponentGroup Id="AssetFiles" Directory="ASSETSFOLDER">
+        <Files Include="$(var.StageDir)\assets\**" />
+      </ComponentGroup>
+
+      <ComponentGroup Id="ScriptFiles" Directory="SCRIPTSFOLDER">
+        <File Source="$(var.StageDir)\scripts\update-nex.ps1" />
+      </ComponentGroup>
+
+      <Component Id="StartupRegistry" Directory="INSTALLFOLDER">
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Nex" Value="[BINFOLDER]Nex.exe --background" Type="string" KeyPath="yes" />
+      </Component>
+
+      <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
+        <Shortcut Id="NexStartMenuShortcut" Name="Nex" Target="[BINFOLDER]Nex.exe" Arguments="--background" />
+        <RemoveFolder Id="RemoveNexStartMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Haxllo\Nex" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+  </Fragment>
+</Wix>

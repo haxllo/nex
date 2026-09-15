@@ -1,0 +1,11 @@
+BuiltPdbOutput	C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.wixpdb
+BuiltTargetOutput	C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.msi
+Input	C:\Users\mshab\Projects\nex/artifacts/windows/nex-2.19.0-windows-x64-stage\bin\Everything64.dll
+Input	C:\Users\mshab\Projects\nex/artifacts/windows/nex-2.19.0-windows-x64-stage\bin\Nex.exe
+Input	C:\Users\mshab\Projects\nex/artifacts/windows/nex-2.19.0-windows-x64-stage\bin\NexHelper.exe
+Input	C:\Users\mshab\Projects\nex/artifacts/windows/nex-2.19.0-windows-x64-stage\scripts\update-nex.ps1
+Input	C:\Users\mshab\Projects\nex\artifacts\windows\nex-2.19.0-windows-x64-stage\assets\fonts\Inter\ttf\Inter-Bold.ttf
+Input	C:\Users\mshab\Projects\nex\artifacts\windows\nex-2.19.0-windows-x64-stage\assets\fonts\Inter\ttf\Inter-Medium.ttf
+Input	C:\Users\mshab\Projects\nex\artifacts\windows\nex-2.19.0-windows-x64-stage\assets\fonts\Inter\ttf\Inter-Regular.ttf
+Input	C:\Users\mshab\Projects\nex\artifacts\windows\nex-2.19.0-windows-x64-stage\assets\fonts\Inter\ttf\Inter-SemiBold.ttf
+Intermediate	C:\Users\mshab\Projects\nex\installer\wix\obj\Release\#cab1.cab

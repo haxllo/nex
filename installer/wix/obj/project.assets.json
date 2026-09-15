@@ -1,0 +1,84 @@
+{
+  "version": 3,
+  "targets": {
+    "native,Version=v0.0": {
+      "WixToolset.Bal.wixext/6.0.2": {
+        "type": "package",
+        "build": {
+          "build/WixToolset.Bal.wixext.targets": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "WixToolset.Bal.wixext/6.0.2": {
+      "sha512": "WeO0Qo28apmrEKQ+fEmWBEwnsez+4/B/NP5WnCnK2ZzKNcBr9xiRx01XHPBr08VqibDZGgXraDqFJ7Flws2QDw==",
+      "type": "package",
+      "path": "wixtoolset.bal.wixext/6.0.2",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "OSMFEULA.txt",
+        "README.md",
+        "build/WixToolset.Bal.wixext.targets",
+        "icon.png",
+        "wixext6/WixToolset.BootstrapperApplications.wixext.dll",
+        "wixtoolset.bal.wixext.6.0.2.nupkg.sha512",
+        "wixtoolset.bal.wixext.nuspec"
+      ]
+    }
+  },
+  "projectFileDependencyGroups": {
+    "native,Version=v0.0": [
+      "WixToolset.Bal.wixext >= 6.0.2"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\mshab\\.nuget\\packages\\": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "C:\\Users\\mshab\\Projects\\nex\\installer\\wix\\NexBundle.wixproj",
+      "projectName": "NexBundle",
+      "projectPath": "C:\\Users\\mshab\\Projects\\nex\\installer\\wix\\NexBundle.wixproj",
+      "packagesPath": "C:\\Users\\mshab\\.nuget\\packages\\",
+      "outputPath": "C:\\Users\\mshab\\Projects\\nex\\installer\\wix\\obj\\",
+      "projectStyle": "PackageReference",
+      "UsingMicrosoftNETSdk": false,
+      "configFilePaths": [
+        "C:\\Users\\mshab\\AppData\\Roaming\\NuGet\\NuGet.Config"
+      ],
+      "originalTargetFrameworks": [
+        "native"
+      ],
+      "sources": {
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "native": {
+          "framework": "native",
+          "targetAlias": "native",
+          "projectReferences": {}
+        }
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      }
+    },
+    "frameworks": {
+      "native": {
+        "framework": "native",
+        "targetAlias": "native",
+        "dependencies": {
+          "WixToolset.Bal.wixext": {
+            "target": "Package",
+            "version": "[6.0.2, )"
+          }
+        }
+      }
+    }
+  }
+}

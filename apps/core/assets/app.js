@@ -1006,6 +1006,7 @@
     // Determine which actions are relevant
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
+    const isBookmark = row.kind === "bookmark";
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");
@@ -1024,14 +1025,15 @@
         b.classList.toggle("hidden", row.kind !== "app");
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
+      if (isBookmark && action !== "open") b.classList.add("hidden");
     });
 
     // Hide dividers whose adjacent sections are empty (e.g. pin/uninstall
     // are app-only, so files/folders must not show trailing gaps).
     const pinVisible = el.querySelector('button[data-action="pin"]')?.classList.contains("hidden") === false;
     const uninstallVisible = el.querySelector('button[data-action="uninstall"]')?.classList.contains("hidden") === false;
-    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", !pinVisible && !uninstallVisible);
-    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", !uninstallVisible);
+    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", isBookmark || (!pinVisible && !uninstallVisible));
+    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", isBookmark || !uninstallVisible);
 
     // Temporarily remove hidden to measure actual layout, then position
     el.classList.remove("hidden");

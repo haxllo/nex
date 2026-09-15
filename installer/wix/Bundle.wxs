@@ -10,7 +10,7 @@
       <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" />
     </BootstrapperApplication>
     <Chain>
-      <MsiPackage SourceFile="$(var.MsiPath)" />
+      <MsiPackage SourceFile="$(var.MsiPath)" Visible="no" />
     </Chain>
   </Bundle>
 </Wix>

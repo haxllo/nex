@@ -1,6 +1,14 @@
 # Nex WiX Installer
 
-WiX Toolset v6 builds Nex MSI and Burn bootstrapper packages from the existing staged release layout.
+WiX Toolset v7 builds Nex MSI and Burn bootstrapper packages from the existing staged release layout.
+
+WiX 7 binary use requires accepting its Open Source Maintenance Fee EULA once per developer/CI environment:
+
+```powershell
+wix eula accept wix7
+```
+
+Run this only after reviewing `https://github.com/wixtoolset/wix/blob/main/OSMFEULA.txt`.
 
 Build MSI:
 

@@ -992,7 +992,7 @@ html[data-theme="light"] img.icon.glyph {
   display: none;
 }
 .power-panel .pcircle[data-power="back"]:hover {
-  background: var(--surface-hover);
+  background: color-mix(in srgb, white 10%, var(--bg-opaque));
   border-color: var(--border-strong);
 }
 

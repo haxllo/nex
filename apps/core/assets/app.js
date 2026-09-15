@@ -394,7 +394,8 @@
           // icon are identical by key — leave them untouched.
           li.className = rowClassName(r, isGridView);
           li.dataset.index = String(i);
-          li.classList.toggle("selected", i === selected);
+           li.classList.toggle("selected", i === selected);
+           li.setAttribute("aria-selected", i === selected ? "true" : "false");
           const trailing = li.querySelector(".pin-icon, .add-icon, .kind");
           if (trailing) trailing.remove();
           appendTrailing(li, r, i);
@@ -504,13 +505,10 @@
   }
 
   function setSelected(i, scroll) {
-    if (i === selected) return;
-    const prev = selected;
     selected = i;
-    const prevEl = rowMap.get(prev);
-    if (prevEl) {
-      prevEl.classList.remove("selected");
-      prevEl.setAttribute("aria-selected", "false");
+    for (const row of rowMap.values()) {
+      row.classList.remove("selected");
+      row.setAttribute("aria-selected", "false");
     }
     const nextEl = rowMap.get(selected);
     if (nextEl) {

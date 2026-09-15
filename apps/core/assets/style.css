@@ -881,6 +881,9 @@ html[data-theme="light"] img.icon.glyph {
   gap: 6px;
   justify-items: center;
 }
+.power-row:has(.pcircle[data-power="back"]) {
+  grid-template-columns: 40px repeat(5, 1fr);
+}
 
 .power-confirm .power-row {
   display: flex;
@@ -968,19 +971,20 @@ html[data-theme="light"] img.icon.glyph {
 }
 .power-panel .pcircle[data-power="back"] {
   --c: var(--text-faint);
-  width: 50px;
-  max-width: 50px;
+  width: 34px;
+  max-width: 34px;
+  height: 34px;
   padding: 0;
   gap: 0;
-  border: 0;
+  border: 1px solid var(--border-strong);
   border-radius: 50%;
-  background: transparent;
+  background: var(--surface-2);
   color: var(--text-faint);
 }
 .power-panel .pcircle[data-power="back"] svg {
-  width: 36px;
-  height: 36px;
-  padding: 8px;
+  width: 34px;
+  height: 34px;
+  padding: 7px;
   background: transparent;
 }
 .power-panel .pcircle[data-power="back"] span,
@@ -989,6 +993,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 .power-panel .pcircle[data-power="back"]:hover {
   background: var(--surface-hover);
+  border-color: var(--border-strong);
 }
 
 @keyframes nexPowerRise {

@@ -883,6 +883,16 @@ impl RuntimeWorker {
 
         if !already_pinned {
             let pinned_value = path;
+            if let Ok(normalized_url) = crate::config::normalize_bookmark_url(&pinned_value) {
+                if !self.runtime_config.web_bookmarks.iter().any(|bookmark| bookmark.url == normalized_url) {
+                    let title = crate::bookmarks::display_title(&normalized_url);
+                    if let Ok(mut bookmark) = crate::config::WebBookmark::new(title, &normalized_url) {
+                        bookmark.icon_path = crate::bookmarks::favicon_cache_path(&normalized_url)
+                            .to_string_lossy().to_string();
+                        self.runtime_config.web_bookmarks.push(bookmark);
+                    }
+                }
+            }
             self.runtime_config.quick_launch.pinned.push(pinned_value);
 
             // Persist to config file and prevent reloader from overwriting

@@ -5,6 +5,22 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const BOOKMARK_KIND: &str = "bookmark";
 
+pub(crate) fn display_title(url: &str) -> String {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.trim().to_string());
+    host.trim_start_matches("www.")
+        .split('.')
+        .next()
+        .unwrap_or(url)
+        .to_string()
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| if index == 0 { ch.to_ascii_uppercase() } else { ch })
+        .collect()
+}
+
 pub(crate) fn bookmark_id(url: &str) -> String {
     format!("bookmark:{}", normalize_for_search(url))
 }

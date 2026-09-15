@@ -703,6 +703,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.
                         focus_input(&webview);
+                        // SetWindowPos(SWP_NOACTIVATE) is used on hide to keep
+                        // Explorer from exposing the taskbar. Depending on
+                        // WebView2/tao focus notifications, the next show can
+                        // otherwise remain marked unfocused even though the
+                        // overlay has been foregrounded and its input focused.
+                        crate::overlay::hotkey::set_overlay_focus(true);
+                        if let Ok(mut s) = state.lock() {
+                            s.has_focus = true;
+                        }
                         // Signal the elevated helper to call SetForegroundWindow
                         // from High IL (bypasses UIPI for Task Manager scenario).
                         crate::overlay::hotkey::signal_overlay_ready();

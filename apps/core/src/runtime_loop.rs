@@ -850,7 +850,8 @@ impl RuntimeWorker {
 
     /// Pin an app to Quick Launch by title.
     fn pin_app_to_quick_launch(&mut self, title: &str) {
-        let title = title.strip_prefix("Open ").unwrap_or(title).trim();
+        let raw_title = title.trim();
+        let title = raw_title.strip_prefix("Open ").unwrap_or(raw_title).trim();
         // Find the app path from search results or Quick Launch items
         let app_path = self.current_results.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("app"))
@@ -862,7 +863,9 @@ impl RuntimeWorker {
             });
 
         let url = self.current_results.iter()
-            .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("action"))
+            .find(|item| item.kind.eq_ignore_ascii_case("action")
+                && (item.title.eq_ignore_ascii_case(raw_title)
+                    || item.title.eq_ignore_ascii_case(&format!("Open {title}"))))
             .map(|item| item.path.clone())
             .filter(|path| path.starts_with("http://") || path.starts_with("https://"));
         let Some(path) = app_path.or(url) else {

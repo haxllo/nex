@@ -1021,7 +1021,6 @@
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
     const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.subtitle || "");
-    const isBookmarkAction = isWebAction || isBookmark;
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");
@@ -1040,19 +1039,15 @@
         b.classList.toggle("hidden", row.kind !== "app" && !isWebAction);
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
-      if ((isBookmark || isWebAction) && action !== "open") b.classList.add("hidden");
-      if (action === "bookmark") {
-        b.textContent = isBookmark ? "Remove Bookmark" : "Bookmark";
-        b.classList.toggle("hidden", !isBookmarkAction);
-      }
+      if ((isBookmark || isWebAction) && action !== "open" && action !== "pin") b.classList.add("hidden");
     });
 
     // Hide dividers whose adjacent sections are empty (e.g. pin/uninstall
     // are app-only, so files/folders must not show trailing gaps).
     const pinVisible = el.querySelector('button[data-action="pin"]')?.classList.contains("hidden") === false;
     const uninstallVisible = el.querySelector('button[data-action="uninstall"]')?.classList.contains("hidden") === false;
-    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", isBookmark || isWebAction || (!pinVisible && !uninstallVisible));
-    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", isBookmark || isWebAction || !uninstallVisible);
+    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", !pinVisible && !uninstallVisible);
+    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", !uninstallVisible);
 
     // Temporarily show to measure actual layout, then position. Measuring
     // while `hidden` returns zero height and always places menu below cursor,
@@ -1093,13 +1088,6 @@
     if (action === "open") {
       hideContextMenu();
       post("submit", selected);
-    } else if (action === "bookmark") {
-      hideContextMenu();
-      post("bookmark", {
-        title,
-        url: ctxRow.url || path,
-        remove: ctxRow.kind === "bookmark",
-      });
     } else if (action === "pin") {
       hideContextMenu();
       if (pinned) {

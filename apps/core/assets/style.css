@@ -344,6 +344,10 @@ body {
 .row.selected:hover {
   border-color: transparent;
 }
+.keyboard-nav .row:hover:not(.selected)::before,
+.keyboard-nav .row:hover:not(.selected)::after {
+  opacity: 0;
+}
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
 .row .path-hint {
   position: absolute;

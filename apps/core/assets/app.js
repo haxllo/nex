@@ -806,6 +806,7 @@
 
       if (e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "J"))) {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(1);
         } else {
@@ -813,6 +814,7 @@
         }
       } else if (e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(-1);
         } else {
@@ -820,6 +822,7 @@
         }
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGrid(e.key === "ArrowLeft" ? -1 : 1, 0);
         }
@@ -1273,6 +1276,9 @@
     }, 1400);
   }
   list.addEventListener("scroll", armScrollFade, { passive: true });
-  list.addEventListener("mousemove", armScrollFade, { passive: true });
+  list.addEventListener("mousemove", () => {
+    document.body.classList.remove("keyboard-nav");
+    armScrollFade();
+  }, { passive: true });
   list.classList.add("scroll-idle");
 })();

@@ -1,5 +1,7 @@
 use crate::config::WebBookmark;
 use crate::model::{normalize_for_search, SearchItem};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 pub(crate) const BOOKMARK_KIND: &str = "bookmark";
 
@@ -29,6 +31,46 @@ pub(crate) fn search_bookmarks(bookmarks: &[WebBookmark], query: &str, limit: us
             )
         })
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn favicon_cache_path(url: &str) -> PathBuf {
+    let hash = xxhash_rust::xxh3::xxh3_64(url.as_bytes());
+    crate::config::stable_app_data_dir().join("bookmark-icons").join(format!("{hash:016x}.png"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn download_favicon(url: &str) -> Result<PathBuf, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "invalid bookmark URL".to_string())?;
+    let host = parsed.host_str().ok_or_else(|| "bookmark URL has no host".to_string())?;
+    let icon_url = format!("{}://{host}/favicon.ico", parsed.scheme());
+    let path = favicon_cache_path(url);
+    if path.is_file() {
+        return Ok(path);
+    }
+    let response = ureq::get(&icon_url)
+        .set("Accept", "image/ico,image/png,image/*;q=0.8")
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .map_err(|e| format!("favicon request failed: {e}"))?;
+    if response.status() != 200 {
+        return Err(format!("favicon request returned {}", response.status()));
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(512 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("favicon read failed: {e}"))?;
+    if bytes.is_empty() || bytes.len() >= 512 * 1024 {
+        return Err("favicon response is empty or too large".into());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| format!("favicon cache dir failed: {e}"))?;
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, bytes).map_err(|e| format!("favicon cache write failed: {e}"))?;
+    std::fs::rename(&temp, &path).map_err(|e| format!("favicon cache replace failed: {e}"))?;
+    Ok(path)
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ devsync.policy.toml
 .DS_Store
 target/
 artifacts
+installer/**/obj/
 nul
 Everything64.dll
 .commandcode/

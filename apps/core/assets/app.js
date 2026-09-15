@@ -1037,7 +1037,7 @@
         const path = row.filePath || row.icon || "";
         const pinned = isItemPinned(path) || isItemPinned(row.icon);
         b.textContent = pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch";
-        b.classList.toggle("hidden", row.kind !== "app");
+        b.classList.toggle("hidden", row.kind !== "app" && !isWebAction);
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
       if ((isBookmark || isWebAction) && action !== "open") b.classList.add("hidden");

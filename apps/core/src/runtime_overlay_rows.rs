@@ -632,9 +632,13 @@ pub(crate) fn build_quick_launch_rows(
         .map(|(index, item)| OverlayRow {
             role: OverlayRowRole::QuickLaunch,
             result_index: Some(index),
-            kind: "app".to_string(),
+            kind: item.kind.clone(),
             title: item.title.clone(),
-            path: quick_launch_subtitle(&item.subtitle),
+            path: if item.kind.eq_ignore_ascii_case("bookmark") {
+                String::new()
+            } else {
+                quick_launch_subtitle(&item.subtitle)
+            },
             icon_path: item.icon_path.clone(),
             clipboard_thumbnail: None,
             clipboard_full_image: None,

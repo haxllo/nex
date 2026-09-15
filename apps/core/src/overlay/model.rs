@@ -79,6 +79,7 @@ pub enum OverlayEvent {
     /// Unpin an app from Quick Launch by title.
     UnpinApp(String),
     Bookmark(String, String, bool),
+    BookmarkIconReady(String, String),
     /// Add an app to Quick Launch by path.
     AddToQuickLaunch(String),
     /// Context menu action: { action, title, path }.
@@ -107,6 +108,7 @@ pub(crate) enum Theme {
 /// A single item in the Quick Launch section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickLaunchItem {
+    pub kind: String,
     pub title: String,
     pub path: String,
     pub subtitle: String,

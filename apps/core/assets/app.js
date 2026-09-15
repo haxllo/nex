@@ -134,9 +134,9 @@
       e.stopPropagation();
       e.preventDefault();
       if (item.pinned) {
-        post('unpin', item.title);
+        post('unpin', item.url || item.title);
       } else {
-        post('pin', item.title);
+        post('pin', item.url || item.title);
       }
       input.focus();
     });
@@ -147,7 +147,7 @@
     if (!filePath) return false;
     const normalized = filePath.replace(/\\/g, '/').toLowerCase();
     return quickLaunchItems.some(item => {
-      const itemPath = (item.path || '').replace(/\\/g, '/').toLowerCase();
+      const itemPath = (item.url || item.path || '').replace(/\\/g, '/').toLowerCase();
       return itemPath === normalized && item.pinned;
     });
   }

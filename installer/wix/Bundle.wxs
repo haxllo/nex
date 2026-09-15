@@ -5,6 +5,7 @@
       Name="Nex"
       Manufacturer="Haxllo"
       Version="$(var.AppVersion)"
+      IconSourceFile="$(var.StageDir)\nex.ico"
       UpgradeCode="E3A739E3-FAF7-4E18-BD8B-01744C9E7C27">
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication

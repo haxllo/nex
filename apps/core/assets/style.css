@@ -97,6 +97,10 @@ body {
      window and margins don't collapse past the measured height. */
   overflow: hidden;
 }
+#panel:has(#context-menu:not(.hidden)) {
+  overflow: visible;
+  clip-path: none;
+}
 
 /* ── search row ───────────────────────────────────────────── */
 #search-row {
@@ -1035,7 +1039,8 @@ html[data-theme="light"] img.icon.glyph {
   background: var(--bg-opaque);
   border: 1px solid var(--border);
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  overflow: hidden;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   z-index: 9999;
 }
 #context-menu button {

@@ -214,8 +214,17 @@ pub fn get_quick_launch_items(
         if trimmed.is_empty() {
             continue;
         }
-        // Try to find by path first, then by title
-        let item = find_item_by_path_or_title(db, trimmed)?;
+        let item = if let Ok(url) = crate::config::normalize_bookmark_url(trimmed) {
+            Some((
+                crate::bookmarks::bookmark_id(&url),
+                "bookmark".to_string(),
+                url.clone(),
+                url,
+                String::new(),
+            ))
+        } else {
+            find_item_by_path_or_title(db, trimmed)?
+        };
         if let Some((id, kind, title, path, subtitle)) = item {
             if seen_ids.insert(id.clone()) {
                 let icon_path = path.clone();

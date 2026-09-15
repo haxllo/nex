@@ -739,8 +739,18 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
+                        .map(|(id, kind, title, path, subtitle, icon_path, is_pinned)| {
+                            let (title, icon_path) = if kind.eq_ignore_ascii_case("bookmark") {
+                                let title = self.runtime_config.web_bookmarks.iter()
+                                    .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))
+                                    .map(|bookmark| bookmark.title.clone())
+                                    .unwrap_or(title);
+                                let icon_path = crate::bookmarks::favicon_cache_path(&path)
+                                    .to_string_lossy().to_string();
+                                (title, icon_path)
+                            } else { (title, icon_path) };
                             crate::overlay::model::QuickLaunchItem {
+                                 kind,
                                 title,
                                 path,
                                 subtitle,
@@ -787,8 +797,18 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, _kind, title, path, subtitle, icon_path, is_pinned)| {
+                        .map(|(id, kind, title, path, subtitle, icon_path, is_pinned)| {
+                            let (title, icon_path) = if kind.eq_ignore_ascii_case("bookmark") {
+                                let title = self.runtime_config.web_bookmarks.iter()
+                                    .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))
+                                    .map(|bookmark| bookmark.title.clone())
+                                    .unwrap_or(title);
+                                let icon_path = crate::bookmarks::favicon_cache_path(&path)
+                                    .to_string_lossy().to_string();
+                                (title, icon_path)
+                            } else { (title, icon_path) };
                             crate::overlay::model::QuickLaunchItem {
+                                 kind,
                                 title,
                                 path,
                                 subtitle,
@@ -830,6 +850,7 @@ impl RuntimeWorker {
 
     /// Pin an app to Quick Launch by title.
     fn pin_app_to_quick_launch(&mut self, title: &str) {
+        let title = title.strip_prefix("Open ").unwrap_or(title).trim();
         // Find the app path from search results or Quick Launch items
         let app_path = self.current_results.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("app"))
@@ -840,7 +861,11 @@ impl RuntimeWorker {
                     .map(|item| item.path.clone())
             });
 
-        let Some(path) = app_path else {
+        let url = self.current_results.iter()
+            .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("action"))
+            .map(|item| item.path.clone())
+            .filter(|path| path.starts_with("http://") || path.starts_with("https://"));
+        let Some(path) = app_path.or(url) else {
             log_warn(&format!("[nex] quick_launch pin failed: app '{}' not found", title));
             return;
         };
@@ -854,7 +879,8 @@ impl RuntimeWorker {
         });
 
         if !already_pinned {
-            self.runtime_config.quick_launch.pinned.push(path);
+            let pinned_value = path;
+            self.runtime_config.quick_launch.pinned.push(pinned_value);
 
             // Persist to config file and prevent reloader from overwriting
             if let Err(error) = self.save_config_and_prevent_reload() {
@@ -980,6 +1006,21 @@ impl RuntimeWorker {
             } else {
                 "Bookmark saved"
             });
+            if !remove {
+                let url = normalized_url.clone();
+                let event_tx = self.event_tx.clone();
+                std::thread::Builder::new()
+                    .name("nex-bookmark-favicon".into())
+                    .spawn(move || {
+                        if let Ok(path) = crate::bookmarks::download_favicon(&url) {
+                            let _ = event_tx.send(OverlayEvent::BookmarkIconReady(
+                                url,
+                                path.to_string_lossy().to_string(),
+                            ));
+                        }
+                    })
+                    .ok();
+            }
         }
     }
 
@@ -2270,6 +2311,14 @@ impl RuntimeWorker {
             }
             OverlayEvent::Bookmark(title, url, remove) => {
                 self.bookmark_url(&title, &url, remove);
+            }
+            OverlayEvent::BookmarkIconReady(url, path) => {
+                if let Some(bookmark) = self.runtime_config.web_bookmarks.iter_mut().find(|b| b.url == url) {
+                    bookmark.icon_path = path;
+                    let _ = self.save_config_and_prevent_reload();
+                    self.load_quick_launch_items_from_config();
+                    self.overlay.set_status_text_and_refresh("Bookmark icon ready");
+                }
             }
             OverlayEvent::AddToQuickLaunch(path) => {
                 self.add_to_quick_launch(&path);

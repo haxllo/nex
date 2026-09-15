@@ -1066,6 +1066,16 @@
     el.style.left = Math.max(pad, Math.min(left, window.innerWidth - menuW - pad)) + "px";
     el.style.top = Math.max(pad, Math.min(top, window.innerHeight - menuH - pad)) + "px";
     el.classList.remove("hidden");
+    requestAnimationFrame(() => {
+      if (el.classList.contains("hidden")) return;
+      const rect = el.getBoundingClientRect();
+      const viewportH = window.visualViewport?.height || window.innerHeight;
+      const viewportW = window.visualViewport?.width || window.innerWidth;
+      const clampedTop = Math.max(pad, Math.min(rect.top, viewportH - rect.height - pad));
+      const clampedLeft = Math.max(pad, Math.min(rect.left, viewportW - rect.width - pad));
+      el.style.top = `${clampedTop}px`;
+      el.style.left = `${clampedLeft}px`;
+    });
   }
 
   function hideContextMenu() {

@@ -1048,7 +1048,7 @@ html[data-theme="light"] img.icon.glyph {
 #list.bento-view {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  grid-auto-rows: 90px;
+  grid-auto-rows: minmax(40px, auto);
   gap: 8px;
   padding: 8px;
   scrollbar-gutter: stable;
@@ -1062,27 +1062,28 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 12px;
   overflow: hidden;
   background: var(--sel);
-  border: 1px solid var(--border);
-  transition: background 100ms ease, border-color 100ms ease;
+  transition: background 100ms ease;
 }
 
 #list.bento-view .row:hover {
   background: var(--hover);
-  border-color: var(--border-strong);
 }
 
 /* Bento tile sizes — asymmetric layout */
 #list.bento-view .row.tile-small {
   grid-column: span 1;
   grid-row: span 1;
+  min-height: 40px;
 }
 #list.bento-view .row.tile-medium {
   grid-column: span 2;
   grid-row: span 1;
+  min-height: 90px;
 }
 #list.bento-view .row.tile-large {
   grid-column: span 2;
   grid-row: span 2;
+  min-height: 180px;
 }
 
 /* Text tile content */

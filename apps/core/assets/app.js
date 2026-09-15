@@ -1020,6 +1020,7 @@
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
+    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.subtitle || "");
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");
@@ -1038,44 +1039,35 @@
         b.classList.toggle("hidden", row.kind !== "app");
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
-      if (isBookmark && action !== "open") b.classList.add("hidden");
+      if ((isBookmark || isWebAction) && action !== "open") b.classList.add("hidden");
     });
 
     // Hide dividers whose adjacent sections are empty (e.g. pin/uninstall
     // are app-only, so files/folders must not show trailing gaps).
     const pinVisible = el.querySelector('button[data-action="pin"]')?.classList.contains("hidden") === false;
     const uninstallVisible = el.querySelector('button[data-action="uninstall"]')?.classList.contains("hidden") === false;
-    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", isBookmark || (!pinVisible && !uninstallVisible));
-    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", isBookmark || !uninstallVisible);
+    el.querySelector('hr[data-divider="1"]')?.classList.toggle("hidden", isBookmark || isWebAction || (!pinVisible && !uninstallVisible));
+    el.querySelector('hr[data-divider="2"]')?.classList.toggle("hidden", isBookmark || isWebAction || !uninstallVisible);
 
-    // Temporarily remove hidden to measure actual layout, then position
+    // Temporarily show to measure actual layout, then position. Measuring
+    // while `hidden` returns zero height and always places menu below cursor,
+    // where short overlay windows clip it at footer.
     el.classList.remove("hidden");
     const menuW = el.offsetWidth || 180;
     const menuH = el.offsetHeight || 0;
-    el.classList.add("hidden");
 
     const pad = 8;
     let left = x + pad;
     if (left + menuW > window.innerWidth - pad) {
       left = x - menuW - pad;
     }
-    let top = y + pad;
-    if (top + menuH > window.innerHeight - pad) {
-      top = y - menuH - pad;
-    }
-    el.style.left = Math.max(pad, Math.min(left, window.innerWidth - menuW - pad)) + "px";
-    el.style.top = Math.max(pad, Math.min(top, window.innerHeight - menuH - pad)) + "px";
-    el.classList.remove("hidden");
-    requestAnimationFrame(() => {
-      if (el.classList.contains("hidden")) return;
-      const rect = el.getBoundingClientRect();
-      const viewportH = window.visualViewport?.height || window.innerHeight;
-      const viewportW = window.visualViewport?.width || window.innerWidth;
-      const clampedTop = Math.max(pad, Math.min(rect.top, viewportH - rect.height - pad));
-      const clampedLeft = Math.max(pad, Math.min(rect.left, viewportW - rect.width - pad));
-      el.style.top = `${clampedTop}px`;
-      el.style.left = `${clampedLeft}px`;
-    });
+    const viewportW = window.visualViewport?.width || window.innerWidth;
+    const viewportH = window.visualViewport?.height || window.innerHeight;
+    const below = y + pad;
+    const above = y - menuH - pad;
+    const top = below + menuH <= viewportH - pad ? below : above;
+    el.style.left = `${Math.max(pad, Math.min(left, viewportW - menuW - pad))}px`;
+    el.style.top = `${Math.max(pad, Math.min(top, viewportH - menuH - pad))}px`;
   }
 
   function hideContextMenu() {

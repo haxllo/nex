@@ -1020,7 +1020,7 @@
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
-    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.subtitle || "");
+    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.url || row.subtitle || "");
 
     const el = contextMenu;
     const btns = el.querySelectorAll("button");
@@ -1029,7 +1029,7 @@
     btns.forEach(b => {
       const action = b.dataset.action;
       if (action === "open") b.classList.toggle("hidden", false);
-      else if (action === "runas") b.classList.toggle("hidden", (!isApp && !isFile) || row.kind === "folder");
+      else if (action === "runas") b.classList.toggle("hidden", isWebAction || (!isApp && !isFile) || row.kind === "folder");
       else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "pin") {

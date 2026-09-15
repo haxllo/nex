@@ -1,6 +1,0 @@
-C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.wixproj.CoreCompileInputs.cache
-C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.msi
-C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.wixpdb
-C:\Users\mshab\Projects\nex\installer\wix\obj\Release\NexMsi.wixproj.BindTracking-neutral.txt
-C:\Users\mshab\Projects\nex\artifacts\windows\NexMsi.msi
-C:\Users\mshab\Projects\nex\artifacts\windows\NexMsi.wixpdb

@@ -134,6 +134,11 @@ const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
+const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
+document.addEventListener('contextmenu', function (event) {
+  event.preventDefault();
+}, true);
+"#;
 
 
 /// Commands the shim posts to the UI thread via the event-loop proxy.
@@ -820,6 +825,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
                         let webview = wry::WebViewBuilder::new()
+                            .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
@@ -1089,6 +1095,7 @@ fn build_webview(
     let ipc_tx = event_tx.clone();
 
     WebViewBuilder::new()
+        .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0))
         .with_url("nexasset://localhost/")

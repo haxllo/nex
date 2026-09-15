@@ -123,12 +123,7 @@ fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
             "could not resolve current executable path: {error}"
         ))
     })?;
-    let cwd = std::env::current_dir().map_err(|error| {
-        UpdateLaunchError::EnvironmentUnavailable(format!(
-            "could not resolve current working directory: {error}"
-        ))
-    })?;
-    let checked_paths = updater_script_candidates(&exe_path, &cwd);
+    let checked_paths = updater_script_candidates(&exe_path);
     let script_path = checked_paths
         .iter()
         .find(|candidate| candidate.exists())
@@ -207,7 +202,7 @@ fn run_updater_script(
     Err(UpdateLaunchError::UnsupportedPlatform)
 }
 
-fn updater_script_candidates(exe_path: &Path, cwd: &Path) -> Vec<PathBuf> {
+fn updater_script_candidates(exe_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Some(exe_dir) = exe_path.parent() {
@@ -224,7 +219,6 @@ fn updater_script_candidates(exe_path: &Path, cwd: &Path) -> Vec<PathBuf> {
         collect_ancestor_candidates(exe_dir, &mut candidates, DEV_UPDATER_RELATIVE_PATH);
     }
 
-    collect_ancestor_candidates(cwd, &mut candidates, DEV_UPDATER_RELATIVE_PATH);
 
     candidates
 }
@@ -252,9 +246,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("nex-updater-installed-{}", std::process::id()));
         let exe_path = root.join("bin/Nex.exe");
-        let cwd = root.clone();
-
-        let candidates = updater_script_candidates(&exe_path, &cwd);
+        let candidates = updater_script_candidates(&exe_path);
 
         assert_eq!(candidates[0], root.join(INSTALLED_UPDATER_RELATIVE_PATH));
         assert_eq!(candidates[1], root.join("update-nex.ps1"));
@@ -265,9 +257,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nex-updater-repo-{}", std::process::id()));
         let repo = root.join("repo");
         let exe_path = repo.join("target/debug/Nex.exe");
-        let cwd = repo.join("apps/core");
-
-        let candidates = updater_script_candidates(&exe_path, &cwd);
+        let candidates = updater_script_candidates(&exe_path);
 
         assert!(candidates
             .iter()
@@ -278,9 +268,7 @@ mod tests {
     fn updater_candidates_are_deduplicated() {
         let repo = std::env::temp_dir().join(format!("nex-updater-dedupe-{}", std::process::id()));
         let exe_path = repo.join("target/debug/Nex.exe");
-        let cwd = repo.join("target/debug");
-
-        let candidates = updater_script_candidates(&exe_path, &cwd);
+        let candidates = updater_script_candidates(&exe_path);
         let unique = candidates.iter().collect::<std::collections::BTreeSet<_>>();
 
         assert_eq!(candidates.len(), unique.len());

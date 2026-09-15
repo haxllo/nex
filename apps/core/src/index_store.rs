@@ -207,6 +207,9 @@ pub fn get_quick_launch_items(
 
     // First: add pinned apps (in the order specified by the user)
     for pinned_path in pinned_paths {
+        if result.len() >= max_items {
+            break;
+        }
         let trimmed = pinned_path.trim();
         if trimmed.is_empty() {
             continue;
@@ -221,12 +224,6 @@ pub fn get_quick_launch_items(
         }
     }
 
-    // If pinned items exist, ONLY show pinned items (no auto-fill)
-    if !result.is_empty() {
-        return Ok(result);
-    }
-
-    // No pinned items: only auto-fill from usage if configured
     if !auto_fill {
         return Ok(result);
     }
@@ -390,29 +387,42 @@ pub fn list_query_selections(
 }
 
 fn init_schema(conn: &Connection) -> Result<(), StoreError> {
-    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-    if current_version < 1 {
-        migration_v1(conn)?;
-    }
-    if current_version < 2 {
-        migration_v2(conn)?;
-    }
-    if current_version < 3 {
-        migration_v3(conn)?;
-    }
-    if current_version < 4 {
-        migration_v4(conn)?;
-    }
-    if current_version < 5 {
-        migration_v5(conn)?;
-    }
+        if current_version < 1 {
+            migration_v1(conn)?;
+        }
+        if current_version < 2 {
+            migration_v2(conn)?;
+        }
+        if current_version < 3 {
+            migration_v3(conn)?;
+        }
+        if current_version < 4 {
+            migration_v4(conn)?;
+        }
+        if current_version < 5 {
+            migration_v5(conn)?;
+        }
 
-    if current_version < 5 {
-        conn.pragma_update(None, "user_version", 5_i64)?;
-    }
+        if current_version < 5 {
+            conn.pragma_update(None, "user_version", 5_i64)?;
+        }
 
-    Ok(())
+        Ok::<(), StoreError>(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 fn migration_v1(conn: &Connection) -> Result<(), StoreError> {

@@ -71,7 +71,6 @@ html[data-theme="light"] {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  outline: none;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -344,6 +343,10 @@ body {
 }
 .row.selected:hover {
   border-color: transparent;
+}
+.keyboard-nav .row:hover:not(.selected)::before,
+.keyboard-nav .row:hover:not(.selected)::after {
+  opacity: 0;
 }
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
 .row .path-hint {
@@ -882,6 +885,9 @@ html[data-theme="light"] img.icon.glyph {
   gap: 6px;
   justify-items: center;
 }
+.power-row:has(.pcircle[data-power="back"]) {
+  grid-template-columns: 40px repeat(5, 1fr);
+}
 
 .power-confirm .power-row {
   display: flex;
@@ -905,10 +911,8 @@ html[data-theme="light"] img.icon.glyph {
   color: var(--c);
   cursor: pointer;
   opacity: 0;
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 9%, transparent),
-    0 2px 7px rgba(0, 0, 0, 0.14);
-  transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+  box-shadow: none;
+  transition: background 150ms ease, border-color 150ms ease;
   animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
@@ -930,7 +934,7 @@ html[data-theme="light"] img.icon.glyph {
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
+  transition: border-color 150ms ease, background 150ms ease;
 }
 .power-panel .pcircle span {
   margin-top: 1px;
@@ -949,35 +953,51 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 50%;
   background: var(--c);
   opacity: 0.85;
-  transition: opacity 150ms ease, transform 150ms ease;
+  transition: opacity 150ms ease;
 }
 .power-panel .pcircle:hover {
   background: color-mix(in srgb, white 7%, var(--bg-opaque));
   border-color: transparent;
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 12%, transparent),
-    0 5px 14px rgba(0, 0, 0, 0.18);
-  transform: translateY(-1px);
+  box-shadow: none;
 }
 .power-panel .pcircle:hover svg {
-  transform: scale(1.06);
   border-color: transparent;
   background: color-mix(in srgb, white 10%, var(--bg-opaque));
-  filter: brightness(1.16);
 }
 .power-panel .pcircle:hover span {
   color: var(--text);
 }
 .power-panel .pcircle:hover::after {
   opacity: 1;
-  transform: scale(1.15);
 }
 .power-panel .pcircle:active {
-  transform: scale(0.96);
+  background: color-mix(in srgb, white 12%, var(--bg-opaque));
 }
 .power-panel .pcircle[data-power="back"] {
   --c: var(--text-faint);
+  width: 34px;
+  max-width: 34px;
+  height: 34px;
+  padding: 0;
+  gap: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface-2);
   color: var(--text-faint);
+}
+.power-panel .pcircle[data-power="back"] svg {
+  width: 34px;
+  height: 34px;
+  padding: 7px;
+  background: transparent;
+}
+.power-panel .pcircle[data-power="back"] span,
+.power-panel .pcircle[data-power="back"]::after {
+  display: none;
+}
+.power-panel .pcircle[data-power="back"]:hover {
+  background: color-mix(in srgb, white 10%, var(--bg-opaque));
+  border-color: var(--border-strong);
 }
 
 @keyframes nexPowerRise {
@@ -1049,7 +1069,7 @@ html[data-theme="light"] img.icon.glyph {
 #list.bento-view {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  grid-auto-rows: 90px;
+  grid-auto-rows: minmax(40px, auto);
   gap: 8px;
   padding: 8px;
   scrollbar-gutter: stable;
@@ -1063,27 +1083,28 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 12px;
   overflow: hidden;
   background: var(--sel);
-  border: 1px solid var(--border);
-  transition: background 100ms ease, border-color 100ms ease;
+  transition: background 100ms ease;
 }
 
 #list.bento-view .row:hover {
   background: var(--hover);
-  border-color: var(--border-strong);
 }
 
 /* Bento tile sizes — asymmetric layout */
 #list.bento-view .row.tile-small {
   grid-column: span 1;
   grid-row: span 1;
+  min-height: 40px;
 }
 #list.bento-view .row.tile-medium {
   grid-column: span 2;
   grid-row: span 1;
+  min-height: 90px;
 }
 #list.bento-view .row.tile-large {
   grid-column: span 2;
   grid-row: span 2;
+  min-height: 180px;
 }
 
 /* Text tile content */

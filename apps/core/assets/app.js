@@ -240,6 +240,7 @@
     li.className = rowClassName(r, isGridView);
     if (animDelay) li.style.animationDelay = animDelay;
     li.setAttribute("role", "option");
+    li.id = `row-${i}`;
     li.dataset.key = key;
     li.dataset.index = String(i);
     if (i === selected) {
@@ -393,7 +394,8 @@
           // icon are identical by key — leave them untouched.
           li.className = rowClassName(r, isGridView);
           li.dataset.index = String(i);
-          li.classList.toggle("selected", i === selected);
+           li.classList.toggle("selected", i === selected);
+           li.setAttribute("aria-selected", i === selected ? "true" : "false");
           const trailing = li.querySelector(".pin-icon, .add-icon, .kind");
           if (trailing) trailing.remove();
           appendTrailing(li, r, i);
@@ -503,13 +505,10 @@
   }
 
   function setSelected(i, scroll) {
-    if (i === selected) return;
-    const prev = selected;
     selected = i;
-    const prevEl = rowMap.get(prev);
-    if (prevEl) {
-      prevEl.classList.remove("selected");
-      prevEl.setAttribute("aria-selected", "false");
+    for (const row of rowMap.values()) {
+      row.classList.remove("selected");
+      row.setAttribute("aria-selected", "false");
     }
     const nextEl = rowMap.get(selected);
     if (nextEl) {
@@ -807,6 +806,7 @@
 
       if (e.key === "ArrowDown" || (e.ctrlKey && (e.key === "j" || e.key === "J"))) {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(1);
         } else {
@@ -814,6 +814,7 @@
         }
       } else if (e.key === "ArrowUp" || (e.ctrlKey && (e.key === "k" || e.key === "K"))) {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGridDown(-1);
         } else {
@@ -821,6 +822,7 @@
         }
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
+        document.body.classList.add("keyboard-nav");
         if (list.classList.contains("grid-view") || list.classList.contains("bento-view")) {
           moveSelectionGrid(e.key === "ArrowLeft" ? -1 : 1, 0);
         }
@@ -1274,6 +1276,9 @@
     }, 1400);
   }
   list.addEventListener("scroll", armScrollFade, { passive: true });
-  list.addEventListener("mousemove", armScrollFade, { passive: true });
+  list.addEventListener("mousemove", () => {
+    document.body.classList.remove("keyboard-nav");
+    armScrollFade();
+  }, { passive: true });
   list.classList.add("scroll-idle");
 })();

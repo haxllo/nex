@@ -22,6 +22,9 @@ pub(crate) fn evaluate(input: &str) -> Result<f64, CalcError> {
     if input.is_empty() {
         return Err(CalcError::Empty);
     }
+    if input.chars().count() > 4096 {
+        return Err(CalcError::Syntax("expression is too long".into()));
+    }
     let chars: Vec<char> = input.chars().collect();
     let mut pos = 0;
     let result = parse_expr(&chars, &mut pos)?;
@@ -112,24 +115,22 @@ fn parse_unary(chars: &[char], pos: &mut usize) -> Result<f64, CalcError> {
         }
         '-' => {
             *pos += 1;
-            let val = parse_unary(chars, pos)?;
+            let val = parse_power(chars, pos)?;
             Ok(-val)
         }
-        _ => {
-            let mut left = parse_power(chars, pos)?;
-            skip_whitespace(chars, pos);
-            if *pos < chars.len() && chars[*pos] == '^' {
-                *pos += 1;
-                let right = parse_unary(chars, pos)?;
-                left = left.powf(right);
-            }
-            Ok(left)
-        }
+        _ => parse_power(chars, pos),
     }
 }
 
 fn parse_power(chars: &[char], pos: &mut usize) -> Result<f64, CalcError> {
-    parse_primary(chars, pos)
+    let mut left = parse_primary(chars, pos)?;
+    skip_whitespace(chars, pos);
+    if *pos < chars.len() && chars[*pos] == '^' {
+        *pos += 1;
+        let right = parse_unary(chars, pos)?;
+        left = left.powf(right);
+    }
+    Ok(left)
 }
 
 fn parse_primary(chars: &[char], pos: &mut usize) -> Result<f64, CalcError> {
@@ -285,6 +286,7 @@ mod tests {
     fn power() {
         assert_eq!(evaluate("2^3").unwrap(), 8.0);
         assert_eq!(evaluate("3^2^2").unwrap(), 81.0); // right-associative
+        assert_eq!(evaluate("-2^2").unwrap(), -4.0);
     }
 
     #[test]

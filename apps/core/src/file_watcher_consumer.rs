@@ -98,21 +98,9 @@ impl FileWatcherHandle {
 
 impl Drop for FileWatcherHandle {
     fn drop(&mut self) {
-        // Intentionally a no-op: do NOT drop the watcher or join the
-        // consumer during shutdown. DirectoryWatcher::drop joins its
-        // internal thread which may be blocked on ReadDirectoryChangesW,
-        // and the consumer may be blocked in a long index rebuild or
-        // service.write(). Either join would stall the process exit,
-        // preventing std::process::exit(0) in main() from being
-        // reached. The watcher holds Win32 handles and the consumer
-        // holds Arc<RwLock<CoreService>> — all cleaned up by
-        // ExitProcess when the process terminates.
-        //
-        // Leak the entries intentionally. Using ManuallyDrop to prevent
-        // WatcherEntry::drop from running, which would trigger
-        // DirectoryWatcher::drop and JoinHandle::join.
         for entry in self.entries.drain(..) {
-            std::mem::forget(entry);
+            drop(entry._watcher);
+            let _ = entry._consumer.join();
         }
     }
 }
@@ -270,11 +258,10 @@ fn apply_event_to_pending(
                 pending_removed.insert(event.path);
             }
         }
-        WatcherEventKind::Renamed => {
-            // The watcher currently emits the same path twice for a
-            // rename (once as Removed with the old name, once as Added
-            // with the new name). Treat as Added; the Removed side has
-            // already been queued by the prior notification.
+        WatcherEventKind::RenameOld => {
+            pending_removed.insert(event.path);
+        }
+        WatcherEventKind::RenameNew => {
             pending_added.insert(event.path, ());
         }
     }
@@ -331,7 +318,13 @@ fn flush_pending(
     let removed_ids: Vec<String> = removed
         .iter()
         .filter(|path| is_under_root(path, root))
-        .map(|path| id_for_path(path))
+        .flat_map(|path| {
+            let normalized = path.to_string_lossy().to_ascii_lowercase();
+            [
+                format!("file:{normalized}"),
+                format!("folder:{normalized}"),
+            ]
+        })
         .collect();
 
     // Apply the batch in a single critical section. This bounds the
@@ -368,20 +361,16 @@ fn flush_pending(
 }
 
 fn is_under_root(path: &Path, root: &Path) -> bool {
-    // Case-insensitive on Windows is handled by the OS; we just check
-    // that `path` is a descendant of `root` by prefix.
-    path.strip_prefix(root).is_ok() || path == root
-}
-
-fn id_for_path(path: &Path) -> String {
-    // The id scheme is `file:<path>` / `folder:<path>` and must match
-    // `discover_filesystem_walk` and the Everything backend exactly.
-    // Windows paths are case-insensitive, so we normalize to lowercase
-    // to ensure watcher events and discovery don't create duplicate IDs
-    // for the same file with different casing.
-    let lowercased = path.to_string_lossy().to_ascii_lowercase();
-    let kind = if path.is_dir() { "folder" } else { "file" };
-    format!("{kind}:{lowercased}")
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    let root = root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .trim_end_matches(['\\', '/'])
+        .to_string();
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with(['\\', '/']))
 }
 
 /// Convert a path into a [`SearchItem`], or `None` if the path should not
@@ -423,7 +412,7 @@ fn path_to_search_item(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
     let path_text = path.to_string_lossy();
-    let id = format!("{kind}:{path_text}");
+    let id = format!("{kind}:{}", path_text.to_ascii_lowercase());
 
     let last_accessed_epoch_secs = metadata
         .modified()
@@ -521,20 +510,11 @@ mod tests {
         let mut added = HashMap::new();
         let mut removed = HashSet::new();
         apply_event_to_pending(
-            evt(WatcherEventKind::Renamed, "/a/new"),
+            evt(WatcherEventKind::RenameNew, "/a/new"),
             &mut added,
             &mut removed,
         );
         assert!(added.contains_key(&PathBuf::from("/a/new")));
-    }
-
-    #[test]
-    fn id_for_path_uses_kind_prefix() {
-        // The id scheme must match discover_filesystem_walk exactly.
-        assert_eq!(
-            id_for_path(&PathBuf::from("/some/file.txt")),
-            "file:/some/file.txt"
-        );
     }
 
     #[test]

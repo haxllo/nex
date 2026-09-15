@@ -11,7 +11,7 @@ const MAX_CLIPBOARD_ENTRIES: usize = 500;
 /// distinguish them from plaintext JSON (legacy format) on read.
 const DPAPI_MAGIC: &[u8; 8] = b"NXCLPDPA";
 
-static CLIPBOARD_CACHE: Mutex<Option<Vec<ClipboardEntry>>> = Mutex::new(None);
+static CLIPBOARD_CACHE: Mutex<Option<(PathBuf, Vec<ClipboardEntry>)>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClipboardContentType {
@@ -200,6 +200,7 @@ pub fn clear_history(cfg: &Config) -> Result<(), String> {
     if cache_dir.exists() {
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     Ok(())
 }
 
@@ -250,14 +251,15 @@ pub fn copy_result_to_clipboard(cfg: &Config, result_id: &str) -> Result<(), Str
 }
 
 fn load_entries(cfg: &Config) -> Vec<ClipboardEntry> {
+    let path = history_path(cfg);
     {
         let guard = CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cached) = guard.as_ref() {
+        if let Some((_, cached)) = guard.as_ref().filter(|(cached_path, _)| *cached_path == path) {
             return cached.clone();
         }
     }
     let entries = load_entries_from_disk(cfg);
-    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries.clone());
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, entries.clone()));
     entries
 }
 
@@ -285,10 +287,39 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
     let encoded = serde_json::to_string(entries)
         .map_err(|e| format!("failed to encode clipboard history: {e}"))?;
     let blob = dpapi_encrypt(encoded.as_bytes());
-    std::fs::write(path, blob)
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, blob)
         .map_err(|e| format!("failed to write clipboard history: {e}"))?;
-    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries.to_vec());
+    replace_history_file(&temp, &path)?;
+    *CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((path, entries.to_vec()));
     Ok(())
+}
+
+fn replace_history_file(temp: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING};
+
+        let temp_wide: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+        let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe {
+            MoveFileExW(
+                temp_wide.as_ptr(),
+                path_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING,
+            )
+        } == 0
+        {
+            return Err(format!("failed to replace clipboard history: {}", std::io::Error::last_os_error()));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    std::fs::rename(temp, path)
+        .map_err(|e| format!("failed to replace clipboard history: {e}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -649,7 +680,7 @@ fn capture_clipboard_thumbnail_png(
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     };
-    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows_sys::Win32::System::Ole::CF_DIB;
 
     unsafe {
@@ -674,6 +705,12 @@ fn capture_clipboard_thumbnail_png(
         }
 
         // 2. Parse BITMAPINFOHEADER
+        let dib_size = GlobalSize(clip_handle);
+        if dib_size < 40 {
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Ok(None);
+        }
         let header_size = *(dib_ptr as *const u32);
         let width = (*(dib_ptr.add(4) as *const i32)).unsigned_abs();
         let height_raw = *(dib_ptr.add(8) as *const i32);
@@ -681,6 +718,7 @@ fn capture_clipboard_thumbnail_png(
         let bpp = *(dib_ptr.add(14) as *const u16);
 
         if header_size < 40
+            || header_size as usize > dib_size
             || width == 0
             || height == 0
             || (bpp != 24 && bpp != 32)
@@ -699,8 +737,32 @@ fn capture_clipboard_thumbnail_png(
 
         // 4. Compute xxh3 hash over raw pixel data (for dedup + file naming)
         let pixel_offset = header_size as usize;
-        let row_bytes = ((width as usize * bpp as usize + 31) / 32) * 4;
-        let total_pixel_bytes = row_bytes * height as usize;
+        let Some(row_bits) = (width as usize).checked_mul(bpp as usize) else {
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Ok(None);
+        };
+        let Some(row_bytes) = row_bits
+            .checked_add(31)
+            .and_then(|bits| bits.checked_div(32))
+            .and_then(|words| words.checked_mul(4)) else {
+                GlobalUnlock(clip_handle);
+                CloseClipboard();
+                return Ok(None);
+            };
+        let Some(total_pixel_bytes) = row_bytes.checked_mul(height as usize) else {
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Ok(None);
+        };
+        if pixel_offset
+            .checked_add(total_pixel_bytes)
+            .is_none_or(|end| end > dib_size)
+        {
+            GlobalUnlock(clip_handle);
+            CloseClipboard();
+            return Ok(None);
+        }
         let pixel_slice =
             std::slice::from_raw_parts(dib_ptr.add(pixel_offset), total_pixel_bytes);
         let hash = xxh3_64(pixel_slice);

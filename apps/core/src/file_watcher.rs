@@ -11,17 +11,18 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INSUFFICIENT_BUFFER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
     FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_CREATION,
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
-    FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, WaitForSingleObject, INFINITE,
+    CreateEventW, WaitForSingleObject,
 };
 
 const BUFFER_BYTES: usize = 16 * 1024;
@@ -33,7 +34,8 @@ pub enum WatcherEventKind {
     Added,
     Modified,
     Removed,
-    Renamed,
+    RenameOld,
+    RenameNew,
 }
 
 impl WatcherEventKind {
@@ -42,9 +44,8 @@ impl WatcherEventKind {
             x if x == FILE_ACTION_ADDED => Some(Self::Added),
             x if x == FILE_ACTION_MODIFIED => Some(Self::Modified),
             x if x == FILE_ACTION_REMOVED => Some(Self::Removed),
-            x if x == FILE_ACTION_RENAMED_OLD_NAME || x == FILE_ACTION_RENAMED_NEW_NAME => {
-                Some(Self::Renamed)
-            }
+            x if x == FILE_ACTION_RENAMED_OLD_NAME => Some(Self::RenameOld),
+            x if x == FILE_ACTION_RENAMED_NEW_NAME => Some(Self::RenameNew),
             _ => None,
         }
     }
@@ -273,7 +274,7 @@ fn run_watch_loop(
             let wait_ms = if batch.timer_start.is_some() {
                 DEBOUNCE_WINDOW_MS as u32
             } else {
-                INFINITE
+                100
             };
             let wait_result = unsafe { WaitForSingleObject(handles.event, wait_ms) };
 
@@ -297,6 +298,10 @@ fn run_watch_loop(
                 }
                 if bytes_returned == 0 {
                     continue;
+                }
+                if bytes_returned as usize > buffer_len {
+                    log_watcher_error("GetOverlappedResult", ERROR_INSUFFICIENT_BUFFER as i32);
+                    break 'outer;
                 }
                 let slice = unsafe {
                     std::slice::from_raw_parts(buffer_ptr as *const u8, bytes_returned as usize)
@@ -326,19 +331,33 @@ fn append_notifications(
     batch: &mut PendingBatch,
 ) {
     let mut offset: usize = 0;
-    while offset + std::mem::size_of::<FILE_NOTIFY_INFORMATION>() <= buffer.len() {
-        let info = unsafe { &*(buffer.as_ptr().add(offset) as *const FILE_NOTIFY_INFORMATION) };
-        let name_byte_len = info.FileNameLength as usize;
+    const HEADER_LEN: usize = 12;
+    let header_len = HEADER_LEN;
+    while offset.checked_add(header_len).is_some_and(|end| end <= buffer.len()) {
+        let info_ptr = unsafe { buffer.as_ptr().add(offset) };
+        let next_entry_offset = unsafe { std::ptr::read_unaligned(info_ptr as *const u32) };
+        let action = unsafe { std::ptr::read_unaligned(info_ptr.add(4) as *const u32) };
+        let name_byte_len =
+            unsafe { std::ptr::read_unaligned(info_ptr.add(8) as *const u32) } as usize;
+        let name_offset = offset + header_len;
+        if name_byte_len % std::mem::size_of::<u16>() != 0
+            || name_offset
+                .checked_add(name_byte_len)
+                .is_none_or(|end| end > buffer.len())
+        {
+            break;
+        }
         let name_u16_len = name_byte_len / 2;
         if name_u16_len == 0 {
             break;
         }
-        let name_slice =
-            unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_u16_len) };
+        let name_slice = unsafe {
+            std::slice::from_raw_parts(info_ptr.add(header_len) as *const u16, name_u16_len)
+        };
         let name = String::from_utf16_lossy(name_slice);
         let full_path = join_under_root(root_lower, &name);
 
-        if let Some(kind) = WatcherEventKind::from_action(info.Action) {
+        if let Some(kind) = WatcherEventKind::from_action(action) {
             if !is_under_excluded(&full_path, excluded) {
                 batch.events.push(WatcherEvent {
                     kind,
@@ -350,10 +369,17 @@ fn append_notifications(
             }
         }
 
-        if info.NextEntryOffset == 0 {
+        if next_entry_offset == 0 {
             break;
         }
-        offset += info.NextEntryOffset as usize;
+        let next = next_entry_offset as usize;
+        if next < header_len || next % std::mem::size_of::<u32>() != 0 {
+            break;
+        }
+        if offset.checked_add(next).is_none_or(|end| end > buffer.len()) {
+            break;
+        }
+        offset += next;
     }
 }
 
@@ -447,7 +473,7 @@ mod tests {
         );
         assert_eq!(
             WatcherEventKind::from_action(FILE_ACTION_RENAMED_OLD_NAME),
-            Some(WatcherEventKind::Renamed)
+            Some(WatcherEventKind::RenameOld)
         );
         assert_eq!(WatcherEventKind::from_action(99), None);
     }

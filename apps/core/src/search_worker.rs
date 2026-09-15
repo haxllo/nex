@@ -22,6 +22,7 @@ pub(crate) struct SearchRequest {
 
 pub(crate) struct SearchResult {
     pub(crate) generation: u64,
+    pub(crate) config_generation: u64,
     pub(crate) results: Vec<SearchItem>,
     pub(crate) error: Option<String>,
     pub(crate) command_mode: bool,
@@ -134,6 +135,7 @@ impl SearchWorker {
 
                             let _ = res_tx.send(SearchResult {
                                 generation: latest.generation,
+                                config_generation: latest.config_generation,
                                 results,
                                 error,
                                 command_mode: latest.parsed_query.command_mode,

@@ -98,8 +98,10 @@ use windows_sys::Win32::UI::Input::{
     RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, RegisterWindowMessageW, SetWindowPos,
-    WM_INPUT, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE,
+    FindWindowW, GetForegroundWindow, GetShellWindow, IsWindow, RegisterWindowMessageW,
+    SetForegroundWindow, SetWindowPos,
+    WM_INPUT, HWND_BOTTOM, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE,
 };
 
 use crate::overlay::icons::IconCache;
@@ -277,6 +279,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    let mut previous_foreground: Option<HWND> = None;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
     // threads from a previous cycle can detect they are outdated and
@@ -419,6 +422,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
+                    if previous_foreground.is_none() {
+                        previous_foreground = capture_previous_foreground(hwnd);
+                    }
                     if webview.is_none() {
                         ready = false;
                         // Mark the show as pending before building the
@@ -504,8 +510,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    window.set_visible(false);
+                    hide_overlay_window(hwnd, &window);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+                    restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     let is_visible = unsafe {
@@ -559,8 +566,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    window.set_visible(false);
+                    hide_overlay_window(hwnd, &window);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+                    restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
@@ -695,6 +703,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.
                         focus_input(&webview);
+                        // SetWindowPos(SWP_NOACTIVATE) is used on hide to keep
+                        // Explorer from exposing the taskbar. Depending on
+                        // WebView2/tao focus notifications, the next show can
+                        // otherwise remain marked unfocused even though the
+                        // overlay has been foregrounded and its input focused.
+                        crate::overlay::hotkey::set_overlay_focus(true);
+                        if let Ok(mut s) = state.lock() {
+                            s.has_focus = true;
+                        }
                         // Signal the elevated helper to call SetForegroundWindow
                         // from High IL (bypasses UIPI for Task Manager scenario).
                         crate::overlay::hotkey::signal_overlay_ready();
@@ -1720,13 +1737,12 @@ fn position_window_centered(window: &Window) {
     let Some((left, top, right, bottom)) = cursor_monitor_work_area() else {
         return;
     };
-    let scale = window.scale_factor();
-    let size = window.inner_size().to_logical::<f64>(scale);
-    let x = left as f64 + ((right - left) as f64 - size.width) / 2.0;
-    let y = top as f64 + ((bottom - top) as f64 - size.height) / 2.0;
+    let size = window.inner_size();
+    let x = left + (right - left - size.width as i32) / 2;
+    let y = top + (bottom - top - size.height as i32) / 2;
     window.set_outer_position(PhysicalPosition::new(
-        x.max(left as f64) as i32,
-        y.max(top as f64) as i32,
+        x.max(left),
+        y.max(top),
     ));
 }
 
@@ -1766,6 +1782,58 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
     }
     let r: RECT = info.rcWork;
     Some((r.left, r.top, r.right, r.bottom))
+}
+
+fn capture_previous_foreground(overlay_hwnd: HWND) -> Option<HWND> {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() || foreground == overlay_hwnd {
+        return None;
+    }
+    if unsafe { IsWindow(foreground) } == 0 {
+        return None;
+    }
+    if shell_window().is_some_and(|shell| shell == foreground) {
+        return None;
+    }
+    Some(foreground)
+}
+
+fn shell_window() -> Option<HWND> {
+    let shell = unsafe { GetShellWindow() };
+    if !shell.is_null() && unsafe { IsWindow(shell) } != 0 {
+        return Some(shell);
+    }
+    let class = [b'P' as u16, b'r' as u16, b'o' as u16, b'g' as u16, b'm' as u16, b'a' as u16, b'n' as u16, 0];
+    let progman = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+    if !progman.is_null() && unsafe { IsWindow(progman) } != 0 {
+        Some(progman)
+    } else {
+        None
+    }
+}
+
+fn restore_previous_foreground(previous: &mut Option<HWND>) {
+    let Some(target) = previous.take().filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0) else {
+        return;
+    };
+    unsafe {
+        SetForegroundWindow(target);
+    }
+}
+
+fn hide_overlay_window(hwnd: HWND, window: &Window) {
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+    let _ = window.set_visible(false);
 }
 
 /// Steal foreground focus reliably. winit/tao cannot do this on its own

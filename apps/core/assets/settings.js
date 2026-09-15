@@ -156,6 +156,19 @@ document.addEventListener("mousedown", (e) => {
   if (!e.target.closest(".dropdown")) closeAllDropdowns(null);
 });
 document.addEventListener("keydown", (e) => {
+  const dialog = document.getElementById("unsaved-dialog");
+  if (dialog && !dialog.classList.contains("hidden") && e.key === "Tab") {
+    const focusable = [...dialog.querySelectorAll("button")];
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
   if (e.key === "Escape") closeAllDropdowns(null);
 });
 // ───────────────────────────────────────────────────────────────────
@@ -208,7 +221,9 @@ function refreshDirty() {
 window.requestCloseSettings = function () {
   refreshDirty();
   if (window.settingsDirty) {
+    window.settingsDialogReturnFocus = document.activeElement;
     document.getElementById("unsaved-dialog")?.classList.remove("hidden");
+    document.querySelector("#unsaved-dialog button")?.focus();
     return;
   }
   window.chrome.webview.postMessage(JSON.stringify({ t: "close" }));
@@ -217,6 +232,8 @@ window.requestCloseSettings = function () {
 function discardSettings() {
   window.closeAfterSave = false;
   document.getElementById("unsaved-dialog")?.classList.add("hidden");
+  window.settingsDialogReturnFocus?.focus();
+  window.settingsDialogReturnFocus = null;
   window.chrome.webview.postMessage(JSON.stringify({ t: "close" }));
 }
 

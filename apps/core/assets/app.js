@@ -320,7 +320,7 @@
     title.className = "title";
     title.textContent = r.title;
     text.appendChild(title);
-    if (r.subtitle) {
+    if (r.subtitle && !r.url) {
       const sub = document.createElement("div");
       sub.className = "subtitle";
       sub.textContent = r.subtitle;
@@ -1017,7 +1017,7 @@
     if (row.role === "show_all_apps") return;
     ctxRow = row;
     // Determine which actions are relevant
-    const isWebAction = row.kind === "action" && /^https?:\/\//i.test(row.url || row.subtitle || "");
+    const isWebAction = row.kind === "action" && (Boolean(row.url) || /^Open /i.test(row.title));
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !isWebAction && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
@@ -1091,9 +1091,9 @@
     } else if (action === "pin") {
       hideContextMenu();
       if (pinned) {
-        post("unpin", title);
+        post("unpin", ctxRow.url || path || title);
       } else {
-        post("pin", title);
+        post("pin", ctxRow.url || path || title);
       }
     } else {
       // All other actions sent to Rust

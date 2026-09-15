@@ -553,10 +553,10 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     }
     // Always hide shell: URIs — they're internal implementation paths.
     let path = item.path.trim();
-    if item.kind.eq_ignore_ascii_case("action") && path.starts_with("http") {
+    let is_shell = path.starts_with("shell:");
+    if path.starts_with("http://") || path.starts_with("https://") {
         return String::new();
     }
-    let is_shell = path.starts_with("shell:");
     if item.kind.eq_ignore_ascii_case("app") {
         let s = item.subtitle.trim();
         if s.is_empty() || s.contains('\\') || s.contains('/') || s.contains(':') {

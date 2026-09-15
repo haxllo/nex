@@ -968,7 +968,27 @@ html[data-theme="light"] img.icon.glyph {
 }
 .power-panel .pcircle[data-power="back"] {
   --c: var(--text-faint);
+  width: 50px;
+  max-width: 50px;
+  padding: 0;
+  gap: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
   color: var(--text-faint);
+}
+.power-panel .pcircle[data-power="back"] svg {
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  background: transparent;
+}
+.power-panel .pcircle[data-power="back"] span,
+.power-panel .pcircle[data-power="back"]::after {
+  display: none;
+}
+.power-panel .pcircle[data-power="back"]:hover {
+  background: var(--surface-hover);
 }
 
 @keyframes nexPowerRise {

@@ -744,7 +744,7 @@ impl RuntimeWorker {
                                 let title = self.runtime_config.web_bookmarks.iter()
                                     .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))
                                     .map(|bookmark| bookmark.title.clone())
-                                    .unwrap_or(title);
+                                    .unwrap_or_else(|| crate::bookmarks::display_title(&path));
                                 let icon_path = crate::bookmarks::favicon_cache_path(&path)
                                     .to_string_lossy().to_string();
                                 (title, icon_path)
@@ -802,7 +802,7 @@ impl RuntimeWorker {
                                 let title = self.runtime_config.web_bookmarks.iter()
                                     .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))
                                     .map(|bookmark| bookmark.title.clone())
-                                    .unwrap_or(title);
+                                    .unwrap_or_else(|| crate::bookmarks::display_title(&path));
                                 let icon_path = crate::bookmarks::favicon_cache_path(&path)
                                     .to_string_lossy().to_string();
                                 (title, icon_path)
@@ -852,6 +852,9 @@ impl RuntimeWorker {
     fn pin_app_to_quick_launch(&mut self, title: &str) {
         let raw_title = title.trim();
         let title = raw_title.strip_prefix("Open ").unwrap_or(raw_title).trim();
+        let url_pin = self.runtime_config.quick_launch.pinned.iter()
+            .find(|path| path.eq_ignore_ascii_case(title) || path.eq_ignore_ascii_case(raw_title))
+            .cloned();
         // Find the app path from search results or Quick Launch items
         let app_path = self.current_results.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.kind.eq_ignore_ascii_case("app"))
@@ -868,7 +871,7 @@ impl RuntimeWorker {
                     || item.title.eq_ignore_ascii_case(&format!("Open {title}"))))
             .map(|item| item.path.clone())
             .filter(|path| path.starts_with("http://") || path.starts_with("https://"));
-        let Some(path) = app_path.or(url) else {
+        let Some(path) = app_path.or(url).or(url_pin) else {
             log_warn(&format!("[nex] quick_launch pin failed: app '{}' not found", title));
             return;
         };
@@ -918,6 +921,22 @@ impl RuntimeWorker {
     fn unpin_app_from_quick_launch(&mut self, title: &str) {
         let title = title.trim();
         if title.is_empty() {
+            return;
+        }
+
+        if let Ok(url) = crate::config::normalize_bookmark_url(title) {
+            let before = self.runtime_config.quick_launch.pinned.len();
+            self.runtime_config.quick_launch.pinned.retain(|p| {
+                !crate::config::normalize_bookmark_url(p)
+                    .map(|candidate| candidate.eq_ignore_ascii_case(&url))
+                    .unwrap_or(false)
+            });
+            self.runtime_config.web_bookmarks.retain(|bookmark| !bookmark.url.eq_ignore_ascii_case(&url));
+            if self.runtime_config.quick_launch.pinned.len() != before {
+                let _ = self.save_config_and_prevent_reload();
+                self.load_quick_launch_items_from_config();
+                self.show_idle_or_quick_launch();
+            }
             return;
         }
 

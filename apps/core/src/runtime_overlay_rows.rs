@@ -230,13 +230,27 @@ pub(crate) fn result_row(
     role: OverlayRowRole,
     command_mode: bool,
 ) -> OverlayRow {
+    let title = if item.kind.eq_ignore_ascii_case("action")
+        && item.path.starts_with("http")
+    {
+        crate::bookmarks::display_title(&item.path)
+    } else {
+        item.title.clone()
+    };
+    let icon_path = if item.path.starts_with("http") {
+        crate::bookmarks::favicon_cache_path(&item.path)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        item.path.clone()
+    };
     OverlayRow {
         role,
         result_index: Some(result_index),
         kind: item.kind.clone(),
-        title: item.title.clone(),
+        title,
         path: overlay_subtitle(item, command_mode),
-        icon_path: item.path.clone(),
+        icon_path,
         clipboard_thumbnail: None,
         clipboard_full_image: None,
         tile_size: None,
@@ -539,6 +553,9 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     }
     // Always hide shell: URIs — they're internal implementation paths.
     let path = item.path.trim();
+    if item.kind.eq_ignore_ascii_case("action") && path.starts_with("http") {
+        return String::new();
+    }
     let is_shell = path.starts_with("shell:");
     if item.kind.eq_ignore_ascii_case("app") {
         let s = item.subtitle.trim();

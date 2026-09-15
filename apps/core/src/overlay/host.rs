@@ -100,7 +100,8 @@ use windows_sys::Win32::UI::Input::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetForegroundWindow, GetShellWindow, IsWindow, RegisterWindowMessageW,
     SetForegroundWindow, SetWindowPos,
-    WM_INPUT, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE,
+    WM_INPUT, HWND_BOTTOM, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE,
 };
 
 use crate::overlay::icons::IconCache;
@@ -509,7 +510,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    window.set_visible(false);
+                    hide_overlay_window(hwnd, &window);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -565,7 +566,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    window.set_visible(false);
+                    hide_overlay_window(hwnd, &window);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -1777,10 +1778,13 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
 fn capture_previous_foreground(overlay_hwnd: HWND) -> Option<HWND> {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() || foreground == overlay_hwnd {
-        return shell_window();
+        return None;
     }
     if unsafe { IsWindow(foreground) } == 0 {
-        return shell_window();
+        return None;
+    }
+    if shell_window().is_some_and(|shell| shell == foreground) {
+        return None;
     }
     Some(foreground)
 }
@@ -1800,13 +1804,27 @@ fn shell_window() -> Option<HWND> {
 }
 
 fn restore_previous_foreground(previous: &mut Option<HWND>) {
-    let target = previous.take().filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0);
-    let Some(target) = target.or_else(shell_window) else {
+    let Some(target) = previous.take().filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0) else {
         return;
     };
     unsafe {
         SetForegroundWindow(target);
     }
+}
+
+fn hide_overlay_window(hwnd: HWND, window: &Window) {
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+    let _ = window.set_visible(false);
 }
 
 /// Steal foreground focus reliably. winit/tao cannot do this on its own

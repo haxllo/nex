@@ -547,6 +547,9 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
         }
         return s.to_string();
     }
+    if item.kind.eq_ignore_ascii_case(crate::bookmarks::BOOKMARK_KIND) {
+        return String::new();
+    }
     if item.kind.eq_ignore_ascii_case("action") {
         if path.is_empty() {
             return "Nex action".to_string();

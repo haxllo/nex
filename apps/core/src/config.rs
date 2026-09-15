@@ -251,6 +251,43 @@ pub struct QuickLaunchConfig {
     pub auto_fill: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebBookmark {
+    pub title: String,
+    pub url: String,
+    #[serde(default)]
+    pub icon_path: String,
+}
+
+impl WebBookmark {
+    pub fn new(title: impl Into<String>, url: impl Into<String>) -> Result<Self, String> {
+        let title = title.into().trim().to_string();
+        if title.is_empty() {
+            return Err("bookmark title is required".into());
+        }
+        let url = normalize_bookmark_url(&url.into())?;
+        Ok(Self {
+            title,
+            url,
+            icon_path: String::new(),
+        })
+    }
+}
+
+pub fn normalize_bookmark_url(input: &str) -> Result<String, String> {
+    let value = input.trim();
+    let with_scheme = if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("https://{value}")
+    };
+    let parsed = url::Url::parse(&with_scheme).map_err(|_| "invalid bookmark URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("bookmark URL must use http or https".into());
+    }
+    Ok(parsed.to_string())
+}
+
 impl Default for QuickLaunchConfig {
     fn default() -> Self {
         Self {
@@ -306,6 +343,7 @@ pub struct Config {
     pub index_max_items_per_query_seed: u32,
     /// Quick Launch settings for idle-state app launcher.
     pub quick_launch: QuickLaunchConfig,
+    pub web_bookmarks: Vec<WebBookmark>,
 }
 
 impl Default for Config {
@@ -384,6 +422,7 @@ impl Default for Config {
             index_max_items_per_root: 40_000,
             index_max_items_per_query_seed: 5_000,
             quick_launch: QuickLaunchConfig::default(),
+            web_bookmarks: Vec::new(),
         }
     }
 }
@@ -829,6 +868,17 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("auto_fill = ");
     text.push_str(if cfg.quick_launch.auto_fill { "true" } else { "false" });
     text.push_str("\n\n");
+    text.push_str("# Web bookmarks\nweb_bookmarks = [\n");
+    for bookmark in &cfg.web_bookmarks {
+        text.push_str("  { title = ");
+        text.push_str(&json_string(&bookmark.title));
+        text.push_str(", url = ");
+        text.push_str(&json_string(&bookmark.url));
+        text.push_str(", icon_path = ");
+        text.push_str(&json_string(&bookmark.icon_path));
+        text.push_str(" },\n");
+    }
+    text.push_str("]\n\n");
 
     text.push_str("# Runtime performance targets\n");
     text.push_str("# cache trim after hide in milliseconds (valid range: 100..10000)\n");
@@ -1013,6 +1063,13 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
 
     if cfg.quick_launch.pinned.iter().any(|p| p.trim().is_empty()) {
         return Err("quick_launch_pinned contains an empty entry".into());
+    }
+
+    for bookmark in &cfg.web_bookmarks {
+        if bookmark.title.trim().is_empty() {
+            return Err("web bookmark title is required".into());
+        }
+        normalize_bookmark_url(&bookmark.url)?;
     }
 
     crate::settings::validate_hotkey(&cfg.hotkey)

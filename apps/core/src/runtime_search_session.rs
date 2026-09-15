@@ -173,6 +173,14 @@ pub(crate) fn search_overlay_results_with_session(
         merged.extend(provider_results);
     }
 
+    if !parsed_query.command_mode {
+        merged.extend(crate::bookmarks::search_bookmarks(
+            &cfg.web_bookmarks,
+            text_query,
+            candidate_limit,
+        ));
+    }
+
     let actions_started = Instant::now();
     let mut action_items =
         search_actions_with_mode(text_query, candidate_limit, parsed_query.command_mode, cfg);

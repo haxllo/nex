@@ -152,6 +152,7 @@ pub(crate) fn overlay_rows_ext(
             kind: "action".to_string(),
             title: "Show all apps".to_string(),
             path: String::new(),
+            url: None,
             icon_path: String::new(),
             clipboard_thumbnail: None,
             clipboard_full_image: None,
@@ -250,6 +251,7 @@ pub(crate) fn result_row(
         kind: item.kind.clone(),
         title,
         path: overlay_subtitle(item, command_mode),
+        url: item.path.starts_with("http").then(|| item.path.clone()),
         icon_path,
         clipboard_thumbnail: None,
         clipboard_full_image: None,
@@ -268,6 +270,7 @@ pub(crate) fn header_row(label: &str) -> OverlayRow {
         kind: String::new(),
         title: label.to_string(),
         path: String::new(),
+        url: None,
         icon_path: String::new(),
         clipboard_thumbnail: None,
         clipboard_full_image: None,
@@ -658,6 +661,10 @@ pub(crate) fn build_quick_launch_rows(
             } else {
                 quick_launch_subtitle(&item.subtitle)
             },
+            url: item
+                .kind
+                .eq_ignore_ascii_case("bookmark")
+                .then(|| item.path.clone()),
             icon_path: item.icon_path.clone(),
             clipboard_thumbnail: None,
             clipboard_full_image: None,
@@ -724,6 +731,7 @@ pub(crate) fn build_clipboard_bento_rows(entries: &[ClipboardEntry]) -> Vec<Over
                 kind: "clipboard_history".to_string(),
                 title,
                 path: entry.id.clone(),
+                url: None,
                 icon_path: String::new(),
                 clipboard_thumbnail: thumbnail,
                 clipboard_full_image: full_image,
@@ -767,6 +775,7 @@ pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message
         kind: "status".to_string(),
         title: message.to_string(),
         path: String::new(),
+        url: None,
         icon_path: String::new(),
         clipboard_thumbnail: None,
         clipboard_full_image: None,

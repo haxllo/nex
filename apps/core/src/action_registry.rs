@@ -396,7 +396,8 @@ fn url_encode_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        search_actions, search_actions_with_mode, ACTION_CHECK_UPDATES_ID, ACTION_WEB_SEARCH_PREFIX,
+        dynamic_provider_open_url_action, search_actions, search_actions_with_mode,
+        ACTION_CHECK_UPDATES_ID, ACTION_WEB_SEARCH_PREFIX,
     };
     use crate::config::{Config, WebSearchProvider};
 

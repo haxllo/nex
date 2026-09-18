@@ -397,16 +397,16 @@ fn url_encode_component(input: &str) -> String {
 mod tests {
     use super::{
         dynamic_provider_open_url_action, search_actions, search_actions_with_mode,
-        ACTION_CHECK_UPDATES_ID, ACTION_WEB_SEARCH_PREFIX,
+        ACTION_CHECK_UPDATES_ID, ACTION_OPEN_LOGS_ID, ACTION_WEB_SEARCH_PREFIX,
     };
     use crate::config::{Config, WebSearchProvider};
 
     #[test]
     fn filters_actions_by_query() {
-        let actions = search_actions("diag", 10);
+        let actions = search_actions("debug", 10);
         assert!(actions
             .iter()
-            .any(|action| action.id == "__nex_action_diagnostics_bundle__"));
+            .any(|action| action.id == ACTION_OPEN_LOGS_ID));
     }
 
     #[test]

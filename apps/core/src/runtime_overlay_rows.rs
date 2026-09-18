@@ -851,10 +851,11 @@ mod tests {
         let results = vec![folder("f2", "fuzzy folder", 3), file("f1", "exact file", 0)];
         let rows = overlay_rows(&results, false);
 
-        // TopHit (exact file) + Folders header + folder = 3 rows.
-        assert_eq!(rows.len(), 3);
+        // TopHit (exact file) + section header and item for each kind.
+        assert_eq!(rows.len(), 4);
         assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
         assert_eq!(rows[0].title, "exact file");
+        assert_eq!(rows[3].title, "Files");
     }
 
     /// "Show all apps" entry: appended after the last app row, before the

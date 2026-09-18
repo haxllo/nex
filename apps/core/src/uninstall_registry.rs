@@ -274,7 +274,8 @@ fn extract_uninstall_search_term(query: &str) -> Option<String> {
         return None;
     }
 
-    // Accept both command-mode prefixes and direct app names (context menu)
+    // Uninstall results only belong to explicit uninstall commands. Treating
+    // every query as an app name hides regular command-mode web searches.
     let mut parts = trimmed.split_whitespace();
     let first = parts.next()?.to_ascii_lowercase();
     if matches!(
@@ -283,8 +284,7 @@ fn extract_uninstall_search_term(query: &str) -> Option<String> {
     ) {
         Some(parts.collect::<Vec<_>>().join(" ").trim().to_string())
     } else {
-        // Direct app name — context menu or non-command usage
-        Some(trimmed.to_string())
+        None
     }
 }
 

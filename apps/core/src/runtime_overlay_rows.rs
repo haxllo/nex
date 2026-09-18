@@ -843,19 +843,20 @@ mod tests {
         assert_eq!(*role_of(&rows[2]), OverlayRowRole::Item);
     }
 
-    /// (b) No apps → top hit is best file/folder (A3).
-    ///     Folder (tier=3) at index 0 must NOT become TopHit — the exact
-    ///     file (tier=0) at index 1 must be selected instead.
+    /// (b) Without apps, files and folders remain in their sections.
     #[test]
-    fn no_apps_top_hit_is_file_or_folder() {
+    fn no_apps_render_under_kind_headers() {
         let results = vec![folder("f2", "fuzzy folder", 3), file("f1", "exact file", 0)];
         let rows = overlay_rows(&results, false);
 
-        // TopHit (exact file) + section header and item for each kind.
+        // Folders header + folder + Files header + file.
         assert_eq!(rows.len(), 4);
-        assert_eq!(*role_of(&rows[0]), OverlayRowRole::TopHit);
-        assert_eq!(rows[0].title, "exact file");
-        assert_eq!(rows[3].title, "Files");
+        assert_eq!(*role_of(&rows[0]), OverlayRowRole::Header);
+        assert_eq!(rows[0].title, "Folders");
+        assert_eq!(rows[1].title, "fuzzy folder");
+        assert_eq!(*role_of(&rows[2]), OverlayRowRole::Header);
+        assert_eq!(rows[2].title, "Files");
+        assert_eq!(rows[3].title, "exact file");
     }
 
     /// "Show all apps" entry: appended after the last app row, before the

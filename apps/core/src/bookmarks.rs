@@ -51,7 +51,9 @@ pub(crate) fn search_bookmarks(bookmarks: &[WebBookmark], query: &str, limit: us
 
 #[cfg(target_os = "windows")]
 pub(crate) fn favicon_cache_path(url: &str) -> PathBuf {
-    let hash = xxhash_rust::xxh3::xxh3_64(url.as_bytes());
+    let cache_key = crate::config::normalize_bookmark_url(url)
+        .unwrap_or_else(|_| url.trim().to_string());
+    let hash = xxhash_rust::xxh3::xxh3_64(cache_key.as_bytes());
     crate::config::stable_app_data_dir().join("bookmark-icons").join(format!("{hash:016x}.png"))
 }
 
@@ -126,5 +128,14 @@ mod tests {
     fn bookmarks_reject_urls_with_embedded_credentials() {
         assert!(WebBookmark::new("Example", "https://user:password@example.com").is_err());
         assert!(favicon_url("https://user:password@example.com").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn favicon_cache_path_uses_the_normalized_url() {
+        assert_eq!(
+            favicon_cache_path("https://example.com"),
+            favicon_cache_path("https://example.com/")
+        );
     }
 }

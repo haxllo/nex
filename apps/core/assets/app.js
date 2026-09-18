@@ -290,7 +290,7 @@
       } else if (isWebResult(r)) {
         const img = document.createElement("img");
         img.className = "icon";
-        if (r.kind === "bookmark" && r.icon) {
+        if (r.icon) {
           img.dataset.iconPath = r.icon;
           img.src = iconCache.get(r.icon) || webIcon();
         } else {

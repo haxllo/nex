@@ -285,6 +285,9 @@ pub fn normalize_bookmark_url(input: &str) -> Result<String, String> {
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("bookmark URL must use http or https".into());
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("bookmark URL must not include credentials".into());
+    }
     Ok(parsed.to_string())
 }
 

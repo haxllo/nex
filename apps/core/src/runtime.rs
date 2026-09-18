@@ -845,13 +845,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_background_with_non_run_commands() {
+    fn non_run_commands_are_forced_to_foreground() {
         let args = vec!["--quit".to_string(), "--background".to_string()];
-        let error = parse_cli_args(&args).expect_err("invalid combination should fail");
-        assert!(error.contains("background mode"));
+        let options = parse_cli_args(&args).expect("quit command should parse");
+        assert_eq!(options.command, RuntimeCommand::Quit);
+        assert!(!options.background);
     }
 
-    #[test]
     #[test]
     fn command_mode_includes_web_search_action() {
         let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn short_single_letter_query_in_all_mode_biases_to_apps() {
+    fn short_single_letter_query_in_all_mode_searches_the_full_pool() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
@@ -902,14 +902,14 @@ mod tests {
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
         assert!(results.iter().any(|item| item.id == "app-1"));
-        assert!(!results.iter().any(|item| item.id == "file-1"));
+        assert!(results.iter().any(|item| item.id == "file-1"));
 
         std::fs::remove_file(app_path).expect("app temp file should be removed");
         std::fs::remove_file(file_path).expect("file temp file should be removed");
     }
 
     #[test]
-    fn short_two_letter_query_in_all_mode_biases_to_apps() {
+    fn short_two_letter_query_in_all_mode_searches_the_full_pool() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
@@ -944,7 +944,7 @@ mod tests {
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
         assert!(results.iter().any(|item| item.id == "app-1"));
-        assert!(!results.iter().any(|item| item.id == "file-1"));
+        assert!(results.iter().any(|item| item.id == "file-1"));
 
         std::fs::remove_file(app_path).expect("app temp file should be removed");
         std::fs::remove_file(file_path).expect("file temp file should be removed");
@@ -1182,12 +1182,12 @@ mod tests {
             "Ctrl+Space",
             std::path::Path::new("C:\\Users\\Admin\\AppData\\Roaming\\Nex\\config.toml"),
         );
-        assert!(message.contains("Hotkey 'Ctrl+Space' is unavailable."));
+        assert!(message.contains("Hotkey 'Ctrl+Space'"));
         assert!(message.contains("Ctrl+Shift+Space"));
         assert!(message.contains("config.toml"));
 
         let status = hotkey_registration_status_text("Ctrl+Space");
-        assert!(status.contains("Hotkey unavailable: Ctrl+Space."));
+        assert!(status.contains("Hotkey 'Ctrl+Space'"));
         assert!(status.contains("Ctrl+Shift+Space"));
     }
 

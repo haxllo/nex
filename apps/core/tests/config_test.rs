@@ -247,18 +247,19 @@ fn migrates_legacy_config_and_preserves_user_values() {
     );
 
     let updated_raw = std::fs::read_to_string(&config_path).unwrap();
-    assert!(updated_raw.contains("\"hotkey\": \"Ctrl+Alt+P\""));
-    assert!(updated_raw.contains("\"max_results\": 33"));
-    assert!(updated_raw.contains("\"idle_cache_trim_ms\": 900"));
-    assert!(updated_raw.contains("\"active_memory_target_mb\": 72"));
-    assert!(updated_raw.contains("\"show_files\": true"));
-    assert!(updated_raw.contains("\"show_folders\": true"));
-    assert!(updated_raw.contains("\"uninstall_actions_enabled\": true"));
-    assert!(updated_raw.contains("\"index_max_items_total\": 120000"));
-    assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));
-    assert!(updated_raw.contains("\"index_max_items_per_query_seed\": 5000"));
-    assert!(updated_raw.contains("\"game_mode_enabled\": false"));
-    assert!(!updated_raw.contains("\"search_backend\""));
+    assert!(updated_raw.contains("# Nex config (TOML format)."));
+    assert!(updated_raw.contains("hotkey = \"Ctrl+Alt+P\""));
+    assert!(updated_raw.contains("max_results = 33"));
+    assert!(updated_raw.contains("idle_cache_trim_ms = 900"));
+    assert!(updated_raw.contains("active_memory_target_mb = 72"));
+    assert!(updated_raw.contains("show_files = true"));
+    assert!(updated_raw.contains("show_folders = true"));
+    assert!(updated_raw.contains("uninstall_actions_enabled = true"));
+    assert!(updated_raw.contains("index_max_items_total = 120000"));
+    assert!(updated_raw.contains("index_max_items_per_root = 40000"));
+    assert!(updated_raw.contains("index_max_items_per_query_seed = 5000"));
+    assert!(updated_raw.contains("game_mode_enabled = false"));
+    assert!(!updated_raw.contains("search_backend ="));
 
     let backups: Vec<_> = std::fs::read_dir(&config_dir)
         .unwrap()

@@ -589,6 +589,11 @@ impl CoreService {
             .drain(..)
             .map(|item| (item.id.clone(), item))
             .collect();
+        let cached_by_id: HashMap<String, SearchItem> = self
+            .cached_items_snapshot()
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect();
 
         let mut discovered_total = 0_usize;
         let mut upserted_total = 0_usize;
@@ -685,7 +690,9 @@ impl CoreService {
             let mut discovered_ids = HashSet::with_capacity(discovered_count);
 
             for (item_idx, mut item) in discovered.into_iter().enumerate() {
-                if let Some(previous) = existing_by_id.get(&item.id) {
+                let cached = cached_by_id.get(&item.id);
+                let previous = cached.or_else(|| existing_by_id.get(&item.id));
+                if let Some(previous) = previous {
                     if item.use_count == 0 {
                         item.use_count = previous.use_count;
                     }

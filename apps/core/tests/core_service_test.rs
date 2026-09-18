@@ -200,8 +200,14 @@ fn service_search_prunes_stale_items() {
     let _ = service.search("present", 10).unwrap();
     let stale_launch = service.launch(LaunchTarget::Id("stale"));
     match stale_launch {
-        Err(ServiceError::ItemNotFound(id)) => assert_eq!(id, "stale"),
+        Err(ServiceError::Launch(nex_core::action_executor::LaunchError::MissingPath(_))) => {}
         other => panic!("unexpected result: {other:?}"),
+    }
+
+    let pruned_launch = service.launch(LaunchTarget::Id("stale"));
+    match pruned_launch {
+        Err(ServiceError::ItemNotFound(id)) => assert_eq!(id, "stale"),
+        other => panic!("expected pruned item to be removed, got: {other:?}"),
     }
 
     std::fs::remove_file(present_path).unwrap();

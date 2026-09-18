@@ -15,8 +15,8 @@ fn accepts_default_config() {
     let cfg = nex_core::config::Config::default();
     assert_eq!(cfg.max_results, 20);
     assert_eq!(cfg.version, nex_core::config::CURRENT_CONFIG_VERSION);
-    assert_eq!(cfg.hotkey, "Ctrl+Space");
-    assert!(!cfg.launch_at_startup);
+    assert_eq!(cfg.hotkey, "Win");
+    assert!(cfg.launch_at_startup);
     assert!(!cfg.hotkey_help.trim().is_empty());
     assert!(!cfg.hotkey_recommended.is_empty());
     assert_eq!(
@@ -31,8 +31,8 @@ fn accepts_default_config() {
         cfg.index_db_path.to_string_lossy().contains("nex")
             || cfg.index_db_path.to_string_lossy().contains("Nex")
     );
-    assert!(!cfg.show_files);
-    assert!(!cfg.show_folders);
+    assert!(cfg.show_files);
+    assert!(cfg.show_folders);
     assert!(cfg.uninstall_actions_enabled);
     assert!(
         cfg.config_path.to_string_lossy().contains("nex")
@@ -131,8 +131,8 @@ fn loads_partial_config_with_migration_safe_defaults() {
 
     assert_eq!(loaded.max_results, 25);
     assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
-    assert_eq!(loaded.hotkey, "Ctrl+Space");
-    assert!(!loaded.launch_at_startup);
+    assert_eq!(loaded.hotkey, "Win");
+    assert!(loaded.launch_at_startup);
     assert_eq!(loaded.config_path, config_path);
     assert!(!loaded.index_db_path.as_os_str().is_empty());
     assert!(!loaded.hotkey_help.trim().is_empty());
@@ -151,28 +151,28 @@ fn writes_user_template_with_comments_and_loads_it() {
         .as_nanos();
     let config_path = std::env::temp_dir()
         .join("swiftfind")
-        .join(format!("template-{unique}.json"));
+        .join(format!("template-{unique}.toml"));
 
     let mut cfg = nex_core::config::Config::default();
     cfg.config_path = config_path.clone();
 
     nex_core::config::write_user_template(&cfg, &config_path).unwrap();
     let raw = std::fs::read_to_string(&config_path).unwrap();
-    assert!(raw.contains("// Nex config (comments are allowed)."));
-    assert!(raw.contains("\"hotkey\": \"Ctrl+Space\""));
-    assert!(raw.contains("// \"hotkey\": \"Ctrl+Alt+Space\""));
-    assert!(!raw.contains("\"index_db_path\""));
-    assert!(raw.contains("\"discovery_exclude_roots\":"));
-    assert!(raw.contains("\"show_files\": false"));
-    assert!(raw.contains("\"show_folders\": false"));
-    assert!(raw.contains("\"uninstall_actions_enabled\": true"));
-    assert!(raw.contains("\"web_search_provider\": \"google\""));
-    assert!(raw.contains("\"index_max_items_total\":"));
-    assert!(raw.contains("\"index_max_items_per_root\":"));
-    assert!(raw.contains("\"index_max_items_per_query_seed\":"));
-    assert!(raw.contains("\"game_mode_enabled\": false"));
+    assert!(raw.contains("# Nex config (TOML format)."));
+    assert!(raw.contains(&format!("hotkey = {:?}", cfg.hotkey)));
+    assert!(raw.contains("# hotkey = "));
+    assert!(!raw.lines().any(|line| line.trim_start().starts_with("index_db_path =")));
+    assert!(raw.contains("discovery_exclude_roots ="));
+    assert!(raw.contains(&format!("show_files = {}", cfg.show_files)));
+    assert!(raw.contains(&format!("show_folders = {}", cfg.show_folders)));
+    assert!(raw.contains("uninstall_actions_enabled = true"));
+    assert!(raw.contains("web_search_provider = \"google\""));
+    assert!(raw.contains("index_max_items_total ="));
+    assert!(raw.contains("index_max_items_per_root ="));
+    assert!(raw.contains("index_max_items_per_query_seed ="));
+    assert!(raw.contains("game_mode_enabled = false"));
     if cfg.discovery_exclude_roots.is_empty() {
-        assert!(raw.contains("\"discovery_exclude_roots\": []"));
+        assert!(raw.contains("discovery_exclude_roots = []"));
     } else {
         for exclude_root in &cfg.discovery_exclude_roots {
             let encoded =
@@ -234,8 +234,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(loaded.launch_at_startup);
     assert_eq!(loaded.idle_cache_trim_ms, 900);
     assert_eq!(loaded.active_memory_target_mb, 72);
-    assert!(!loaded.show_files);
-    assert!(!loaded.show_folders);
+    assert!(loaded.show_files);
+    assert!(loaded.show_folders);
     assert!(loaded.uninstall_actions_enabled);
     assert_eq!(loaded.index_max_items_total, 120_000);
     assert_eq!(loaded.index_max_items_per_root, 40_000);
@@ -251,8 +251,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("\"max_results\": 33"));
     assert!(updated_raw.contains("\"idle_cache_trim_ms\": 900"));
     assert!(updated_raw.contains("\"active_memory_target_mb\": 72"));
-    assert!(updated_raw.contains("\"show_files\": false"));
-    assert!(updated_raw.contains("\"show_folders\": false"));
+    assert!(updated_raw.contains("\"show_files\": true"));
+    assert!(updated_raw.contains("\"show_folders\": true"));
     assert!(updated_raw.contains("\"uninstall_actions_enabled\": true"));
     assert!(updated_raw.contains("\"index_max_items_total\": 120000"));
     assert!(updated_raw.contains("\"index_max_items_per_root\": 40000"));

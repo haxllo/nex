@@ -1571,13 +1571,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
                 "title": r.title,
                 "subtitle": r.path,
                 "kind": r.kind,
-                "url": if r.kind.eq_ignore_ascii_case("bookmark")
-                    || (r.kind.eq_ignore_ascii_case("action") && r.path.starts_with("http"))
-                {
-                    serde_json::Value::String(r.path.clone())
-                } else {
-                    serde_json::Value::Null
-                },
+                "url": r.url.clone(),
                 "icon": icon,
                 "filePath": file_path,
                 "selectable": selectable,
@@ -1737,8 +1731,10 @@ unsafe fn begin_native_drag(hwnd: HWND) {
     // itself. (WM_NCLBUTTONDOWN + HTCAPTION does NOT work here: the
     // child's capture swallows the NC hit-test and the loop never gets
     // WM_MOUSEMOVE.)
-    let _ = ReleaseCapture();
-    SendMessageW(hwnd, WM_SYSCOMMAND, (SC_MOVE | HTCAPTION) as WPARAM, 0);
+    unsafe {
+        let _ = ReleaseCapture();
+        SendMessageW(hwnd, WM_SYSCOMMAND, (SC_MOVE | HTCAPTION) as WPARAM, 0);
+    }
 }
 
 /// Center the window horizontally on the monitor under the cursor and

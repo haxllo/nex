@@ -253,24 +253,19 @@ pub(crate) fn search_overlay_results_with_session(
         }
     }
 
-    // Open-URL affordance: bare domain or explicit URL typed with no exact
-    // title match (youtube.com, github.com/haxllo/nex, https://localhost).
+    // Open-URL affordance: bare domain or explicit URL typed by the user
+    // (youtube.com, github.com/haxllo/nex, https://localhost). A local item
+    // named like a domain must not hide the website result.
     // Sits AFTER create-file in precedence — whitelisted-extension queries
     // never reach it (their TLD segment isn't in url_tlds).
     if !parsed_query.command_mode
         && !short_query_app_bias
         && filter.mode == crate::config::SearchMode::All
     {
-        let exact_any_match = merged.iter().any(|r| {
-            crate::model::normalize_for_search(&r.title)
-                == crate::model::normalize_for_search(text_query)
-        });
-        if !exact_any_match {
-            if let Some(url_item) =
-                crate::action_registry::dynamic_provider_open_url_action(text_query, cfg)
-            {
-                merged.push(url_item);
-            }
+        if let Some(url_item) =
+            crate::action_registry::dynamic_provider_open_url_action(text_query, cfg)
+        {
+            merged.push(url_item);
         }
     }
 

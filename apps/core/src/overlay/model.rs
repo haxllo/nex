@@ -15,6 +15,8 @@ pub struct OverlayRow {
     pub kind: String,
     pub title: String,
     pub path: String,
+    /// Canonical website URL, retained when `path` is used as display text.
+    pub url: Option<String>,
     pub icon_path: String,
     /// Base64 data URI for clipboard image thumbnails.
     pub clipboard_thumbnail: Option<String>,

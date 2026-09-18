@@ -1008,6 +1008,31 @@ impl RuntimeWorker {
         Ok(())
     }
 
+    fn fetch_current_website_favicons(&self) {
+        let urls: std::collections::HashSet<String> = self
+            .current_results
+            .iter()
+            .filter(|item| item.id.starts_with(crate::action_registry::ACTION_OPEN_URL_PREFIX))
+            .map(|item| item.path.clone())
+            .filter(|url| !crate::bookmarks::favicon_cache_path(url).is_file())
+            .collect();
+
+        for url in urls {
+            let event_tx = self.event_tx.clone();
+            std::thread::Builder::new()
+                .name("nex-website-favicon".into())
+                .spawn(move || {
+                    if let Ok(path) = crate::bookmarks::download_favicon(&url) {
+                        let _ = event_tx.send(OverlayEvent::BookmarkIconReady(
+                            url,
+                            path.to_string_lossy().to_string(),
+                        ));
+                    }
+                })
+                .ok();
+        }
+    }
+
     fn bookmark_url(&mut self, title: &str, url: &str, remove: bool) {
         let Ok(normalized_url) = crate::config::normalize_bookmark_url(url) else {
             self.overlay.set_status_text("Invalid bookmark URL");
@@ -1857,6 +1882,7 @@ impl RuntimeWorker {
                     self.config_generation,
                     self.apps_expanded.as_deref(),
                 );
+                self.fetch_current_website_favicons();
             }
             OverlayEvent::ShowAllAppsFillRest => {
                 // Expansion was cancelled (query changed / escaped) before
@@ -2346,10 +2372,17 @@ impl RuntimeWorker {
                 self.bookmark_url(&title, &url, remove);
             }
             OverlayEvent::BookmarkIconReady(url, path) => {
+                let mut bookmark_updated = false;
                 if let Some(bookmark) = self.runtime_config.web_bookmarks.iter_mut().find(|b| b.url == url) {
                     bookmark.icon_path = path;
                     let _ = self.save_config_and_prevent_reload();
                     self.load_quick_launch_items_from_config();
+                    bookmark_updated = true;
+                }
+                if self.current_rows.iter().any(|row| row.url.as_deref() == Some(&url)) {
+                    self.overlay.set_results(&self.current_rows, self.selected_index);
+                }
+                if bookmark_updated {
                     self.overlay.set_status_text_and_refresh("Bookmark icon ready");
                 }
             }

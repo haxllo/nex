@@ -55,17 +55,24 @@ pub(crate) fn favicon_cache_path(url: &str) -> PathBuf {
     crate::config::stable_app_data_dir().join("bookmark-icons").join(format!("{hash:016x}.png"))
 }
 
+pub(crate) fn favicon_url(url: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "invalid bookmark URL".to_string())?;
+    parsed
+        .join("/favicon.ico")
+        .map(|icon_url| icon_url.into())
+        .map_err(|_| "bookmark URL has no favicon endpoint".to_string())
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn download_favicon(url: &str) -> Result<PathBuf, String> {
-    let parsed = url::Url::parse(url).map_err(|_| "invalid bookmark URL".to_string())?;
-    let host = parsed.host_str().ok_or_else(|| "bookmark URL has no host".to_string())?;
-    let icon_url = format!("{}://{host}/favicon.ico", parsed.scheme());
+    let icon_url = favicon_url(url)?;
     let path = favicon_cache_path(url);
     if path.is_file() {
         return Ok(path);
     }
     let response = ureq::get(&icon_url)
         .set("Accept", "image/ico,image/png,image/*;q=0.8")
+        .set("User-Agent", "Nex/2")
         .timeout(std::time::Duration::from_secs(5))
         .call()
         .map_err(|e| format!("favicon request failed: {e}"))?;
@@ -103,5 +110,13 @@ mod tests {
         let bookmarks = vec![WebBookmark::new("Nex", "https://example.com").unwrap()];
         assert_eq!(search_bookmarks(&bookmarks, "nex", 10).len(), 1);
         assert_eq!(search_bookmarks(&bookmarks, "example", 10).len(), 1);
+    }
+
+    #[test]
+    fn favicon_endpoint_preserves_the_site_origin() {
+        assert_eq!(
+            favicon_url("https://example.com:8443/a/page?query=value").unwrap(),
+            "https://example.com:8443/favicon.ico"
+        );
     }
 }

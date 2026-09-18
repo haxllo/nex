@@ -1,9 +1,17 @@
 {
 	"version": 1,
+	"inference": {
+		"run": {
+			"detectorVersion": 1,
+			"framework": "rust",
+			"workspacePath": null
+		}
+	},
 	"ports": {
 		"preview": 3000,
 		"additional": {}
 	},
+	"services": [],
 	"scripts": {
 		"setup": {
 			"enabled": true,
@@ -11,7 +19,7 @@
 		},
 		"run": {
 			"enabled": true,
-			"command": null
+			"command": "cargo run"
 		},
 		"archive": {
 			"enabled": true,

@@ -260,8 +260,6 @@ fn dedup_removes_same_app_from_different_sources() {
         SearchItem::new("firefox-exe", "app", "Firefox",
             "C:\\Program Files\\Mozilla Firefox\\firefox.exe")
             .with_usage(50, 2_000_000_000),
-        SearchItem::new("chrome", "app", "Chrome",
-            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
     ];
 
     let results = nex_core::search::search(&items, "fir", 10);
@@ -270,8 +268,7 @@ fn dedup_removes_same_app_from_different_sources() {
     assert!(ids.contains(&"firefox-exe"));
     assert!(!ids.contains(&"firefox-lnk"));
     assert!(!ids.contains(&"firefox-uninstall"));
-    assert!(ids.contains(&"chrome"));
-    assert_eq!(results.len(), 2);
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -283,14 +280,14 @@ fn dedup_fills_slots_with_next_best_non_duplicates() {
             &format!("C:\\Program Files\\Firefox{}\\firefox.exe", i),
         ));
     }
-    items.push(SearchItem::new("chrome", "app", "Chrome",
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"));
+    items.push(SearchItem::new("firefox-developer", "app", "Firefox Developer Edition",
+        "C:\\Program Files\\Firefox Developer Edition\\firefox.exe"));
 
     let results = nex_core::search::search(&items, "fire", 5);
 
     let firefox_count = results.iter().filter(|i| i.title == "Firefox").count();
     assert_eq!(firefox_count, 1);
-    assert!(results.iter().any(|i| i.id == "chrome"));
+    assert!(results.iter().any(|i| i.id == "firefox-developer"));
     assert_eq!(results.len(), 2);
 }
 

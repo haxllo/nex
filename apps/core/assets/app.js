@@ -133,10 +133,11 @@
     pinIcon.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
+      const target = item.url || item.path || item.title;
       if (item.pinned) {
-        post('unpin', item.url || item.title);
+        post('unpin', target);
       } else {
-        post('pin', item.url || item.title);
+        post('pin', target);
       }
       input.focus();
     });
@@ -154,18 +155,20 @@
 
   function createAddIcon(item) {
     const addIcon = document.createElement('div');
-    const filePath = item.filePath || item.icon;
-    const pinned = isItemPinned(filePath);
+    const target = item.url || item.filePath || item.icon;
+    const pinned = isItemPinned(target);
     addIcon.className = 'add-icon' + (pinned ? ' pinned' : '');
     addIcon.innerHTML = pinned ? pinIconPinnedSvg : addIconSvg;
     addIcon.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      if (filePath) {
+      if (target) {
         if (pinned) {
-          post('unpin', item.title);
+          post('unpin', target);
+        } else if (item.url) {
+          post('pin', target);
         } else {
-          post('addToQuickLaunch', filePath);
+          post('addToQuickLaunch', target);
         }
       }
       input.focus();
@@ -225,7 +228,7 @@
       if (quickLaunchItem) {
         li.appendChild(createPinIcon(quickLaunchItem, i));
       }
-    } else if (r.kind === "app" && r.role !== "calculator") {
+    } else if ((r.kind === "app" || isWebResult(r)) && r.role !== "calculator") {
       li.appendChild(createAddIcon(r));
     } else if (r.kind && r.role !== "calculator") {
       const kind = document.createElement("div");
@@ -283,6 +286,17 @@
         const img = document.createElement("img");
         img.className = "icon";
         img.src = folderIcon();
+        li.appendChild(img);
+      } else if (isWebResult(r)) {
+        const img = document.createElement("img");
+        img.className = "icon";
+        if (r.kind === "bookmark" && r.icon) {
+          img.dataset.iconPath = r.icon;
+          img.src = iconCache.get(r.icon) || webIcon();
+        } else {
+          img.src = webIcon();
+        }
+        img.onerror = () => { img.src = webIcon(); };
         li.appendChild(img);
       } else if (r.icon && r.kind !== "action") {
         const img = document.createElement("img");
@@ -999,6 +1013,14 @@
   // ── context menu ──────────────────────────────────────────
   let ctxRow = null; // the row the context menu was opened on
 
+  function isWebResult(row) {
+    return Boolean(row.url) && (row.kind === "action" || row.kind === "bookmark");
+  }
+
+  function itemTarget(row) {
+    return row.url || row.filePath || row.icon || row.subtitle || "";
+  }
+
   // Capture before WebView2/Chromium can open its native menu. Row-local
   // handlers remain for selection, but this guarantees reused/child nodes
   // cannot leak the browser context menu.
@@ -1017,7 +1039,7 @@
     if (row.role === "show_all_apps") return;
     ctxRow = row;
     // Determine which actions are relevant
-    const isWebAction = row.kind === "action" && (Boolean(row.url) || /^Open /i.test(row.title));
+    const isWebAction = row.kind === "action" && isWebResult(row);
     const isApp = row.kind === "app" || row.role === "quick_launch" || (row.kind === "action" && !isWebAction && !row.title.startsWith("Search Web"));
     const isFile = row.kind === "file" || row.kind === "folder" || (row.subtitle && row.subtitle.length > 0 && row.kind !== "action");
     const isBookmark = row.kind === "bookmark";
@@ -1033,10 +1055,10 @@
       else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "pin") {
-        const path = row.filePath || row.icon || "";
-        const pinned = isItemPinned(path) || isItemPinned(row.icon);
+        const target = itemTarget(row);
+        const pinned = isItemPinned(target);
         b.textContent = pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch";
-        b.classList.toggle("hidden", row.kind !== "app" && !isWebAction);
+        b.classList.toggle("hidden", row.kind !== "app" && !isWebAction && !isBookmark);
       }
       else if (action === "uninstall") b.classList.toggle("hidden", row.kind !== "app");
       if ((isBookmark || isWebAction) && action !== "open" && action !== "pin") b.classList.add("hidden");
@@ -1053,16 +1075,19 @@
     // while `hidden` returns zero height and always places menu below cursor,
     // where short overlay windows clip it at footer.
     el.classList.remove("hidden");
+    const viewportW = window.visualViewport?.width || window.innerWidth;
+    // The host keeps WebView's viewport at MAX_HEIGHT for fast resizes, while
+    // the native window is only as tall as the current panel.
+    const viewportH = Math.min(window.visualViewport?.height || window.innerHeight, lastH || panel.getBoundingClientRect().height);
+    const pad = 8;
+    el.style.maxHeight = `${Math.max(0, viewportH - pad * 2)}px`;
     const menuW = el.offsetWidth || 180;
     const menuH = el.offsetHeight || 0;
 
-    const pad = 8;
     let left = x + pad;
-    if (left + menuW > window.innerWidth - pad) {
+    if (left + menuW > viewportW - pad) {
       left = x - menuW - pad;
     }
-    const viewportW = window.visualViewport?.width || window.innerWidth;
-    const viewportH = window.visualViewport?.height || window.innerHeight;
     const below = y + pad;
     const above = y - menuH - pad;
     const top = below + menuH <= viewportH - pad ? below : above;
@@ -1082,8 +1107,8 @@
     if (!action) return;
 
     const title = ctxRow.title || "";
-    const path = ctxRow.filePath || ctxRow.subtitle || "";
-    const pinned = isItemPinned(path) || isItemPinned(ctxRow.icon);
+    const path = itemTarget(ctxRow);
+    const pinned = isItemPinned(path);
 
     if (action === "open") {
       hideContextMenu();
@@ -1091,9 +1116,9 @@
     } else if (action === "pin") {
       hideContextMenu();
       if (pinned) {
-        post("unpin", ctxRow.url || path || title);
+        post("unpin", path || title);
       } else {
-        post("pin", ctxRow.url || path || title);
+        post("pin", path || title);
       }
     } else {
       // All other actions sent to Rust

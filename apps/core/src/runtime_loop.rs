@@ -852,6 +852,7 @@ impl RuntimeWorker {
     fn pin_app_to_quick_launch(&mut self, title: &str) {
         let raw_title = title.trim();
         let title = raw_title.strip_prefix("Open ").unwrap_or(raw_title).trim();
+        let direct_url = crate::config::normalize_bookmark_url(raw_title).ok();
         let url_pin = self.runtime_config.quick_launch.pinned.iter()
             .find(|path| path.eq_ignore_ascii_case(title) || path.eq_ignore_ascii_case(raw_title))
             .cloned();
@@ -871,7 +872,7 @@ impl RuntimeWorker {
                     || item.title.eq_ignore_ascii_case(&format!("Open {title}"))))
             .map(|item| item.path.clone())
             .filter(|path| path.starts_with("http://") || path.starts_with("https://"));
-        let Some(path) = app_path.or(url).or(url_pin) else {
+        let Some(path) = direct_url.or(app_path).or(url).or(url_pin) else {
             log_warn(&format!("[nex] quick_launch pin failed: app '{}' not found", title));
             return;
         };

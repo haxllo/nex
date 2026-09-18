@@ -153,12 +153,12 @@ pub fn search_with_filter_with_boosts(
         })
         .collect();
 
+    deduplicate_apps(&mut scored);
     if scored.len() > limit {
         scored.select_nth_unstable_by(limit, compare_scored);
         scored.truncate(limit);
     }
     scored.sort_unstable_by(compare_scored);
-    deduplicate_apps(&mut scored);
     apply_top_hit_confidence_guard(&mut scored, &normalized_query, app_intent_query);
 
     scored
@@ -756,9 +756,9 @@ fn subsequence_penalties(haystack: &str, needle: &str) -> Option<(i64, i64)> {
 }
 
 fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
-    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    let mut winners: HashMap<(String, String), usize> = HashMap::new();
+    let mut remove = vec![false; scored.len()];
 
-    // Group app items by (normalized_title, normalized_basename)
     for (idx, s) in scored.iter().enumerate() {
         if !s.item.kind.eq_ignore_ascii_case("app") {
             continue;
@@ -767,33 +767,23 @@ fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
             normalize_for_search(&s.item.title),
             extract_base_name(&s.item.path),
         );
-        groups.entry(key).or_default().push(idx);
-    }
-
-    // For each group, find the index with the highest score, mark others for removal
-    let mut remove_indices: Vec<usize> = Vec::new();
-    for (_, indices) in groups.iter() {
-        if indices.len() <= 1 {
-            continue;
-        }
-        // Find the best index (highest score, then best match_kind, etc.)
-        let best_idx = indices
-            .iter()
-            .max_by(|&&a, &&b| compare_scored(&scored[a], &scored[b]))
-            .copied()
-            .unwrap();
-        for &idx in indices {
-            if idx != best_idx {
-                remove_indices.push(idx);
+        if let Some(&current_winner) = winners.get(&key) {
+            if compare_scored(s, &scored[current_winner]).is_lt() {
+                remove[current_winner] = true;
+                winners.insert(key, idx);
+            } else {
+                remove[idx] = true;
             }
+        } else {
+            winners.insert(key, idx);
         }
     }
 
-    // Sort descending so we remove from back to front (preserves earlier indices)
-    remove_indices.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in remove_indices {
-        scored.remove(idx);
-    }
+    *scored = scored
+        .drain(..)
+        .enumerate()
+        .filter_map(|(idx, item)| (!remove[idx]).then_some(item))
+        .collect();
 }
 
 fn extract_base_name(path: &str) -> String {

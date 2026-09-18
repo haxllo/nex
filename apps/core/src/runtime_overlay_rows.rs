@@ -651,8 +651,10 @@ pub(crate) fn build_quick_launch_rows(
             result_index: Some(index),
             kind: item.kind.clone(),
             title: item.title.clone(),
+            // Keep a bookmark's URL available to its context menu. The UI
+            // recognizes it as a URL and does not render it as a subtitle.
             path: if item.kind.eq_ignore_ascii_case("bookmark") {
-                String::new()
+                item.path.clone()
             } else {
                 quick_launch_subtitle(&item.subtitle)
             },

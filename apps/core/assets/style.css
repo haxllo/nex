@@ -690,7 +690,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 .row:hover .add-icon {
-  opacity: 0;
+  opacity: 1;
 }
 
 .row .add-icon.pinned {

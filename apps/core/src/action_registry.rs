@@ -315,7 +315,7 @@ pub(crate) fn dynamic_provider_create_file_action(
 }
 
 /// Detect a bare domain or explicit URL (youtube.com, github.com/haxllo/nex,
-/// https://localhost:8080) and produce an "Open <url>" action row.
+/// https://localhost:8080) and produce a website action row.
 ///
 /// Accepted when either:
 ///  - the query starts with http:// or https:// (any host, incl. localhost), or
@@ -347,7 +347,7 @@ pub(crate) fn dynamic_provider_open_url_action(
     Some(SearchItem::new(
         &id,
         "action",
-        &format!("Open {trimmed}"),
+        &crate::bookmarks::display_title(&url),
         &url,
     ))
 }
@@ -424,6 +424,15 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|action| action.id.starts_with(ACTION_WEB_SEARCH_PREFIX)));
+    }
+
+    #[test]
+    fn open_url_action_uses_the_website_name() {
+        let cfg = Config::default();
+        let action = dynamic_provider_open_url_action("acme.com", &cfg).unwrap();
+
+        assert_eq!(action.title, "Acme");
+        assert_eq!(action.path, "https://acme.com");
     }
 
     #[test]

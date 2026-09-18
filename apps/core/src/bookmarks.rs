@@ -119,4 +119,9 @@ mod tests {
             "https://example.com:8443/favicon.ico"
         );
     }
+
+    #[test]
+    fn bookmarks_reject_urls_with_embedded_credentials() {
+        assert!(WebBookmark::new("Example", "https://user:password@example.com").is_err());
+    }
 }

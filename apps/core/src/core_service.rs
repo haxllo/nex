@@ -766,7 +766,7 @@ impl CoreService {
         }
         self.refresh_cache_from_store()?;
         if progress_pct.is_none() {
-            self.sync_indexes_from_cache()?;
+            self.sync_indexes_from_cache_with_force(upserted_total > 0 || removed_total > 0)?;
         }
         if let Some(ref pct) = progress_pct {
             pct.store(100, Ordering::Relaxed);
@@ -1217,6 +1217,10 @@ impl CoreService {
     }
 
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
+        self.sync_indexes_from_cache_with_force(false)
+    }
+
+    fn sync_indexes_from_cache_with_force(&self, force: bool) -> Result<(), ServiceError> {
         let items = index_store::list_items(&*self.db())?;
         let item_count = items.len();
 
@@ -1228,12 +1232,9 @@ impl CoreService {
 
         let tantivy_is_first = tantivy_docs.map(|d| d == 0).unwrap_or(true);
 
-        // Short-circuit when Tantivy already matches the cached item count.
-        // After a progress-window or background rebuild where items were
-        // added/removed, the backend may be stale even if non-empty —
-        // comparing against the actual count (not just zero vs non-zero)
-        // catches this.
-        if tantivy_docs == Some(item_count as u64) {
+        // Counts alone cannot distinguish replaced documents, so only skip
+        // a matching index when the rebuild did not change any stored item.
+        if !force && tantivy_docs == Some(item_count as u64) {
             self.maybe_compact_backends();
             return Ok(());
         }

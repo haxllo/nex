@@ -765,7 +765,7 @@ fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
         }
         let key = (
             normalize_for_search(&s.item.title),
-            extract_base_name(&s.item.path),
+            deduplication_base_name(s.item),
         );
         if let Some(&current_winner) = winners.get(&key) {
             if compare_scored(s, &scored[current_winner]).is_lt() {
@@ -784,6 +784,17 @@ fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
         .enumerate()
         .filter_map(|(idx, item)| (!remove[idx]).then_some(item))
         .collect();
+}
+
+fn deduplication_base_name(item: &SearchItem) -> String {
+    if item
+        .path
+        .split(['\\', '/'])
+        .any(|part| part.eq_ignore_ascii_case("uninstall"))
+    {
+        return normalize_for_search(&item.title);
+    }
+    extract_base_name(&item.path)
 }
 
 fn extract_base_name(path: &str) -> String {

@@ -11,9 +11,9 @@ fn rejects_reserved_hotkey() {
 }
 
 #[test]
-fn rejects_win_modifier_hotkey() {
-    let result = nex_core::settings::validate_hotkey("Win+P");
-    assert!(result.is_err());
+fn validates_win_modifier_hotkey() {
+    let canonical = nex_core::settings::validate_hotkey("win + p").unwrap();
+    assert_eq!(canonical, "Win+P");
 }
 
 #[test]
@@ -30,9 +30,9 @@ fn suggests_safe_hotkey_presets_excluding_current_hotkey() {
     assert_eq!(
         suggestions,
         vec![
+            "Win".to_string(),
             "Ctrl+Alt+Space".to_string(),
             "Alt+Shift+Space".to_string(),
-            "Ctrl+Shift+P".to_string()
         ]
     );
 }

@@ -56,7 +56,8 @@ pub(crate) fn favicon_cache_path(url: &str) -> PathBuf {
 }
 
 pub(crate) fn favicon_url(url: &str) -> Result<String, String> {
-    let parsed = url::Url::parse(url).map_err(|_| "invalid bookmark URL".to_string())?;
+    let url = crate::config::normalize_bookmark_url(url)?;
+    let parsed = url::Url::parse(&url).map_err(|_| "invalid bookmark URL".to_string())?;
     parsed
         .join("/favicon.ico")
         .map(|icon_url| icon_url.into())
@@ -65,8 +66,9 @@ pub(crate) fn favicon_url(url: &str) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn download_favicon(url: &str) -> Result<PathBuf, String> {
-    let icon_url = favicon_url(url)?;
-    let path = favicon_cache_path(url);
+    let url = crate::config::normalize_bookmark_url(url)?;
+    let icon_url = favicon_url(&url)?;
+    let path = favicon_cache_path(&url);
     if path.is_file() {
         return Ok(path);
     }
@@ -123,5 +125,6 @@ mod tests {
     #[test]
     fn bookmarks_reject_urls_with_embedded_credentials() {
         assert!(WebBookmark::new("Example", "https://user:password@example.com").is_err());
+        assert!(favicon_url("https://user:password@example.com").is_err());
     }
 }

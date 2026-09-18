@@ -61,8 +61,9 @@ pub(crate) fn overlay_rows(results: &[SearchItem], command_mode: bool) -> Vec<Ov
 }
 
 /// Build overlay rows, optionally appending a synthetic "Show all apps"
-/// entry after the last app row (before the Folders header). Activating
-/// it re-runs the query apps-only with a larger limit.
+/// entry after the last app row (before the Folders header). A recognized
+/// website URL is shown before app results. Activating "Show all apps" re-runs
+/// the query apps-only with a larger limit.
 pub(crate) fn overlay_rows_ext(
     results: &[SearchItem],
     command_mode: bool,
@@ -84,20 +85,24 @@ pub(crate) fn overlay_rows_ext(
             .collect();
     }
 
-    // Select TopHit index first (A2/A3), independent of kind-group rebuild.
-    let top_hit_index = select_top_hit_index(results);
+    // A directly entered website URL always takes the primary row, ahead of
+    // matching apps. Otherwise preserve the established app-first top-hit rule.
+    let website_result_index = results
+        .iter()
+        .position(|item| item.id.starts_with(crate::action_registry::ACTION_OPEN_URL_PREFIX));
+    let top_hit_index = website_result_index.unwrap_or_else(|| select_top_hit_index(results));
 
-    // Only mark top hit as "consumed" when it IS an app — its TopHit row is
-    // emitted below.  Non-app top hits (files, folders, action rows) stay in
-    // their normal kind bucket so they render under their section header.
-    let top_hit_is_app = results[top_hit_index].kind.eq_ignore_ascii_case("app");
+    // Only consume the primary row when it is an app or direct website result.
+    // Other non-app top hits stay in their normal kind bucket and section.
+    let top_hit_is_primary = website_result_index.is_some()
+        || results[top_hit_index].kind.eq_ignore_ascii_case("app");
 
     // Group indices by kind, then sort within each kind by tier
     // (0=Exact → 3=Fuzzy), preserving original index for stability.
     let mut kind_buckets: [Vec<usize>; 6] = Default::default();
 
     for (index, item) in results.iter().enumerate() {
-        if top_hit_is_app && index == top_hit_index {
+        if top_hit_is_primary && index == top_hit_index {
             continue;
         }
         let gi = kind_group_order(&item.kind) as usize;
@@ -116,11 +121,9 @@ pub(crate) fn overlay_rows_ext(
 
     let mut rows = Vec::new();
 
-    // Emit TopHit row only when the top hit is an app — the standalone
-    // TopHit slot is the app presentation (grid cell, no section header).
-    // When no apps are present, folders/files belong under their own
-    // section headers (Folders/Files) instead of floating alone above them.
-    if results[top_hit_index].kind.eq_ignore_ascii_case("app") {
+    // Direct website results and apps use the standalone primary slot. Other
+    // result kinds remain under their section headers.
+    if top_hit_is_primary {
         rows.push(result_row(
             &results[top_hit_index],
             top_hit_index,
@@ -819,6 +822,15 @@ mod tests {
     fn action(id: &str, title: &str, tier: u8) -> SearchItem {
         SearchItem::new(id, "action", title, "").with_match_tier(tier)
     }
+    fn website(title: &str, tier: u8) -> SearchItem {
+        SearchItem::new(
+            "__nex_action_open_url__:example.com",
+            "action",
+            title,
+            "https://example.com",
+        )
+        .with_match_tier(tier)
+    }
     fn clipboard(id: &str, title: &str, tier: u8) -> SearchItem {
         SearchItem::new(id, "clipboard", title, "").with_match_tier(tier)
     }
@@ -896,6 +908,33 @@ mod tests {
             rows.iter().filter(|r| r.role == OverlayRowRole::ShowAllApps).count(),
             1
         );
+    }
+
+    #[test]
+    fn direct_website_result_precedes_apps_and_other_results() {
+        let results = vec![
+            app("a1", "Example App", 0),
+            folder("f1", "Example Folder", 0),
+            website("Example", 3),
+            file("fi1", "example.txt", 0),
+            action("a2", "Other action", 0),
+        ];
+        let rows = overlay_rows_ext(&results, false, true);
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+
+        assert_eq!(titles, vec![
+            "Example",
+            "Example App",
+            "Show all apps",
+            "Folders",
+            "Example Folder",
+            "Files",
+            "example.txt",
+            "Actions",
+            "Other action",
+        ]);
+        assert_eq!(rows[0].role, OverlayRowRole::TopHit);
+        assert_eq!(rows[0].result_index, Some(2));
     }
 
     /// (c) Kind order: apps > folders > files > actions > clipboard, same tier.

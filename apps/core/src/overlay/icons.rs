@@ -204,6 +204,17 @@ fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
         }
     }
 
+    // Windows Terminal's AppsFolder shell item can expose only a 32px icon,
+    // while its package contains the sharp Start/taskbar logo assets.
+    #[cfg(target_os = "windows")]
+    if path_str.eq_ignore_ascii_case(
+        r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
+    ) {
+        if let Some(png) = windows_terminal_package_png() {
+            return Some(png);
+        }
+    }
+
     // Everything else: extract the shell icon.
     #[cfg(target_os = "windows")]
     {
@@ -229,6 +240,37 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     normalize_to_square_png(img.into_rgba8())
 }
 
+#[cfg(target_os = "windows")]
+fn windows_terminal_package_png() -> Option<Vec<u8>> {
+    let windows_apps = PathBuf::from(r"C:\Program Files\WindowsApps");
+    let package = std::fs::read_dir(windows_apps)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("Microsoft.WindowsTerminal_")
+                        && name.ends_with("_8wekyb3d8bbwe")
+                })
+        })?;
+
+    for name in [
+        "Square44x44Logo.scale-400.png",
+        "StoreLogo.scale-400.png",
+        "Square150x150Logo.scale-400.png",
+    ] {
+        let path = package.join("Images").join(name);
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Some(png) = decode_image_bytes(&bytes) {
+                return Some(png);
+            }
+        }
+    }
+    None
+}
+
 /// Normalize any RGBA image to a consistent square canvas:
 /// Lanczos-resize to TARGET × TARGET (upscaling small sources,
 /// downscaling large ones), centered on a transparent canvas. Every
@@ -250,10 +292,18 @@ fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
 
     // ── Compute fill ratio (alpha > 8 = visible) ──
     let mut content_px: u64 = 0;
+    let mut content_min_x = w;
+    let mut content_min_y = h;
+    let mut content_max_x: u32 = 0;
+    let mut content_max_y: u32 = 0;
     for y in 0..h {
         for x in 0..w {
             if img.get_pixel(x, y)[3] > 8 {
                 content_px += 1;
+                if x < content_min_x { content_min_x = x; }
+                if y < content_min_y { content_min_y = y; }
+                if x > content_max_x { content_max_x = x; }
+                if y > content_max_y { content_max_y = y; }
             }
         }
     }
@@ -280,6 +330,36 @@ fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
         }
     }
     let core_bbox_valid = core_px > 0 && core_max_x >= core_min_x && core_max_y >= core_min_y;
+
+    // Low-resolution icons, and high-resolution assets with large transparent
+    // margins, need content cropping. Full-bleed app icons keep old path.
+    if w < 128 || h < 128 || fill_ratio < 0.35 {
+        if content_px > 0 {
+            let pad: u32 = 1;
+            let crop_x = content_min_x.saturating_sub(pad);
+            let crop_y = content_min_y.saturating_sub(pad);
+            let crop_x2 = (content_max_x + pad).min(w - 1);
+            let crop_y2 = (content_max_y + pad).min(h - 1);
+            let crop = image::imageops::crop_imm(
+                &img,
+                crop_x,
+                crop_y,
+                crop_x2 - crop_x + 1,
+                crop_y2 - crop_y + 1,
+            )
+            .to_image();
+            if w < 128 || h < 128 {
+                return rgba_to_png(crop);
+            }
+
+            // Refit padded high-resolution artwork to the standard canvas;
+            // source remains high-res, so this does not introduce blur.
+            use image::imageops::{self, FilterType};
+            let resized = imageops::resize(&crop, target, target, FilterType::Lanczos3);
+            return rgba_to_png(resized);
+        }
+        return rgba_to_png(img);
+    }
 
     // ── Sparse glyph: crop to core bbox, upscale to target ──
     // fill_ratio uses alpha>8 (permissive), core_bbox uses alpha>128 (strict).

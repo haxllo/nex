@@ -149,11 +149,19 @@
 
   function isItemPinned(filePath) {
     if (!filePath) return false;
-    const normalized = filePath.replace(/\\/g, '/').toLowerCase();
+    const normalized = normalizePinTarget(filePath);
     return quickLaunchItems.some(item => {
-      const itemPath = (item.url || item.path || '').replace(/\\/g, '/').toLowerCase();
+      const itemPath = normalizePinTarget(item.url || item.path || '');
       return itemPath === normalized && item.pinned;
     });
+  }
+
+  function normalizePinTarget(target) {
+    const value = String(target || '').trim();
+    if (/^https?:\/\//i.test(value)) {
+      try { return new URL(value).toString().toLowerCase(); } catch (_) {}
+    }
+    return value.replace(/\\/g, '/').toLowerCase();
   }
 
   function createAddIcon(item) {
@@ -208,7 +216,7 @@
       const size = r.tileSize || "small";
       return "row clipboard-tile tile-" + size;
     }
-    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "show_all_apps") ? " row-grid" : " row-list") : "");
+    return "row" + (r.role === "calculator" ? " calculator" : "") + (r.role === "quick_launch" ? " quick-launch" : "") + (isGridView ? ((r.kind === "app" || r.role === "quick_launch" || r.role === "show_all_apps") ? " row-grid" : " row-list") : "");
   }
 
   function buildSection(key, r) {

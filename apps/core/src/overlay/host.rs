@@ -686,11 +686,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.
-                        // Also reject stale Painted when Hide cleared rows
-                        // (search bar would show with no content).
-                        let should_show = state.lock().map(|s| s.visible && !s.rows.is_empty()).unwrap_or(false);
+                        // Empty rows are valid for a fresh config with no
+                        // Quick Launch pins. Visibility is the stale-paint
+                        // guard; row count must not block the empty state.
+                        let should_show = state.lock().map(|s| s.visible).unwrap_or(false);
                         if !should_show {
-                            crate::runtime::log_info("[nex] host Painted: stale (visible=false or rows empty), skipping show");
+                            crate::runtime::log_info("[nex] host Painted: stale (visible=false), skipping show");
                             return;
                         }
                         window.set_visible(true);

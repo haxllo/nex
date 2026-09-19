@@ -925,6 +925,28 @@ impl RuntimeWorker {
             return;
         }
 
+        // Settings and Control Panel entries are launch protocols, not
+        // indexed apps. Remove stale UI/config state directly by URI.
+        if title.starts_with("ms-settings:") || title.eq_ignore_ascii_case("sysdm.cpl") {
+            let normalized = title.replace('/', "\\").to_ascii_lowercase();
+            self.runtime_config.quick_launch.pinned.retain(|p| {
+                p.replace('/', "\\").to_ascii_lowercase() != normalized
+            });
+            self.quick_launch_items.retain(|item| {
+                item.path.replace('/', "\\").to_ascii_lowercase() != normalized
+                    && !(item.title.eq_ignore_ascii_case(title) && item.is_pinned)
+            });
+            let _ = self.save_config_and_prevent_reload();
+            self.load_quick_launch_items_from_config();
+            if self.overlay.query_text().trim().is_empty() {
+                self.show_idle_or_quick_launch();
+            } else {
+                self.overlay.set_status_text_and_refresh(&format!("Unpinned '{}' from Quick Launch", title));
+            }
+            log_info(&format!("[nex] quick_launch unpinned '{title}'"));
+            return;
+        }
+
         if let Ok(url) = crate::config::normalize_bookmark_url(title) {
             let before = self.runtime_config.quick_launch.pinned.len();
             self.runtime_config.quick_launch.pinned.retain(|p| {
@@ -941,22 +963,25 @@ impl RuntimeWorker {
             return;
         }
 
+        // Config is source of truth. This also removes stale pins whose item
+        // disappeared from the index, such as old Settings protocol entries.
+        let from_config = self.runtime_config.quick_launch.pinned.iter()
+            .find(|p| {
+                p.eq_ignore_ascii_case(title)
+                    || p.replace('/', "\\").eq_ignore_ascii_case(&title.replace('/', "\\"))
+            })
+            .cloned();
+
         // First, try to find by title in quick_launch_items (idle state).
-        let app_path = self.quick_launch_items.iter()
+        let app_path = from_config.or_else(|| self.quick_launch_items.iter()
             .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
-            .map(|item| item.path.clone());
+            .map(|item| item.path.clone()));
 
         // If not found, try to find by title in current_results (search mode).
         let path_to_remove = if let Some(path) = app_path {
             path
         } else {
-            // Also try matching directly against entries in the config pinned list
-            let from_config = self.runtime_config.quick_launch.pinned.iter()
-                .find(|p| p.eq_ignore_ascii_case(title))
-                .cloned();
-            if let Some(path) = from_config {
-                path
-            } else {
+            {
                 let from_quick_launch = self.quick_launch_items.iter()
                     .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
                     .map(|item| item.path.clone());

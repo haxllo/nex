@@ -881,6 +881,14 @@
     true
   );
 
+  // Any keyboard interaction abandons the row context menu. This covers
+  // navigation and command-mode keys before they produce an input event.
+  window.addEventListener("keydown", (e) => {
+    if (!contextMenu.classList.contains("hidden") && e.key !== "Escape") {
+      hideContextMenu();
+    }
+  }, true);
+
   // ── query input (adaptive debounce) ──────────────────────
   // First char of each typing burst fires immediately (0ms).
   // Subsequent rapid chars coalesce at 40ms so SearchWorker
@@ -1143,9 +1151,6 @@
 
   // Close context menu on Escape
   window.addEventListener("keydown", (e) => {
-    if (!contextMenu.classList.contains("hidden") && e.key !== "Escape") {
-      hideContextMenu();
-    }
     if (e.key === "Escape" && !contextMenu.classList.contains("hidden")) {
       hideContextMenu();
       input.focus();

@@ -1018,10 +1018,15 @@
   let ctxRow = null; // the row the context menu was opened on
 
   function isWebResult(row) {
-    return Boolean(row.url) && (row.kind === "action" || row.kind === "bookmark");
+    const target = row.url || row.filePath || row.icon || row.subtitle || "";
+    return /^(https?:\/\/|ms-settings:|sysdm\.cpl$)/i.test(target)
+      && (row.kind === "action" || row.kind === "bookmark" || row.role === "quick_launch");
   }
 
   function itemTarget(row) {
+    if (row.role === "quick_launch" && /^(ms-settings:|sysdm\.cpl$)/i.test(row.subtitle || "")) {
+      return row.subtitle;
+    }
     return row.url || row.filePath || row.icon || row.subtitle || "";
   }
 
@@ -1138,6 +1143,9 @@
 
   // Close context menu on Escape
   window.addEventListener("keydown", (e) => {
+    if (!contextMenu.classList.contains("hidden") && e.key !== "Escape") {
+      hideContextMenu();
+    }
     if (e.key === "Escape" && !contextMenu.classList.contains("hidden")) {
       hideContextMenu();
       input.focus();

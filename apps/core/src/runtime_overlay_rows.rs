@@ -659,7 +659,10 @@ pub(crate) fn build_quick_launch_rows(
             title: item.title.clone(),
             // Keep a bookmark's URL available to its context menu. The UI
             // recognizes it as a URL and does not render it as a subtitle.
-            path: if item.kind.eq_ignore_ascii_case("bookmark") {
+            path: if item.kind.eq_ignore_ascii_case("bookmark")
+                || item.path.starts_with("ms-settings:")
+                || item.path.eq_ignore_ascii_case("sysdm.cpl")
+            {
                 item.path.clone()
             } else {
                 quick_launch_subtitle(&item.subtitle)

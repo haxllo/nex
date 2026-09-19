@@ -888,6 +888,7 @@
   let debounce = null;
   let lastInputTime = 0;
   input.addEventListener("input", () => {
+    if (!contextMenu.classList.contains("hidden")) hideContextMenu();
     let raw = input.value;
     // In command mode the `@` prefix is kept out of the display
     // input — keydown handles enter/exit, `input` just sends

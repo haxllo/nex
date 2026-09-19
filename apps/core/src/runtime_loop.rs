@@ -957,6 +957,12 @@ impl RuntimeWorker {
             if let Some(path) = from_config {
                 path
             } else {
+                let from_quick_launch = self.quick_launch_items.iter()
+                    .find(|item| item.title.eq_ignore_ascii_case(title) && item.is_pinned)
+                    .map(|item| item.path.clone());
+                if let Some(path) = from_quick_launch {
+                    path
+                } else {
                 let from_results = self.current_results.iter()
                     .find(|item| item.title.eq_ignore_ascii_case(title))
                     .map(|item| item.path.clone());
@@ -966,6 +972,7 @@ impl RuntimeWorker {
                         log_warn(&format!("[nex] quick_launch unpin failed: app '{}' not found in results", title));
                         return;
                     }
+                }
                 }
             }
         };

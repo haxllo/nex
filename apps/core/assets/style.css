@@ -233,6 +233,7 @@ body {
 
 #list {
   list-style: none;
+  outline: none;
   max-height: 416px;
   overflow-y: auto;
   padding: 0 6px;
@@ -1042,6 +1043,7 @@ html[data-theme="light"] img.icon.glyph {
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   z-index: 9999;
+  outline: none;
 }
 #context-menu button {
   display: block;

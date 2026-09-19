@@ -67,6 +67,9 @@
   const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, .power-panel, .power-confirm";
   panel.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
+    if (!contextMenu.classList.contains("hidden") && !e.target.closest("#context-menu")) {
+      hideContextMenu();
+    }
     if (e.target.closest(DRAG_BLOCKED)) return;
     if (e.target.isContentEditable) return;
     e.preventDefault();
@@ -1078,7 +1081,11 @@
     const viewportW = window.visualViewport?.width || window.innerWidth;
     // The host keeps WebView's viewport at MAX_HEIGHT for fast resizes, while
     // the native window is only as tall as the current panel.
-    const viewportH = Math.min(window.visualViewport?.height || window.innerHeight, lastH || panel.getBoundingClientRect().height);
+    const panelRect = panel.getBoundingClientRect();
+    const viewportH = Math.min(
+      window.visualViewport?.height || window.innerHeight,
+      panelRect.bottom,
+    );
     const pad = 8;
     el.style.maxHeight = `${Math.max(0, viewportH - pad * 2)}px`;
     const menuW = el.offsetWidth || 180;

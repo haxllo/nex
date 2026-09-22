@@ -20,10 +20,16 @@ const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 /// when CSS displays at 30px. PNG is ~3-8KB each — fits the LRU budget.
 const TARGET_ICON_SIZE: u32 = 128;
 /// Extraction request size for IShellItemImageFactory and
-/// PrivateExtractIconsW (primary high-res paths). 256px is the
-/// Windows jumbo icon size; the Lanczos downscale to
-/// TARGET_ICON_SIZE (128) produces a clean, sharp result on HiDPI.
+/// PrivateExtractIconsW (primary high-res paths). 256px is the Windows
+/// jumbo icon size; larger sources are downscaled with Lanczos while
+/// native smaller sources are kept native-sized to avoid blur.
 const EXTRACT_ICON_SIZE: i32 = 256;
+
+const ICON_NORMALIZATION_VERSION: u8 = 2;
+
+fn cache_key(path: &str) -> PathBuf {
+    PathBuf::from(format!("v{}|{}", ICON_NORMALIZATION_VERSION, path))
+}
 
 pub struct IconCache {
     inner: Mutex<Inner>,
@@ -72,13 +78,14 @@ impl IconCache {
     }
 
     /// Decode `path` (.ico/.png) and return PNG-encoded bytes for the
-    /// WebView `nexasset://icon/...` route. Cached in an LRU keyed by
-    /// path. Returns `None` on empty path or decode failure.
+    /// WebView `nexasset://icon/...` route. The cache key includes the
+    /// normalization version so algorithm changes invalidate old entries.
     pub fn png_bytes(&self, path: &str) -> Option<Arc<Vec<u8>>> {
         if path.is_empty() {
             return None;
         }
-        let key = PathBuf::from(path);
+        let source = PathBuf::from(path);
+        let key = cache_key(path);
         if let Ok(mut inner) = self.inner.lock() {
             let bytes = inner.png.get(&key).cloned();
             if bytes.is_some() {
@@ -86,7 +93,7 @@ impl IconCache {
                 return bytes;
             }
         }
-        let bytes = Arc::new(decode_png(&key)?);
+        let bytes = Arc::new(decode_png(&source)?);
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.put(key.clone(), bytes.clone());
             inner.touch(key);
@@ -96,13 +103,12 @@ impl IconCache {
     }
 
     /// Same as `png_bytes` but never blocks — returns `None` if the
-    /// icon has not been decoded yet.  The background prefetch thread
-    /// fills the cache; the caller re-renders when it completes.
+    /// icon has not been decoded yet. The versioned key mirrors `png_bytes`.
     pub fn png_bytes_cached(&self, path: &str) -> Option<Arc<Vec<u8>>> {
         if path.is_empty() {
             return None;
         }
-        let key = PathBuf::from(path);
+        let key = cache_key(path);
         let mut inner = self.inner.lock().ok()?;
         let bytes = inner.png.get(&key).cloned()?;
         inner.touch(key);
@@ -204,15 +210,21 @@ fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
         }
     }
 
-    // Windows Terminal's AppsFolder shell item can expose only a 32px icon,
-    // while its package contains the sharp Start/taskbar logo assets.
+    // A few desktop vendors ship a higher-resolution application logo beside
+    // the executable while the EXE icon resource remains a legacy raster.
+    // Prefer those authoritative assets before invoking Windows extraction.
     #[cfg(target_os = "windows")]
-    if path_str.eq_ignore_ascii_case(
-        r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
-    ) {
-        if let Some(png) = windows_terminal_package_png() {
-            return Some(png);
-        }
+    if let Some(png) = vendor_asset_icon_png(&path_str) {
+        return Some(png);
+    }
+
+    // Packaged Store apps expose a shell item that is not necessarily the
+    // same logo Windows uses in Start and the taskbar. Resolve the package
+    // family from the AppsFolder identity and prefer its dense 44px logo
+    // variants before falling back to shell extraction.
+    #[cfg(target_os = "windows")]
+    if let Some(png) = package_logo_png(&path_str) {
+        return Some(png);
     }
 
     // Everything else: extract the shell icon.
@@ -241,174 +253,240 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_terminal_package_png() -> Option<Vec<u8>> {
-    let windows_apps = PathBuf::from(r"C:\Program Files\WindowsApps");
-    let package = std::fs::read_dir(windows_apps)
-        .ok()?
-        .filter_map(Result::ok)
+fn vendor_asset_icon_png(path: &str) -> Option<Vec<u8>> {
+    let target = if path.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk_target(path).unwrap_or_else(|| path.to_string())
+    } else {
+        path.to_string()
+    };
+    let lower = target.to_ascii_lowercase();
+    let candidates: &[&str] = if lower.ends_with(r"\cloudflare warp.exe") {
+        &[
+            r"data\flutter_assets\assets\app_icon\pngs\cloudflare-one-client-logo.png",
+        ]
+    } else if lower.ends_with(r"\steam.exe") {
+        &[r"public\steam_tray.ico", r"public\steam_offline.ico"]
+    } else if lower.ends_with(r"\photoshop.exe") {
+        &[
+            r"AMT\Core key files\AddRemoveInfo\ps_cc_folder_plugin.ico",
+            r"AMT\Core key files\AddRemoveInfo\ps_cc_folder.ico",
+        ]
+    } else {
+        &[]
+    };
+    let executable = PathBuf::from(target);
+    let root = executable.parent()?;
+    for relative in candidates {
+        let candidate = root.join(relative);
+        let Ok(bytes) = std::fs::read(&candidate) else { continue };
+        if let Some(png) = decode_image_bytes(&bytes) {
+            crate::logging::info(&format!(
+                "[nex] vendor icon: executable={} asset={}",
+                executable.display(),
+                candidate.display()
+            ));
+            return Some(png);
+        }
+    }
+    None
+}
+#[cfg(target_os = "windows")]
+/// Load the same family logo Windows uses for a packaged Start-menu app.
+/// AppsFolder's shell provider may return a sparse legacy logo or only a
+/// 16/32px bitmap, so the package assets are a more reliable quality source.
+fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
+    let identity = apps_folder_path.strip_prefix("shell:AppsFolder\\")
+        .or_else(|| apps_folder_path.strip_prefix("shell:AppsFolder/"))?;
+    let family = identity.split('!').next()?.trim();
+    let Some((package_name, publisher_id)) = family.rsplit_once('_') else {
+        return None;
+    };
+    if package_name.is_empty() || publisher_id.is_empty()
+        || package_name.contains('\\') || package_name.contains('/')
+    {
+        return None;
+    }
+    let program_files = std::env::var_os("ProgramFiles")?;
+    let package_root = PathBuf::from(program_files).join("WindowsApps");
+    let mut packages = std::fs::read_dir(package_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
         .map(|entry| entry.path())
-        .find(|path| {
+        .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| {
-                    name.starts_with("Microsoft.WindowsTerminal_")
-                        && name.ends_with("_8wekyb3d8bbwe")
+                    name.starts_with(&format!("{package_name}_"))
+                        && name.ends_with(&format!("__{publisher_id}"))
                 })
-        })?;
-
-    for name in [
-        "Square44x44Logo.scale-400.png",
-        "StoreLogo.scale-400.png",
-        "Square150x150Logo.scale-400.png",
-    ] {
-        let path = package.join("Images").join(name);
-        if let Ok(bytes) = std::fs::read(path) {
-            if let Some(png) = decode_image_bytes(&bytes) {
-                return Some(png);
+        })
+        .collect::<Vec<_>>();
+    // WindowsApps is commonly readable only through the AppX deployment
+    // service. Fall back to that service instead of assuming directory
+    // enumeration permissions, which is why packaged icons previously
+    // worked for Terminal only on some machines.
+    if packages.is_empty() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let family_arg = format!("{package_name}_{publisher_id}");
+        let script = format!(
+            "(Get-AppxPackage | Where-Object {{ $_.PackageFamilyName -eq '{}' }}).InstallLocation",
+            family_arg.replace('\'', "''")
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-WindowStyle", "Hidden", "-Command", &script,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok();
+        if let Some(output) = output.filter(|value| value.status.success()) {
+            let location = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !location.is_empty() {
+                packages.push(PathBuf::from(location));
             }
+        }
+    }
+    // Multiple versions can remain installed. The highest version sorts last
+    // for the WindowsApps naming convention; try newest first.
+    packages.sort_by(|a, b| b.cmp(a));
+    let mut candidates = Vec::new();
+    for package in packages {
+        let assets_root = package.join("Assets");
+        let images_root = package.join("Images");
+        for root in [assets_root, images_root] {
+            if !root.is_dir() {
+                continue;
+            }
+            for entry in walkdir::WalkDir::new(root)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+                    continue;
+                };
+                let lower = name.to_ascii_lowercase();
+                if !matches!(path.extension().and_then(|v| v.to_str()), Some(ext) if ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("ico")) {
+                    continue;
+                }
+                if lower.contains("splash")
+                    || lower.contains("tile")
+                    || lower.contains("lockscreen")
+                    || lower.contains("badge")
+                    || lower.contains("wide")
+                {
+                    continue;
+                }
+                let mut score = 0i32;
+                if lower.contains("targetsize-256") { score += 1000; }
+                if lower.contains("targetsize-") { score += 400; }
+                if lower.contains("applist") { score += 350; }
+                if lower.contains("square44") { score += 300; }
+                if lower.contains("storelogo") { score += 250; }
+                if lower.contains("logo") { score += 150; }
+                if lower.contains("scale-400") { score += 100; }
+                if score == 0 { continue; }
+                candidates.push((score, path.to_path_buf()));
+            }
+        }
+    }
+    candidates.sort_by(|(score_a, path_a), (score_b, path_b)| {
+        score_b.cmp(score_a).then_with(|| path_a.cmp(path_b))
+    });
+    for (_, path) in candidates {
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        if let Some(png) = decode_image_bytes(&bytes) {
+            crate::logging::info(&format!(
+                "[nex] package icon: family={family} asset={}",
+                path.display()
+            ));
+            return Some(png);
         }
     }
     None
 }
 
-/// Normalize any RGBA image to a consistent square canvas:
-/// Lanczos-resize to TARGET × TARGET (upscaling small sources,
-/// downscaling large ones), centered on a transparent canvas. Every
-/// result row gets a uniform square icon with consistent padding —
-/// Raycast look. Without the upscale, small shell extractions (e.g.
-/// Windows Settings) would render smaller than 256px sources (Spotify).
-///
-/// Content-aware upscale for sparse glyph icons: if visible pixels
-/// fill < 35% of the source image (small glyph centered in large
-/// transparent padding), crop to bounding box first then upscale the
-/// cropped region to fill TARGET × TARGET. This prevents Magnifier/
-/// JPEGView-style icons from rendering as tiny dots.
-///
-/// Full-bleed icons (Notepad ~58% fill) keep existing behavior.
-/// Degenerate case (all-transparent) returns native PNG as-is.
+/// Normalize an arbitrary RGBA image to a square canvas without stretching
+/// its artwork. Low-resolution sources stay native-sized; high-resolution
+/// padded sources are cropped before fitting to the target canvas.
 fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
     let target = TARGET_ICON_SIZE;
     let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
 
-    // ── Compute fill ratio (alpha > 8 = visible) ──
-    let mut content_px: u64 = 0;
-    let mut content_min_x = w;
-    let mut content_min_y = h;
-    let mut content_max_x: u32 = 0;
-    let mut content_max_y: u32 = 0;
+    let mut content_px = 0u64;
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
     for y in 0..h {
         for x in 0..w {
             if img.get_pixel(x, y)[3] > 8 {
                 content_px += 1;
-                if x < content_min_x { content_min_x = x; }
-                if y < content_min_y { content_min_y = y; }
-                if x > content_max_x { content_max_x = x; }
-                if y > content_max_y { content_max_y = y; }
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
             }
         }
     }
-    let fill_ratio = content_px as f32 / ((w * h) as f32);
-
-    // ── Compute core bounding box (alpha > 128 = solid) ──
-    // Use a stricter threshold to find the actual glyph core — anti-aliased
-    // border pixels (alpha 9-128) can span the full image, making the bbox
-    // useless for cropping. Core bbox captures the opaque glyph content.
-    let mut core_min_x = w;
-    let mut core_min_y = h;
-    let mut core_max_x: u32 = 0;
-    let mut core_max_y: u32 = 0;
-    let mut core_px: u64 = 0;
-    for y in 0..h {
-        for x in 0..w {
-            if img.get_pixel(x, y)[3] > 128 {
-                core_px += 1;
-                if x < core_min_x { core_min_x = x; }
-                if y < core_min_y { core_min_y = y; }
-                if x > core_max_x { core_max_x = x; }
-                if y > core_max_y { core_max_y = y; }
-            }
-        }
-    }
-    let core_bbox_valid = core_px > 0 && core_max_x >= core_min_x && core_max_y >= core_min_y;
-
-    // Low-resolution icons, and high-resolution assets with large transparent
-    // margins, need content cropping. Full-bleed app icons keep old path.
-    if w < 128 || h < 128 || fill_ratio < 0.35 {
-        if content_px > 0 {
-            let pad: u32 = 1;
-            let crop_x = content_min_x.saturating_sub(pad);
-            let crop_y = content_min_y.saturating_sub(pad);
-            let crop_x2 = (content_max_x + pad).min(w - 1);
-            let crop_y2 = (content_max_y + pad).min(h - 1);
-            let crop = image::imageops::crop_imm(
-                &img,
-                crop_x,
-                crop_y,
-                crop_x2 - crop_x + 1,
-                crop_y2 - crop_y + 1,
-            )
-            .to_image();
-            if w < 128 || h < 128 {
-                return rgba_to_png(crop);
-            }
-
-            // Refit padded high-resolution artwork to the standard canvas;
-            // source remains high-res, so this does not introduce blur.
-            use image::imageops::{self, FilterType};
-            let resized = imageops::resize(&crop, target, target, FilterType::Lanczos3);
-            return rgba_to_png(resized);
-        }
-        return rgba_to_png(img);
-    }
-
-    // ── Sparse glyph: crop to core bbox, upscale to target ──
-    // fill_ratio uses alpha>8 (permissive), core_bbox uses alpha>128 (strict).
-    // Both must agree: low fill AND core bbox significantly smaller than image.
-    if core_bbox_valid && fill_ratio < 0.35 {
-        let bbox_w = core_max_x - core_min_x + 1;
-        let bbox_h = core_max_y - core_min_y + 1;
-        // Only crop if core bbox is actually smaller than the source —
-        // otherwise we'd just be resizing the same dimensions.
-        if bbox_w < w || bbox_h < h {
-            use image::imageops::{self, FilterType};
-            let pad: u32 = 2;
-            let crop_x = core_min_x.saturating_sub(pad);
-            let crop_y = core_min_y.saturating_sub(pad);
-            let crop_x2 = (core_max_x + pad).min(w - 1);
-            let crop_y2 = (core_max_y + pad).min(h - 1);
-            let crop_w = crop_x2 - crop_x + 1;
-            let crop_h = crop_y2 - crop_y + 1;
-
-            let crop = image::imageops::crop_imm(&img, crop_x, crop_y, crop_w, crop_h).to_image();
-
-            // Upscale cropped region to fill TARGET × TARGET.
-            let resized = imageops::resize(&crop, target, target, FilterType::Lanczos3);
-            let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
-            let x = target.saturating_sub(resized.width()) / 2;
-            let y = target.saturating_sub(resized.height()) / 2;
-            imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
-            return rgba_to_png(canvas);
-        }
-    }
-
-    // Degenerate: all-transparent image → return native as-is.
     if content_px == 0 {
         return rgba_to_png(img);
     }
 
-    // ── Full-bleed / normal path ──
-    // Uniform canvas: upscale small sources, downscale large ones —
-    // every row icon renders at the same CSS size no matter what size
-    // the shell extraction returned (some app icons come back small,
-    // e.g. Windows Settings, while others are 256px).
+    let fill_ratio = content_px as f32 / (w as f32 * h as f32);
+    // 45% catches genuinely padded package logos while leaving ordinary
+    // full-bleed app icons (for example Notepad) on the existing path.
+    let padded = fill_ratio < 0.45;
+    let source = if w < 128 || h < 128 || padded {
+        let pad = if w < 128 || h < 128 { 1 } else { 2 };
+        let x = min_x.saturating_sub(pad);
+        let y = min_y.saturating_sub(pad);
+        let x2 = max_x.saturating_add(pad).min(w - 1);
+        let y2 = max_y.saturating_add(pad).min(h - 1);
+        image::imageops::crop_imm(&img, x, y, x2 - x + 1, y2 - y + 1).to_image()
+    } else {
+        img
+    };
+
+    // True 16/32px icon resources are too small for the fixed CSS slot.
+    // Upscale only these tiny sources into the normalized canvas; larger
+    // native sources keep their pixels and avoid introducing blur.
+    let tiny_native = w <= 32 && h <= 32;
+    if w < 128 || h < 128 {
+        if !tiny_native {
+            return rgba_to_png(source);
+        }
+    }
+
     use image::imageops::{self, FilterType};
-    let resized = imageops::resize(&img, target, target, FilterType::Lanczos3);
-    let mut canvas = image::RgbaImage::from_pixel(target, target, image::Rgba([0, 0, 0, 0]));
-    let x = target.saturating_sub(resized.width()) / 2;
-    let y = target.saturating_sub(resized.height()) / 2;
+    let scale = (target as f32 / source.width() as f32)
+        .min(target as f32 / source.height() as f32)
+        .min(if tiny_native { f32::MAX } else { 1.0 });
+
+    let dst_w = ((source.width() as f32 * scale).round() as u32).max(1);
+    let dst_h = ((source.height() as f32 * scale).round() as u32).max(1);
+    let resized = imageops::resize(&source, dst_w, dst_h, FilterType::Lanczos3);
+    let mut canvas = image::RgbaImage::from_pixel(
+        target,
+        target,
+        image::Rgba([0, 0, 0, 0]),
+    );
+    let x = (target - dst_w) / 2;
+    let y = (target - dst_h) / 2;
     imageops::overlay(&mut canvas, &resized, x as i64, y as i64);
     rgba_to_png(canvas)
 }
+
 
 fn rgba_to_png(rgba: image::RgbaImage) -> Option<Vec<u8>> {
     let (width, height) = rgba.dimensions();
@@ -423,6 +501,24 @@ fn rgba_to_png(rgba: image::RgbaImage) -> Option<Vec<u8>> {
     )
     .ok()?;
     Some(out.into_inner())
+}
+
+#[cfg(target_os = "windows")]
+fn recover_gdi_alpha(rgba: &mut [u8]) {
+    let alpha_present = rgba.chunks_exact(4).any(|pixel| pixel[3] != 0);
+    if alpha_present {
+        return;
+    }
+    let rgb_present = rgba.chunks_exact(4).any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0);
+    if !rgb_present {
+        return;
+    }
+    // Some legacy icon resources render through GDI with RGB populated but
+    // alpha left at zero. Treat the strongest color channel as coverage;
+    // this restores those icons without changing resources with real alpha.
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[3] = pixel[0].max(pixel[1]).max(pixel[2]);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -481,6 +577,7 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, s
             rgba[i * 4 + 2] = chunk[0]; // B ← R
             rgba[i * 4 + 3] = chunk[3]; // A ← A
         }
+        recover_gdi_alpha(&mut rgba);
 
         DeleteObject(hbmp as _);
         DeleteDC(hdc);
@@ -848,24 +945,25 @@ fn shell_item_image_factory_png(_shell_path: &str) -> Option<Vec<u8>> {
     None
 }
 
-#[cfg(target_os = "windows")]
-/// Extract the best quality icon from a file. Primary chain:
-/// IShellItemImageFactory → PrivateExtractIconsW → SHGetFileInfo.
+/// Extract the best quality icon from a file. Shell extraction is universal,
+/// but it can legally return only a 16/32px bitmap even when the executable
+/// embeds a larger resource. Try the executable resource first, then accept
+/// the shell result only when it is the best available fallback.
 #[cfg(target_os = "windows")]
 fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
-    // 1. IShellItemImageFactory — universal, handles all shell types.
-    if let Some(png) = shell_item_image_factory_png(shell_path) {
-        return Some(png);
-    }
-
-    // 2. PrivateExtractIconsW (high-res from .exe/.ico/.dll icon resources).
     let resolved_target = if shell_path.to_ascii_lowercase().ends_with(".lnk") {
         resolve_lnk_target(shell_path)
     } else {
         None
     };
-    let resource_paths = resolved_target.as_deref().into_iter().chain(std::iter::once(shell_path));
-    for path in resource_paths {
+    let resource_paths = resolved_target
+        .as_deref()
+        .into_iter()
+        .chain(std::iter::once(shell_path));
+
+    // PrivateExtractIconsW reads the actual multi-size icon resource from
+    // EXE/ICO/DLL files. This is the path Windows uses for many desktop apps.
+    for path in resource_paths.clone() {
         if !path.starts_with("shell:") {
             if let Some(png) = private_extract_icons_png(path) {
                 return Some(png);
@@ -873,7 +971,12 @@ fn extract_shell_icon_png(shell_path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // 3. SHGetFileInfo — last resort fallback.
+    // IShellItemImageFactory handles virtual shell items and packaged apps.
+    // It remains the preferred fallback for paths without a filesystem icon.
+    if let Some(png) = shell_item_image_factory_png(shell_path) {
+        return Some(png);
+    }
+
     extract_shell_icon_fallback(shell_path)
 }
 
@@ -1075,6 +1178,74 @@ mod tests {
         assert_eq!(evicted, 0);
     }
 
+    fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+        let (w, h) = image.dimensions();
+        let mut min_x = w;
+        let mut min_y = h;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut found = false;
+        for y in 0..h {
+            for x in 0..w {
+                if image.get_pixel(x, y)[3] > 8 {
+                    found = true;
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        found.then_some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+    }
+
+    #[test]
+    fn small_native_icon_is_not_upscaled_by_decoder() {
+        let mut image = image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 0, 0, 0]));
+        for y in 4..28 {
+            for x in 4..28 {
+                image.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        let png = normalize_to_square_png(image).expect("normalization should encode");
+        let decoded = image::load_from_memory(&png).expect("normalized PNG should decode").into_rgba8();
+        assert_eq!(decoded.dimensions(), (128, 128));
+        let (_, _, width, height) = alpha_bounds(&decoded).expect("tiny artwork should remain visible");
+        assert!(width >= 96 && height >= 96, "tiny source should fill normalized canvas");
+    }
+
+    #[test]
+    fn padded_high_resolution_icon_is_cropped_without_stretching() {
+        let mut image = image::RgbaImage::from_pixel(600, 600, image::Rgba([0, 0, 0, 0]));
+        for y in 228..372 {
+            for x in 203..396 {
+                image.put_pixel(x, y, image::Rgba([0, 128, 255, 255]));
+            }
+        }
+        let png = normalize_to_square_png(image).expect("normalization should encode");
+        let decoded = image::load_from_memory(&png).expect("normalized PNG should decode").into_rgba8();
+        assert_eq!(decoded.dimensions(), (128, 128));
+        let (_, _, width, height) = alpha_bounds(&decoded).expect("artwork should remain visible");
+        assert!(width > height, "wide logo must remain wide after normalization");
+        assert!(width as f32 / height as f32 > 1.2);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn packaged_terminal_logo_uses_high_resolution_asset_when_available() {
+        let path = r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App";
+        let Some(png) = package_logo_png(path) else {
+            eprintln!("SKIP: Windows Terminal package is not installed");
+            return;
+        };
+        let image = image::load_from_memory(&png)
+            .expect("package logo output should be valid PNG")
+            .into_rgba8();
+        assert_eq!(image.dimensions(), (128, 128));
+        let (_, _, width, height) = alpha_bounds(&image).expect("package logo should contain artwork");
+        assert!(width > height, "Terminal logo should retain its wide artwork ratio");
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     fn bench_icon_extraction_paths() {
@@ -1133,11 +1304,82 @@ mod tests {
 
         eprintln!("── Icon extraction benchmark ({n} iterations each) ──");
         eprintln!("IShellItemImageFactory: mean={siif_mean:.1}µs  p95={siif_p95:.1}µs");
+
         eprintln!("PrivateExtractIconsW:   mean={peiw_mean:.1}µs  p95={peiw_p95:.1}µs");
 
         // Assert both paths are in the same ballpark (within 3x of each other)
         let ratio = siif_mean.max(peiw_mean) / siif_mean.min(peiw_mean);
         assert!(ratio < 3.0, "IShellItemImageFactory (mean={siif_mean:.0}µs) vs PrivateExtractIconsW (mean={peiw_mean:.0}µs) differ by {ratio:.1}x — unexpected");
+    }
+}
+#[cfg(test)]
+#[cfg(target_os = "windows")]
+mod installed_app_probes {
+    use super::*;
+
+    fn alpha_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+        let (w, h) = image.dimensions();
+        let mut min_x = w;
+        let mut min_y = h;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut found = false;
+        for y in 0..h {
+            for x in 0..w {
+                if image.get_pixel(x, y)[3] > 8 {
+                    found = true;
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        if !found { None } else { Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)) }
+    }
+
+    #[test]
+    fn probe_common_app_icon_sources() {
+        let cases = [
+            ("camera", r"shell:AppsFolder\Microsoft.WindowsCamera_8wekyb3d8bbwe!App"),
+            ("calculator", r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+            ("terminal", r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"),
+            ("photoshop", r"C:\Program Files\Adobe\Adobe Photoshop 2026\Photoshop.exe"),
+        ];
+        for (label, path) in cases {
+            let Some(png) = decode_png(&PathBuf::from(path)) else {
+                eprintln!("icon probe [{label}] unavailable: {path}");
+                continue;
+            };
+            let image = image::load_from_memory(&png)
+                .expect("icon output should be valid PNG")
+                .into_rgba8();
+            let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
+            eprintln!("icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
+            assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
+        }
+    }
+
+    #[test]
+    fn probe_remaining_desktop_icon_sources() {
+        let cases = [
+            ("cloudflare", r"C:\Program Files\Cloudflare\Cloudflare WARP\Cloudflare WARP.exe"),
+            ("jpegview", r"C:\Program Files\JPEGView\JPEGView.exe"),
+            ("bloodstrike", r"C:\Program Files (x86)\bloodstrike\launcher.exe"),
+        ];
+        for (label, path) in cases {
+            let Some(png) = decode_png(&PathBuf::from(path)) else {
+                eprintln!("remaining icon probe [{label}] unavailable: {path}");
+                continue;
+            };
+            let image = image::load_from_memory(&png)
+                .expect("icon output should be valid PNG")
+                .into_rgba8();
+            let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
+            eprintln!("remaining icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
+            assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
+            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
+        }
     }
 }
 

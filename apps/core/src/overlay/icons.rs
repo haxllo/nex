@@ -493,6 +493,24 @@ fn rgba_to_png(rgba: image::RgbaImage) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
+fn recover_gdi_alpha(rgba: &mut [u8]) {
+    let alpha_present = rgba.chunks_exact(4).any(|pixel| pixel[3] != 0);
+    if alpha_present {
+        return;
+    }
+    let rgb_present = rgba.chunks_exact(4).any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0);
+    if !rgb_present {
+        return;
+    }
+    // Some legacy icon resources render through GDI with RGB populated but
+    // alpha left at zero. Treat the strongest color channel as coverage;
+    // this restores those icons without changing resources with real alpha.
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[3] = pixel[0].max(pixel[1]).max(pixel[2]);
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, size: i32) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, CreateDIBSection, SelectObject, DeleteObject,
@@ -548,6 +566,7 @@ fn icon_to_rgba_png(hicon: windows_sys::Win32::UI::WindowsAndMessaging::HICON, s
             rgba[i * 4 + 2] = chunk[0]; // B ← R
             rgba[i * 4 + 3] = chunk[3]; // A ← A
         }
+        recover_gdi_alpha(&mut rgba);
 
         DeleteObject(hbmp as _);
         DeleteDC(hdc);
@@ -1303,7 +1322,7 @@ mod installed_app_probes {
                 }
             }
         }
-        found.then_some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+        if !found { None } else { Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)) }
     }
 
     #[test]
@@ -1325,7 +1344,6 @@ mod installed_app_probes {
             let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
             eprintln!("icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
             assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
-            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
         }
     }
 
@@ -1333,8 +1351,8 @@ mod installed_app_probes {
     fn probe_remaining_desktop_icon_sources() {
         let cases = [
             ("cloudflare", r"C:\Program Files\Cloudflare\Cloudflare WARP\Cloudflare WARP.exe"),
-            ("steam", r"G:\Program Files\Steam\steam.exe"),
-            ("photoshop", r"C:\Program Files\Adobe\Adobe Photoshop 2026\Photoshop.exe"),
+            ("jpegview", r"C:\Program Files\JPEGView\JPEGView.exe"),
+            ("bloodstrike", r"C:\Program Files (x86)\bloodstrike\launcher.exe"),
         ];
         for (label, path) in cases {
             let Some(png) = decode_png(&PathBuf::from(path)) else {

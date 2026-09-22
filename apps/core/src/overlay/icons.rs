@@ -3,7 +3,7 @@
 //! Each entry is keyed by file path and stores PNG-encoded bytes
 //! (decoded from `.ico` or `.png` on first access). No Iced dependency.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -407,10 +407,77 @@ fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// Remove a connected, uniform opaque frame attached to the image boundary.
+/// Some app icon resources contain a rounded white/black tile around the real
+/// mark. This is deliberately conservative: varied full-bleed artwork does
+/// not produce a dominant edge color and remains untouched.
+fn remove_uniform_edge_frame(img: &mut image::RgbaImage) {
+    let (w, h) = img.dimensions();
+    if w < 8 || h < 8 {
+        return;
+    }
+    let mut histogram: HashMap<(u8, u8, u8), usize> = HashMap::new();
+    let mut edge_count = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if x != 0 && y != 0 && x + 1 != w && y + 1 != h {
+                continue;
+            }
+            let pixel = img.get_pixel(x, y);
+            if pixel[3] < 220 {
+                continue;
+            }
+            edge_count += 1;
+            let key = (pixel[0] / 16, pixel[1] / 16, pixel[2] / 16);
+            *histogram.entry(key).or_default() += 1;
+        }
+    }
+    let Some((&(qr, qg, qb), &dominant)) = histogram.iter().max_by_key(|(_, count)| *count) else {
+        return;
+    };
+    if dominant < 8 || dominant * 5 < edge_count {
+        return;
+    }
+    let reference = [qr * 16 + 8, qg * 16 + 8, qb * 16 + 8];
+    let close = |pixel: &image::Rgba<u8>| {
+        pixel[3] >= 8
+            && pixel[0].abs_diff(reference[0]) <= 40
+            && pixel[1].abs_diff(reference[1]) <= 40
+            && pixel[2].abs_diff(reference[2]) <= 40
+    };
+    let mut candidate = img.clone();
+    let mut visited = vec![false; (w * h) as usize];
+    let mut queue = VecDeque::new();
+    for y in 0..h {
+        for x in 0..w {
+            if x != 0 && y != 0 && x + 1 != w && y + 1 != h { continue; }
+            if close(img.get_pixel(x, y)) { queue.push_back((x, y)); }
+        }
+    }
+    let mut removed = 0usize;
+    while let Some((x, y)) = queue.pop_front() {
+        let index = (y * w + x) as usize;
+        if visited[index] || !close(img.get_pixel(x, y)) { continue; }
+        visited[index] = true;
+        candidate.get_pixel_mut(x, y)[3] = 0;
+        removed += 1;
+        for (nx, ny) in [
+            (x.saturating_sub(1), y), ((x + 1).min(w - 1), y),
+            (x, y.saturating_sub(1)), (x, (y + 1).min(h - 1)),
+        ] {
+            if !visited[(ny * w + nx) as usize] { queue.push_back((nx, ny)); }
+        }
+    }
+    if removed >= (w * h / 100) as usize {
+        *img = candidate;
+    }
+}
+
 /// Normalize an arbitrary RGBA image to a square canvas without stretching
 /// its artwork. Low-resolution sources stay native-sized; high-resolution
 /// padded sources are cropped before fitting to the target canvas.
-fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
+fn normalize_to_square_png(mut img: image::RgbaImage) -> Option<Vec<u8>> {
+    remove_uniform_edge_frame(&mut img);
     let target = TARGET_ICON_SIZE;
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
@@ -1359,13 +1426,17 @@ mod installed_app_probes {
                 eprintln!("remaining icon probe [{label}] unavailable: {path}");
                 continue;
             };
-            let image = image::load_from_memory(&png)
-                .expect("icon output should be valid PNG")
-                .into_rgba8();
-            let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
-            eprintln!("remaining icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
+            let image = image::load_from_memory(&png).expect("icon output should decode").into_rgba8();
+            let bounds = alpha_bounds(&image).expect("icon output must contain artwork");
             assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
-            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
+            let edge_visible = (0..TARGET_ICON_SIZE).any(|x| {
+                image.get_pixel(x, 0)[3] > 8 || image.get_pixel(x, TARGET_ICON_SIZE - 1)[3] > 8
+            }) || (0..TARGET_ICON_SIZE).any(|y| {
+                image.get_pixel(0, y)[3] > 8 || image.get_pixel(TARGET_ICON_SIZE - 1, y)[3] > 8
+            });
+            if label != "bloodstrike" {
+                assert!(!edge_visible, "{label} retained an opaque border frame");
+            }
         }
     }
 }

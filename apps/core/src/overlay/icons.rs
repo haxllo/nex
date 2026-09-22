@@ -204,6 +204,14 @@ fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
         }
     }
 
+    // A few desktop vendors ship a higher-resolution application logo beside
+    // the executable while the EXE icon resource remains a legacy raster.
+    // Prefer those authoritative assets before invoking Windows extraction.
+    #[cfg(target_os = "windows")]
+    if let Some(png) = vendor_asset_icon_png(&path_str) {
+        return Some(png);
+    }
+
     // Packaged Store apps expose a shell item that is not necessarily the
     // same logo Windows uses in Start and the taskbar. Resolve the package
     // family from the AppsFolder identity and prefer its dense 44px logo
@@ -238,6 +246,44 @@ fn decode_image_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     normalize_to_square_png(img.into_rgba8())
 }
 
+#[cfg(target_os = "windows")]
+fn vendor_asset_icon_png(path: &str) -> Option<Vec<u8>> {
+    let target = if path.to_ascii_lowercase().ends_with(".lnk") {
+        resolve_lnk_target(path).unwrap_or_else(|| path.to_string())
+    } else {
+        path.to_string()
+    };
+    let lower = target.to_ascii_lowercase();
+    let candidates: &[&str] = if lower.ends_with(r"\cloudflare warp.exe") {
+        &[
+            r"data\flutter_assets\assets\app_icon\pngs\cloudflare-one-client-logo.png",
+        ]
+    } else if lower.ends_with(r"\steam.exe") {
+        &[r"public\steam_tray.ico", r"public\steam_offline.ico"]
+    } else if lower.ends_with(r"\photoshop.exe") {
+        &[
+            r"AMT\Core key files\AddRemoveInfo\ps_cc_folder_plugin.ico",
+            r"AMT\Core key files\AddRemoveInfo\ps_cc_folder.ico",
+        ]
+    } else {
+        &[]
+    };
+    let executable = PathBuf::from(target);
+    let root = executable.parent()?;
+    for relative in candidates {
+        let candidate = root.join(relative);
+        let Ok(bytes) = std::fs::read(&candidate) else { continue };
+        if let Some(png) = decode_image_bytes(&bytes) {
+            crate::logging::info(&format!(
+                "[nex] vendor icon: executable={} asset={}",
+                executable.display(),
+                candidate.display()
+            ));
+            return Some(png);
+        }
+    }
+    None
+}
 #[cfg(target_os = "windows")]
 /// Load the same family logo Windows uses for a packaged Start-menu app.
 /// AppsFolder's shell provider may return a sparse legacy logo or only a
@@ -1276,10 +1322,32 @@ mod installed_app_probes {
             let image = image::load_from_memory(&png)
                 .expect("icon output should be valid PNG")
                 .into_rgba8();
-            let bounds = alpha_bounds(&image);
-            eprintln!("icon probe [{label}] path={path} dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
+            let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
+            eprintln!("icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
             assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
-            assert!(bounds.is_some(), "{label} output must contain visible artwork");
+            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
+        }
+    }
+
+    #[test]
+    fn probe_remaining_desktop_icon_sources() {
+        let cases = [
+            ("cloudflare", r"C:\Program Files\Cloudflare\Cloudflare WARP\Cloudflare WARP.exe"),
+            ("steam", r"G:\Program Files\Steam\steam.exe"),
+            ("photoshop", r"C:\Program Files\Adobe\Adobe Photoshop 2026\Photoshop.exe"),
+        ];
+        for (label, path) in cases {
+            let Some(png) = decode_png(&PathBuf::from(path)) else {
+                eprintln!("remaining icon probe [{label}] unavailable: {path}");
+                continue;
+            };
+            let image = image::load_from_memory(&png)
+                .expect("icon output should be valid PNG")
+                .into_rgba8();
+            let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
+            eprintln!("remaining icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
+            assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
+            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
         }
     }
 }

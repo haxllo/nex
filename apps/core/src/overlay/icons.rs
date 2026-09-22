@@ -25,6 +25,12 @@ const TARGET_ICON_SIZE: u32 = 128;
 /// native smaller sources are kept native-sized to avoid blur.
 const EXTRACT_ICON_SIZE: i32 = 256;
 
+const ICON_NORMALIZATION_VERSION: u8 = 2;
+
+fn cache_key(path: &str) -> PathBuf {
+    PathBuf::from(format!("v{}|{}", ICON_NORMALIZATION_VERSION, path))
+}
+
 pub struct IconCache {
     inner: Mutex<Inner>,
 }
@@ -72,13 +78,14 @@ impl IconCache {
     }
 
     /// Decode `path` (.ico/.png) and return PNG-encoded bytes for the
-    /// WebView `nexasset://icon/...` route. Cached in an LRU keyed by
-    /// path. Returns `None` on empty path or decode failure.
+    /// WebView `nexasset://icon/...` route. The cache key includes the
+    /// normalization version so algorithm changes invalidate old entries.
     pub fn png_bytes(&self, path: &str) -> Option<Arc<Vec<u8>>> {
         if path.is_empty() {
             return None;
         }
-        let key = PathBuf::from(path);
+        let source = PathBuf::from(path);
+        let key = cache_key(path);
         if let Ok(mut inner) = self.inner.lock() {
             let bytes = inner.png.get(&key).cloned();
             if bytes.is_some() {
@@ -86,7 +93,7 @@ impl IconCache {
                 return bytes;
             }
         }
-        let bytes = Arc::new(decode_png(&key)?);
+        let bytes = Arc::new(decode_png(&source)?);
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.put(key.clone(), bytes.clone());
             inner.touch(key);
@@ -96,13 +103,12 @@ impl IconCache {
     }
 
     /// Same as `png_bytes` but never blocks — returns `None` if the
-    /// icon has not been decoded yet.  The background prefetch thread
-    /// fills the cache; the caller re-renders when it completes.
+    /// icon has not been decoded yet. The versioned key mirrors `png_bytes`.
     pub fn png_bytes_cached(&self, path: &str) -> Option<Arc<Vec<u8>>> {
         if path.is_empty() {
             return None;
         }
-        let key = PathBuf::from(path);
+        let key = cache_key(path);
         let mut inner = self.inner.lock().ok()?;
         let bytes = inner.png.get(&key).cloned()?;
         inner.touch(key);
@@ -452,16 +458,21 @@ fn normalize_to_square_png(img: image::RgbaImage) -> Option<Vec<u8>> {
         img
     };
 
-    // Never upscale a native small icon. The browser may display it in a
-    // larger CSS slot, but the source pixels remain crisp and uninvented.
+    // True 16/32px icon resources are too small for the fixed CSS slot.
+    // Upscale only these tiny sources into the normalized canvas; larger
+    // native sources keep their pixels and avoid introducing blur.
+    let tiny_native = w <= 32 && h <= 32;
     if w < 128 || h < 128 {
-        return rgba_to_png(source);
+        if !tiny_native {
+            return rgba_to_png(source);
+        }
     }
 
     use image::imageops::{self, FilterType};
     let scale = (target as f32 / source.width() as f32)
         .min(target as f32 / source.height() as f32)
-        .min(1.0);
+        .min(if tiny_native { f32::MAX } else { 1.0 });
+
     let dst_w = ((source.width() as f32 * scale).round() as u32).max(1);
     let dst_h = ((source.height() as f32 * scale).round() as u32).max(1);
     let resized = imageops::resize(&source, dst_w, dst_h, FilterType::Lanczos3);
@@ -1198,7 +1209,9 @@ mod tests {
         }
         let png = normalize_to_square_png(image).expect("normalization should encode");
         let decoded = image::load_from_memory(&png).expect("normalized PNG should decode").into_rgba8();
-        assert_eq!(decoded.dimensions(), (26, 26));
+        assert_eq!(decoded.dimensions(), (128, 128));
+        let (_, _, width, height) = alpha_bounds(&decoded).expect("tiny artwork should remain visible");
+        assert!(width >= 96 && height >= 96, "tiny source should fill normalized canvas");
     }
 
     #[test]

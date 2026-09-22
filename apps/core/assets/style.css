@@ -483,7 +483,6 @@ img.icon.icon-pop {
 .grid-view .row.row-list .icon {
   width: 24px;
   height: 24px;
-  border-radius: 6px;
 }
 .grid-view .row.row-list .icon.placeholder::after {
   width: 20px;
@@ -517,7 +516,6 @@ img.icon.icon-pop {
   flex: 0 0 auto;
   width: 24px;
   height: 24px;
-  border-radius: 6px;
   object-fit: contain;
 }
 .grid-view .row .icon {

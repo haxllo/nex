@@ -1,6 +1,5 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::time::UNIX_EPOCH;
 
 use crate::action_registry::{
     ACTION_CHECK_UPDATES_ID, ACTION_CLIPBOARD_HISTORY_ID, ACTION_LOCK_ID,
@@ -124,18 +123,6 @@ pub(crate) fn launch_overlay_selection(
     service
         .launch_with_query_context(LaunchTarget::Id(&selected.id), Some(query_text), Some(mode))
         .map_err(|error| format!("launch failed: {error}"))?;
-
-    // Record the launch for Quick Launch usage tracking
-    if selected.kind.eq_ignore_ascii_case("app") {
-        let now = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let db = service.db_ref();
-        if let Err(error) = crate::index_store::record_launch(&db, &selected.id, now) {
-            crate::runtime::log_warn(&format!("[nex] record_launch failed: {error}"));
-        }
-    }
 
     Ok(true)
 }

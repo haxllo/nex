@@ -66,7 +66,8 @@ pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError>
     db.execute(
         "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, path=excluded.path, subtitle=excluded.subtitle,
-         use_count=excluded.use_count, last_accessed_epoch_secs=excluded.last_accessed_epoch_secs",
+         use_count=excluded.use_count, last_accessed_epoch_secs=excluded.last_accessed_epoch_secs,
+         launch_count=excluded.launch_count, last_launched_at=excluded.last_launched_at",
         params![
             item.id,
             item.kind,
@@ -174,22 +175,6 @@ pub fn record_query_selection(
          selected_count = MIN(item_query_memory.selected_count + 1, 1000),
          last_selected_epoch_secs = excluded.last_selected_epoch_secs",
         params![query_norm, mode, item_id, selected_at_epoch_secs],
-    )?;
-    Ok(())
-}
-
-/// Record an app launch for Quick Launch usage tracking.
-pub fn record_launch(
-    db: &Connection,
-    item_id: &str,
-    launched_at_epoch_secs: i64,
-) -> Result<(), StoreError> {
-    db.execute(
-        "UPDATE item SET
-         launch_count = launch_count + 1,
-         last_launched_at = ?2
-         WHERE id = ?1",
-        params![item_id, launched_at_epoch_secs],
     )?;
     Ok(())
 }

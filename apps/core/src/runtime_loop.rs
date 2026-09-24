@@ -2010,16 +2010,17 @@ impl RuntimeWorker {
                             match crate::action_executor::launch_open_target(&path) {
                                 Ok(()) => {
                                     log_info(&format!("[nex] quick_launch launched '{}'", item.title));
-                                    // Record the launch
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0);
-                                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
-                                    let db = guard.db_ref();
-                                    // Find the item ID by path to record launch
-                                    if let Ok(Some((id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&db, &path) {
-                                        if let Err(error) = crate::index_store::record_launch(&db, &id, now) {
+                                    let id = {
+                                        let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                                        let db = guard.db_ref();
+                                        crate::index_store::find_item_by_path_or_title(&db, &path)
+                                            .ok()
+                                            .flatten()
+                                            .map(|(id, _, _, _, _)| id)
+                                    };
+                                    if let Some(id) = id {
+                                        let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                                        if let Err(error) = guard.record_successful_launch_by_id(&id) {
                                             log_warn(&format!("[nex] record_launch failed: {error}"));
                                         }
                                     }

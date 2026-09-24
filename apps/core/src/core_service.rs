@@ -530,16 +530,10 @@ impl CoreService {
                     .ok_or_else(|| ServiceError::ItemNotFound(id.to_string()))?;
                 match launch_path(&item.path) {
                     Ok(()) => {
-                        // Update the in-memory cache immediately (no DB
-                        // contention). The DB persistence is best-effort
-                        // — the stale pruner or next index rebuild will
-                        // pick up the current use_count from memory.
-                        let now = now_epoch_secs();
-                        let mut updated = item.clone();
-                        updated.use_count = updated.use_count.saturating_add(1);
-                        updated.last_accessed_epoch_secs =
-                            now.max(updated.last_accessed_epoch_secs);
-                        self.upsert_cached_item(updated);
+                        // Launch learning updates both ranking and Quick Launch.
+                        if let Err(error) = self.record_successful_launch(&item) {
+                            crate::logging::warn(&format!("[nex] record launch failed: {error}"));
+                        }
                         Ok(())
                     }
                     Err(error) if should_prune_after_launch_error(&item, &error) => {
@@ -1683,13 +1677,27 @@ impl CoreService {
     #[cfg(not(target_os = "windows"))]
     pub(crate) fn log_memory_stats(&self) {}
 
+    pub(crate) fn record_successful_launch_by_id(&self, id: &str) -> Result<(), ServiceError> {
+        let item = self
+            .cached_items
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| ServiceError::ItemNotFound(id.to_string()))?;
+        self.record_successful_launch(&item)
+    }
+
     fn record_successful_launch(&self, item: &SearchItem) -> Result<(), ServiceError> {
         let now = now_epoch_secs();
         let mut updated = item.clone();
         updated.use_count = updated.use_count.saturating_add(1);
+        updated.launch_count = updated.launch_count.saturating_add(1);
         updated.last_accessed_epoch_secs = now.max(updated.last_accessed_epoch_secs);
+        updated.last_launched_at = now.max(updated.last_launched_at);
 
-        index_store::upsert_item(&*self.db(), &updated)?;
+        index_store::upsert_item(&self.db(), &updated)?;
         self.upsert_cached_item(updated);
         Ok(())
     }
@@ -2219,7 +2227,7 @@ mod tests {
         effective_file_folder_cache_cap, CoreService,
     };
     use crate::config::{Config, SearchMode};
-    use crate::index_store::open_memory;
+    use crate::index_store::{self, open_memory};
     use crate::model::SearchItem;
     use crate::search::SearchFilter;
     use std::path::PathBuf;
@@ -2305,6 +2313,37 @@ mod tests {
             results.iter().any(|item| item.id == "app-zulu"),
             "newly added item must be visible immediately"
         );
+    }
+
+    #[test]
+    fn successful_launch_updates_ranking_and_quick_launch_usage() {
+        let service = CoreService::with_connection(
+            isolated_config("launch-usage"),
+            open_memory().unwrap(),
+        )
+        .expect("service should initialize");
+        let item = SearchItem::new("app-editor", "app", "Editor", "C:\\editor.exe");
+        service.upsert_item(&item).expect("item should upsert");
+
+        service
+            .record_successful_launch_by_id(&item.id)
+            .expect("launch should be recorded");
+
+        let cached = service
+            .cached_items_snapshot()
+            .into_iter()
+            .find(|candidate| candidate.id == item.id)
+            .expect("item should remain cached");
+        assert_eq!(cached.use_count, 1);
+        assert_eq!(cached.launch_count, 1);
+        assert!(cached.last_accessed_epoch_secs > 0);
+        assert_eq!(cached.last_accessed_epoch_secs, cached.last_launched_at);
+
+        let stored = index_store::get_item(&service.db(), &item.id)
+            .expect("stored item should load")
+            .expect("stored item should exist");
+        assert_eq!(stored.use_count, 1);
+        assert_eq!(stored.launch_count, 1);
     }
 
     #[test]

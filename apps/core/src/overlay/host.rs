@@ -854,7 +854,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     );
                                 } else if body.contains("\"t\":\"minimize\"") {
                                     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-                                    if let Ok(mut slot) = settings_hwnd_for_ipc.lock() {
+                                    if let Ok(slot) = settings_hwnd_for_ipc.lock() {
                                         if let Some(h) = *slot {
                                             unsafe { ShowWindow(h, SW_MINIMIZE); }
                                         }
@@ -1866,7 +1866,6 @@ fn hide_overlay_window(hwnd: HWND, window: &Window) {
 /// with nex.exe's PID, so `SetForegroundWindow` will succeed without it.
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         ShowWindow, SW_SHOW,

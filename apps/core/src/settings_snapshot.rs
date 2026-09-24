@@ -1,4 +1,4 @@
-use crate::{config::{self, Config}, overlay::model::Theme};
+use crate::{config::{self, Config}};
 
 pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("bad json: {e}"))?;

@@ -1,5 +1,4 @@
 use crate::action_registry::search_actions_with_mode;
-use crate::clipboard_history;
 use crate::config::Config;
 use crate::core_service::CoreService;
 use crate::model::SearchItem;

@@ -1054,8 +1054,8 @@ fn write_fullres_to_clipboard(cfg: &Config, hash: u64) -> Result<(), String> {
         let dst_row = height - 1 - y;
         for x in 0..width {
             let src_idx = ((y * width + x) * 4) as usize;
-            let dst_idx = (header_size as usize + dst_row as usize * row_size as usize
-                + x as usize * 3);
+            let dst_idx = header_size as usize + dst_row as usize * row_size as usize
+                + x as usize * 3;
             dib[dst_idx] = rgba[src_idx + 2]; // B
             dib[dst_idx + 1] = rgba[src_idx + 1]; // G
             dib[dst_idx + 2] = rgba[src_idx]; // R

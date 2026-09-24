@@ -1448,18 +1448,22 @@ fn raw_extract_string_array(raw: &str, key: &str) -> Vec<String> {
             if let Some(start) = after.find('[') {
                 let arr_content = &after[start..];
                 if let Some(end) = arr_content.find(']') {
-                    let arr_str = &arr_content[1..end];
-                    // Parse quoted strings
-                    let mut result = Vec::new();
-                    for item in arr_str.split(',') {
-                        let trimmed = item.trim();
-                        // Remove quotes
-                        let cleaned = trimmed.trim_matches('"').trim_matches('\'').trim();
-                        if !cleaned.is_empty() {
-                            result.push(cleaned.to_string());
+                    if end > 1 {
+                        let arr_str = &arr_content[1..end];
+                        // Parse quoted strings
+                        let mut result = Vec::new();
+                        for item in arr_str.split(',') {
+                            let trimmed = item.trim();
+                            // Remove quotes
+                            let cleaned = trimmed.trim_matches('"').trim_matches('\'').trim();
+                            if !cleaned.is_empty() {
+                                result.push(cleaned.to_string());
+                            }
                         }
+                        return result;
                     }
-                    return result;
+                    // Empty array []
+                    return Vec::new();
                 }
             }
         }

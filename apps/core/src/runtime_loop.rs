@@ -47,7 +47,7 @@ use crate::runtime_index::{
 use crate::runtime_overlay_rows::{
     filter_suppressed_uninstall_results, overlay_rows, overlay_rows_ext,
     reconcile_suppressed_uninstall_titles, result_row, set_idle_overlay_state,
-    set_quick_launch_overlay_state, set_status_row_overlay_state,
+    set_status_row_overlay_state,
     track_uninstall_title_suppression, uninstall_target_title_from_action_title,
     ConfirmationKind, PendingConfirmation,
     ACTION_POWER_CANCEL_ID, ACTION_POWER_CONFIRM_ID,
@@ -273,7 +273,6 @@ pub(crate) fn run_windows_runtime(
     // from the worker thread. A dedicated updater thread owns the
     // tray_icon and applies state changes.
     let (tray_gm_tx, tray_gm_rx) = crossbeam_channel::unbounded::<bool>();
-    let (tray_hi_tx, tray_hi_rx) = crossbeam_channel::unbounded::<bool>();
     let _tray_updater = std::thread::Builder::new()
         .name("nex-tray-updater".into())
         .spawn(move || {
@@ -282,12 +281,6 @@ pub(crate) fn run_windows_runtime(
                     recv(tray_gm_rx) -> msg => {
                         match msg {
                             Ok(enabled) => tray_icon.set_game_mode(enabled),
-                            Err(_) => break,
-                        }
-                    }
-                    recv(tray_hi_rx) -> msg => {
-                        match msg {
-                            Ok(active) => tray_icon.set_hotkey_issue(active),
                             Err(_) => break,
                         }
                     }
@@ -312,7 +305,6 @@ pub(crate) fn run_windows_runtime(
                         .unwrap_or_else(|| "unknown".to_string())
                 ));
                 overlay.set_hotkey_issue_active(false);
-                let _ = tray_hi_tx.send(false);
                 *hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener);
                 None
             }
@@ -332,7 +324,6 @@ pub(crate) fn run_windows_runtime(
                 ));
                 log_warn(&format!("[nex] {recovery_message}"));
                 overlay.set_hotkey_issue_active(true);
-                let _ = tray_hi_tx.send(true);
                 let status = hotkey_registration_status_text(&runtime_config.hotkey);
                 overlay.set_status_text(&status);
                 Some(status)
@@ -427,7 +418,6 @@ pub(crate) fn run_windows_runtime(
         event_rx,
         is_running,
         tray_gm_tx,
-        tray_hi_tx,
         hotkey_listener: hotkey_listener.clone(),
         event_tx: event_tx.clone(),
         hotkey_check_counter: 0,
@@ -543,7 +533,6 @@ struct RuntimeWorker {
     event_rx: crossbeam_channel::Receiver<OverlayEvent>,
     is_running: Arc<AtomicBool>,
     tray_gm_tx: crossbeam_channel::Sender<bool>,
-    tray_hi_tx: crossbeam_channel::Sender<bool>,
     hotkey_listener: Arc<Mutex<Option<HotkeyListener>>>,
     event_tx: crossbeam_channel::Sender<OverlayEvent>,
     hotkey_check_counter: u32,
@@ -739,7 +728,7 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, kind, title, path, subtitle, icon_path, is_pinned)| {
+                        .map(|(_id, kind, title, path, subtitle, icon_path, is_pinned)| {
                             let (title, icon_path) = if kind.eq_ignore_ascii_case("bookmark") {
                                 let title = self.runtime_config.web_bookmarks.iter()
                                     .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))
@@ -797,7 +786,7 @@ impl RuntimeWorker {
                 Ok(items) => {
                     self.quick_launch_items = items
                         .into_iter()
-                        .map(|(id, kind, title, path, subtitle, icon_path, is_pinned)| {
+                        .map(|(_id, kind, title, path, subtitle, icon_path, is_pinned)| {
                             let (title, icon_path) = if kind.eq_ignore_ascii_case("bookmark") {
                                 let title = self.runtime_config.web_bookmarks.iter()
                                     .find(|bookmark| bookmark.url.eq_ignore_ascii_case(&path))

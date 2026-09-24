@@ -19,7 +19,7 @@ pub(crate) use crate::runtime_diagnostics::{
 };
 pub(crate) use crate::runtime_diagnostics::{
     command_diagnostics_bundle, command_probe_index, command_status_json, env_var_with_legacy,
-    load_query_profile_status_report, load_status_diagnostics_snapshot, write_diagnostics_bundle,
+    load_query_profile_status_report, load_status_diagnostics_snapshot,
 };
 #[cfg(test)]
 pub(crate) use crate::runtime_overlay_rows::{

@@ -832,7 +832,7 @@ impl HotkeyListener {
         }));
         let helper_thread = if try_helper {
             let should_exit_h = should_exit.clone();
-            let thread_id_h = thread_id.clone();
+            let _thread_id_h = thread_id.clone();
             let helper_h = helper.clone();
             let event_tx_h = event_tx.clone();
             let required_mods_h = required_mods.clone();

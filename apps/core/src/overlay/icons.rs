@@ -122,7 +122,7 @@ impl IconCache {
         };
         let cutoff = Instant::now()
             .checked_sub(inner.idle_trim)
-            .unwrap_or_else(Instant::now);
+            .unwrap_or_else(|| Instant::now());
         // Remove any stale entries from both the LRU and the touch map.
         // Also clean up touch entries that were left behind by LRU eviction.
         let stale: Vec<PathBuf> = inner
@@ -855,7 +855,7 @@ fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
 fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_size: i32) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, SelectObject, ReleaseDC, DeleteObject,
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, GetDIBits, GetDC,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, GetDC,
         GetObjectW, BITMAP, StretchBlt, SRCCOPY, CreateDIBSection,
     };
 

@@ -145,7 +145,7 @@ pub(crate) fn launch_overlay_selection(
 /// be cleared by the post-action session reset.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn execute_action_selection(
-    service: &CoreService,
+    _service: &CoreService,
     cfg: &Config,
     plugins: &PluginRegistry,
     selected: &SearchItem,

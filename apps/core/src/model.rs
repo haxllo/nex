@@ -19,6 +19,12 @@ pub struct SearchItem {
     pub match_target: Option<String>,
     normalized_title: String,
     normalized_search_text: String,
+    /// 64-bit character-presence bitmap of `normalized_search_text`.
+    /// Bits 0..25 = a-z, 26..35 = 0-9, bit 36 = "any other alphanumeric".
+    /// Used as an O(1) *reject* filter before any subsequence scan: if the
+    /// query needs a character the item does not contain at all, no fuzzy
+    /// match is possible.
+    normalized_search_mask: u64,
 }
 
 impl SearchItem {
@@ -79,6 +85,7 @@ impl SearchItem {
     ) -> Self {
         let normalized_title = normalize_for_search(&title);
         let normalized_search_text = normalize_for_search(&format!("{title} {path} {subtitle}"));
+        let normalized_search_mask = char_presence_mask(&normalized_search_text);
         Self {
             id,
             kind,
@@ -94,6 +101,7 @@ impl SearchItem {
             match_target: None,
             normalized_title,
             normalized_search_text,
+            normalized_search_mask,
         }
     }
 
@@ -128,6 +136,7 @@ impl SearchItem {
         self.subtitle = subtitle.to_string();
         self.normalized_search_text =
             normalize_for_search(&format!("{} {} {}", self.title, self.path, self.subtitle));
+        self.normalized_search_mask = char_presence_mask(&self.normalized_search_text);
         self
     }
 
@@ -138,6 +147,36 @@ impl SearchItem {
     pub fn normalized_search_text(&self) -> &str {
         &self.normalized_search_text
     }
+
+    /// Character-presence bitmap over `normalized_search_text`.
+    pub fn normalized_search_mask(&self) -> u64 {
+        self.normalized_search_mask
+    }
+}
+
+/// Bit index for a normalised-search character. `None` means the character
+/// cannot be represented in the bitmap and callers must not reject on it.
+pub fn mask_bit_for_char(ch: char) -> Option<u32> {
+    match ch {
+        'a'..='z' => Some((ch as u32) - ('a' as u32)),
+        '0'..='9' => Some(26 + (ch as u32) - ('0' as u32)),
+        _ => None,
+    }
+}
+
+/// Build the presence bitmap for a normalised string. Unmappable characters
+/// set [`MASK_OTHER_BIT`] so a query containing one is never falsely rejected.
+pub const MASK_OTHER_BIT: u32 = 36;
+
+pub fn char_presence_mask(normalized: &str) -> u64 {
+    let mut mask = 0_u64;
+    for ch in normalized.chars() {
+        match mask_bit_for_char(ch) {
+            Some(bit) => mask |= 1_u64 << bit,
+            None => mask |= 1_u64 << MASK_OTHER_BIT,
+        }
+    }
+    mask
 }
 
 pub fn normalize_for_search(input: &str) -> String {

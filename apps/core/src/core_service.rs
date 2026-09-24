@@ -6,13 +6,14 @@ use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse}
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
+use crate::hot_prefix::{prefetch_queries, HotPrefixCache, HOT_PREFIX_RESULT_LIMIT};
 use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
 use crate::tantivy_search::TantivyIndex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -127,6 +128,16 @@ pub struct CoreService {
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
     personalization_cache: Mutex<PersonalizationCache>,
+    /// Pre-computed ranked results for single-character first keystrokes.
+    /// See `crate::hot_prefix`.
+    hot_prefix_cache: Mutex<HotPrefixCache>,
+    /// Bumped on every mutation of the item set. A hot-prefix entry is only
+    /// served when its stored generation matches this value.
+    search_generation: AtomicU64,
+    /// Guards against scheduling more than one pre-fetch build at a time.
+    hot_prefix_prefetch_in_flight: AtomicBool,
+    /// Epoch seconds of the last recent-documents recency refresh.
+    recent_docs_last_scan: AtomicU64,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
@@ -204,6 +215,11 @@ impl CoreService {
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
             personalization_cache: Mutex::new(PersonalizationCache::new()),
+            hot_prefix_cache: Mutex::new(HotPrefixCache::default()),
+            // Starts at 1 so an empty cache (generation 0) never validates.
+            search_generation: AtomicU64::new(1),
+            hot_prefix_prefetch_in_flight: AtomicBool::new(false),
+            recent_docs_last_scan: AtomicU64::new(0),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
@@ -317,7 +333,7 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.search_with_filter_internal(query, limit, filter, true)
+        self.search_with_filter_internal(query, limit, filter, true, true)
     }
 
     pub fn search_with_filter_uncapped(
@@ -326,7 +342,18 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.search_with_filter_internal(query, limit, filter, false)
+        self.search_with_filter_internal(query, limit, filter, false, true)
+    }
+
+    /// Search without consulting the hot-prefix cache. Used by the pre-fetch
+    /// builder itself so it always computes from the live item set.
+    fn search_with_filter_no_hot_cache(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: &SearchFilter,
+    ) -> Result<Vec<SearchItem>, ServiceError> {
+        self.search_with_filter_internal(query, limit, filter, false, false)
     }
 
     fn search_with_filter_internal(
@@ -335,6 +362,7 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
         clamp_to_config_max: bool,
+        allow_hot_cache: bool,
     ) -> Result<Vec<SearchItem>, ServiceError> {
         let config_snapshot = self.config_snapshot();
 
@@ -349,6 +377,15 @@ impl CoreService {
         } else {
             limit
         };
+
+        // Hot-prefix pre-fetch: a single-character query with the default
+        // filter is exactly what `prefetch_hot_prefixes` pre-computed, so
+        // serve it straight from memory and skip the whole ranking pass.
+        if allow_hot_cache {
+            if let Some(cached) = self.hot_prefix_lookup(query, filter, effective_limit) {
+                return Ok(cached);
+            }
+        }
 
         if should_use_app_cache(filter) {
             // Uses try_read to avoid blocking when refresh_cache_from_store
@@ -1063,6 +1100,240 @@ impl CoreService {
         drop(self.cached_app_items.read());
     }
 
+    /// Invalidate the hot-prefix cache. Called on every mutation of the item
+    /// set so a pre-fetched entry can never outlive its source data.
+    fn bump_search_generation(&self) {
+        self.search_generation.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut guard) = self.hot_prefix_cache.lock() {
+            guard.clear();
+        }
+    }
+
+    /// Filter shape the pre-fetcher covers: the default "All" search with
+    /// files and folders enabled and no extra constraints. Anything else is
+    /// served by the normal path.
+    fn hot_prefix_filter_supported(filter: &SearchFilter) -> bool {
+        filter.mode == SearchMode::All
+            && filter.extension_filter.is_none()
+            && filter.include_files
+            && filter.include_folders
+            && filter.include_groups.is_empty()
+            && filter.exclude_terms.is_empty()
+            && filter.modified_within.is_none()
+            && filter.created_within.is_none()
+    }
+
+    /// Serve a single-character query from the pre-fetched cache when the
+    /// cached generation still matches the live item set.
+    fn hot_prefix_lookup(
+        &self,
+        query: &str,
+        filter: &SearchFilter,
+        limit: usize,
+    ) -> Option<Vec<SearchItem>> {
+        if limit == 0 || !Self::hot_prefix_filter_supported(filter) {
+            return None;
+        }
+        let normalized = crate::model::normalize_for_search(query);
+        if normalized.chars().count() != 1 {
+            return None;
+        }
+        let generation = self.search_generation.load(Ordering::SeqCst);
+        let guard = self.hot_prefix_cache.lock().ok()?;
+        let hits = guard.lookup(&normalized, generation)?;
+        let mut results = hits.to_vec();
+        results.truncate(limit);
+        Some(results)
+    }
+
+    /// Whether a pre-fetch build is worth scheduling: no build in flight and
+    /// the cache does not already match the live generation.
+    pub(crate) fn hot_prefix_prefetch_needed(&self) -> bool {
+        if self
+            .hot_prefix_prefetch_in_flight
+            .load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let generation = self.search_generation.load(Ordering::SeqCst);
+        match self.hot_prefix_cache.lock() {
+            Ok(guard) => !guard.is_current(generation),
+            Err(_) => false,
+        }
+    }
+
+    /// Pre-compute ranked results for every possible first keystroke.
+    ///
+    /// Intended to run off the interactive path. On-demand results and
+    /// pre-fetched results come from the same ranking code, so a cache hit is
+    /// indistinguishable from a fresh computation.
+    pub(crate) fn prefetch_hot_prefixes(&self) {
+        if self
+            .hot_prefix_prefetch_in_flight
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        // Only pre-fetch when the indexed path can answer quickly. Without a
+        // populated index each prefix would fall back to a full scan of the
+        // in-memory cache, which is exactly the cost we are trying to hide.
+        let index_ready = self
+            .tantivy_index
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
+            .map(|docs| docs > 0)
+            .unwrap_or(false);
+        if !index_ready {
+            self.hot_prefix_prefetch_in_flight
+                .store(false, Ordering::SeqCst);
+            return;
+        }
+
+        let generation = self.search_generation.load(Ordering::SeqCst);
+        let filter = SearchFilter::default();
+        let mut entries = HashMap::new();
+        for query in prefetch_queries() {
+            // Abandon the build if the item set changed under us; publishing
+            // a half-stale snapshot would be worse than no cache at all.
+            if self.search_generation.load(Ordering::SeqCst) != generation {
+                self.hot_prefix_prefetch_in_flight
+                    .store(false, Ordering::SeqCst);
+                return;
+            }
+            if let Ok(results) =
+                self.search_with_filter_no_hot_cache(&query, HOT_PREFIX_RESULT_LIMIT, &filter)
+            {
+                if !results.is_empty() {
+                    entries.insert(query, results);
+                }
+            }
+        }
+
+        if self.search_generation.load(Ordering::SeqCst) == generation {
+            if let Ok(mut guard) = self.hot_prefix_cache.lock() {
+                guard.replace(generation, entries);
+            }
+        }
+        self.hot_prefix_prefetch_in_flight
+            .store(false, Ordering::SeqCst);
+    }
+
+    /// Claim the right to run one recency refresh, at most once per
+    /// `interval_secs`. Returns `false` when another pass already claimed the
+    /// current window, so concurrent show events cannot stack up work.
+    pub(crate) fn recent_documents_scan_due(&self, interval_secs: i64) -> bool {
+        let now = crate::recent_files::now_epoch_secs().max(0) as u64;
+        let interval = interval_secs.max(0) as u64;
+        let previous = self.recent_docs_last_scan.load(Ordering::SeqCst);
+        if previous > 0 && now.saturating_sub(previous) < interval {
+            return false;
+        }
+        self.recent_docs_last_scan
+            .compare_exchange(previous, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Refresh recency for recently opened documents from the shell's MRU.
+    pub(crate) fn apply_recent_documents(&self) -> Result<usize, ServiceError> {
+        match crate::recent_files::recent_dir_default() {
+            Some(dir) => self.apply_recent_documents_from(&dir),
+            None => Ok(0),
+        }
+    }
+
+    /// Apply the recency overlay from an explicit MRU directory.
+    ///
+    /// Existing file/folder items get their `last_accessed_epoch_secs`
+    /// advanced; recent targets the filesystem scan never reached are
+    /// inserted. Only forwards-moving recency is written, so repeated passes
+    /// converge and cost nothing once the list is fully reflected.
+    pub(crate) fn apply_recent_documents_from(&self, dir: &Path) -> Result<usize, ServiceError> {
+        let targets = crate::recent_files::collect_recent_targets(
+            dir,
+            crate::recent_files::RECENT_FILES_MAX_ENTRIES,
+        );
+        if targets.is_empty() {
+            return Ok(0);
+        }
+
+        let mut wanted: HashSet<String> = HashSet::new();
+        let mut identities = Vec::new();
+        for (path, modified) in targets {
+            let Some((kind, id)) = crate::recent_files::recent_item_identity(&path) else {
+                continue;
+            };
+            wanted.insert(id.clone());
+            identities.push((kind, id, path, modified));
+        }
+        if identities.is_empty() {
+            return Ok(0);
+        }
+
+        // Only materialise the rows we might touch; the full cache can hold
+        // well over a hundred thousand entries.
+        let existing: HashMap<String, SearchItem> = {
+            let guard = match self.cached_items.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .iter()
+                .filter(|item| wanted.contains(&item.id))
+                .map(|item| (item.id.clone(), item.clone()))
+                .collect()
+        };
+
+        let mut applied = 0_usize;
+        for (kind, id, path, modified) in identities {
+            if applied >= crate::recent_files::RECENT_FILES_MAX_APPLIED_PER_PASS {
+                break;
+            }
+
+            let path_text = path.to_string_lossy().to_string();
+            let item = match existing.get(&id) {
+                Some(current) => {
+                    if current.last_accessed_epoch_secs >= modified {
+                        continue;
+                    }
+                    let mut updated = current.clone();
+                    updated.last_accessed_epoch_secs = modified;
+                    updated
+                }
+                None => {
+                    let Some(title) = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .filter(|name| !name.is_empty())
+                    else {
+                        continue;
+                    };
+                    let subtitle = path
+                        .parent()
+                        .map(|parent| parent.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    // Recency only — usage counts stay zero so a real launch
+                    // is still what drives frequency bonuses.
+                    SearchItem::from_owned_with_subtitle(
+                        id,
+                        kind.to_string(),
+                        title,
+                        path_text,
+                        subtitle,
+                        0,
+                        modified,
+                    )
+                }
+            };
+
+            self.upsert_item(&item)?;
+            applied += 1;
+        }
+
+        Ok(applied)
+    }
+
     fn query_personalization_boosts(
         &self,
         query: &str,
@@ -1166,6 +1437,7 @@ impl CoreService {
                 *guard = latest_apps;
             }
         }
+        self.bump_search_generation();
         Ok(())
     }
 
@@ -1197,6 +1469,7 @@ impl CoreService {
                 }
             }
         }
+        self.bump_search_generation();
     }
 
     fn remove_cached_item_by_id(&self, id: &str) {
@@ -1214,6 +1487,7 @@ impl CoreService {
                 guard.retain(|entry| entry.id != id);
             }
         }
+        self.bump_search_generation();
     }
 
     pub(crate) fn sync_indexes_from_cache(&self) -> Result<(), ServiceError> {
@@ -1306,6 +1580,7 @@ impl CoreService {
         drop(tantivy_guard);
 
         self.maybe_compact_backends();
+        self.bump_search_generation();
         Ok(())
     }
 
@@ -1491,6 +1766,7 @@ impl CoreService {
             self.cached_len()
         ));
 
+        self.bump_search_generation();
         Ok(())
     }
 
@@ -1948,6 +2224,189 @@ mod tests {
     use crate::search::SearchFilter;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Config whose Tantivy directory is unique per test, so parallel tests
+    /// never share an `IndexWriter` on the same directory.
+    fn isolated_config(label: &str) -> Config {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("nex-prefetch-{label}-{unique}"));
+        let mut config = Config::default();
+        config.index_db_path = dir.join("index.sqlite3");
+        config
+    }
+
+    fn tantivy_docs(service: &CoreService) -> u64 {
+        service
+            .tantivy_index
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn hot_prefix_prefetch_matches_on_demand_results() {
+        let service = CoreService::with_connection(isolated_config("equivalence"), open_memory().unwrap())
+            .expect("service should initialize");
+        for (id, title) in [
+            ("app-figma", "Figma"),
+            ("app-firefox", "Firefox"),
+            ("app-terminal", "Terminal"),
+            ("file-fuzzy", "fuzzy notes"),
+        ] {
+            service
+                .upsert_item(&SearchItem::new(id, "app", title, &format!("C:\\{id}.exe")))
+                .expect("item should upsert");
+        }
+
+        let cold = service.search("f", 10).expect("search should succeed");
+        assert!(!cold.is_empty());
+
+        service.prefetch_hot_prefixes();
+
+        if tantivy_docs(&service) > 0 {
+            assert!(
+                !service.hot_prefix_prefetch_needed(),
+                "cache must be current after a successful build"
+            );
+        }
+
+        let hot = service.search("f", 10).expect("search should succeed");
+        let cold_ids: Vec<&str> = cold.iter().map(|item| item.id.as_str()).collect();
+        let hot_ids: Vec<&str> = hot.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            cold_ids, hot_ids,
+            "pre-fetched results must be identical to on-demand ranking"
+        );
+    }
+
+    #[test]
+    fn hot_prefix_cache_invalidates_on_item_mutation() {
+        let service = CoreService::with_connection(isolated_config("invalidate"), open_memory().unwrap())
+            .expect("service should initialize");
+        service
+            .upsert_item(&SearchItem::new("app-zed", "app", "Zed", "C:\\zed.exe"))
+            .expect("item should upsert");
+        service.prefetch_hot_prefixes();
+
+        service
+            .upsert_item(&SearchItem::new("app-zulu", "app", "Zulu", "C:\\zulu.exe"))
+            .expect("item should upsert");
+
+        assert!(
+            service.hot_prefix_prefetch_needed(),
+            "a mutation must invalidate the pre-fetch cache"
+        );
+        let results = service.search("z", 10).expect("search should succeed");
+        assert!(
+            results.iter().any(|item| item.id == "app-zulu"),
+            "newly added item must be visible immediately"
+        );
+    }
+
+    #[test]
+    fn recent_documents_recency_overlay_advances_and_inserts() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let recent_dir = std::env::temp_dir().join(format!("nex-mru-{unique}"));
+        std::fs::create_dir_all(&recent_dir).expect("recent dir should be created");
+
+        // A file the index already knows about but with no recency.
+        let known = std::env::temp_dir().join(format!("nex-mru-known-{unique}.pdf"));
+        std::fs::write(&known, b"pdf").expect("known file should exist");
+        // A file the filesystem scan never reached, only visible via the MRU.
+        let unseen = std::env::temp_dir().join(format!("nex-mru-unseen-{unique}.pdf"));
+        std::fs::write(&unseen, b"pdf").expect("unseen file should exist");
+
+        std::fs::write(
+            recent_dir.join("known.lnk"),
+            crate::recent_files::lnk_with_link_info(
+                // LinkInfo local base paths carry a trailing separator.
+                &format!("{}\\", known.parent().unwrap().to_string_lossy()),
+                known.file_name().unwrap().to_string_lossy().as_ref(),
+            ),
+        )
+        .expect("shortcut should be written");
+        std::fs::write(
+            recent_dir.join("unseen.lnk"),
+            crate::recent_files::lnk_with_link_info(
+                &format!("{}\\", unseen.parent().unwrap().to_string_lossy()),
+                unseen.file_name().unwrap().to_string_lossy().as_ref(),
+            ),
+        )
+        .expect("shortcut should be written");
+
+        let service = CoreService::with_connection(
+            isolated_config("recent-docs"),
+            open_memory().unwrap(),
+        )
+        .expect("service should initialize");
+        let known_id = format!("file:{}", known.to_string_lossy().to_ascii_lowercase());
+        service
+            .upsert_item(&SearchItem::new(
+                &known_id,
+                "file",
+                known.file_name().unwrap().to_string_lossy().as_ref(),
+                known.to_string_lossy().as_ref(),
+            ))
+            .expect("known file should upsert");
+
+        let applied = service
+            .apply_recent_documents_from(&recent_dir)
+            .expect("overlay should apply");
+        assert_eq!(applied, 2, "both MRU entries should be applied");
+
+        let recency_of = |id: &str| {
+            service
+                .cached_items_snapshot()
+                .into_iter()
+                .find(|item| item.id == id)
+                .map(|item| item.last_accessed_epoch_secs)
+        };
+        assert!(
+            recency_of(&known_id).unwrap_or(0) > 0,
+            "existing item should gain recency"
+        );
+        let unseen_id = format!("file:{}", unseen.to_string_lossy().to_ascii_lowercase());
+        assert!(
+            recency_of(&unseen_id).unwrap_or(0) > 0,
+            "MRU-only target should be inserted with recency"
+        );
+
+        // Second pass must be a no-op: recency only moves forward.
+        let second = service
+            .apply_recent_documents_from(&recent_dir)
+            .expect("overlay should apply");
+        assert_eq!(second, 0, "re-applying the same MRU must do nothing");
+
+        let _ = std::fs::remove_dir_all(&recent_dir);
+        let _ = std::fs::remove_file(&known);
+        let _ = std::fs::remove_file(&unseen);
+    }
+
+    #[test]
+    fn recent_documents_scan_is_rate_limited() {
+        let service = CoreService::with_connection(
+            isolated_config("recent-rate"),
+            open_memory().unwrap(),
+        )
+        .expect("service should initialize");
+
+        assert!(service.recent_documents_scan_due(600));
+        assert!(
+            !service.recent_documents_scan_due(600),
+            "a second call inside the window must be refused"
+        );
+        assert!(
+            service.recent_documents_scan_due(0),
+            "a zero interval always allows a refresh"
+        );
+    }
 
     #[test]
     fn app_mode_search_excludes_non_app_items() {

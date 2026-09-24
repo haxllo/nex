@@ -501,6 +501,68 @@ pub(crate) fn run_windows_runtime(
     host_result.map_err(RuntimeError::Overlay)
 }
 
+/// Schedule the predictive hot-prefix pre-fetch on a background thread.
+///
+/// Only runs when the cache is stale and no build is already in flight, so a
+/// long-lived session pays the cost once per item-set generation. Keeping it
+/// off the event-loop thread means showing and typing in the overlay never
+/// waits on it.
+fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
+    let needed = match service.try_read() {
+        Ok(guard) => guard.hot_prefix_prefetch_needed(),
+        Err(_) => false,
+    };
+    if !needed {
+        return;
+    }
+
+    let service = Arc::clone(service);
+    let _ = std::thread::Builder::new()
+        .name("nex-hot-prefix-prefetch".into())
+        .spawn(move || {
+            if let Ok(guard) = service.read() {
+                guard.prefetch_hot_prefixes();
+            }
+        });
+}
+
+/// How often the recent-documents recency overlay is allowed to re-scan the
+/// shell MRU. Launching an app or opening a document is what moves the MRU,
+/// and the overlay only *advances* recency, so a coarse interval loses
+/// nothing while keeping the service write lock idle.
+const RECENT_DOCUMENTS_REFRESH_SECS: i64 = 600;
+
+/// Apply the recent-documents recency overlay on a background thread.
+///
+/// Takes the service write lock, so it must never run on the event-loop
+/// thread: the search worker holds a read guard while ranking, and blocking
+/// that would stall the first keystroke.
+fn spawn_recent_documents_refresh(service: &Arc<RwLock<CoreService>>) {
+    let due = match service.try_read() {
+        Ok(guard) => guard.recent_documents_scan_due(RECENT_DOCUMENTS_REFRESH_SECS),
+        Err(_) => false,
+    };
+    if !due {
+        return;
+    }
+
+    let service = Arc::clone(service);
+    let _ = std::thread::Builder::new()
+        .name("nex-recent-documents".into())
+        .spawn(move || match service.write() {
+            Ok(guard) => match guard.apply_recent_documents() {
+                Ok(applied) if applied > 0 => {
+                    log_info(&format!("[nex] recent_documents applied={applied}"))
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log_info(&format!("[nex] recent_documents failed: {error}"))
+                }
+            },
+            Err(_) => log_info("[nex] recent_documents skipped (service busy)"),
+        });
+}
+
 /// All mutable state owned by the runtime worker thread. The
 /// `on_event` method is the body of the legacy Win32 message-pump
 /// callback, refactored from a closure into a method on a struct
@@ -1555,6 +1617,11 @@ impl RuntimeWorker {
                             Ok(guard) => guard.warm_search_cache(),
                             Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
                         }
+                        // Predictive pre-fetch: compute the single-character
+                        // result sets now, off the interactive path, so the
+                        // user's first keystroke is a cache hit.
+                        spawn_hot_prefix_prefetch(&self.service);
+                        spawn_recent_documents_refresh(&self.service);
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
                         );
@@ -1612,6 +1679,8 @@ impl RuntimeWorker {
                 if let Ok(guard) = self.service.read() {
                     guard.warm_search_cache();
                 }
+                spawn_hot_prefix_prefetch(&self.service);
+                spawn_recent_documents_refresh(&self.service);
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 if self.overlay.query_text().trim().is_empty() {
                     self.load_quick_launch_items();

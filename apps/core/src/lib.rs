@@ -17,6 +17,7 @@ pub(crate) mod file_watcher;
 pub(crate) mod file_watcher_consumer;
 pub mod hotkey;
 pub mod hotkey_runtime;
+pub(crate) mod hot_prefix;
 pub mod index_store;
 pub mod logging;
 pub mod model;
@@ -25,6 +26,7 @@ pub mod plugin_sdk;
 #[cfg(target_os = "windows")]
 pub(crate) mod power_actions;
 pub mod query_dsl;
+pub(crate) mod recent_files;
 pub mod runtime;
 pub(crate) mod runtime_actions;
 pub(crate) mod runtime_commands;

@@ -117,10 +117,16 @@ pub fn search_with_filter_with_boosts(
     let fast_path = is_default_filter(filter) && !normalized_query.is_empty();
     let app_intent_query = looks_like_app_intent_query(query, &normalized_query, filter.mode);
     let now_epoch_secs = now_epoch_secs();
+    // Characters the query needs. Any item whose normalised text lacks one of
+    // them cannot match (exact, substring, or fuzzy) — reject with one AND.
+    let required_mask = query_presence_requirement(&normalized_query);
     let mut scored: Vec<ScoredItem<'_>> = items
         .iter()
         .filter(|item| matches_visibility(item, filter))
         .filter_map(|item| {
+            if !item_may_match_query(item, required_mask) {
+                return None;
+            }
             let personalization_boost = personalization_boosts
                 .and_then(|boosts| boosts.get(item.id.as_str()))
                 .copied()
@@ -172,6 +178,29 @@ pub fn search_with_filter_with_boosts(
         .collect()
 }
 
+/// Presence bits the query requires of an item's normalised search text.
+/// Empty when the query has no normalised characters.
+fn query_presence_requirement(normalized_query: &str) -> u64 {
+    let mut required = 0_u64;
+    for ch in normalized_query.chars() {
+        if let Some(bit) = crate::model::mask_bit_for_char(ch) {
+            required |= 1_u64 << bit;
+        }
+    }
+    required
+}
+
+/// Cheap O(1) reject used before any lexical scan. Items whose match is
+/// decided elsewhere (Tantivy pre-scores, `match_target` overrides) are
+/// always admitted so their semantics are untouched.
+#[inline]
+fn item_may_match_query(item: &SearchItem, required_mask: u64) -> bool {
+    if required_mask == 0 || item.pre_score.is_some() || item.match_target.is_some() {
+        return true;
+    }
+    item.normalized_search_mask() & required_mask == required_mask
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ScoredItem<'a> {
     source_rank: u8,
@@ -211,12 +240,17 @@ fn score_item_fast(
             kind: tier,
         }
     } else {
-        let title_for_match = item
-            .match_target
-            .as_deref()
-            .map(|t| crate::model::normalize_for_search(t))
-            .unwrap_or_else(|| item.normalized_title().to_string());
-        score_text(&title_for_match, normalized_query)?
+        // Common case is `match_target: None`; borrow the precomputed
+        // normalized title directly instead of cloning it into a String.
+        let normalized_target;
+        let title_for_match: &str = match item.match_target.as_deref() {
+            Some(target) => {
+                normalized_target = crate::model::normalize_for_search(target);
+                normalized_target.as_str()
+            }
+            None => item.normalized_title(),
+        };
+        score_text(title_for_match, normalized_query)?
     };
     let lexical_signal_bonus = word_boundary_and_acronym_bonus(&item.title, normalized_query);
     let app_intent_bonus = app_intent_bonus(item, app_intent_query, normalized_query.len());
@@ -277,12 +311,15 @@ fn score_item(
             kind: TextMatchKind::Substring,
         }
     } else {
-        let title_for_match = item
-            .match_target
-            .as_deref()
-            .map(|t| crate::model::normalize_for_search(t))
-            .unwrap_or_else(|| item.normalized_title().to_string());
-        score_text(&title_for_match, normalized_query).or_else(|| {
+        let normalized_target;
+        let title_for_match: &str = match item.match_target.as_deref() {
+            Some(target) => {
+                normalized_target = crate::model::normalize_for_search(target);
+                normalized_target.as_str()
+            }
+            None => item.normalized_title(),
+        };
+        score_text(title_for_match, normalized_query).or_else(|| {
             score_text(item.normalized_search_text(), normalized_query).map(|text_score| {
                 TextScore {
                     score: text_score.score - 1_500,
@@ -463,75 +500,154 @@ fn apply_top_hit_confidence_guard(
     }
 }
 
+/// Allocation-free lexical signal: word-prefix and acronym bonuses.
+///
+/// The previous implementation built a `Vec<String>` of word tokens plus an
+/// `acronym` `String` for **every candidate on every keystroke** — roughly
+/// 2 heap allocations per item, so ~240k for a 120k-item corpus. This version
+/// scans the title exactly once with zero heap traffic, which is the single
+/// largest per-query win in the ranking pass.
 fn word_boundary_and_acronym_bonus(title: &str, normalized_query: &str) -> i64 {
     if title.trim().is_empty() || normalized_query.is_empty() {
         return 0;
     }
 
-    let words = normalized_word_tokens(title);
-    if words.is_empty() {
-        return 0;
-    }
-
-    let mut bonus = 0_i64;
-    if words
-        .first()
-        .is_some_and(|word| word.starts_with(normalized_query))
-    {
-        bonus += WORD_PREFIX_PRIMARY_BOOST;
-    } else if words
-        .iter()
-        .skip(1)
-        .any(|word| word.starts_with(normalized_query))
-    {
-        bonus += WORD_PREFIX_SECONDARY_BOOST;
-    }
-
-    let acronym: String = words
-        .iter()
-        .filter_map(|word| word.chars().next())
-        .collect();
-    if normalized_query.len() >= 2 {
-        if acronym == normalized_query {
-            bonus += ACRONYM_EXACT_BOOST;
-        } else if acronym.starts_with(normalized_query) {
-            bonus += ACRONYM_PREFIX_BOOST;
-        }
-    }
-
-    bonus.clamp(0, MAX_LEXICAL_SIGNAL_BOOST)
-}
-
-fn normalized_word_tokens(title: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
+    let mut scan = LexicalScan::new(normalized_query);
     let mut previous_was_lower = false;
 
     for ch in title.chars() {
         if !ch.is_alphanumeric() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
+            scan.close_word();
             previous_was_lower = false;
             continue;
         }
 
         let is_upper = ch.is_uppercase();
-        if !current.is_empty() && is_upper && previous_was_lower {
-            words.push(std::mem::take(&mut current));
+        if scan.word_open && is_upper && previous_was_lower {
+            scan.close_word();
+        }
+        if !scan.word_open {
+            scan.start_word();
         }
 
         for lower in ch.to_lowercase() {
-            current.push(lower);
+            scan.push_char(lower);
         }
         previous_was_lower = ch.is_lowercase();
     }
+    scan.close_word();
 
-    if !current.is_empty() {
-        words.push(current);
+    scan.bonus()
+}
+
+/// Single-pass scanner that reproduces `normalized_word_tokens` semantics
+/// (alphanumeric runs, split before an uppercase that follows a lowercase)
+/// without allocating. `progress` tracks how many bytes of the query the
+/// current word has consumed; `usize::MAX` marks a word that already failed.
+struct LexicalScan<'a> {
+    query: &'a str,
+    query_len: usize,
+    query_char_len: usize,
+    progress: usize,
+    word_open: bool,
+    word_count: usize,
+    acronym_pending: bool,
+    acronym_ok: bool,
+    acronym: [char; 64],
+    first_word_prefix: bool,
+    other_word_prefix: bool,
+}
+
+impl<'a> LexicalScan<'a> {
+    fn new(query: &'a str) -> Self {
+        let query_char_len = query.chars().count();
+        Self {
+            query,
+            query_len: query.len(),
+            query_char_len,
+            progress: 0,
+            word_open: false,
+            word_count: 0,
+            acronym_pending: false,
+            acronym_ok: query_char_len <= 64,
+            acronym: ['\0'; 64],
+            first_word_prefix: false,
+            other_word_prefix: false,
+        }
     }
 
-    words
+    fn start_word(&mut self) {
+        self.word_open = true;
+        self.word_count += 1;
+        self.progress = 0;
+        self.acronym_pending = true;
+    }
+
+    fn push_char(&mut self, lower: char) {
+        if self.acronym_pending {
+            self.acronym_pending = false;
+            if self.acronym_ok && self.word_count <= 64 {
+                self.acronym[self.word_count - 1] = lower;
+            }
+        }
+        if self.progress < self.query_len {
+            match self.query[self.progress..].chars().next() {
+                Some(expected) if expected == lower => self.progress += expected.len_utf8(),
+                _ => self.progress = usize::MAX,
+            }
+        }
+    }
+
+    fn close_word(&mut self) {
+        if !self.word_open {
+            return;
+        }
+        self.word_open = false;
+        if self.progress == self.query_len {
+            if self.word_count == 1 {
+                self.first_word_prefix = true;
+            } else {
+                self.other_word_prefix = true;
+            }
+        }
+    }
+
+    fn bonus(&self) -> i64 {
+        let mut bonus = 0_i64;
+        if self.first_word_prefix {
+            bonus += WORD_PREFIX_PRIMARY_BOOST;
+        } else if self.other_word_prefix {
+            bonus += WORD_PREFIX_SECONDARY_BOOST;
+        }
+
+        if self.query_len >= 2 {
+            let stored = self.word_count.min(self.acronym.len());
+            let mut query_chars = self.query.chars();
+            let mut matched = 0_usize;
+            let mut all_match = true;
+            for index in 0..stored {
+                match query_chars.next() {
+                    Some(expected) => {
+                        if self.acronym[index] != expected {
+                            all_match = false;
+                            break;
+                        }
+                        matched += 1;
+                    }
+                    None => break,
+                }
+            }
+            if all_match && matched == self.query_char_len {
+                if self.word_count == self.query_char_len {
+                    bonus += ACRONYM_EXACT_BOOST;
+                } else if self.word_count > self.query_char_len {
+                    bonus += ACRONYM_PREFIX_BOOST;
+                }
+            }
+        }
+
+        bonus.clamp(0, MAX_LEXICAL_SIGNAL_BOOST)
+    }
 }
 
 fn app_intent_bonus(
@@ -756,6 +872,12 @@ fn subsequence_penalties(haystack: &str, needle: &str) -> Option<(i64, i64)> {
 }
 
 fn deduplicate_apps(scored: &mut Vec<ScoredItem<'_>>) {
+    // File-only corpora (the common case for indexed searches) have nothing
+    // to dedupe — skip the HashMap + Vec<bool> allocations entirely.
+    if !scored.iter().any(|s| s.item.kind.eq_ignore_ascii_case("app")) {
+        return;
+    }
+
     let mut winners: HashMap<(String, String), usize> = HashMap::new();
     let mut remove = vec![false; scored.len()];
 
@@ -816,4 +938,140 @@ fn now_epoch_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod lexical_scan_tests {
+    use super::*;
+
+    /// Reference implementation mirroring the original allocating scanner.
+    /// Kept verbatim so the allocation-free rewrite can be proven equivalent.
+    fn reference_normalized_word_tokens(title: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut previous_was_lower = false;
+
+        for ch in title.chars() {
+            if !ch.is_alphanumeric() {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                previous_was_lower = false;
+                continue;
+            }
+
+            let is_upper = ch.is_uppercase();
+            if !current.is_empty() && is_upper && previous_was_lower {
+                words.push(std::mem::take(&mut current));
+            }
+
+            for lower in ch.to_lowercase() {
+                current.push(lower);
+            }
+            previous_was_lower = ch.is_lowercase();
+        }
+
+        if !current.is_empty() {
+            words.push(current);
+        }
+
+        words
+    }
+
+    fn reference_bonus(title: &str, normalized_query: &str) -> i64 {
+        if title.trim().is_empty() || normalized_query.is_empty() {
+            return 0;
+        }
+
+        let words = reference_normalized_word_tokens(title);
+        if words.is_empty() {
+            return 0;
+        }
+
+        let mut bonus = 0_i64;
+        if words
+            .first()
+            .is_some_and(|word| word.starts_with(normalized_query))
+        {
+            bonus += WORD_PREFIX_PRIMARY_BOOST;
+        } else if words
+            .iter()
+            .skip(1)
+            .any(|word| word.starts_with(normalized_query))
+        {
+            bonus += WORD_PREFIX_SECONDARY_BOOST;
+        }
+
+        let acronym: String = words
+            .iter()
+            .filter_map(|word| word.chars().next())
+            .collect();
+        if normalized_query.len() >= 2 {
+            if acronym == normalized_query {
+                bonus += ACRONYM_EXACT_BOOST;
+            } else if acronym.starts_with(normalized_query) {
+                bonus += ACRONYM_PREFIX_BOOST;
+            }
+        }
+
+        bonus.clamp(0, MAX_LEXICAL_SIGNAL_BOOST)
+    }
+
+    #[test]
+    fn allocation_free_scanner_matches_reference() {
+        let titles = [
+            "Visual Studio Code",
+            "Windows Terminal",
+            "Q4_Report.xlsx",
+            "Document_00042.txt",
+            "HTC One M8",
+            "mySQLWorkbench",
+            "git-bash.exe",
+            "  spaced out  ",
+            "ALLCAPS",
+            "a",
+            "...",
+            "",
+            "Nex",
+            "win10_notes_v2.md",
+            "camelCaseWordsHere",
+            "snake_case_name",
+            "12345",
+        ];
+        let queries = [
+            "a", "ab", "vs", "wte", "q4", "doc", "nte", "z", "q4reort", "msw", "htcom",
+            "win", "camel", "snake", "12", "al", "", "my", "g", "ccw", "nex", "vs", "h8",
+        ];
+
+        for title in titles {
+            for query in queries {
+                assert_eq!(
+                    word_boundary_and_acronym_bonus(title, query),
+                    reference_bonus(title, query),
+                    "divergence for title={title:?} query={query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scanner_handles_boundaries_and_acronyms() {
+        assert_eq!(word_boundary_and_acronym_bonus("", "a"), 0);
+        assert_eq!(word_boundary_and_acronym_bonus("   ", "a"), 0);
+        assert_eq!(word_boundary_and_acronym_bonus("alpha", ""), 0);
+        // first-word prefix
+        assert_eq!(word_boundary_and_acronym_bonus("Alpha", "al"), WORD_PREFIX_PRIMARY_BOOST);
+        // secondary-word prefix only
+        assert_eq!(word_boundary_and_acronym_bonus("foo bar", "ba"), WORD_PREFIX_SECONDARY_BOOST);
+        // acronym exact (needs >= 2 chars)
+        assert_eq!(
+            word_boundary_and_acronym_bonus("Visual Studio Code", "vsc"),
+            ACRONYM_EXACT_BOOST
+        );
+        // acronym prefix with extra words
+        assert_eq!(
+            word_boundary_and_acronym_bonus("Visual Studio Code", "vs"),
+            ACRONYM_PREFIX_BOOST
+        );
+    }
 }

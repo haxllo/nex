@@ -13,7 +13,7 @@
   --radius: 8px;
   --row-radius: 6px;
   --pad-x: 16px;
-  --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   /* dark palette */
   --bg: rgba(0, 0, 0, 0.70);

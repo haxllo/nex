@@ -18,6 +18,8 @@ pub(crate) struct SearchRequest {
     pub(crate) config_generation: u64,
     pub(crate) parsed_query: ParsedQuery,
     pub(crate) max_results: usize,
+    /// For logging: number of requests coalesced into this one
+    pub(crate) coalesced_count: usize,
 }
 
 pub(crate) struct SearchResult {
@@ -59,8 +61,20 @@ impl SearchWorker {
 
                     match req_rx.recv() {
                         Ok(mut latest) => {
+                            let mut coalesced = 0_usize;
                             while let Ok(next) = req_rx.try_recv() {
+                                coalesced += 1;
                                 latest = next;
+                            }
+                            latest.coalesced_count = coalesced;
+
+                            if coalesced > 0 {
+                                crate::logging::info(&format!(
+                                    "[nex] search_coalesced query_len={} coalesced={} generation={}",
+                                    latest.parsed_query.raw.len(),
+                                    coalesced,
+                                    latest.generation
+                                ));
                             }
 
                             // Drain the clear channel again after recv.
@@ -170,6 +184,7 @@ impl SearchWorker {
             config_generation,
             parsed_query,
             max_results,
+            coalesced_count: 0,
         });
         generation
     }

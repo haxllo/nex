@@ -223,7 +223,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "7";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "8";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -1167,10 +1167,7 @@ Get-AppxPackage | ForEach-Object {
   if ([string]::IsNullOrWhiteSpace($family)) { return }
   $publisher = [string]$_.PublisherDisplayName
   if ([string]::IsNullOrWhiteSpace($publisher)) {
-    $raw = [string]$_.Publisher
-    if (-not [string]::IsNullOrWhiteSpace($raw)) {
-      if ($raw -match 'CN=([^,]+)') { $publisher = $matches[1] } else { $publisher = $raw }
-    }
+    $publisher = [string]$_.Publisher
   }
   if (-not [string]::IsNullOrWhiteSpace($publisher)) {
     "{0}`t{1}" -f $family.Trim(), $publisher.Trim()

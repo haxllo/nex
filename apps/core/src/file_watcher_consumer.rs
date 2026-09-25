@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
@@ -46,6 +47,8 @@ const CONSUMER_BATCH_CAP: usize = 4096;
 struct WatcherEntry {
     _watcher: DirectoryWatcher,
     _consumer: JoinHandle<()>,
+    /// Count of overflow events dropped since last resync
+    overflow_count: Arc<AtomicUsize>,
 }
 
 /// RAII handle owning all per-root watchers and their consumer threads.
@@ -81,10 +84,18 @@ impl FileWatcherHandle {
                     continue;
                 }
             };
-            let consumer = spawn_consumer(root, rx, Arc::clone(&service), excluded_roots.clone());
+            let overflow_count = Arc::new(AtomicUsize::new(0));
+            let consumer = spawn_consumer(
+                root.clone(),
+                rx,
+                Arc::clone(&service),
+                excluded_roots.clone(),
+                Arc::clone(&overflow_count),
+            );
             entries.push(WatcherEntry {
                 _watcher: watcher,
                 _consumer: consumer,
+                overflow_count,
             });
         }
         Self { entries }
@@ -110,12 +121,13 @@ fn spawn_consumer(
     rx: Receiver<Vec<WatcherEvent>>,
     service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
+    overflow_count: Arc<AtomicUsize>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("nex-watcher-consumer[{}]", root.display()))
         .spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_consumer(root, rx, service, excluded_roots)
+                run_consumer(root, rx, service, excluded_roots, overflow_count)
             }));
             if let Err(payload) = outcome {
                 let message = panic_message_to_string(&payload);
@@ -132,6 +144,7 @@ fn run_consumer(
     rx: Receiver<Vec<WatcherEvent>>,
     service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
+    overflow_count: Arc<AtomicUsize>,
 ) {
     // The receiver can produce one or more `Vec<WatcherEvent>`s per batch.
     // We coalesce across batches too: if a file is "Added" then "Removed"
@@ -140,6 +153,8 @@ fn run_consumer(
     let mut pending_removed: HashSet<PathBuf> = HashSet::new();
     let mut total_dropped: usize = 0;
     let mut dropped_since_last_flush: usize = 0;
+    let mut flush_count_since_last_resync: usize = 0;
+    const OVERFLOW_RESYNC_THRESHOLD: usize = 3;
 
     loop {
         let recv = rx.recv_timeout(CONSUMER_FLUSH_INTERVAL);
@@ -186,6 +201,7 @@ fn run_consumer(
                 &mut pending_added,
                 &mut pending_removed,
             );
+            flush_count_since_last_resync += 1;
         }
 
         // If we dropped events during this flush window, the index is
@@ -194,6 +210,7 @@ fn run_consumer(
         // Log immediately and kick an incremental resync so the index
         // reconverges from disk on the next event burst.
         if dropped_since_last_flush > 0 {
+            overflow_count.fetch_add(dropped_since_last_flush, Ordering::SeqCst);
             crate::runtime::log_warn(&format!(
                 "[nex] directory_watcher root=\"{}\" dropped {} events in current flush window; triggering resync",
                 root.display(),
@@ -201,6 +218,23 @@ fn run_consumer(
             ));
             dropped_since_last_flush = 0;
             trigger_resync(&service, &root);
+            flush_count_since_last_resync = 0;
+        } else if flush_count_since_last_resync >= OVERFLOW_RESYNC_THRESHOLD {
+            // After enough successful flushes without drops, if we still have
+            // accumulated overflow count from previous bursts, trigger a resync
+            // to catch up on any missed changes.
+            let accumulated = overflow_count.load(Ordering::SeqCst);
+            if accumulated > 0 {
+                crate::runtime::log_info(&format!(
+                    "[nex] directory_watcher root=\"{}\" accumulated {} dropped events across {} flushes; triggering catch-up resync",
+                    root.display(),
+                    accumulated,
+                    flush_count_since_last_resync
+                ));
+                trigger_resync(&service, &root);
+                overflow_count.store(0, Ordering::SeqCst);
+                flush_count_since_last_resync = 0;
+            }
         }
     }
 }

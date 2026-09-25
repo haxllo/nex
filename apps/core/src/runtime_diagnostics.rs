@@ -53,6 +53,9 @@ pub(crate) struct StatusDiagnosticsSnapshot {
     pub(crate) last_overlay_tuning_line: Option<String>,
     pub(crate) last_memory_snapshot_line: Option<String>,
     pub(crate) last_config_reload_line: Option<String>,
+    pub(crate) last_indexing_metrics_line: Option<String>,
+    pub(crate) last_search_coalesced_line: Option<String>,
+    pub(crate) last_launch_failure_line: Option<String>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -185,6 +188,9 @@ pub(crate) fn parse_status_diagnostics_snapshot(
     let last_overlay_tuning_line = latest_line_with_token(content, "overlay_tuning ");
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
     let last_config_reload_line = latest_line_with_token(content, "config reloaded ");
+    let last_indexing_metrics_line = latest_line_with_token(content, "indexing_metrics ");
+    let last_search_coalesced_line = latest_line_with_token(content, "search_coalesced ");
+    let last_launch_failure_line = latest_line_with_token(content, "launch_failure ");
 
     if hotkey_registration_issue_line.is_none()
         && overlay_ready_line.is_none()
@@ -201,6 +207,9 @@ pub(crate) fn parse_status_diagnostics_snapshot(
         && last_overlay_tuning_line.is_none()
         && last_memory_snapshot_line.is_none()
         && last_config_reload_line.is_none()
+        && last_indexing_metrics_line.is_none()
+        && last_search_coalesced_line.is_none()
+        && last_launch_failure_line.is_none()
     {
         return None;
     }
@@ -221,6 +230,9 @@ pub(crate) fn parse_status_diagnostics_snapshot(
         last_overlay_tuning_line,
         last_memory_snapshot_line,
         last_config_reload_line,
+        last_indexing_metrics_line,
+        last_search_coalesced_line,
+        last_launch_failure_line,
     })
 }
 
@@ -305,6 +317,18 @@ pub(crate) fn build_status_diagnostics_json(
         .last_config_reload_line
         .as_ref()
         .and_then(|line| parse_log_line_epoch_secs(line));
+    let indexing_metrics = snapshot
+        .last_indexing_metrics_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let search_coalesced = snapshot
+        .last_search_coalesced_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
+    let launch_failure = snapshot
+        .last_launch_failure_line
+        .as_ref()
+        .and_then(|line| parse_key_value_tokens(line));
 
     serde_json::json!({
         "startup_lifecycle": {
@@ -325,6 +349,9 @@ pub(crate) fn build_status_diagnostics_json(
         "memory_snapshot": memory_snapshot,
         "config_reload": config_reload,
         "config_reload_epoch_secs": config_reload_epoch_secs,
+        "indexing_metrics": indexing_metrics,
+        "search_coalesced": search_coalesced,
+        "launch_failure": launch_failure,
         "raw": {
             "hotkey_issue_line": snapshot.hotkey_registration_issue_line,
             "overlay_ready_line": snapshot.overlay_ready_line,
@@ -341,6 +368,9 @@ pub(crate) fn build_status_diagnostics_json(
             "overlay_tuning_line": snapshot.last_overlay_tuning_line,
             "memory_snapshot_line": snapshot.last_memory_snapshot_line,
             "config_reload_line": snapshot.last_config_reload_line,
+            "indexing_metrics_line": snapshot.last_indexing_metrics_line,
+            "search_coalesced_line": snapshot.last_search_coalesced_line,
+            "launch_failure_line": snapshot.last_launch_failure_line,
         }
     })
 }

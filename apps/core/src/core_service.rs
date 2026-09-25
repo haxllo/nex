@@ -138,6 +138,10 @@ pub struct CoreService {
     hot_prefix_prefetch_in_flight: AtomicBool,
     /// Epoch seconds of the last recent-documents recency refresh.
     recent_docs_last_scan: AtomicU64,
+    /// Peak memory during last indexing cycle (in bytes).
+    last_indexing_peak_memory: Mutex<Option<usize>>,
+    /// Number of completed indexing cycles.
+    indexing_cycle_count: AtomicU64,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
 }
@@ -220,6 +224,8 @@ impl CoreService {
             search_generation: AtomicU64::new(1),
             hot_prefix_prefetch_in_flight: AtomicBool::new(false),
             recent_docs_last_scan: AtomicU64::new(0),
+            last_indexing_peak_memory: Mutex::new(None),
+            indexing_cycle_count: AtomicU64::new(0),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
         })
@@ -536,14 +542,23 @@ impl CoreService {
                         }
                         Ok(())
                     }
-                    Err(error) if should_prune_after_launch_error(&item, &error) => {
-                        if let Err(e) = index_store::delete_item(&*self.db(), &item.id) {
-                            crate::logging::warn(&format!("[nex] delete_item after launch error failed: {e}"));
+                    Err(error) => {
+                        // Log structured launch failure diagnostics
+                        crate::logging::warn(&format!(
+                            "[nex] launch_failure id={} kind={} path=\"{}\" error={}",
+                            item.id,
+                            item.kind,
+                            item.path,
+                            error
+                        ));
+                        if should_prune_after_launch_error(&item, &error) {
+                            if let Err(e) = index_store::delete_item(&*self.db(), &item.id) {
+                                crate::logging::warn(&format!("[nex] delete_item after launch error failed: {e}"));
+                            }
+                            self.remove_cached_item_by_id(&item.id);
                         }
-                        self.remove_cached_item_by_id(&item.id);
                         Err(ServiceError::from(error))
                     }
-                    Err(error) => Err(ServiceError::from(error)),
                 }
             }
         }
@@ -600,6 +615,8 @@ impl CoreService {
         &self,
         incremental_mode: bool,
     ) -> Result<IndexRefreshReport, ServiceError> {
+        let cycle_start = Instant::now();
+        let memory_before = self_measure_memory();
         let providers_guard = match self.providers.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -803,6 +820,29 @@ impl CoreService {
             pct.store(100, Ordering::Relaxed);
         }
         let indexed_total = self.cached_len();
+
+        // Record memory and cycle metrics
+        let memory_after = self_measure_memory();
+        let memory_delta = memory_after.saturating_sub(memory_before);
+        {
+            let mut peak = match self.last_indexing_peak_memory.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            *peak = Some(memory_after);
+        }
+        self.indexing_cycle_count.fetch_add(1, Ordering::SeqCst);
+
+        let elapsed_ms = cycle_start.elapsed().as_millis();
+        crate::logging::info(&format!(
+            "[nex] indexing_metrics cycle_count={} elapsed_ms={} memory_before_mb={} memory_after_mb={} memory_delta_mb={}",
+            self.indexing_cycle_count.load(Ordering::SeqCst),
+            elapsed_ms,
+            memory_before / 1024 / 1024,
+            memory_after / 1024 / 1024,
+            memory_delta / 1024 / 1024
+        ));
+
         Ok(IndexRefreshReport {
             indexed_total,
             discovered_total,
@@ -2098,25 +2138,17 @@ fn provider_manages_kind(provider_name: &str, kind: &str) -> bool {
 
 fn should_prune_after_launch_error(item: &SearchItem, error: &LaunchError) -> bool {
     let is_filesystem_target = looks_like_filesystem_path(item.path.trim());
-    match error {
-        LaunchError::MissingPath(_) => {
-            is_filesystem_target
-                && (item.kind.eq_ignore_ascii_case("app")
-                    || item.kind.eq_ignore_ascii_case("file")
-                    || item.kind.eq_ignore_ascii_case("folder"))
-        }
-        LaunchError::LaunchFailed {
-            code: Some(code), ..
-        } => {
-            // ShellExecute missing-file/path errors: remove stale entries immediately.
-            (*code == 2 || *code == 3)
-                && is_filesystem_target
-                && (item.kind.eq_ignore_ascii_case("app")
-                    || item.kind.eq_ignore_ascii_case("file")
-                    || item.kind.eq_ignore_ascii_case("folder"))
-        }
-        LaunchError::LaunchFailed { .. } | LaunchError::EmptyPath => false,
-    }
+    let should_prune = match error {
+        LaunchError::MissingPath(_) => true,
+        LaunchError::LaunchFailed { code: Some(code), .. } => *code == 2 || *code == 3,
+        LaunchError::Structured { code: Some(code), .. } => *code == 2 || *code == 3,
+        _ => false,
+    };
+    should_prune
+        && is_filesystem_target
+        && (item.kind.eq_ignore_ascii_case("app")
+            || item.kind.eq_ignore_ascii_case("file")
+            || item.kind.eq_ignore_ascii_case("folder"))
 }
 
 fn should_skip_provider_discovery(
@@ -2218,6 +2250,50 @@ fn now_epoch_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Estimate current process memory usage in bytes.
+/// Platform-agnostic fallback that works on Windows and Unix.
+fn self_measure_memory() -> usize {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        unsafe {
+            let mut pmc: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+            pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+            if GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut pmc as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ) != 0
+            {
+                return pmc.WorkingSetSize as usize;
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Fallback for non-Windows: read /proc/self/status (Linux) or use sysinfo (macOS)
+        // For now, return 0 to avoid crashing on unsupported platforms
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmRSS:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<usize>() {
+                            return kb * 1024;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    0
 }
 
 #[cfg(test)]

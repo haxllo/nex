@@ -9,6 +9,13 @@ pub enum LaunchError {
     EmptyPath,
     MissingPath(PathBuf),
     LaunchFailed { message: String, code: Option<i32> },
+    /// Structured launch failure with context for diagnostics
+    Structured {
+        path: String,
+        kind: String,
+        reason: String,
+        code: Option<i32>,
+    },
 }
 
 impl Display for LaunchError {
@@ -21,6 +28,13 @@ impl Display for LaunchError {
                     write!(f, "launch failed: {message} (code {code})")
                 } else {
                     write!(f, "launch failed: {message}")
+                }
+            }
+            Self::Structured { path, kind, reason, code } => {
+                if let Some(code) = code {
+                    write!(f, "launch failed [{kind}]: {path} - {reason} (code {code})")
+                } else {
+                    write!(f, "launch failed [{kind}]: {path} - {reason}")
                 }
             }
         }
@@ -117,8 +131,11 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
     } as isize;
 
     if result <= 32 {
-        return Err(LaunchError::LaunchFailed {
-            message: format!("ShellExecuteW failed for '{target}'"),
+        let kind = if Path::new(target).is_dir() { "directory" } else { "file" };
+        return Err(LaunchError::Structured {
+            path: target.to_string(),
+            kind: kind.to_string(),
+            reason: format!("ShellExecuteW returned {}", result),
             code: Some(result as i32),
         });
     }
@@ -150,8 +167,10 @@ fn launch_runas(target: &str) -> Result<(), LaunchError> {
     } as isize;
 
     if result <= 32 {
-        return Err(LaunchError::LaunchFailed {
-            message: format!("ShellExecuteW runas failed for '{target}'"),
+        return Err(LaunchError::Structured {
+            path: target.to_string(),
+            kind: "elevated".to_string(),
+            reason: format!("ShellExecuteW runas returned {}", result),
             code: Some(result as i32),
         });
     }
@@ -178,8 +197,10 @@ fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
         .arg(target)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .spawn()
-        .map_err(|error| LaunchError::LaunchFailed {
-            message: format!("failed to launch shell target '{target}': {error}"),
+        .map_err(|error| LaunchError::Structured {
+            path: target.to_string(),
+            kind: "shell".to_string(),
+            reason: format!("explorer.exe spawn failed: {error}"),
             code: None,
         })?;
     Ok(())

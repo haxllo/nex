@@ -1286,6 +1286,9 @@ fn handle_ipc(
         "settings" => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
         }
+        "checkUpdates" => {
+            let _ = event_tx.send(OverlayEvent::CheckUpdates);
+        }
         "dragStart" => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button

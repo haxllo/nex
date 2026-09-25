@@ -397,6 +397,12 @@ impl NativeOverlayShell {
         self.post(UiCommand::Apply);
     }
 
+    /// Set whether a new update is available (shows/hides update notice).
+    pub fn set_update_available(&self, available: bool) {
+        self.with_state(|s| s.update_available = available);
+        self.post(UiCommand::Apply);
+    }
+
     pub fn set_hotkey_issue_active(&self, active: bool) {
         self.with_state(|s| s.hotkey_issue_active = active);
         self.post(UiCommand::Apply);

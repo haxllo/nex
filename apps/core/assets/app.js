@@ -24,6 +24,8 @@
   const contextMenu = $("context-menu");
   const completionEl = $("completion");
   const hintComplete = $("hint-complete");
+  const updateNotice = $("update-notice");
+  const updateBtn = $("update-btn");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -1238,6 +1240,11 @@
       // text, so stale values can never overwrite the input.
       completion = typeof state.completion === "string" ? state.completion : "";
 
+      // Update availability: show/hide update notice
+      if (typeof state.updateAvailable === "boolean") {
+        updateNotice.classList.toggle("hidden", !state.updateAvailable);
+      }
+
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");
@@ -1333,6 +1340,11 @@
   // ── settings button ─────────────────────────────────────────
   document.getElementById("footer-settings-btn").addEventListener("click", () => {
     post("settings");
+  });
+
+  // ── update button ───────────────────────────────────────────
+  updateBtn.addEventListener("click", () => {
+    post("checkUpdates");
   });
 
   // ── scrollbar idle fade ────────────────────────────────────

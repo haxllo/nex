@@ -117,6 +117,27 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
     }
 }
 
+/// Check if an update is available by running the updater in capture mode
+/// and parsing the output. Returns true if an update is available.
+pub fn check_update_available(channel: UpdateChannel) -> Result<bool, UpdateLaunchError> {
+    let output = run_updater_capture(channel)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().rev() {
+        if let Some((_, json)) = line.split_once("NEX_UPDATE_RESULT:") {
+            let json = json.trim();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+                let status = value
+                    .get("status")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("");
+                return Ok(status == "update-available");
+            }
+        }
+    }
+    // If we can't parse the result, assume no update is available
+    Ok(false)
+}
+
 fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
     let exe_path = std::env::current_exe().map_err(|error| {
         UpdateLaunchError::EnvironmentUnavailable(format!(

@@ -98,6 +98,10 @@ pub enum OverlayEvent {
     /// A hotkey combo captured natively for the settings page.
     /// Empty string = recording cancelled.
     HotkeyRecorded(String),
+    /// Check for updates (triggered from update notice button).
+    CheckUpdates,
+    /// Update availability status from background check.
+    UpdateAvailable(bool),
 
 }
 
@@ -154,6 +158,8 @@ pub struct ShimState {
     /// The page renders the untyped remainder dimmed inside the input
     /// and Tab fills it in. `None` outside command mode.
     pub completion: Option<String>,
+    /// Whether a new update is available. When true, show update notification.
+    pub update_available: bool,
 }
 
 impl Default for ShimState {
@@ -180,6 +186,7 @@ impl Default for ShimState {
             quick_launch_visible: false,
             bento_view: false,
             completion: None,
+            update_available: false,
         }
     }
 }

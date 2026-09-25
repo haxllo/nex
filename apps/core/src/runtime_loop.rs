@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::rc::Rc;
 #[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex, RwLock};
 #[cfg(target_os = "windows")]
@@ -1724,6 +1724,20 @@ impl RuntimeWorker {
                 crate::runtime::log_info(&format!("[nex] settings snapshot: {snap}"));
                 self.overlay.open_settings(snap);
             }
+            OverlayEvent::CheckUpdates => {
+                match crate::runtime_process::launch_stable_updater() {
+                    Ok(script_path) => {
+                        log_info(&format!("[nex] check_updates launched: {}", script_path.display()));
+                    }
+                    Err(error) => {
+                        log_warn(&format!("[nex] check_updates failed: {error}"));
+                    }
+                }
+            }
+            OverlayEvent::UpdateAvailable(available) => {
+                self.overlay.set_update_available(available);
+                log_info(&format!("[nex] update_available={}", available));
+            }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {
                     Ok(updated) => {
@@ -1869,6 +1883,31 @@ impl RuntimeWorker {
             }
             OverlayEvent::FocusSearchInput => {
                 self.overlay.focus_search_input();
+            }
+            OverlayEvent::Tick => {
+                // Periodic background tasks
+                // Check for updates periodically (e.g., every hour)
+                // This is a lightweight check that can run in the background
+                static LAST_UPDATE_CHECK: AtomicU64 = AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let last_check = LAST_UPDATE_CHECK.load(Ordering::Relaxed);
+                if now.saturating_sub(last_check) > 3600 {
+                    // Check for updates every hour
+                    LAST_UPDATE_CHECK.store(now, Ordering::Relaxed);
+                    let event_tx = self.event_tx.clone();
+                    std::thread::Builder::new()
+                        .name("nex-update-check".into())
+                        .spawn(move || {
+                            let available = crate::updater::check_update_available(
+                                crate::updater::UpdateChannel::Stable
+                            ).unwrap_or(false);
+                            let _ = event_tx.send(OverlayEvent::UpdateAvailable(available));
+                        })
+                        .ok();
+                }
             }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();

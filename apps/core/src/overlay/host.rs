@@ -138,6 +138,9 @@ const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
 document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
 }, true);
+// Force subpixel antialiasing for sharper text
+document.documentElement.style.webkitFontSmoothing = 'subpixel-antialiased';
+document.documentElement.style.textRendering = 'geometricPrecision';
 "#;
 
 
@@ -1095,7 +1098,7 @@ fn build_webview(
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
 
-    WebViewBuilder::new()
+    let webview = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0))
@@ -1107,7 +1110,9 @@ fn build_webview(
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
         })
         .build(window)
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(webview)
 }
 
 /// Serve embedded UI assets.

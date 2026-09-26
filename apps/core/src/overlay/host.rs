@@ -1097,8 +1097,7 @@ fn build_webview(
 
     let webview = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
-        .with_transparent(true)
-        .with_background_color((0, 0, 0, 0))
+        .with_background_color((30, 30, 30, 255))
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
             serve_asset(request)

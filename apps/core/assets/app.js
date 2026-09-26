@@ -24,6 +24,9 @@
   const contextMenu = $("context-menu");
   const completionEl = $("completion");
   const hintComplete = $("hint-complete");
+  const updateNotice = $("update-notice");
+  const updateBtn = $("update-btn");
+  const updateBtnLabel = updateBtn.querySelector("span");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -1195,6 +1198,16 @@
       // Lightweight status-only update — apply without re-rendering rows.
       if (!Array.isArray(state.rows) && typeof state.status === "string") {
         statusEl.dataset.text = state.status || "";
+        if (state.status.startsWith("Updated")) {
+          updateBtn.disabled = true;
+          updateBtnLabel.textContent = "Updated";
+        } else if (state.status.startsWith("Up to date")) {
+          updateBtn.disabled = false;
+          updateBtnLabel.textContent = "Up to date";
+        } else if (state.status.startsWith("Update failed") || state.status.startsWith("Could not")) {
+          updateBtn.disabled = false;
+          updateBtnLabel.textContent = "Retry";
+        }
         return;
       }
 
@@ -1237,6 +1250,11 @@
       // command mode). renderCompletion gates it against the typed
       // text, so stale values can never overwrite the input.
       completion = typeof state.completion === "string" ? state.completion : "";
+
+      // Update availability: show/hide update notice
+      if (typeof state.updateAvailable === "boolean") {
+        updateNotice.classList.toggle("hidden", !state.updateAvailable);
+      }
 
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
@@ -1333,6 +1351,13 @@
   // ── settings button ─────────────────────────────────────────
   document.getElementById("footer-settings-btn").addEventListener("click", () => {
     post("settings");
+  });
+
+  // ── update button ───────────────────────────────────────────
+  updateBtn.addEventListener("click", () => {
+    updateBtn.disabled = true;
+    updateBtnLabel.textContent = "Updating...";
+    post("checkUpdates");
   });
 
   // ── scrollbar idle fade ────────────────────────────────────

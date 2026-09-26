@@ -102,8 +102,13 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let last_err = stderr
         .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| {
+            let line = line.trim();
+            !line.is_empty()
+                && !line.starts_with("+ CategoryInfo")
+                && !line.starts_with("+ FullyQualifiedErrorId")
+        })
+        .or_else(|| stderr.lines().rev().find(|line| !line.trim().is_empty()))
         .unwrap_or("");
     if output.status.success() {
         "Update finished".to_string()
@@ -115,6 +120,28 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
             output.status.code().unwrap_or(-1)
         )
     }
+}
+
+/// Check if an update is available by running the updater in capture mode
+/// and parsing the output. Returns true if an update is available.
+pub fn check_update_available(channel: UpdateChannel) -> Result<bool, UpdateLaunchError> {
+    let script_path = resolve_updater_script()?;
+    let output = run_updater_script_check_only(script_path.as_path(), channel)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines().rev() {
+        if let Some((_, json)) = line.split_once("NEX_UPDATE_RESULT:") {
+            let json = json.trim();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+                let status = value
+                    .get("status")
+                    .and_then(|field| field.as_str())
+                    .unwrap_or("");
+                return Ok(status == "update-available");
+            }
+        }
+    }
+    // If we can't parse the result, assume no update is available
+    Ok(false)
 }
 
 fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
@@ -138,6 +165,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[cfg(target_os = "windows")]
 fn build_updater_command(script_path: &Path, channel: UpdateChannel) -> std::process::Command {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+
+    // Let PowerShell and its Inno Setup child activate their own windows.
+    // Windows otherwise treats this worker-thread launch as background work.
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+
     let mut command = std::process::Command::new("powershell.exe");
     command
         .arg("-NoProfile")
@@ -186,6 +221,21 @@ fn run_updater_script(
         })
 }
 
+#[cfg(target_os = "windows")]
+fn run_updater_script_check_only(
+    script_path: &Path,
+    channel: UpdateChannel,
+) -> Result<std::process::Output, UpdateLaunchError> {
+    let mut command = build_updater_command(script_path, channel);
+    command.arg("-CheckOnly");
+    command.output().map_err(|error| {
+        UpdateLaunchError::LaunchFailed(format!(
+            "failed to check for updates with '{}': {error}",
+            script_path.display()
+        ))
+    })
+}
+
 #[cfg(not(target_os = "windows"))]
 fn launch_updater_script(
     _script_path: &Path,
@@ -196,6 +246,14 @@ fn launch_updater_script(
 
 #[cfg(not(target_os = "windows"))]
 fn run_updater_script(
+    _script_path: &Path,
+    _channel: UpdateChannel,
+) -> Result<std::process::Output, UpdateLaunchError> {
+    Err(UpdateLaunchError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_updater_script_check_only(
     _script_path: &Path,
     _channel: UpdateChannel,
 ) -> Result<std::process::Output, UpdateLaunchError> {

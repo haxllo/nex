@@ -88,6 +88,11 @@ Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\Cu
 Filename: "{cmd}"; Parameters: "/C reg delete HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v SwiftFind /f >NUL 2>&1 || exit /b 0"; Flags: runhidden; RunOnceId: "nex-clear-legacy-startup-machine"
 
 [Code]
+function ShowWindow(hWnd: HWND; nCmdShow: Integer): Boolean;
+  external 'ShowWindow@user32.dll stdcall';
+function SetForegroundWindow(hWnd: HWND): Boolean;
+  external 'SetForegroundWindow@user32.dll stdcall';
+
 const
   NexUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
   NexRuntimeRelativePath = 'bin\Nex.exe';
@@ -96,6 +101,22 @@ const
 
 var
   DeleteDataCheckbox: TNewCheckBox;
+
+procedure ActivateInstallerWindow();
+begin
+  ShowWindow(WizardForm.Handle, 9);
+  SetForegroundWindow(WizardForm.Handle);
+end;
+
+procedure InitializeWizard();
+begin
+  ActivateInstallerWindow();
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  ActivateInstallerWindow();
+end;
 
 procedure ForceStopRuntimeByPath(RuntimeExe: string); forward;
 

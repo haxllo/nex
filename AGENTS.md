@@ -2,6 +2,8 @@
 
 ## Build & Test
 
+**Cargo target location**: Use `G:\nex-target` for Cargo commands when available. Set `$env:CARGO_TARGET_DIR='G:\nex-target'` before `cargo build`, `cargo check`, or `cargo test` to avoid C: drive pressure.
+
 ```bash
 cargo build --bin Nex                    # debug build (nex only)
 cargo build --release --bin Nex --bin NexHelper  # release build (both binaries)

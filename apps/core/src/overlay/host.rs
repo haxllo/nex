@@ -1287,6 +1287,9 @@ fn handle_ipc(
         "settings" => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
         }
+        "checkUpdates" => {
+            let _ = event_tx.send(OverlayEvent::CheckUpdates);
+        }
         "dragStart" => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button
@@ -1622,6 +1625,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "showPending": show_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
+        "updateAvailable": s.update_available,
     })
     .to_string()
 }

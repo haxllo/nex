@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::rc::Rc;
 #[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex, RwLock};
 #[cfg(target_os = "windows")]
@@ -244,6 +244,18 @@ pub(crate) fn run_windows_runtime(
     // (and the hotkey listener / tray) write to, and the runtime
     // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
+
+    // Check for updates on startup
+    let event_tx_for_update = event_tx.clone();
+    std::thread::Builder::new()
+        .name("nex-startup-update-check".into())
+        .spawn(move || {
+            let available = crate::updater::check_update_available(
+                crate::updater::UpdateChannel::Stable
+            ).unwrap_or(false);
+            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable(available));
+        })
+        .ok();
 
     // The power popup is initialized by the overlay host after its own
     // WebView2 build completes (host.rs) — never here. WebView2 env
@@ -1724,6 +1736,27 @@ impl RuntimeWorker {
                 crate::runtime::log_info(&format!("[nex] settings snapshot: {snap}"));
                 self.overlay.open_settings(snap);
             }
+            OverlayEvent::CheckUpdates => {
+                self.overlay.set_status_text("Updating...");
+                let event_tx = self.event_tx.clone();
+                std::thread::Builder::new()
+                    .name("nex-update-button".into())
+                    .spawn(move || {
+                        let message = match crate::updater::run_updater_capture(
+                            crate::updater::UpdateChannel::Stable,
+                        ) {
+                            Ok(output) => crate::updater::summarize_update_output(&output),
+                            Err(error) => format!("Could not launch updater: {error}"),
+                        };
+                        log_info(&format!("[nex] update button result: {message}"));
+                        let _ = event_tx.send(OverlayEvent::UpdateStatus(message));
+                    })
+                    .ok();
+            }
+            OverlayEvent::UpdateAvailable(available) => {
+                self.overlay.set_update_available(available);
+                log_info(&format!("[nex] update_available={}", available));
+            }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {
                     Ok(updated) => {
@@ -1808,6 +1841,9 @@ impl RuntimeWorker {
                     .ok();
             }
             OverlayEvent::UpdateStatus(text) => {
+                if text.starts_with("Updated") || text.starts_with("Up to date") {
+                    self.overlay.set_update_available(false);
+                }
                 self.overlay.set_status_text(&text);
             }
             OverlayEvent::TrayLock => {
@@ -1869,6 +1905,10 @@ impl RuntimeWorker {
             }
             OverlayEvent::FocusSearchInput => {
                 self.overlay.focus_search_input();
+            }
+            OverlayEvent::Tick => {
+                // Periodic background tasks
+                // Updates are checked on startup only, not periodically
             }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();

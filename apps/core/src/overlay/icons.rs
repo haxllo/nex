@@ -25,7 +25,7 @@ const TARGET_ICON_SIZE: u32 = 128;
 /// native smaller sources are kept native-sized to avoid blur.
 const EXTRACT_ICON_SIZE: i32 = 256;
 
-const ICON_NORMALIZATION_VERSION: u8 = 2;
+const ICON_NORMALIZATION_VERSION: u8 = 3;
 
 fn cache_key(path: &str) -> PathBuf {
     PathBuf::from(format!("v{}|{}", ICON_NORMALIZATION_VERSION, path))

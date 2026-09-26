@@ -71,7 +71,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 ; Launch Nex after install (no config/setup processes needed — nex handles those on first run).
-Filename: "{app}\bin\Nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent
+Filename: "{app}\bin\Nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent; Check: ShouldLaunchNexAfterInstall
 
 [UninstallRun]
 ; Ask running instance to terminate cleanly first.
@@ -106,6 +106,11 @@ procedure ActivateInstallerWindow();
 begin
   ShowWindow(WizardForm.Handle, 9);
   SetForegroundWindow(WizardForm.Handle);
+end;
+
+function ShouldLaunchNexAfterInstall(): Boolean;
+begin
+  Result := Pos('--nex-updater', Lowercase(GetCmdTail())) = 0;
 end;
 
 procedure InitializeWizard();

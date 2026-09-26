@@ -55,7 +55,6 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 |---|---|
 | `NEX_SUPPRESS_STDIO=1` | Suppress stdout logging (also `SWIFTFIND_SUPPRESS_STDIO`) |
 | `NEX_WINDOWS_RUNTIME_SMOKE=1` | Enable the windows runtime smoke test (otherwise skips) |
-| `NEX_ALLOW_MISSING_ICON=1` | Allow release build without `nex.ico` (also `SWIFTFIND_ALLOW_MISSING_ICON`) |
 
 ## Overlay Architecture
 

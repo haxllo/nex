@@ -437,10 +437,10 @@ try {
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
   if ($needsElevation) {
-    $proc = Start-Process -FilePath $setupPath -Verb RunAs -PassThru -WindowStyle Normal
+    $proc = Start-Process -FilePath $setupPath -ArgumentList "--nex-updater" -Verb RunAs -PassThru -WindowStyle Normal
   }
   else {
-    $proc = Start-Process -FilePath $setupPath -PassThru -WindowStyle Normal
+    $proc = Start-Process -FilePath $setupPath -ArgumentList "--nex-updater" -PassThru -WindowStyle Normal
   }
   Bring-ProcessToFront -Process $proc
   $proc.WaitForExit()

@@ -16,7 +16,7 @@
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   /* dark palette */
-  --bg: rgba(0, 0, 0, 0.70);
+  --bg: #1E1E1E;
   --bg-opaque: #1E1E1E;
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
@@ -42,8 +42,8 @@
 }
 
 html[data-theme="light"] {
-  --bg: rgba(246, 246, 248, 0.72);
-  --bg-opaque: rgba(255, 255, 255, 1);
+  --bg: #ffffff;
+  --bg-opaque: #ffffff;
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
@@ -82,10 +82,6 @@ body {
   font-weight: 400;
   letter-spacing: 0.2px;
   color: var(--text);
-  -webkit-font-smoothing: subpixel-antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-rendering: geometricPrecision;
-  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
   overflow: visible;
 }
 
@@ -221,10 +217,9 @@ body {
 }
 
 #body {
-  transform: translateZ(0); /* force GPU compositing layer — survives visibility toggles */
 }
 #body.idle {
-  visibility: hidden; /* keeps GPU layers alive; display:none would destroy them */
+  visibility: hidden;
 }
 /* Idle: divider must not occupy layout — it would leak 7px (1px + 6px
    margin) past the 60px idle window after a power-menu back. */

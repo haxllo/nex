@@ -138,9 +138,6 @@ const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
 document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
 }, true);
-// Force subpixel antialiasing for sharper text
-document.documentElement.style.webkitFontSmoothing = 'subpixel-antialiased';
-document.documentElement.style.textRendering = 'geometricPrecision';
 "#;
 
 

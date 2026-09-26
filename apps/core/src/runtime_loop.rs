@@ -245,6 +245,18 @@ pub(crate) fn run_windows_runtime(
     // worker thread reads from.
     let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
 
+    // Check for updates on startup
+    let event_tx_for_update = event_tx.clone();
+    std::thread::Builder::new()
+        .name("nex-startup-update-check".into())
+        .spawn(move || {
+            let available = crate::updater::check_update_available(
+                crate::updater::UpdateChannel::Stable
+            ).unwrap_or(false);
+            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable(available));
+        })
+        .ok();
+
     // The power popup is initialized by the overlay host after its own
     // WebView2 build completes (host.rs) — never here. WebView2 env
     // creation is not concurrency-safe across threads sharing the same
@@ -258,6 +270,23 @@ pub(crate) fn run_windows_runtime(
     // the same channel the tray uses. Only effective when a console
     // is present (AttachConsole succeeded in main.rs).
     crate::console_signal::install(event_tx.clone());
+
+    // Build the event channel that the WebView host's IPC handler
+    // (and the hotkey listener / tray) write to, and the runtime
+    // worker thread reads from.
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
+
+    // Check for updates on startup
+    let event_tx_for_update = event_tx.clone();
+    std::thread::Builder::new()
+        .name("nex-startup-update-check".into())
+        .spawn(move || {
+            let available = crate::updater::check_update_available(
+                crate::updater::UpdateChannel::Stable
+            ).unwrap_or(false);
+            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable(available));
+        })
+        .ok();
 
     // Create the system tray icon with context menu. The tray uses
     // the same event channel so menu selections are delivered as
@@ -1886,28 +1915,7 @@ impl RuntimeWorker {
             }
             OverlayEvent::Tick => {
                 // Periodic background tasks
-                // Check for updates periodically (e.g., every hour)
-                // This is a lightweight check that can run in the background
-                static LAST_UPDATE_CHECK: AtomicU64 = AtomicU64::new(0);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let last_check = LAST_UPDATE_CHECK.load(Ordering::Relaxed);
-                if now.saturating_sub(last_check) > 3600 {
-                    // Check for updates every hour
-                    LAST_UPDATE_CHECK.store(now, Ordering::Relaxed);
-                    let event_tx = self.event_tx.clone();
-                    std::thread::Builder::new()
-                        .name("nex-update-check".into())
-                        .spawn(move || {
-                            let available = crate::updater::check_update_available(
-                                crate::updater::UpdateChannel::Stable
-                            ).unwrap_or(false);
-                            let _ = event_tx.send(OverlayEvent::UpdateAvailable(available));
-                        })
-                        .ok();
-                }
+                // Updates are checked on startup only, not periodically
             }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();

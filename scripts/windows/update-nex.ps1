@@ -6,6 +6,7 @@ param(
   [switch]$StartAfterUpdate = $true,
   [switch]$KeepBackup,
   [switch]$Force,
+  [switch]$CheckOnly,
   [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Nex",
   [string]$CacheRoot = "$env:LOCALAPPDATA\Nex\updates"
 )
@@ -97,7 +98,10 @@ function Resolve-TargetRelease {
     return (Is-BetaRelease $_)
   }
 
-  $selected = $filtered | Select-Object -First 1
+  $selected = $filtered | Sort-Object -Property @{ Expression = {
+      try { [version](Normalize-Version ([string]$_.tag_name)) }
+      catch { [version]'0.0.0' }
+    }; Descending = $true } | Select-Object -First 1
   if (-not $selected) {
     throw "No '$ChannelName' release found in repo '$Repo'."
   }
@@ -126,6 +130,40 @@ function Download-ReleaseAsset {
     -Uri $Asset.browser_download_url `
     -Headers @{ "User-Agent" = "Nex-Updater"; "Accept" = "application/octet-stream" } `
     -OutFile $OutFile
+}
+
+function Get-Sha256([string]$Path) {
+  if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $stream = [System.IO.File]::OpenRead($Path)
+      try {
+        $bytes = $sha256.ComputeHash($stream)
+      }
+      finally {
+        $stream.Dispose()
+      }
+    }
+    finally {
+      $sha256.Dispose()
+    }
+    return ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+  }
+  catch {
+    $lines = @(certutil.exe -hashfile $Path SHA256 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to calculate SHA-256 hash for '$Path': $($_.Exception.Message)"
+    }
+    $hash = ($lines | Where-Object { $_ -match '^[0-9a-fA-F ]{64,}$' } | Select-Object -First 1)
+    if (-not $hash) {
+      throw "Unable to parse SHA-256 hash for '$Path'."
+    }
+    return ([string]$hash).Trim().Replace(' ', '').ToLowerInvariant()
+  }
 }
 
 function Get-RuntimeExecutableCandidates {
@@ -239,6 +277,38 @@ function Stop-Runtime {
   Start-Sleep -Milliseconds 200
 }
 
+function Bring-ProcessToFront($Process) {
+  if (-not ('NexWindow' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class NexWindow {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+}
+'@
+  }
+  $shell = New-Object -ComObject WScript.Shell
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    $Process.Refresh()
+    if ($Process.HasExited) {
+      return
+    }
+    if ($Process.MainWindowHandle -ne 0) {
+      $handle = [IntPtr]$Process.MainWindowHandle
+      [NexWindow]::ShowWindowAsync($handle, 9) | Out-Null
+      [NexWindow]::SetForegroundWindow($handle) | Out-Null
+      if (-not $shell.AppActivate($Process.Id)) {
+        Write-Host "Warning: could not activate installer window." -ForegroundColor Yellow
+      }
+      return
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  Write-Host "Warning: installer window was not ready for foreground activation." -ForegroundColor Yellow
+}
+
 function Verify-ManifestAndInstaller {
   param(
     $Manifest,
@@ -280,7 +350,7 @@ function Verify-ManifestAndInstaller {
     throw "Manifest artifacts.setup.sha256 is missing."
   }
 
-  $actualSha = (Get-FileHash -LiteralPath $SetupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualSha = Get-Sha256 -Path $SetupPath
   if ($actualSha -ne $setupSha.ToLowerInvariant()) {
     throw "Installer checksum mismatch. Expected '$setupSha', got '$actualSha'."
   }
@@ -321,6 +391,12 @@ if (-not $Force -and $installedVersion -and (Compare-Versions $installedVersion 
   exit 0
 }
 
+if ($CheckOnly) {
+  Write-Host "Update available (installed $installedVersion, latest $resolvedVersion)." -ForegroundColor Yellow
+  Write-Host "NEX_UPDATE_RESULT: $(ConvertTo-Json -Compress @{ status = 'update-available'; version = $resolvedVersion })"
+  exit 0
+}
+
 $setupAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $setupNames
 $manifestAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $manifestNames
 
@@ -335,7 +411,7 @@ Write-Host "[1/5] Downloading manifest and installer..." -ForegroundColor Yellow
 Download-ReleaseAsset -Asset $manifestAsset -OutFile $manifestPath
 Download-ReleaseAsset -Asset $setupAsset -OutFile $setupPath
 
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 12
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 Write-Host "[2/5] Verifying integrity..." -ForegroundColor Yellow
 Verify-ManifestAndInstaller `
   -Manifest $manifest `
@@ -360,13 +436,14 @@ try {
   }
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
-  $args = @()
   if ($needsElevation) {
-    $proc = Start-Process -FilePath $setupPath -ArgumentList $args -Verb RunAs -PassThru -Wait
+    $proc = Start-Process -FilePath $setupPath -Verb RunAs -PassThru -WindowStyle Normal
   }
   else {
-    $proc = Start-Process -FilePath $setupPath -ArgumentList $args -PassThru -Wait
+    $proc = Start-Process -FilePath $setupPath -PassThru -WindowStyle Normal
   }
+  Bring-ProcessToFront -Process $proc
+  $proc.WaitForExit()
   if ($proc.ExitCode -ne 0) {
     throw "Installer exited with code $($proc.ExitCode)."
   }
@@ -380,7 +457,10 @@ try {
   & $newExe --sync-startup | Out-Null
 
   if ($StartAfterUpdate) {
-    Start-Process -FilePath $newExe -ArgumentList "--background" -WindowStyle Hidden
+    # Runtime already runs detached from this updater process. Starting the
+    # foreground runtime directly avoids the background->foreground respawn
+    # race during WebView initialization and first overlay positioning.
+    Start-Process -FilePath $newExe -ArgumentList "--foreground" -WindowStyle Hidden
   }
 
   if ($backupDir -and (Test-Path -LiteralPath $backupDir) -and -not $KeepBackup) {
@@ -409,7 +489,7 @@ catch {
       Move-Item -LiteralPath $backupDir -Destination $InstallRoot
       $restoredExe = Resolve-InstalledRuntimePath -Root $InstallRoot
       if ($StartAfterUpdate -and (Test-Path -LiteralPath $restoredExe)) {
-        Start-Process -FilePath $restoredExe -ArgumentList "--background" -WindowStyle Hidden
+        Start-Process -FilePath $restoredExe -ArgumentList "--foreground" -WindowStyle Hidden
       }
       Write-Host "Rollback complete: restored previous installation." -ForegroundColor Green
     }

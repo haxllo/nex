@@ -271,23 +271,6 @@ pub(crate) fn run_windows_runtime(
     // is present (AttachConsole succeeded in main.rs).
     crate::console_signal::install(event_tx.clone());
 
-    // Build the event channel that the WebView host's IPC handler
-    // (and the hotkey listener / tray) write to, and the runtime
-    // worker thread reads from.
-    let (event_tx, event_rx) = crossbeam_channel::unbounded::<OverlayEvent>();
-
-    // Check for updates on startup
-    let event_tx_for_update = event_tx.clone();
-    std::thread::Builder::new()
-        .name("nex-startup-update-check".into())
-        .spawn(move || {
-            let available = crate::updater::check_update_available(
-                crate::updater::UpdateChannel::Stable
-            ).unwrap_or(false);
-            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable(available));
-        })
-        .ok();
-
     // Create the system tray icon with context menu. The tray uses
     // the same event channel so menu selections are delivered as
     // OverlayEvent variants to the worker thread.
@@ -1754,14 +1737,21 @@ impl RuntimeWorker {
                 self.overlay.open_settings(snap);
             }
             OverlayEvent::CheckUpdates => {
-                match crate::runtime_process::launch_stable_updater() {
-                    Ok(script_path) => {
-                        log_info(&format!("[nex] check_updates launched: {}", script_path.display()));
-                    }
-                    Err(error) => {
-                        log_warn(&format!("[nex] check_updates failed: {error}"));
-                    }
-                }
+                self.overlay.set_status_text("Updating...");
+                let event_tx = self.event_tx.clone();
+                std::thread::Builder::new()
+                    .name("nex-update-button".into())
+                    .spawn(move || {
+                        let message = match crate::updater::run_updater_capture(
+                            crate::updater::UpdateChannel::Stable,
+                        ) {
+                            Ok(output) => crate::updater::summarize_update_output(&output),
+                            Err(error) => format!("Could not launch updater: {error}"),
+                        };
+                        log_info(&format!("[nex] update button result: {message}"));
+                        let _ = event_tx.send(OverlayEvent::UpdateStatus(message));
+                    })
+                    .ok();
             }
             OverlayEvent::UpdateAvailable(available) => {
                 self.overlay.set_update_available(available);
@@ -1851,6 +1841,9 @@ impl RuntimeWorker {
                     .ok();
             }
             OverlayEvent::UpdateStatus(text) => {
+                if text.starts_with("Updated") || text.starts_with("Up to date") {
+                    self.overlay.set_update_available(false);
+                }
                 self.overlay.set_status_text(&text);
             }
             OverlayEvent::TrayLock => {

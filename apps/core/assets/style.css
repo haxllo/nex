@@ -885,11 +885,15 @@ html[data-theme="light"] img.icon.glyph {
 
 #update-btn:hover {
   background: rgba(74, 222, 128, 0.25);
-  transform: scale(1.05);
 }
 
 #update-btn:active {
   transform: scale(0.98);
+}
+
+#update-btn:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 #update-btn svg {

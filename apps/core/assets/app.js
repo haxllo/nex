@@ -26,6 +26,7 @@
   const hintComplete = $("hint-complete");
   const updateNotice = $("update-notice");
   const updateBtn = $("update-btn");
+  const updateBtnLabel = updateBtn.querySelector("span");
 
   // Local mirror of pushed state.
   let rows = [];
@@ -1197,6 +1198,16 @@
       // Lightweight status-only update — apply without re-rendering rows.
       if (!Array.isArray(state.rows) && typeof state.status === "string") {
         statusEl.dataset.text = state.status || "";
+        if (state.status.startsWith("Updated")) {
+          updateBtn.disabled = true;
+          updateBtnLabel.textContent = "Updated";
+        } else if (state.status.startsWith("Up to date")) {
+          updateBtn.disabled = false;
+          updateBtnLabel.textContent = "Up to date";
+        } else if (state.status.startsWith("Update failed") || state.status.startsWith("Could not")) {
+          updateBtn.disabled = false;
+          updateBtnLabel.textContent = "Retry";
+        }
         return;
       }
 
@@ -1344,6 +1355,8 @@
 
   // ── update button ───────────────────────────────────────────
   updateBtn.addEventListener("click", () => {
+    updateBtn.disabled = true;
+    updateBtnLabel.textContent = "Updating...";
     post("checkUpdates");
   });
 

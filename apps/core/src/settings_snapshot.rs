@@ -53,6 +53,7 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "searchModeDefault": cfg.search_mode_default.as_str(),
         "searchDslEnabled": cfg.search_dsl_enabled,
         "webSearchProvider": cfg.web_search_provider.as_str(),
+        "version": env!("CARGO_PKG_VERSION"),
     })
     .to_string()
 }

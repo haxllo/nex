@@ -175,6 +175,7 @@ document.addEventListener("keydown", (e) => {
 
 window.applySettings = function (s) {
   document.documentElement.dataset.theme = s.theme || "dark";
+  document.getElementById("app-version").textContent = s.version ? `v${s.version}` : "";
   window.currentSettings = s;
   window.pendingHotkey = null;
   for (const [id, kind] of FIELDS) {

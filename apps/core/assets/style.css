@@ -855,14 +855,14 @@ html[data-theme="light"] img.icon.glyph {
 #power-btn-top.open {
   color: var(--text);
   background: transparent;
-  transform: scale(1.15);
+  transform: translateY(-1px);
 }
 
 /* ── update notice ───────────────────────────────────────── */
 #update-notice {
   position: relative;
   flex: 0 0 auto;
-  margin-left: 8px;
+  margin-left: 0;
 }
 
 #update-btn {

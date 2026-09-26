@@ -597,6 +597,11 @@
   .status.ok .dot { background: var(--accent); }
   .status.error { color: var(--danger); }
   .status.error .dot { background: var(--danger); }
+  .app-version {
+    color: var(--fg-faint);
+    font-size: 10px;
+    margin-left: 8px;
+  }
   .footer-actions { display: flex; align-items: center; gap: 8px; }
   .btn {
     height: 26px;
@@ -897,7 +902,7 @@
 
   <!-- Footer -->
   <div class="footer">
-    <div id="status" class="status"><span class="dot"></span><span class="status-text">Ready</span></div>
+    <div id="status" class="status"><span class="dot"></span><span class="status-text">Ready</span><span id="app-version" class="app-version"></span></div>
     <div class="footer-actions">
       <button class="btn btn-primary" onclick="save(); this.blur()">Save changes</button>
     </div>

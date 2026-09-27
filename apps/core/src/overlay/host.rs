@@ -799,9 +799,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::SettingsHotkeyRecorded { combo } => {
                     if let Some((_, wv)) = &settings_ui {
-                        let _ = wv.evaluate_script(&format!(
-                            "window.hotkeyRecorded && window.hotkeyRecorded('{combo}')"
-                        ));
+                        // Combo originates from the recordHotkey native path,
+                        // not free-form JS — but still JSON-escape it before
+                        // interpolating into script so a quote can never
+                        // break out of the string literal.
+                        let arg = serde_json::to_string(&combo).unwrap_or_default();
+                        let script =
+                            format!("window.hotkeyRecorded && window.hotkeyRecorded({arg})");
+                        let _ = wv.evaluate_script(&script);
                     }
                 }
                 UiCommand::OpenSettings { snapshot}=> {
@@ -833,37 +838,59 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 serve_asset(request)
                             })
                             .with_ipc_handler(move |req| {
+                                use crate::overlay::ipc::{parse_settings, SettingsMessage};
                                 let body = req.body().clone();
-                                if body.contains("\"t\":\"save\"") {
-                                    let _ = save_tx.send(OverlayEvent::SaveSettings(body));
-                                } else if body.contains("\"t\":\"ready\"") {
-                                    let snap = snapshot_for_ipc.lock().unwrap().clone();
-                                    if let Some(snap) = snap {
-                                        let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings { snapshot: snap });
-                                    };
-                                } else if body.contains("\"t\":\"recordHotkey\"") {
-                                    RECORDING_HOTKEY.store(true, Ordering::SeqCst);
-                                    // Keep Start menu shut while capturing
-                                    register_raw_input_sink(record_hwnd, true);
-                                } else if body.contains("\"t\":\"cancelRecord\"") {
-                                    RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-                                    // Restore normal Win routing.
-                                    register_raw_input_sink(
-                                        record_hwnd,
-                                        crate::overlay::hotkey::is_win_key_hotkey(),
-                                    );
-                                } else if body.contains("\"t\":\"minimize\"") {
-                                    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-                                    if let Ok(slot) = settings_hwnd_for_ipc.lock() {
-                                        if let Some(h) = *slot {
-                                            unsafe { ShowWindow(h, SW_MINIMIZE); }
+                                match parse_settings(&body) {
+                                    Ok(SettingsMessage::Save(payload)) => {
+                                        if payload.cfg.is_object() {
+                                            let _ = save_tx.send(OverlayEvent::SaveSettings(body));
+                                        } else {
+                                            crate::runtime::log_info(
+                                                "[nex] settings ipc rejected: save cfg is not an object",
+                                            );
                                         }
                                     }
-                                } else if body.contains("\"t\":\"close\"") {
-                                    let _ = proxy_for_ipc.send_event(UiCommand::CloseSettings);
-                                }
-                                else {
-                                    crate::runtime::log_info(&format!("[nex] settings ipc: {body}"));
+                                    Ok(SettingsMessage::Ready(_)) => {
+                                        let snap = snapshot_for_ipc.lock().unwrap().clone();
+                                        if let Some(snap) = snap {
+                                            let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings {
+                                                snapshot: snap,
+                                            });
+                                        };
+                                    }
+                                    Ok(SettingsMessage::RecordHotkey(_)) => {
+                                        RECORDING_HOTKEY.store(true, Ordering::SeqCst);
+                                        // Keep Start menu shut while capturing
+                                        register_raw_input_sink(record_hwnd, true);
+                                    }
+                                    Ok(SettingsMessage::CancelRecord(_)) => {
+                                        RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                                        // Restore normal Win routing.
+                                        register_raw_input_sink(
+                                            record_hwnd,
+                                            crate::overlay::hotkey::is_win_key_hotkey(),
+                                        );
+                                    }
+                                    Ok(SettingsMessage::Minimize(_)) => {
+                                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                                            ShowWindow, SW_MINIMIZE,
+                                        };
+                                        if let Ok(slot) = settings_hwnd_for_ipc.lock() {
+                                            if let Some(h) = *slot {
+                                                unsafe {
+                                                    ShowWindow(h, SW_MINIMIZE);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(SettingsMessage::Close(_)) => {
+                                        let _ = proxy_for_ipc.send_event(UiCommand::CloseSettings);
+                                    }
+                                    Err(reject) => {
+                                        crate::runtime::log_info(&format!(
+                                            "[nex] settings ipc rejected: {reject}"
+                                        ));
+                                    }
                                 }
                             })
                             .build(&sw)
@@ -1173,131 +1200,108 @@ fn base64_data_uri(bytes: &[u8]) -> String {
     out
 }
 
-/// Parse one IPC message from the page and act on it.
+/// Parse one IPC message from the page and act on it. The body is
+/// strictly deserialized into [`crate::overlay::ipc::OverlayMessage`]:
+/// malformed JSON, unknown message types, and unknown fields are
+/// rejected with a log line instead of being silently coerced.
 fn handle_ipc(
     body: &str,
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
 ) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return;
+    use crate::overlay::ipc::{OverlayMessage, parse_overlay};
+    let msg = match parse_overlay(body) {
+        Ok(msg) => msg,
+        Err(reject) => {
+            crate::runtime::log_info(&format!("[nex] overlay ipc rejected: {reject}"));
+            return;
+        }
     };
-    let t = value.get("t").and_then(|v| v.as_str()).unwrap_or("");
-    match t {
-        "ready" => {
+    match msg {
+        OverlayMessage::Ready(_) => {
             try_send_ui(proxy, UiCommand::WebviewReady);
         }
-        "query" => {
+        OverlayMessage::Query(p) => {
             // Ignore queries that fire after hide (debounced input
             // races with Escape).  The shim clears query/rows on
             // hide; a stale query would prevent idle-state setup.
             if !state.lock().map(|s| s.visible).unwrap_or(false) {
                 return;
             }
-            let q = value
-                .get("v")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let q = p.v;
             if let Ok(mut s) = state.lock() {
                 s.query = q.clone();
             }
             let _ = event_tx.send(OverlayEvent::QueryChanged(q));
         }
-        "submit" => {
-            let idx = value.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        OverlayMessage::Submit(p) => {
+            let idx = p.v as usize;
             if let Ok(mut s) = state.lock() {
                 s.selected = idx;
             }
             let _ = event_tx.send(OverlayEvent::Submit);
         }
-        "select" => {
-            let idx = value.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        OverlayMessage::Select(p) => {
+            let idx = p.v as usize;
             if let Ok(mut s) = state.lock() {
                 s.selected = idx;
             }
         }
-        "escape" => {
+        OverlayMessage::Escape(_) => {
             let _ = event_tx.send(OverlayEvent::Escape);
         }
-        "resize" => {
+        OverlayMessage::Resize(p) => {
             // JS sends {t:"resize", v:{v:h, immediate:bool}} (new) or
             // {t:"resize", v:h} (legacy number-only).
-            let (h, immediate) = match value.get("v") {
-                Some(serde_json::Value::Object(obj)) => {
-                    let h = obj.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let imm = obj.get("immediate").and_then(|v| v.as_bool()).unwrap_or(false);
-                    (h, imm)
-                }
-                Some(serde_json::Value::Number(n)) => {
-                    (n.as_f64().unwrap_or(0.0), false)
-                }
-                _ => return,
-            };
+            let (h, immediate) = p.v.height_and_immediate();
             try_send_ui(proxy, UiCommand::Resize { h, immediate });
         }
-        "painted" => {
+        OverlayMessage::Painted(_) => {
             // First paint after push_state — safe to show the window.
             // Deferred from WebviewReady / Show to avoid a flash of
             // uncomposited content before the WebView2 paints.
             try_send_ui(proxy, UiCommand::Painted);
         }
-        "pin" => {
-            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::PinApp(title.to_string()));
-            }
+        OverlayMessage::Pin(p) => {
+            let _ = event_tx.send(OverlayEvent::PinApp(p.v));
         }
-        "unpin" => {
-            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::UnpinApp(title.to_string()));
-            }
+        OverlayMessage::Unpin(p) => {
+            let _ = event_tx.send(OverlayEvent::UnpinApp(p.v));
         }
-        "bookmark" => {
-            let payload = value.get("v").cloned().unwrap_or_default();
-            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let remove = payload.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
-            let _ = event_tx.send(OverlayEvent::Bookmark(title.to_string(), url.to_string(), remove));
+        OverlayMessage::Bookmark(p) => {
+            let _ = event_tx.send(OverlayEvent::Bookmark(p.v.title, p.v.url, p.v.remove));
         }
-        "addToQuickLaunch" => {
-            if let Some(path) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
-            }
+        OverlayMessage::AddToQuickLaunch(p) => {
+            let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(p.v));
         }
-        "powerAction" => {
-            if let Some(action) = value.get("v").and_then(|v| v.as_str()) {
-                let event = match action {
-                    "lock" => OverlayEvent::TrayLock,
-                    "sleep" => OverlayEvent::TraySleep,
-                    "shutdown" => OverlayEvent::PowerMenuShutdown,
-                    "restart" => OverlayEvent::PowerMenuRestart,
-                    "signout" => OverlayEvent::TraySignOut,
-                    _ => return,
-                };
-                let _ = event_tx.send(event);
-            }
+        OverlayMessage::PowerAction(p) => {
+            let event = match p.v.as_str() {
+                "lock" => OverlayEvent::TrayLock,
+                "sleep" => OverlayEvent::TraySleep,
+                "shutdown" => OverlayEvent::PowerMenuShutdown,
+                "restart" => OverlayEvent::PowerMenuRestart,
+                "signout" => OverlayEvent::TraySignOut,
+                _ => return,
+            };
+            let _ = event_tx.send(event);
         }
-        "contextAction" => {
-            let action = value.get("v").and_then(|v| v.get("action")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let title = value.get("v").and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let path = value.get("v").and_then(|v| v.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
+        OverlayMessage::ContextAction(p) => {
+            let _ = event_tx.send(OverlayEvent::ContextAction(p.v.action, p.v.title, p.v.path));
         }
-        "settings" => {
+        OverlayMessage::Settings(_) => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
         }
-        "checkUpdates" => {
+        OverlayMessage::CheckUpdates(_) => {
             let _ = event_tx.send(OverlayEvent::CheckUpdates);
         }
-        "dragStart" => {
+        OverlayMessage::DragStart(_) => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button
             // release — no per-move IPC at all, so the window tracks
             // the cursor 1:1 with no lag and no ghost frames.
             try_send_ui(proxy, UiCommand::DragStart);
         }
-        _ => {}
     }
 }
 

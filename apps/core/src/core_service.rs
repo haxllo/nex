@@ -19,7 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
-const STALE_PRUNE_BATCH_SIZE: usize = 16;
+/// 128 `Path::exists` probes per 15 s tick (~8/s amortized). 16 took
+/// ~31 h to sweep a 120k-item index; 128 sweeps in ~4 h with the same
+/// `try_write` politeness (skips under load).
+const STALE_PRUNE_BATCH_SIZE: usize = 128;
 const PERSONALIZATION_CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// In-memory TTL cache for personalization boosts.

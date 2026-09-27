@@ -148,6 +148,20 @@ impl IconCache {
         }
     }
 
+    /// Warm-release that keeps the `keep` most-recently-used entries
+    /// (top hits / Quick Launch repaint instantly) and drops the rest.
+    /// Bounded: at most `keep` PNGs (~4 KiB each) survive idle.
+    pub(crate) fn retain_recent(&self, keep: usize) {
+        if let Ok(mut inner) = self.inner.lock() {
+            while inner.png.len() > keep {
+                if inner.png.pop_lru().is_none() {
+                    break;
+                }
+            }
+            inner.clean_orphaned_touches();
+        }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.inner
             .lock()

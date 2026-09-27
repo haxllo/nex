@@ -50,7 +50,13 @@ struct Inner {
     /// Shared work slot for the single persistent icon-prefetch thread.
     /// `set_results()` replaces the contents; the background thread
     /// always processes the latest batch — old work is discarded.
+    /// `prefetch_notify_tx` wakes the thread immediately so first
+    /// paint does not wait out the 50 ms poll sleep. Only the worker
+    /// thread holds the `Receiver` — a second stored receiver would
+    /// steal wake tokens (MPMC fan-out) and reintroduce the delay.
     prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>>,
+    prefetch_notify_tx: Sender<()>,
+
 }
 
 impl NativeOverlayShell {
@@ -61,6 +67,11 @@ impl NativeOverlayShell {
     pub fn create() -> Result<Self, String> {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         let prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>> = Arc::new(Mutex::new(None));
+        // Rendezvous wake-up: `set_results` offers a token; the thread
+        // blocks on `recv_timeout(50ms)` so a lost token only costs the
+        // old poll delay, never a stall.
+        let (prefetch_notify_tx, prefetch_notify_for_thread) =
+            crossbeam_channel::bounded::<()>(1);
         let icon_cache = Arc::new(IconCache::default());
         let icon_cache_for_thread = icon_cache.clone();
         let prefetch_work_for_thread = prefetch_work.clone();
@@ -78,8 +89,9 @@ impl NativeOverlayShell {
         std::thread::Builder::new()
             .name("nex-icon-prefetch".into())
             .spawn(move || loop {
-                // Sleep until work arrives. Check every 50ms so we
-                // don't miss a slot replacement during rapid typing.
+                // Block until `set_results` wakes us; 50 ms timeout is
+                // only a fallback so a lost token still gets picked up.
+                let _ = prefetch_notify_for_thread.recv_timeout(Duration::from_millis(50));
                 let rows: Vec<OverlayRow> = {
                     let mut slot = match prefetch_work_for_thread.lock() {
                         Ok(g) => g,
@@ -87,14 +99,37 @@ impl NativeOverlayShell {
                     };
                     match slot.take() {
                         Some(r) if !r.is_empty() => r,
-                        _ => {
-                            drop(slot);
-                            std::thread::sleep(Duration::from_millis(50));
-                            continue;
-                        }
+                        _ => continue,
                     }
                 };
-                crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, &rows);
+                // Visible-first streaming: decode the viewport (~8 rows)
+                // then notify immediately so top hits paint while the
+                // tail still decodes. Same bytes, one batch earlier.
+                const VIEWPORT_ROWS: usize = 8;
+                let (head, tail) = if rows.len() > VIEWPORT_ROWS {
+                    rows.split_at(VIEWPORT_ROWS)
+                } else {
+                    (&rows[..], &[][..])
+                };
+                crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, head);
+                if !tail.is_empty() {
+                    if let Ok(slot) = proxy_for_thread.lock() {
+                        if let Some(proxy) = slot.as_ref() {
+                            let _ = proxy.send_event(UiCommand::ApplyIcons);
+                        }
+                    }
+                    // `set_results` may have replaced the slot while the
+                    // head decoded — prefer the newer batch over the stale tail.
+                    let stale_tail = {
+                        matches!(
+                            prefetch_work_for_thread.lock().as_deref_mut(),
+                            Ok(Some(_))
+                        )
+                    };
+                    if !stale_tail {
+                        crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, tail);
+                    }
+                }
                 // Notify the host event loop that icons are now cached so
                 // it re-sends the icon data JSON; the page patches the
                 // placeholder <img> elements that painted cold (no src).
@@ -120,6 +155,7 @@ impl NativeOverlayShell {
                 stop_tx,
                 stop_rx,
                 prefetch_work,
+                prefetch_notify_tx,
             }),
         })
     }
@@ -463,6 +499,9 @@ impl NativeOverlayShell {
             if let Ok(mut slot) = self.inner.prefetch_work.lock() {
                 *slot = Some(rows.to_vec());
             }
+            // Wake the prefetch thread; `try_send` so rapid typing
+            // never blocks the message pump on a full rendezvous.
+            let _ = self.inner.prefetch_notify_tx.try_send(());
         }
     }
 

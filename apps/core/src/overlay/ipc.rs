@@ -28,6 +28,23 @@ pub(crate) const MAX_TITLE_CHARS: usize = 1024;
 pub(crate) const MAX_PATH_CHARS: usize = 32_768;
 /// Longest accepted bookmark URL (characters).
 pub(crate) const MAX_URL_CHARS: usize = 8192;
+/// Largest accepted row index for submit/select. Real lists hold at most
+/// ~100 rows; this leaves wide headroom while keeping the `as usize`
+/// cast at the call site loss-free on both 32- and 64-bit targets.
+pub(crate) const MAX_RESULT_INDEX: u64 = 10_000;
+/// Power actions the overlay page may request.
+pub(crate) const KNOWN_POWER_ACTIONS: &[&str] =
+    &["lock", "sleep", "shutdown", "restart", "signout"];
+/// Context-menu actions the overlay page may request. Mirrors the arms
+/// of `handle_context_action` in `runtime_loop.rs`.
+pub(crate) const KNOWN_CONTEXT_ACTIONS: &[&str] = &[
+    "runas",
+    "openfolder",
+    "copypath",
+    "uninstall",
+    "pin",
+    "unpin",
+];
 
 /// Why an IPC message was rejected. Returned to both call sites so they
 /// can log a one-line reason; the page itself gets no error channel
@@ -72,14 +89,12 @@ pub(crate) struct NoPayload {}
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueryPayload {
-    #[serde(default)]
     pub v: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct IndexPayload {
-    #[serde(default)]
     pub v: u64,
 }
 
@@ -270,6 +285,20 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         OverlayMessage::Query(p) => {
             check_len(&p.v, MAX_QUERY_CHARS, "query").map_err(IpcReject::BadPayload)?
         }
+        OverlayMessage::Submit(p) | OverlayMessage::Select(p) => {
+            if p.v > MAX_RESULT_INDEX {
+                return Err(IpcReject::BadPayload(format!(
+                    "row index {0} exceeds {MAX_RESULT_INDEX}",
+                    p.v
+                )));
+            }
+        }
+        OverlayMessage::Resize(p) => {
+            let (h, _) = p.v.height_and_immediate();
+            if !h.is_finite() {
+                return Err(IpcReject::BadPayload("resize height is not finite".into()));
+            }
+        }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {
             check_len(&p.v, MAX_TITLE_CHARS, "pin target").map_err(IpcReject::BadPayload)?;
         }
@@ -283,9 +312,21 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::PowerAction(p) => {
             check_len(&p.v, 32, "power action").map_err(IpcReject::BadPayload)?;
+            if !KNOWN_POWER_ACTIONS.contains(&p.v.as_str()) {
+                return Err(IpcReject::BadPayload(format!(
+                    "unknown power action: {:?}",
+                    p.v
+                )));
+            }
         }
         OverlayMessage::ContextAction(p) => {
             check_len(&p.v.action, 64, "context action").map_err(IpcReject::BadPayload)?;
+            if !KNOWN_CONTEXT_ACTIONS.contains(&p.v.action.as_str()) {
+                return Err(IpcReject::BadPayload(format!(
+                    "unknown context action: {:?}",
+                    p.v.action
+                )));
+            }
             check_len(&p.v.title, MAX_TITLE_CHARS, "context title")
                 .map_err(IpcReject::BadPayload)?;
             check_len(&p.v.path, MAX_PATH_CHARS, "context path").map_err(IpcReject::BadPayload)?;
@@ -421,5 +462,42 @@ mod tests {
             parse_settings(r#"{"t":"save"}"#),
             Err(IpcReject::BadPayload(_))
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_power_and_context_actions() {
+        assert!(matches!(
+            parse_overlay(r#"{"t":"powerAction","v":"reboot-system"}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(matches!(
+            parse_overlay(
+                r#"{"t":"contextAction","v":{"action":"rm-rf","title":"a","path":"b"}}"#
+            ),
+            Err(IpcReject::BadPayload(_))
+        ));
+        // Known actions still parse.
+        assert!(parse_overlay(r#"{"t":"powerAction","v":"lock"}"#).is_ok());
+        assert!(parse_overlay(
+            r#"{"t":"contextAction","v":{"action":"copypath","title":"a","path":"b"}}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_out_of_range_row_index_and_missing_fields() {
+        assert!(matches!(
+            parse_overlay(r#"{"t":"submit","v":99999}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(matches!(
+            parse_overlay(r#"{"t":"query"}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(matches!(
+            parse_overlay(r#"{"t":"submit"}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(parse_overlay(r#"{"t":"submit","v":3}"#).is_ok());
     }
 }

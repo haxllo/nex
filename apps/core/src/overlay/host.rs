@@ -605,7 +605,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // heap outside Chromium — but keep the 16 most
                         // recent so top hits repaint without re-decode.
                         let entries = icon_cache.len();
-                        icon_cache.retain_recent(16);
+                        icon_cache.retain_recent(48);
                         let kept = icon_cache.len();
                         crate::logging::info(&format!(
                             "[nex] ui warm-release: icon cache trimmed entries={entries} kept={kept} (webview kept warm)"

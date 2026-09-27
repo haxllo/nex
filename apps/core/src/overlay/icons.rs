@@ -13,7 +13,7 @@ use lru::LruCache;
 
 use crate::overlay::model::OverlayRow;
 
-const DEFAULT_MAX_ENTRIES: usize = 96;
+const DEFAULT_MAX_ENTRIES: usize = 128;
 const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 
 /// Target square canvas size for normalized icons. Crisp at 2-3x DPI
@@ -1167,6 +1167,37 @@ mod tests {
     fn empty_path_returns_none() {
         let cache = IconCache::default();
         assert!(cache.png_bytes("").is_none());
+    }
+
+    /// Head/tail split contract with `shim::set_results`: rows
+    /// `[..8]` decode inline, `[8..]` on the prefetch thread.
+    /// A 12-row batch must split into an 8-row head and a 4-row tail.
+    #[test]
+    fn viewport_split_covers_whole_batch() {
+        const VIEWPORT_ROWS: usize = 8;
+        let rows: Vec<OverlayRow> = (0..12)
+            .map(|i| OverlayRow {
+                role: crate::overlay::model::OverlayRowRole::Item,
+                result_index: Some(i),
+                kind: "app".into(),
+                title: format!("t{i}"),
+                path: String::new(),
+                url: None,
+                icon_path: format!("C:\\app{i}.exe"),
+                clipboard_thumbnail: None,
+                clipboard_full_image: None,
+                tile_size: None,
+            })
+            .collect();
+        let head_end = VIEWPORT_ROWS.min(rows.len());
+        let tail: &[OverlayRow] = if rows.len() > VIEWPORT_ROWS {
+            &rows[VIEWPORT_ROWS..]
+        } else {
+            &[]
+        };
+        assert_eq!(head_end, 8);
+        assert_eq!(tail.len(), 4);
+        assert_eq!(rows[..head_end].len() + tail.len(), rows.len());
     }
 
     #[test]

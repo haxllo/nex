@@ -102,22 +102,18 @@ impl NativeOverlayShell {
                         _ => continue,
                     }
                 };
-                // Visible-first streaming: decode the viewport (~8 rows)
-                // then notify immediately so top hits paint while the
-                // tail still decodes. Same bytes, one batch earlier.
+                // Visible-first streaming: the viewport head (~8 rows)
+                // was already decoded inline by set_results; decode the
+                // tail here then notify so rows below the fold fill in.
+                // Re-check the cache per row so a superseding keystroke's
+                // inline pass can satisfy entries first (no double decode).
                 const VIEWPORT_ROWS: usize = 8;
-                let (head, tail) = if rows.len() > VIEWPORT_ROWS {
-                    rows.split_at(VIEWPORT_ROWS)
+                let tail: &[OverlayRow] = if rows.len() > VIEWPORT_ROWS {
+                    &rows[VIEWPORT_ROWS..]
                 } else {
-                    (&rows[..], &[][..])
+                    &[]
                 };
-                crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, head);
                 if !tail.is_empty() {
-                    if let Ok(slot) = proxy_for_thread.lock() {
-                        if let Some(proxy) = slot.as_ref() {
-                            let _ = proxy.send_event(UiCommand::ApplyIcons);
-                        }
-                    }
                     // `set_results` may have replaced the slot while the
                     // head decoded — prefer the newer batch over the stale tail.
                     let stale_tail = {
@@ -127,7 +123,18 @@ impl NativeOverlayShell {
                         )
                     };
                     if !stale_tail {
-                        crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, tail);
+                        for row in tail {
+                            if !row.icon_path.is_empty()
+                                && icon_cache_for_thread
+                                    .png_bytes_cached(&row.icon_path)
+                                    .is_none()
+                            {
+                                crate::overlay::icons::prefetch_rows(
+                                    &icon_cache_for_thread,
+                                    std::slice::from_ref(row),
+                                );
+                            }
+                        }
                     }
                 }
                 // Notify the host event loop that icons are now cached so
@@ -489,19 +496,39 @@ impl NativeOverlayShell {
             // Update quick_launch_visible based on whether we're showing Quick Launch rows
             s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });
-        self.post(UiCommand::Apply);
-
-        // Queue icon decoding on the persistent background thread.
-        // Replacing the slot discards any pending batch — the thread
-        // always processes the latest results, preventing thread
-        // accumulation under rapid typing.
+        // Queue the full batch on the prefetch thread FIRST so a newer
+        // keystroke can never slip in between and be skipped as stale.
         if !rows.is_empty() {
             if let Ok(mut slot) = self.inner.prefetch_work.lock() {
                 *slot = Some(rows.to_vec());
             }
+        }
+        self.post(UiCommand::Apply);
+
+        // Decode the visible viewport synchronously (bounded: 8 rows,
+        // deduped by path, warm cache hits are ~µs). First query after
+        // launch has a cold cache — without this the first paint ships
+        // zero icons and every row blinks in on the later ApplyIcons
+        // push. The tail continues on the prefetch thread via wake.
+        if !rows.is_empty() {
+            const VIEWPORT_ROWS: usize = 8;
+            let head_end = VIEWPORT_ROWS.min(rows.len());
+            {
+                use std::collections::HashSet;
+                let mut seen = HashSet::new();
+                let head: Vec<OverlayRow> = rows[..head_end]
+                    .iter()
+                    .filter(|r| !r.icon_path.is_empty() && seen.insert(r.icon_path.clone()))
+                    .cloned()
+                    .collect();
+                crate::overlay::icons::prefetch_rows(&self.inner.icon_cache, &head);
+            }
             // Wake the prefetch thread; `try_send` so rapid typing
             // never blocks the message pump on a full rendezvous.
             let _ = self.inner.prefetch_notify_tx.try_send(());
+            // Push the newly-decoded head icons so the first paint
+            // patches them in (icons-only, no row rebuild).
+            self.post(UiCommand::ApplyIcons);
         }
     }
 

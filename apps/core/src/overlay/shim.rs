@@ -114,27 +114,16 @@ impl NativeOverlayShell {
                     &[]
                 };
                 if !tail.is_empty() {
-                    // `set_results` may have replaced the slot while the
-                    // head decoded — prefer the newer batch over the stale tail.
-                    let stale_tail = {
-                        matches!(
-                            prefetch_work_for_thread.lock().as_deref_mut(),
-                            Ok(Some(_))
-                        )
-                    };
+                    // Set to Some by a newer set_results while this batch
+                    // decoded — prefer the newer batch over the stale tail.
+                    // take() it so the next loop doesn't reprocess it as
+                    // a duplicate wake (slot was already taken above).
+                    let stale_tail = prefetch_work_for_thread
+                        .lock()
+                        .map(|mut slot| slot.take().is_some())
+                        .unwrap_or(false);
                     if !stale_tail {
-                        for row in tail {
-                            if !row.icon_path.is_empty()
-                                && icon_cache_for_thread
-                                    .png_bytes_cached(&row.icon_path)
-                                    .is_none()
-                            {
-                                crate::overlay::icons::prefetch_rows(
-                                    &icon_cache_for_thread,
-                                    std::slice::from_ref(row),
-                                );
-                            }
-                        }
+                        crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, tail);
                     }
                 }
                 // Notify the host event loop that icons are now cached so
@@ -505,24 +494,15 @@ impl NativeOverlayShell {
         }
         self.post(UiCommand::Apply);
 
-        // Decode the visible viewport synchronously (bounded: 8 rows,
-        // deduped by path, warm cache hits are ~µs). First query after
-        // launch has a cold cache — without this the first paint ships
-        // zero icons and every row blinks in on the later ApplyIcons
-        // push. The tail continues on the prefetch thread via wake.
+        // Decode the visible viewport synchronously (bounded: 8 rows;
+        // prefetch_rows dedups by path, warm hits are ~µs). First query
+        // after launch has a cold cache — without this the first paint
+        // ships zero icons and every row blinks in on the later
+        // ApplyIcons push. The tail continues on the prefetch thread.
         if !rows.is_empty() {
             const VIEWPORT_ROWS: usize = 8;
             let head_end = VIEWPORT_ROWS.min(rows.len());
-            {
-                use std::collections::HashSet;
-                let mut seen = HashSet::new();
-                let head: Vec<OverlayRow> = rows[..head_end]
-                    .iter()
-                    .filter(|r| !r.icon_path.is_empty() && seen.insert(r.icon_path.clone()))
-                    .cloned()
-                    .collect();
-                crate::overlay::icons::prefetch_rows(&self.inner.icon_cache, &head);
-            }
+            crate::overlay::icons::prefetch_rows(&self.inner.icon_cache, &rows[..head_end]);
             // Wake the prefetch thread; `try_send` so rapid typing
             // never blocks the message pump on a full rendezvous.
             let _ = self.inner.prefetch_notify_tx.try_send(());

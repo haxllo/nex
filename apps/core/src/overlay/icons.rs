@@ -1148,9 +1148,19 @@ pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
             }
         });
     }
-    for row in rows {
-        if !row.icon_path.is_empty() {
-            cache.png_bytes(&row.icon_path);
+    // Dedup by path: repeated exes (two shortcuts to the same target)
+    // decode once. Skip warm entries so a superseding keystroke's
+    // inline pass isn't repeated by the tail loop.
+    {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for row in rows {
+            if !row.icon_path.is_empty()
+                && seen.insert(row.icon_path.clone())
+                && cache.png_bytes_cached(&row.icon_path).is_none()
+            {
+                cache.png_bytes(&row.icon_path);
+            }
         }
     }
     // Note: CoUninitialize is intentionally omitted. COM is cleaned

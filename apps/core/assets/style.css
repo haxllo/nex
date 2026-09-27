@@ -302,7 +302,7 @@ body {
     0 3px 10px color-mix(in srgb, black 18%, transparent);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 80ms ease-out;
+  transition: none;
 }
 .row::after {
   content: "";
@@ -320,7 +320,7 @@ body {
   mask-composite: exclude;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 80ms ease-out;
+  transition: none;
 }
 .row > * {
   position: relative;

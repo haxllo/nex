@@ -533,6 +533,10 @@
   }
 
   function setSelected(i, scroll) {
+    if (i === selected) {
+      if (scroll) scrollToSelected();
+      return;
+    }
     selected = i;
     for (const row of rowMap.values()) {
       row.classList.remove("selected");

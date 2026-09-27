@@ -1282,7 +1282,15 @@ fn handle_ipc(
                 "shutdown" => OverlayEvent::PowerMenuShutdown,
                 "restart" => OverlayEvent::PowerMenuRestart,
                 "signout" => OverlayEvent::TraySignOut,
-                _ => return,
+                // Unreachable: the parser allow-lists power actions, but
+                // log rather than silently drop if schemas ever diverge.
+                _ => {
+                    crate::runtime::log_info(&format!(
+                        "[nex] overlay ipc rejected: unknown power action {:?}",
+                        p.v
+                    ));
+                    return;
+                }
             };
             let _ = event_tx.send(event);
         }

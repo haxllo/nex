@@ -602,7 +602,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Keep WebView + ready so re-open is always the
                         // warm path (consistent timing). Drop decoded
                         // PNG icons — the bulk of reclaimable overlay
-                        // heap outside Chromium — but keep the 16 most
+                        // heap outside Chromium — but keep the 48 most
                         // recent so top hits repaint without re-decode.
                         let entries = icon_cache.len();
                         icon_cache.retain_recent(48);

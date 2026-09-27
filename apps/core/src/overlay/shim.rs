@@ -116,12 +116,12 @@ impl NativeOverlayShell {
                 if !tail.is_empty() {
                     // Set to Some by a newer set_results while this batch
                     // decoded — prefer the newer batch over the stale tail.
-                    // take() it so the next loop doesn't reprocess it as
-                    // a duplicate wake (slot was already taken above).
-                    let stale_tail = prefetch_work_for_thread
-                        .lock()
-                        .map(|mut slot| slot.take().is_some())
-                        .unwrap_or(false);
+                    // Peek only: the next loop iteration takes and decodes
+                    // it (taking here would drop its tail below the fold).
+                    let stale_tail = matches!(
+                        prefetch_work_for_thread.lock().as_deref(),
+                        Ok(Some(_))
+                    );
                     if !stale_tail {
                         crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, tail);
                     }

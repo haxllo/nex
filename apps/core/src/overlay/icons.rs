@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     /// Head/tail split contract with `shim::set_results`: rows
-    /// `[..8]` decode inline, `[8..]` on the prefetch thread.
+    /// `[..8]` are prioritized before `[8..]` by the prefetch thread.
     /// A 12-row batch must split into an 8-row head and a 4-row tail.
     #[test]
     fn viewport_split_covers_whole_batch() {

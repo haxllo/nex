@@ -306,7 +306,16 @@ fn run_watch_loop(
                     break 'outer;
                 }
                 if bytes_returned == 0 {
-                    continue;
+                    // Windows reports directory-change buffer overflow with
+                    // zero bytes. The journal is no longer trustworthy;
+                    // force a full consumer resync before accepting events.
+                    batch.events.clear();
+                    batch.events.push(WatcherEvent {
+                        kind: WatcherEventKind::OverflowResync,
+                        path: PathBuf::new(),
+                    });
+                    flush_batch(&mut batch, &tx);
+                    break;
                 }
                 // Buffer overflow: the journal wrapped and events were
                 // lost. Keep watching (re-arm below) and emit a drain

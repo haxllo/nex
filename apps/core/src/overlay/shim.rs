@@ -102,28 +102,32 @@ impl NativeOverlayShell {
                         _ => continue,
                     }
                 };
-                // Visible-first streaming: the viewport head (~8 rows)
-                // was already decoded inline by set_results; decode the
-                // tail here then notify so rows below the fold fill in.
-                // Re-check the cache per row so a superseding keystroke's
-                // inline pass can satisfy entries first (no double decode).
+                // Visible-first streaming: decode the viewport head before
+                // the tail, but keep all decoding off the runtime worker.
+                // Re-check the work slot between phases so a superseding
+                // keystroke can cancel stale, expensive shell extraction.
                 const VIEWPORT_ROWS: usize = 8;
-                let tail: &[OverlayRow] = if rows.len() > VIEWPORT_ROWS {
-                    &rows[VIEWPORT_ROWS..]
-                } else {
-                    &[]
-                };
-                if !tail.is_empty() {
-                    // Set to Some by a newer set_results while this batch
-                    // decoded — prefer the newer batch over the stale tail.
-                    // Peek only: the next loop iteration takes and decodes
-                    // it (taking here would drop its tail below the fold).
+                let head_end = VIEWPORT_ROWS.min(rows.len());
+                crate::overlay::icons::prefetch_rows(
+                    &icon_cache_for_thread,
+                    &rows[..head_end],
+                );
+                if let Ok(slot) = proxy_for_thread.lock() {
+                    if let Some(proxy) = slot.as_ref() {
+                        let _ = proxy.send_event(UiCommand::ApplyIcons);
+                    }
+                }
+
+                if rows.len() > head_end {
                     let stale_tail = matches!(
                         prefetch_work_for_thread.lock().as_deref(),
                         Ok(Some(_))
                     );
                     if !stale_tail {
-                        crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, tail);
+                        crate::overlay::icons::prefetch_rows(
+                            &icon_cache_for_thread,
+                            &rows[head_end..],
+                        );
                     }
                 }
                 // Notify the host event loop that icons are now cached so
@@ -485,8 +489,9 @@ impl NativeOverlayShell {
             // Update quick_launch_visible based on whether we're showing Quick Launch rows
             s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });
-        // Queue the full batch on the prefetch thread FIRST so a newer
-        // keystroke can never slip in between and be skipped as stale.
+        // Queue the full batch on the prefetch thread. It prioritizes the
+        // visible head, so result rendering and hotkey handling never wait
+        // for cold shell icon extraction.
         if !rows.is_empty() {
             if let Ok(mut slot) = self.inner.prefetch_work.lock() {
                 *slot = Some(rows.to_vec());
@@ -494,21 +499,10 @@ impl NativeOverlayShell {
         }
         self.post(UiCommand::Apply);
 
-        // Decode the visible viewport synchronously (bounded: 8 rows;
-        // prefetch_rows dedups by path, warm hits are ~µs). First query
-        // after launch has a cold cache — without this the first paint
-        // ships zero icons and every row blinks in on the later
-        // ApplyIcons push. The tail continues on the prefetch thread.
+        // Wake the worker after the row state is visible. The worker decodes
+        // the first viewport batch before the rest, then posts icon data.
         if !rows.is_empty() {
-            const VIEWPORT_ROWS: usize = 8;
-            let head_end = VIEWPORT_ROWS.min(rows.len());
-            crate::overlay::icons::prefetch_rows(&self.inner.icon_cache, &rows[..head_end]);
-            // Wake the prefetch thread; `try_send` so rapid typing
-            // never blocks the message pump on a full rendezvous.
             let _ = self.inner.prefetch_notify_tx.try_send(());
-            // Push the newly-decoded head icons so the first paint
-            // patches them in (icons-only, no row rebuild).
-            self.post(UiCommand::ApplyIcons);
         }
     }
 

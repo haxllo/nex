@@ -1,8 +1,6 @@
-## {Release title}
+## {Descriptive release title}
 
 {1-2 sentence summary of release — plain words, what it feels like for the user}
-
-**GitHub release title:** `v{VER}`. Keep descriptive release title in this body heading. Do not use `v{VER} — {title}` as GitHub release title.
 
 **Pre-release checklist (BEFORE writing notes):**
 0. Tag last: create tag `v{VER}` only AFTER the release-notes commit is on master — otherwise the tag lags master by commits and GitHub shows a phantom "1 commit" gap.

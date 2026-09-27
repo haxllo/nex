@@ -104,15 +104,34 @@ impl SearchWorker {
                                 continue;
                             }
 
+                            // Bounded retry on lock contention: a refresh or
+                            // watcher batch can hold the service write lock
+                            // for a few milliseconds. Retrying a handful of
+                            // times (with a short sleep) turns what used to
+                            // be an empty "temporarily locked" flash into a
+                            // slightly delayed — but valid — result. Only
+                            // after the retries are exhausted do we report
+                            // the error for this generation; the next
+                            // keystroke sends a fresh generation anyway.
+                            const SERVICE_LOCK_RETRIES: usize = 8;
+                            const SERVICE_LOCK_RETRY_WAIT: std::time::Duration =
+                                std::time::Duration::from_millis(5);
                             let outcome =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let service_guard = match service.try_read() {
-                                        Ok(g) => g,
-                                        Err(_) => {
-                                            return Err(
-                                                "search engine temporarily locked"
-                                                    .to_string(),
-                                            )
+                                    let mut attempt = 0_usize;
+                                    let service_guard = loop {
+                                        match service.try_read() {
+                                            Ok(g) => break g,
+                                            Err(_) => {
+                                                attempt += 1;
+                                                if attempt > SERVICE_LOCK_RETRIES {
+                                                    return Err(
+                                                        "search engine temporarily locked"
+                                                            .to_string(),
+                                                    );
+                                                }
+                                                std::thread::sleep(SERVICE_LOCK_RETRY_WAIT);
+                                            }
                                         }
                                     };
                                     search_overlay_results_with_session(

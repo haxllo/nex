@@ -424,6 +424,7 @@ pub(crate) fn run_windows_runtime(
         selected_index: 0,
         last_query: String::new(),
         last_sent_generation: 0,
+        last_applied_generation: 0,
         search_session: OverlaySearchSession::default(),
         config_generation: 0,
         hotkey_issue_status,
@@ -602,6 +603,10 @@ struct RuntimeWorker {
     selected_index: usize,
     last_query: String,
     last_sent_generation: u64,
+    /// Generation of the last result actually applied to the overlay.
+    /// Guards against an older empty result clearing a newer non-empty
+    /// list while keystrokes are still in flight.
+    last_applied_generation: u64,
     search_session: OverlaySearchSession,
     hotkey_issue_status: Option<String>,
     event_rx: crossbeam_channel::Receiver<OverlayEvent>,
@@ -2009,6 +2014,7 @@ impl RuntimeWorker {
                     &mut self.current_rows,
                     &mut self.selected_index,
                     self.last_sent_generation,
+                    &mut self.last_applied_generation,
                     self.config_generation,
                     self.apps_expanded.as_deref(),
                 );
@@ -2642,6 +2648,7 @@ fn apply_search_results(
     current_rows: &mut Vec<crate::overlay::OverlayRow>,
     selected_index: &mut usize,
     last_sent_generation: u64,
+    last_applied_generation: &mut u64,
     config_generation: u64,
     apps_expanded_query: Option<&str>,
 ) {
@@ -2671,6 +2678,7 @@ fn apply_search_results(
         overlay.set_results(&[], 0);
         overlay.set_completion(None);
         overlay.set_status_text(&format!("Search error: {error}"));
+        *last_applied_generation = result.generation;
         return;
     }
 
@@ -2678,6 +2686,19 @@ fn apply_search_results(
     crate::runtime_overlay_rows::dedupe_overlay_results(&mut results);
     if !suppressed_uninstall_titles.is_empty() {
         filter_suppressed_uninstall_results(&mut results, suppressed_uninstall_titles);
+    }
+
+    // Generation guard against stale empty flashes: an older empty result
+    // must never clear a newer non-empty list while keystrokes are in
+    // flight — the newer generation's results are queued or computing.
+    // (The `< last_sent_generation` check above already drops results older
+    // than the last request; this covers equal-generation replays where an
+    // empty redelivery would clobber an applied non-empty set.)
+    if results.is_empty()
+        && !current_results.is_empty()
+        && result.generation <= *last_applied_generation
+    {
+        return;
     }
 
     // Sort pinned items to the top ONLY during idle quick-launch view
@@ -2796,6 +2817,7 @@ fn apply_search_results(
 
     let final_completion = completion.or(mode_completion);
     overlay.set_completion(final_completion.as_deref());
+    *last_applied_generation = result.generation;
 }
 
 /// True when a result is a concrete named command (built-in action or

@@ -150,7 +150,9 @@ pub(crate) enum UiCommand {
     Apply,
     /// Icons decoded in the background are now cached — re-send the
     /// icon data JSON so the page can patch placeholder <img> elements.
-    ApplyIcons,
+    /// The payload contains only newly decoded icon paths, avoiding a
+    /// full snapshot re-encode on every icon batch.
+    ApplyIcons(Vec<String>),
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
     /// Only the status text changed — send a lightweight update.
@@ -402,17 +404,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         push_status(&webview, &state);
                     }
                 }
-                UiCommand::ApplyIcons => {
+                UiCommand::ApplyIcons(decoded_paths) => {
                     // Progressive icon delivery: the background prefetch
-                    // thread decoded icons and posted this command. Re-send
-                    // the icon data JSON so the page can patch placeholder
-                    // <img> elements that painted with no src (cold cache).
+                    // thread decoded icons and posted this command. Send only
+                    // the newly decoded icon data so the page can patch
+                    // placeholder <img> elements that painted with no src
+                    // (cold cache) without re-encoding the whole snapshot.
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         let snapshot = {
                             let Ok(s) = state.lock() else { return };
                             s.clone()
                         };
-                        let icons_json = snapshot_icons_json(&snapshot, &icon_cache);
+                        let icons_json =
+                            snapshot_icon_subset_json(&snapshot, &icon_cache, &decoded_paths);
                         if !icons_json.is_empty() {
                             if let Some(wv) = webview.as_ref() {
                                 post_json(wv, &icons_json);
@@ -498,8 +502,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::FocusInput => {
+                    // Start/Explorer can reassert foreground after the
+                    // initial show. Treat refocus as a complete native focus
+                    // handoff, not only a WebView DOM focus request.
+                    // Do not optimistically mark focus: the delayed reassert
+                    // below checks actual foreground ownership.
+                    let visible = state.lock().map(|s| s.visible).unwrap_or(false);
+                    if visible {
+                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        force_foreground(hwnd);
+                        crate::overlay::hotkey::signal_overlay_ready();
+                    }
                     window.set_focus();
                     focus_input(&webview);
+                    if visible {
+                        let proxy_reassert = proxy.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(250));
+                            try_send_ui(&proxy_reassert, UiCommand::FocusReassert);
+                        });
+                    }
                 }
                 UiCommand::Hide => {
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
@@ -759,12 +781,25 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // focus theft on Win key hotkeys.  Same as the initial
                     // force_foreground + focus_input, but runs after
                     // Explorer has finished its re-assertion cycle.
-                    // Only fire when overlay IS visible but lost focus —
-                    // force_foreground calls ShowWindow(SW_SHOW) which
-                    // would re-show a hidden window.
-                    let should_reassert = state.lock().map(|s| s.visible && !s.has_focus).unwrap_or(false);
-                    if should_reassert {
-                        force_foreground(hwnd);
+                    // Only fire when overlay IS visible but another window
+                    // actually owns the foreground — force_foreground calls
+                    // ShowWindow(SW_SHOW) which would re-show a hidden
+                    // window. Use native ownership rather than logical focus
+                    // state, which can lag WebView2 focus transitions.
+                    let (visible, logical_focused) = state
+                        .lock()
+                        .map(|s| (s.visible, s.has_focus))
+                        .unwrap_or((false, false));
+                    let foreground_owned = unsafe { GetForegroundWindow() == hwnd };
+                    // The container can own the OS foreground while the
+                    // WebView input remains unfocused after Start/Explorer
+                    // takes and returns focus. Recover DOM focus in that
+                    // state too; only retake the OS foreground when needed.
+                    if visible && (!foreground_owned || !logical_focused) {
+                        if !foreground_owned {
+                            force_foreground(hwnd);
+                            window.set_focus();
+                        }
                         focus_input(&webview);
                     }
                 }
@@ -1642,6 +1677,40 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "updateAvailable": s.update_available,
     })
     .to_string()
+}
+
+fn snapshot_icon_subset_json(
+    s: &ShimState,
+    icons: &Arc<IconCache>,
+    decoded_paths: &[String],
+) -> String {
+    let wanted: std::collections::HashSet<&str> =
+        decoded_paths.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    let icon_map: serde_json::Map<String, serde_json::Value> = s
+        .rows
+        .iter()
+        .filter(|r| !r.icon_path.is_empty())
+        .filter(|r| wanted.contains(r.icon_path.as_str()))
+        .filter(|r| seen.insert(r.icon_path.clone()))
+        .filter_map(|r| {
+            let b64 = icons
+                .png_bytes_cached(&r.icon_path)
+                .map(|arc| base64_data_uri(arc.as_ref()))
+                .unwrap_or_default();
+            if b64.is_empty() {
+                None
+            } else {
+                Some((r.icon_path.clone(), serde_json::Value::String(b64)))
+            }
+        })
+        .collect();
+
+    if icon_map.is_empty() {
+        return String::new();
+    }
+
+    serde_json::json!({ "icons": icon_map }).to_string()
 }
 
 /// Serialize icon data as `{"icons": {path: dataUri, ...}}`.

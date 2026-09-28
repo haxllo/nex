@@ -108,13 +108,15 @@ impl NativeOverlayShell {
                 // keystroke can cancel stale, expensive shell extraction.
                 const VIEWPORT_ROWS: usize = 8;
                 let head_end = VIEWPORT_ROWS.min(rows.len());
-                crate::overlay::icons::prefetch_rows(
+                let decoded_head = crate::overlay::icons::prefetch_rows(
                     &icon_cache_for_thread,
                     &rows[..head_end],
                 );
-                if let Ok(slot) = proxy_for_thread.lock() {
-                    if let Some(proxy) = slot.as_ref() {
-                        let _ = proxy.send_event(UiCommand::ApplyIcons);
+                if !decoded_head.is_empty() {
+                    if let Ok(slot) = proxy_for_thread.lock() {
+                        if let Some(proxy) = slot.as_ref() {
+                            let _ = proxy.send_event(UiCommand::ApplyIcons(decoded_head));
+                        }
                     }
                 }
 
@@ -124,18 +126,21 @@ impl NativeOverlayShell {
                         Ok(Some(_))
                     );
                     if !stale_tail {
-                        crate::overlay::icons::prefetch_rows(
+                        let decoded_tail = crate::overlay::icons::prefetch_rows(
                             &icon_cache_for_thread,
                             &rows[head_end..],
                         );
-                    }
-                }
-                // Notify the host event loop that icons are now cached so
-                // it re-sends the icon data JSON; the page patches the
-                // placeholder <img> elements that painted cold (no src).
-                if let Ok(slot) = proxy_for_thread.lock() {
-                    if let Some(proxy) = slot.as_ref() {
-                        let _ = proxy.send_event(UiCommand::ApplyIcons);
+                        // Notify the host event loop that icons are now cached
+                        // so it sends only the newly decoded icon data; the
+                        // page patches the placeholder <img> elements that
+                        // painted cold (no src).
+                        if !decoded_tail.is_empty() {
+                            if let Ok(slot) = proxy_for_thread.lock() {
+                                if let Some(proxy) = slot.as_ref() {
+                                    let _ = proxy.send_event(UiCommand::ApplyIcons(decoded_tail));
+                                }
+                            }
+                        }
                     }
                 }
             })

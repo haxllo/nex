@@ -50,7 +50,13 @@ struct Inner {
     /// Shared work slot for the single persistent icon-prefetch thread.
     /// `set_results()` replaces the contents; the background thread
     /// always processes the latest batch — old work is discarded.
+    /// `prefetch_notify_tx` wakes the thread immediately so first
+    /// paint does not wait out the 50 ms poll sleep. Only the worker
+    /// thread holds the `Receiver` — a second stored receiver would
+    /// steal wake tokens (MPMC fan-out) and reintroduce the delay.
     prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>>,
+    prefetch_notify_tx: Sender<()>,
+
 }
 
 impl NativeOverlayShell {
@@ -61,6 +67,11 @@ impl NativeOverlayShell {
     pub fn create() -> Result<Self, String> {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
         let prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>> = Arc::new(Mutex::new(None));
+        // Rendezvous wake-up: `set_results` offers a token; the thread
+        // blocks on `recv_timeout(50ms)` so a lost token only costs the
+        // old poll delay, never a stall.
+        let (prefetch_notify_tx, prefetch_notify_for_thread) =
+            crossbeam_channel::bounded::<()>(1);
         let icon_cache = Arc::new(IconCache::default());
         let icon_cache_for_thread = icon_cache.clone();
         let prefetch_work_for_thread = prefetch_work.clone();
@@ -78,8 +89,9 @@ impl NativeOverlayShell {
         std::thread::Builder::new()
             .name("nex-icon-prefetch".into())
             .spawn(move || loop {
-                // Sleep until work arrives. Check every 50ms so we
-                // don't miss a slot replacement during rapid typing.
+                // Block until `set_results` wakes us; 50 ms timeout is
+                // only a fallback so a lost token still gets picked up.
+                let _ = prefetch_notify_for_thread.recv_timeout(Duration::from_millis(50));
                 let rows: Vec<OverlayRow> = {
                     let mut slot = match prefetch_work_for_thread.lock() {
                         Ok(g) => g,
@@ -87,20 +99,48 @@ impl NativeOverlayShell {
                     };
                     match slot.take() {
                         Some(r) if !r.is_empty() => r,
-                        _ => {
-                            drop(slot);
-                            std::thread::sleep(Duration::from_millis(50));
-                            continue;
-                        }
+                        _ => continue,
                     }
                 };
-                crate::overlay::icons::prefetch_rows(&icon_cache_for_thread, &rows);
-                // Notify the host event loop that icons are now cached so
-                // it re-sends the icon data JSON; the page patches the
-                // placeholder <img> elements that painted cold (no src).
-                if let Ok(slot) = proxy_for_thread.lock() {
-                    if let Some(proxy) = slot.as_ref() {
-                        let _ = proxy.send_event(UiCommand::ApplyIcons);
+                // Visible-first streaming: decode the viewport head before
+                // the tail, but keep all decoding off the runtime worker.
+                // Re-check the work slot between phases so a superseding
+                // keystroke can cancel stale, expensive shell extraction.
+                const VIEWPORT_ROWS: usize = 8;
+                let head_end = VIEWPORT_ROWS.min(rows.len());
+                let decoded_head = crate::overlay::icons::prefetch_rows(
+                    &icon_cache_for_thread,
+                    &rows[..head_end],
+                );
+                if !decoded_head.is_empty() {
+                    if let Ok(slot) = proxy_for_thread.lock() {
+                        if let Some(proxy) = slot.as_ref() {
+                            let _ = proxy.send_event(UiCommand::ApplyIcons(decoded_head));
+                        }
+                    }
+                }
+
+                if rows.len() > head_end {
+                    let stale_tail = matches!(
+                        prefetch_work_for_thread.lock().as_deref(),
+                        Ok(Some(_))
+                    );
+                    if !stale_tail {
+                        let decoded_tail = crate::overlay::icons::prefetch_rows(
+                            &icon_cache_for_thread,
+                            &rows[head_end..],
+                        );
+                        // Notify the host event loop that icons are now cached
+                        // so it sends only the newly decoded icon data; the
+                        // page patches the placeholder <img> elements that
+                        // painted cold (no src).
+                        if !decoded_tail.is_empty() {
+                            if let Ok(slot) = proxy_for_thread.lock() {
+                                if let Some(proxy) = slot.as_ref() {
+                                    let _ = proxy.send_event(UiCommand::ApplyIcons(decoded_tail));
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -120,6 +160,7 @@ impl NativeOverlayShell {
                 stop_tx,
                 stop_rx,
                 prefetch_work,
+                prefetch_notify_tx,
             }),
         })
     }
@@ -453,16 +494,20 @@ impl NativeOverlayShell {
             // Update quick_launch_visible based on whether we're showing Quick Launch rows
             s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });
-        self.post(UiCommand::Apply);
-
-        // Queue icon decoding on the persistent background thread.
-        // Replacing the slot discards any pending batch — the thread
-        // always processes the latest results, preventing thread
-        // accumulation under rapid typing.
+        // Queue the full batch on the prefetch thread. It prioritizes the
+        // visible head, so result rendering and hotkey handling never wait
+        // for cold shell icon extraction.
         if !rows.is_empty() {
             if let Ok(mut slot) = self.inner.prefetch_work.lock() {
                 *slot = Some(rows.to_vec());
             }
+        }
+        self.post(UiCommand::Apply);
+
+        // Wake the worker after the row state is visible. The worker decodes
+        // the first viewport batch before the rest, then posts icon data.
+        if !rows.is_empty() {
+            let _ = self.inner.prefetch_notify_tx.try_send(());
         }
     }
 

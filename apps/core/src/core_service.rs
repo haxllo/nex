@@ -19,7 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
-const STALE_PRUNE_BATCH_SIZE: usize = 16;
+/// 128 `Path::exists` probes per 15 s tick (~8/s amortized). 16 took
+/// ~31 h to sweep a 120k-item index; 128 sweeps in ~4 h with the same
+/// `try_write` politeness (skips under load).
+const STALE_PRUNE_BATCH_SIZE: usize = 128;
 const PERSONALIZATION_CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// In-memory TTL cache for personalization boosts.
@@ -394,16 +397,14 @@ impl CoreService {
         }
 
         if should_use_app_cache(filter) {
-            // Uses try_read to avoid blocking when refresh_cache_from_store
-            // holds the write lock — return empty results rather than stalling
-            // the search worker thread.
-            let guard = match self.cached_app_items.try_read() {
-                Ok(guard) => guard,
-                Err(_) => return Ok(Vec::new()),
-            };
+            // Read a consistent (generation, items) snapshot with a bounded
+            // blocking read. The swap in `refresh_cache_from_store` replaces
+            // the whole Vec at once, so the wait is a single swap — never an
+            // empty result caused by lock contention.
+            let (_generation, items) = self.cached_app_snapshot();
             let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
             return Ok(crate::search::search_with_filter_with_boosts(
-                &guard,
+                &items,
                 query,
                 effective_limit,
                 filter,
@@ -415,8 +416,9 @@ impl CoreService {
         // directly. The index is only populated when background indexing has
         // finished successfully. When the index is empty (e.g., Everything
         // service was down during indexing) we fall back to scanning the
-        // in-memory cache, holding the read lock only for the duration of
-        // the ranking pass — no full Vec clone per keystroke.
+        // in-memory cache snapshot. Tantivy gives snapshot isolation via
+        // per-query reader reload; the cache fallback below is stamped with
+        // the live generation so mixed-generation merges stay detectable.
         if should_use_db_query_seed(filter, query) {
             let indexed_seed_limit =
                 (config_snapshot.index_max_items_per_query_seed as usize).max(250);
@@ -431,29 +433,26 @@ impl CoreService {
                     Some(&query_boosts),
                 );
                 if ranked.len() < effective_limit {
-                    // Augment with in-memory cache items the index missed.
-                    // Uses try_read to avoid blocking when refresh_cache_from_store
-                    // or the pruner holds the write lock — skip augmentation rather
-                    // than stalling the search worker thread.
-                    if let Ok(guard) = self.cached_items.try_read() {
-                        let cache_ranked = crate::search::search_with_filter_with_boosts(
-                            &guard,
-                            query,
-                            effective_limit.saturating_sub(ranked.len()),
-                            filter,
-                            Some(&query_boosts),
-                        );
-                        for item in cache_ranked {
-                            let dominated = ranked.iter().any(|r| {
-                                (!r.path.is_empty() && !item.path.is_empty()
-                                    && r.path.eq_ignore_ascii_case(&item.path))
-                                    || r.id == item.id
-                            });
-                            if !dominated {
-                                ranked.push(item);
-                                if ranked.len() >= effective_limit {
-                                    break;
-                                }
+                    // Augment with in-memory cache items the index missed,
+                    // ranked from the same live snapshot.
+                    let (_generation, items) = self.cached_snapshot();
+                    let cache_ranked = crate::search::search_with_filter_with_boosts(
+                        &items,
+                        query,
+                        effective_limit.saturating_sub(ranked.len()),
+                        filter,
+                        Some(&query_boosts),
+                    );
+                    for item in cache_ranked {
+                        let dominated = ranked.iter().any(|r| {
+                            (!r.path.is_empty() && !item.path.is_empty()
+                                && r.path.eq_ignore_ascii_case(&item.path))
+                                || r.id == item.id
+                        });
+                        if !dominated {
+                            ranked.push(item);
+                            if ranked.len() >= effective_limit {
+                                break;
                             }
                         }
                     }
@@ -474,18 +473,14 @@ impl CoreService {
             }
         }
 
-        // Path 2: no index results — rank the in-memory cache directly,
-        // holding the read lock only while we score and select.
-        // Uses try_read to avoid blocking when refresh_cache_from_store
-        // or the pruner holds the write lock — return empty results rather
-        // than stalling the search worker thread.
+        // Path 2: no index results — rank a consistent snapshot of the
+        // in-memory cache. A blocking snapshot read is bounded by a single
+        // whole-Vec swap, so contention surfaces as a slightly older (but
+        // valid) result set, never a blank flash.
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
-        let guard = match self.cached_items.try_read() {
-            Ok(guard) => guard,
-            Err(_) => return Ok(Vec::new()),
-        };
+        let (_generation, items) = self.cached_snapshot();
         Ok(crate::search::search_with_filter_with_boosts(
-            &guard,
+            &items,
             query,
             effective_limit,
             filter,
@@ -1141,6 +1136,38 @@ impl CoreService {
         if let Ok(mut guard) = self.hot_prefix_cache.lock() {
             guard.clear();
         }
+    }
+
+    /// Current index generation. Bumped on every mutation of the item set
+    /// (cache refresh, upsert, delete, index sync, prune), so readers can
+    /// detect that the underlying data changed between two observations.
+    pub fn search_generation(&self) -> u64 {
+        self.search_generation.load(Ordering::SeqCst)
+    }
+
+    /// A point-in-time view of the searchable item set: the cache contents
+    /// plus the generation they were read at. Readers that hold a snapshot
+    /// never observe a partially rebuilt cache — the swap in
+    /// `refresh_cache_from_store` replaces the whole `Vec` at once, and a
+    /// blocking read here is bounded by that single swap.
+    pub fn cached_snapshot(&self) -> (u64, Vec<SearchItem>) {
+        let generation = self.search_generation.load(Ordering::SeqCst);
+        let guard = match self.cached_items.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (generation, guard.clone())
+    }
+
+    /// Same as [`Self::cached_snapshot`] but for the apps-only cache used
+    /// by the Apps-mode fast path.
+    pub fn cached_app_snapshot(&self) -> (u64, Vec<SearchItem>) {
+        let generation = self.search_generation.load(Ordering::SeqCst);
+        let guard = match self.cached_app_items.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        (generation, guard.clone())
     }
 
     /// Filter shape the pre-fetcher covers: the default "All" search with
@@ -2652,6 +2679,63 @@ mod tests {
         cfg.show_folders = true;
         cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
         assert!(broad_root_discovery_enabled(&cfg));
+    }
+
+    #[test]
+    fn cached_snapshot_is_generation_stamped_and_consistent() {
+        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+            .expect("service should initialize");
+        let before = service.search_generation();
+        service
+            .upsert_item(&SearchItem::new(
+                "snap-1",
+                "app",
+                "Snapshot App",
+                "C:\\snap.exe",
+            ))
+            .expect("item should upsert");
+        assert!(service.search_generation() > before);
+
+        let (generation, items) = service.cached_snapshot();
+        assert_eq!(generation, service.search_generation());
+        assert!(items.iter().any(|item| item.id == "snap-1"));
+
+        // A fresh search over the live set sees the same item — search no
+        // longer has a lock-contention path that returns an empty Vec.
+        let results = service
+            .search_with_filter("snapshot", 10, &SearchFilter::default())
+            .expect("search should succeed");
+        assert!(results.iter().any(|item| item.id == "snap-1"));
+    }
+
+    #[test]
+    fn search_results_never_reflect_partial_cache_swap() {
+        // The swap in refresh_cache_from_store replaces the whole Vec at
+        // once; a concurrent search either sees the pre- or post-swap set,
+        // never an empty Vec from lock contention. Exercise the read side
+        // under contention: hold a read guard (blocking writers) and confirm
+        // the snapshot still returns the full pre-swap contents.
+        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+            .expect("service should initialize");
+        service
+            .upsert_item(&SearchItem::new(
+                "swap-1",
+                "app",
+                "Swap App",
+                "C:\\swap.exe",
+            ))
+            .expect("item should upsert");
+
+        let guard = service
+            .cached_items
+            .read()
+            .expect("read lock should be available");
+        let expected = guard.len();
+        drop(guard);
+
+        let (_generation, items) = service.cached_snapshot();
+        assert_eq!(items.len(), expected);
+        assert!(items.iter().any(|item| item.id == "swap-1"));
     }
 
     #[test]

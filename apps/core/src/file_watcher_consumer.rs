@@ -7,8 +7,8 @@
 //! 1. Build a stable id from a path (same scheme as `discover_filesystem_walk`).
 //! 2. Run the same `DiscoveryExclusionPolicy` as the initial scan so the
 //!    index never gains items that a full scan would have skipped.
-//! 3. Coalesce bursts (Added+Removed for the same path within the same
-//!    debounce window collapse to a no-op).
+//! 3. Coalesce bursts last-wins per path (delete+recreate inside the
+//!    window ends present, matching disk state).
 //! 4. Apply a bounded queue between producer and consumer so a flood of
 //!    events cannot grow unbounded memory.
 //!
@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
@@ -85,12 +85,14 @@ impl FileWatcherHandle {
                 }
             };
             let overflow_count = Arc::new(AtomicUsize::new(0));
+            let resync_in_flight = Arc::new(AtomicBool::new(false));
             let consumer = spawn_consumer(
                 root.clone(),
                 rx,
                 Arc::clone(&service),
                 excluded_roots.clone(),
                 Arc::clone(&overflow_count),
+                Arc::clone(&resync_in_flight),
             );
             entries.push(WatcherEntry {
                 _watcher: watcher,
@@ -122,12 +124,13 @@ fn spawn_consumer(
     service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
     overflow_count: Arc<AtomicUsize>,
+    resync_in_flight: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("nex-watcher-consumer[{}]", root.display()))
         .spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_consumer(root, rx, service, excluded_roots, overflow_count)
+                run_consumer(root, rx, service, excluded_roots, overflow_count, resync_in_flight)
             }));
             if let Err(payload) = outcome {
                 let message = panic_message_to_string(&payload);
@@ -145,22 +148,49 @@ fn run_consumer(
     service: Arc<RwLock<CoreService>>,
     excluded_roots: Vec<PathBuf>,
     overflow_count: Arc<AtomicUsize>,
+    resync_in_flight: Arc<AtomicBool>,
 ) {
     // The receiver can produce one or more `Vec<WatcherEvent>`s per batch.
-    // We coalesce across batches too: if a file is "Added" then "Removed"
-    // within the flush window, the index update is a no-op.
+    // We coalesce across batches too, last-wins per path: Added-then-Removed
+    // ends removed, Removed-then-Added ends present (matches disk state).
     let mut pending_added: HashMap<PathBuf, ()> = HashMap::new();
     let mut pending_removed: HashSet<PathBuf> = HashSet::new();
     let mut total_dropped: usize = 0;
     let mut dropped_since_last_flush: usize = 0;
     let mut flush_count_since_last_resync: usize = 0;
+    let mut resync_handle: Option<JoinHandle<()>> = None;
     const OVERFLOW_RESYNC_THRESHOLD: usize = 3;
 
     loop {
         let recv = rx.recv_timeout(CONSUMER_FLUSH_INTERVAL);
+        if resync_handle.as_ref().is_some_and(|handle| handle.is_finished()) {
+            let _ = resync_handle.take().and_then(|handle| handle.join().ok());
+        }
         match recv {
             Ok(batch) => {
+                if resync_in_flight.load(Ordering::SeqCst) {
+                    continue;
+                }
                 for event in batch {
+                    if event.kind == WatcherEventKind::OverflowResync {
+                        // Journal overflow upstream: net state is
+                        // unknown, so force a full resync now.
+                        flush_pending(
+                            &root,
+                            &service,
+                            &excluded_roots,
+                            &mut pending_added,
+                            &mut pending_removed,
+                        );
+                        trigger_full_resync(
+                            &service,
+                            &root,
+                            &resync_in_flight,
+                            &mut resync_handle,
+                        );
+                        flush_count_since_last_resync = 0;
+                        break;
+                    }
                     if pending_added.len() + pending_removed.len() >= CONSUMER_BATCH_CAP {
                         total_dropped = total_dropped.saturating_add(1);
                         dropped_since_last_flush =
@@ -187,7 +217,15 @@ fn run_consumer(
                         "[nex] directory_watcher root=\"{}\" dropped {total_dropped} events due to batch cap",
                         root.display()
                     ));
-                    trigger_resync(&service, &root);
+                    trigger_full_resync(
+                        &service,
+                        &root,
+                        &resync_in_flight,
+                        &mut resync_handle,
+                    );
+                }
+                if let Some(handle) = resync_handle.take() {
+                    let _ = handle.join();
                 }
                 return;
             }
@@ -207,8 +245,10 @@ fn run_consumer(
         // If we dropped events during this flush window, the index is
         // likely stale (a path we never saw could be missing, or an
         // event we never received could leave a stale row in place).
-        // Log immediately and kick an incremental resync so the index
-        // reconverges from disk on the next event burst.
+        // Log immediately and kick a full resync so the index
+        // reconverges from disk. Incremental would be a no-op here:
+        // the provider stamp is unchanged, so the skip gate would
+        // return `skipped=true` without scanning.
         if dropped_since_last_flush > 0 {
             overflow_count.fetch_add(dropped_since_last_flush, Ordering::SeqCst);
             crate::runtime::log_warn(&format!(
@@ -217,7 +257,12 @@ fn run_consumer(
                 dropped_since_last_flush
             ));
             dropped_since_last_flush = 0;
-            trigger_resync(&service, &root);
+            trigger_full_resync(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+            );
             flush_count_since_last_resync = 0;
         } else if flush_count_since_last_resync >= OVERFLOW_RESYNC_THRESHOLD {
             // After enough successful flushes without drops, if we still have
@@ -231,41 +276,78 @@ fn run_consumer(
                     accumulated,
                     flush_count_since_last_resync
                 ));
-                trigger_resync(&service, &root);
+                trigger_full_resync(
+                    &service,
+                    &root,
+                    &resync_in_flight,
+                    &mut resync_handle,
+                );
                 overflow_count.store(0, Ordering::SeqCst);
                 flush_count_since_last_resync = 0;
             }
         }
     }
+
 }
 
-/// Kick an incremental resync against the core service to recover from
-/// any events we could not enqueue. Holds the service write lock only
-/// long enough to schedule; the actual scan runs on the service's own
-/// indexing pipeline. Failure is non-fatal — we log and continue; the
-/// next flush cycle or the queued discovery reindex path will retry.
-fn trigger_resync(service: &Arc<RwLock<CoreService>>, root: &Path) {
-    let report_result = {
-        let guard = match service.read() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.rebuild_index_incremental_with_report()
-    };
-    match report_result {
-        Ok(report) => {
-            crate::runtime::log_info(&format!(
-                "[nex] directory_watcher root=\"{}\" resync ok discovered={} upserted={} removed={}",
-                root.display(),
-                report.discovered_total,
-                report.upserted_total,
-                report.removed_total
-            ));
-        }
+/// Kick a full (non-incremental) resync against the core service to
+/// recover from events we could not enqueue. Incremental would skip:
+/// the provider stamp is unchanged inside the reconcile window, so
+/// `should_skip_provider_discovery` returns true without scanning.
+/// Full mode ignores stamps and re-reads from disk. Failure is
+/// non-fatal — we log and continue; the next flush cycle or the
+/// queued discovery reindex path will retry.
+fn trigger_full_resync(
+    service: &Arc<RwLock<CoreService>>,
+    root: &Path,
+    in_flight: &Arc<AtomicBool>,
+    handle_slot: &mut Option<JoinHandle<()>>,
+) {
+    if handle_slot
+        .as_ref()
+        .is_some_and(|handle| !handle.is_finished())
+    {
+        return;
+    }
+    if let Some(handle) = handle_slot.take() {
+        let _ = handle.join();
+    }
+    if in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let service = Arc::clone(service);
+    let root = root.to_path_buf();
+    let root_label = root.display().to_string();
+    let worker_in_flight = Arc::clone(in_flight);
+    let result = std::thread::Builder::new()
+        .name(format!("nex-discovery-resync[{}]", root.display()))
+        .spawn(move || {
+            let report_result = {
+                let guard = match service.read() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.rebuild_index_with_report()
+            };
+            match report_result {
+                Ok(report) => crate::runtime::log_info(&format!(
+                    "[nex] directory_watcher root=\"{}\" resync ok discovered={} upserted={} removed={}",
+                    root.display(), report.discovered_total, report.upserted_total, report.removed_total
+                )),
+                Err(error) => crate::runtime::log_warn(&format!(
+                    "[nex] directory_watcher root=\"{}\" resync failed: {error}",
+                    root.display()
+                )),
+            }
+            worker_in_flight.store(false, Ordering::SeqCst);
+        });
+    match result {
+        Ok(thread) => *handle_slot = Some(thread),
         Err(error) => {
+            in_flight.store(false, Ordering::SeqCst);
             crate::runtime::log_warn(&format!(
-                "[nex] directory_watcher root=\"{}\" resync failed: {error}",
-                root.display()
+                "[nex] directory_watcher root=\"{}\" resync thread failed to start: {error}",
+                root_label
             ));
         }
     }
@@ -278,13 +360,11 @@ fn apply_event_to_pending(
 ) {
     match event.kind {
         WatcherEventKind::Added | WatcherEventKind::Modified => {
-            // If a "Removed" was queued for the same path, the net effect
-            // is a no-op; drop both. Otherwise the new state is "exists".
-            if pending_removed.remove(&event.path) {
-                pending_added.remove(&event.path);
-            } else {
-                pending_added.insert(event.path, ());
-            }
+            // The file exists on disk now (editor save = temp-write
+            // + rename lands here). Last-wins: end in "exists" even
+            // when a Removed was queued earlier in the window.
+            pending_removed.remove(&event.path);
+            pending_added.insert(event.path, ());
         }
         WatcherEventKind::Removed => {
             // Reverse: a prior "Added" cancels out.
@@ -297,6 +377,9 @@ fn apply_event_to_pending(
         }
         WatcherEventKind::RenameNew => {
             pending_added.insert(event.path, ());
+        }
+        WatcherEventKind::OverflowResync => {
+            // Handled at the batch level before coalescing.
         }
     }
 }
@@ -492,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_then_added_collapses_to_noop() {
+    fn removed_then_added_ends_present() {
         let mut added = HashMap::new();
         let mut removed = HashSet::new();
         apply_event_to_pending(
@@ -501,7 +584,7 @@ mod tests {
             &mut removed,
         );
         apply_event_to_pending(evt(WatcherEventKind::Added, "/a"), &mut added, &mut removed);
-        assert!(added.is_empty());
+        assert!(added.contains_key(&PathBuf::from("/a")));
         assert!(removed.is_empty());
     }
 

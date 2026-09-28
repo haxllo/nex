@@ -17,7 +17,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
     FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_CREATION,
-    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+    FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    FILE_NOTIFY_CHANGE_SIZE,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
@@ -25,7 +26,9 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, WaitForSingleObject,
 };
 
-const BUFFER_BYTES: usize = 16 * 1024;
+/// 64 KiB change journal buffer. 16 KiB overflowed on bulk copies and
+/// builds; the extra 48 KiB costs one page per watched root.
+const BUFFER_BYTES: usize = 64 * 1024;
 const DEBOUNCE_WINDOW_MS: u64 = 200;
 const MAX_EVENTS_PER_BATCH: usize = 4096;
 
@@ -36,6 +39,9 @@ pub enum WatcherEventKind {
     Removed,
     RenameOld,
     RenameNew,
+    /// The change journal overflowed and events were lost. The
+    /// consumer must force a full resync; carries no path.
+    OverflowResync,
 }
 
 impl WatcherEventKind {
@@ -228,7 +234,10 @@ fn run_watch_loop(
     stop: Arc<AtomicBool>,
     tx: Sender<Vec<WatcherEvent>>,
 ) {
+    // Watching directory names too: a renamed/created folder changes
+    // which files a scan would return beneath it.
     let notify_filter = FILE_NOTIFY_CHANGE_FILE_NAME
+        | FILE_NOTIFY_CHANGE_DIR_NAME
         | FILE_NOTIFY_CHANGE_LAST_WRITE
         | FILE_NOTIFY_CHANGE_SIZE
         | FILE_NOTIFY_CHANGE_CREATION;
@@ -297,11 +306,30 @@ fn run_watch_loop(
                     break 'outer;
                 }
                 if bytes_returned == 0 {
-                    continue;
+                    // Windows reports directory-change buffer overflow with
+                    // zero bytes. The journal is no longer trustworthy;
+                    // force a full consumer resync before accepting events.
+                    batch.events.clear();
+                    batch.events.push(WatcherEvent {
+                        kind: WatcherEventKind::OverflowResync,
+                        path: PathBuf::new(),
+                    });
+                    flush_batch(&mut batch, &tx);
+                    break;
                 }
+                // Buffer overflow: the journal wrapped and events were
+                // lost. Keep watching (re-arm below) and emit a drain
+                // marker so the consumer forces a full resync. Exiting
+                // here used to kill the watcher until process restart.
                 if bytes_returned as usize > buffer_len {
                     log_watcher_error("GetOverlappedResult", ERROR_INSUFFICIENT_BUFFER as i32);
-                    break 'outer;
+                    batch.events.clear();
+                    batch.events.push(WatcherEvent {
+                        kind: WatcherEventKind::OverflowResync,
+                        path: PathBuf::new(),
+                    });
+                    flush_batch(&mut batch, &tx);
+                    break;
                 }
                 let slice = unsafe {
                     std::slice::from_raw_parts(buffer_ptr as *const u8, bytes_returned as usize)
@@ -363,8 +391,16 @@ fn append_notifications(
                     kind,
                     path: full_path,
                 });
+                // Silent truncate used to drop the tail with no
+                // recovery signal. Keep the cap (bounds memory) but
+                // plant an overflow marker so the consumer forces a
+                // full resync for the events we could not keep.
                 if batch.events.len() > MAX_EVENTS_PER_BATCH {
                     batch.events.truncate(MAX_EVENTS_PER_BATCH);
+                    batch.events.push(WatcherEvent {
+                        kind: WatcherEventKind::OverflowResync,
+                        path: PathBuf::new(),
+                    });
                 }
             }
         }
@@ -434,13 +470,18 @@ fn flush_batch(batch: &mut PendingBatch, tx: &Sender<Vec<WatcherEvent>>) {
         batch.timer_start = None;
         return;
     }
-    let mut deduped: Vec<WatcherEvent> = Vec::with_capacity(batch.events.len());
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    for ev in batch.events.drain(..) {
-        if seen.insert(ev.path.clone()) {
-            deduped.push(ev);
+    // Last-wins: a rapid create+delete must end deleted (not ghost),
+    // and delete+create must end present. First-wins kept stale
+    // states that only the slow pruner could repair.
+    let mut latest: HashSet<PathBuf> = HashSet::new();
+    let mut reversed: Vec<WatcherEvent> = Vec::with_capacity(batch.events.len());
+    for ev in batch.events.drain(..).rev() {
+        if ev.kind == WatcherEventKind::OverflowResync || latest.insert(ev.path.clone()) {
+            reversed.push(ev);
         }
     }
+    reversed.reverse();
+    let deduped = reversed;
     let _ = tx.send(deduped);
     batch.timer_start = None;
 }

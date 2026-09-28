@@ -51,3 +51,16 @@ pub mod updater;
 #[cfg(target_os = "windows")]
 pub(crate) mod overlay;
 pub(crate) mod settings_snapshot;
+
+/// Max settings-save IPC body (bytes). Mirrors the overlay IPC cap so the
+/// settings path enforces the same bound on non-Windows test builds.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn overlay_ipc_max_bytes() -> usize {
+    64 * 1024
+}
+
+/// Max settings-save IPC body (bytes) on Windows: the overlay IPC cap.
+#[cfg(target_os = "windows")]
+pub(crate) fn overlay_ipc_max_bytes() -> usize {
+    overlay::ipc::MAX_IPC_BYTES
+}

@@ -399,36 +399,11 @@ body {
 .section {
   animation: nexRowIn 150ms ease-out backwards;
 }
-/* Icon pop-in — placeholder → real icon swap (gated in JS on src change). */
-@keyframes nexIconIn {
-  from {
-    opacity: 0;
-    transform: scale(0.8);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-img.icon.icon-pop {
-  animation: nexIconIn 120ms ease-out;
-}
-/* List-level icon pop — one animation class for the swapped batch. */
-#list.icons-pop img.icon.icon-swap {
-  animation: nexIconIn 120ms ease-out;
-}
+/* Icon swaps are plain src assignments batched in one rAF — no
+   opacity/scale restart, so cold icons fade in exactly once (never). */
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section {
-    animation: none;
-  }
-  img.icon.icon-pop {
-    animation: none;
-  }
-  #list.icons-pop img.icon {
-    animation: none;
-  }
-  #list.icons-pop img.icon.icon-swap {
     animation: none;
   }
 #power-menu {

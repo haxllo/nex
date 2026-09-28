@@ -261,7 +261,11 @@ impl EverythingBridge {
                         continue;
                     }
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        let id = format!("folder:{}", path.to_string_lossy());
+                        // Lowercase id: matches walk (`discover_filesystem_walk`)
+                        // and watcher (`path_to_search_item`) so an
+                        // Everything scan upserts the same row instead
+                        // of leaving a ghost duplicate.
+                        let id = format!("folder:{}", path.to_string_lossy().to_ascii_lowercase());
                         out.push(SearchItem::new(&id, "folder", name, &path.to_string_lossy()));
                         total_added += 1;
                         root_added += 1;
@@ -278,7 +282,7 @@ impl EverythingBridge {
                     if name.is_empty() {
                         continue;
                     }
-                    let id = format!("file:{}", path.to_string_lossy());
+                    let id = format!("file:{}", path.to_string_lossy().to_ascii_lowercase());
                     out.push(SearchItem::new(&id, "file", name, &path.to_string_lossy()));
                     total_added += 1;
                     root_added += 1;

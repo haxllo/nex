@@ -6,14 +6,14 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
 
 use crate::overlay::model::OverlayRow;
 
-const DEFAULT_MAX_ENTRIES: usize = 96;
+const DEFAULT_MAX_ENTRIES: usize = 128;
 const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 
 /// Target square canvas size for normalized icons. Crisp at 2-3x DPI
@@ -26,6 +26,8 @@ const TARGET_ICON_SIZE: u32 = 128;
 const EXTRACT_ICON_SIZE: i32 = 256;
 
 const ICON_NORMALIZATION_VERSION: u8 = 3;
+
+static PACKAGE_DIR_CACHE: OnceLock<Mutex<HashMap<String, Vec<PathBuf>>>> = OnceLock::new();
 
 fn cache_key(path: &str) -> PathBuf {
     PathBuf::from(format!("v{}|{}", ICON_NORMALIZATION_VERSION, path))
@@ -145,6 +147,20 @@ impl IconCache {
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.clear();
             inner.last_touch.clear();
+        }
+    }
+
+    /// Warm-release that keeps the `keep` most-recently-used entries
+    /// (top hits / Quick Launch repaint instantly) and drops the rest.
+    /// Bounded: at most `keep` PNGs (~4 KiB each) survive idle.
+    pub(crate) fn retain_recent(&self, keep: usize) {
+        if let Ok(mut inner) = self.inner.lock() {
+            while inner.png.len() > keep {
+                if inner.png.pop_lru().is_none() {
+                    break;
+                }
+            }
+            inner.clean_orphaned_touches();
         }
     }
 
@@ -290,26 +306,155 @@ fn vendor_asset_icon_png(path: &str) -> Option<Vec<u8>> {
     }
     None
 }
-#[cfg(target_os = "windows")]
-/// Load the same family logo Windows uses for a packaged Start-menu app.
-/// AppsFolder's shell provider may return a sparse legacy logo or only a
-/// 16/32px bitmap, so the package assets are a more reliable quality source.
-fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
-    let identity = apps_folder_path.strip_prefix("shell:AppsFolder\\")
+fn package_family(apps_folder_path: &str) -> Option<String> {
+    let identity = apps_folder_path
+        .strip_prefix("shell:AppsFolder\\")
         .or_else(|| apps_folder_path.strip_prefix("shell:AppsFolder/"))?;
     let family = identity.split('!').next()?.trim();
     let Some((package_name, publisher_id)) = family.rsplit_once('_') else {
         return None;
     };
-    if package_name.is_empty() || publisher_id.is_empty()
-        || package_name.contains('\\') || package_name.contains('/')
+    if package_name.is_empty()
+        || publisher_id.is_empty()
+        || package_name.contains('\\')
+        || package_name.contains('/')
     {
         return None;
     }
-    let program_files = std::env::var_os("ProgramFiles")?;
-    let package_root = PathBuf::from(program_files).join("WindowsApps");
-    let mut packages = std::fs::read_dir(package_root)
-        .ok()
+    Some(family.to_string())
+}
+
+fn cached_package_dirs(family: &str) -> Option<Vec<PathBuf>> {
+    let mut cache = PACKAGE_DIR_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?;
+    let dirs = cache.get(family)?.clone();
+    let live = dirs
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    if live.is_empty() {
+        cache.remove(family);
+        return None;
+    }
+    cache.insert(family.to_string(), live.clone());
+    Some(live)
+}
+
+fn remember_package_dirs(family: &str, dirs: &[PathBuf]) {
+    if dirs.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = PACKAGE_DIR_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.insert(family.to_string(), dirs.to_vec());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_package_full_names(family: &str) -> Vec<String> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::Packaging::Appx::GetPackagesByPackageFamily;
+
+    let family_wide: Vec<u16> = family.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut count = 0u32;
+    let mut buffer_len = 0u32;
+    let status = unsafe {
+        GetPackagesByPackageFamily(
+            family_wide.as_ptr(),
+            &mut count,
+            std::ptr::null_mut(),
+            &mut buffer_len,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != ERROR_INSUFFICIENT_BUFFER || count == 0 || buffer_len == 0 {
+        return Vec::new();
+    }
+
+    let mut buffer = vec![0u16; buffer_len as usize];
+    let mut pointers = vec![std::ptr::null_mut(); count as usize];
+    let status = unsafe {
+        GetPackagesByPackageFamily(
+            family_wide.as_ptr(),
+            &mut count,
+            pointers.as_mut_ptr(),
+            &mut buffer_len,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Vec::new();
+    }
+
+    pointers
+        .into_iter()
+        .filter_map(|pointer| {
+            if pointer.is_null() {
+                return None;
+            }
+            let mut len = 0usize;
+            while unsafe { *pointer.add(len) } != 0 {
+                len += 1;
+            }
+            let name = unsafe { std::slice::from_raw_parts(pointer, len) };
+            String::from_utf16(name).ok().filter(|name| !name.is_empty())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn native_package_install_path(package_full_name: &str) -> Option<PathBuf> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::Packaging::Appx::GetPackagePathByFullName;
+
+    let full_name_wide: Vec<u16> = package_full_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut path_len = 0u32;
+    let status = unsafe {
+        GetPackagePathByFullName(
+            full_name_wide.as_ptr(),
+            &mut path_len,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != ERROR_INSUFFICIENT_BUFFER || path_len == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; path_len as usize];
+    let status = unsafe {
+        GetPackagePathByFullName(
+            full_name_wide.as_ptr(),
+            &mut path_len,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let len = buffer.iter().position(|value| *value == 0).unwrap_or(buffer.len());
+    String::from_utf16(&buffer[..len]).ok().map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_package_dirs(family: &str) -> Vec<PathBuf> {
+    if let Some(dirs) = cached_package_dirs(family) {
+        return dirs;
+    }
+
+    let Some((package_name, publisher_id)) = family.rsplit_once('_') else {
+        return Vec::new();
+    };
+    let program_files = std::env::var_os("ProgramFiles");
+    let mut packages = program_files
+        .map(|root| PathBuf::from(root).join("WindowsApps"))
+        .and_then(|package_root| std::fs::read_dir(package_root).ok())
         .into_iter()
         .flat_map(|entries| entries.filter_map(Result::ok))
         .map(|entry| entry.path())
@@ -322,6 +467,15 @@ fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
                 })
         })
         .collect::<Vec<_>>();
+
+    #[cfg(target_os = "windows")]
+    if packages.is_empty() {
+        for full_name in native_package_full_names(family) {
+            if let Some(path) = native_package_install_path(&full_name) {
+                packages.push(path);
+            }
+        }
+    }
     // WindowsApps is commonly readable only through the AppX deployment
     // service. Fall back to that service instead of assuming directory
     // enumeration permissions, which is why packaged icons previously
@@ -352,6 +506,17 @@ fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
     // Multiple versions can remain installed. The highest version sorts last
     // for the WindowsApps naming convention; try newest first.
     packages.sort_by(|a, b| b.cmp(a));
+    remember_package_dirs(family, &packages);
+    packages
+}
+
+#[cfg(target_os = "windows")]
+/// Load the same family logo Windows uses for a packaged Start-menu app.
+/// AppsFolder's shell provider may return a sparse legacy logo or only a
+/// 16/32px bitmap, so the package assets are a more reliable quality source.
+fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
+    let family = package_family(apps_folder_path)?;
+    let packages = resolve_package_dirs(&family);
     let mut candidates = Vec::new();
     for package in packages {
         let assets_root = package.join("Assets");
@@ -1110,7 +1275,7 @@ fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
     png
 }
 
-pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
+fn ensure_worker_com_initialized() {
     // Initialize COM once per thread lifetime. The persistent
     // nex-icon-prefetch thread calls this repeatedly; calling
     // CoInitializeEx/CoUninitialize on every batch wastes cycles
@@ -1134,15 +1299,91 @@ pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) {
             }
         });
     }
-    for row in rows {
-        if !row.icon_path.is_empty() {
-            cache.png_bytes(&row.icon_path);
-        }
-    }
     // Note: CoUninitialize is intentionally omitted. COM is cleaned
     // up by ExitProcess when the process terminates. Calling
     // CoUninitialize here would undo the initialization for the
     // entire thread, requiring re-initialization on the next call.
+}
+
+fn unique_cold_icon_paths(rows: &[OverlayRow], cache: &IconCache) -> Vec<(usize, String)> {
+    // Dedup by path: repeated exes (two shortcuts to the same target)
+    // decode once. Skip warm entries so a superseding keystroke's
+    // inline pass isn't repeated by the tail loop.
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut cold = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if !row.icon_path.is_empty()
+            && seen.insert(row.icon_path.clone())
+            && cache.png_bytes_cached(&row.icon_path).is_none()
+        {
+            cold.push((index, row.icon_path.clone()));
+        }
+    }
+    cold
+}
+
+fn decode_icon_paths(cache: &IconCache, paths: &[(usize, String)]) -> Vec<String> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(|count| count.get().min(4).max(1))
+        .unwrap_or(1);
+    if worker_count <= 1 || paths.len() <= 1 {
+        ensure_worker_com_initialized();
+        return paths
+            .iter()
+            .filter_map(|(index, path)| {
+                cache.png_bytes(path).map(|_| (index, path.clone()))
+            })
+            .map(|(_, path)| path)
+            .collect();
+    }
+
+    let chunk_size = paths.len().div_ceil(worker_count);
+    let mut decoded = Vec::with_capacity(paths.len());
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in paths.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                ensure_worker_com_initialized();
+                let mut local = Vec::with_capacity(chunk.len());
+                for (index, path) in chunk {
+                    if cache.png_bytes(path).is_some() {
+                        local.push((*index, path.clone()));
+                    }
+                }
+                local
+            }));
+        }
+        for handle in handles {
+            decoded.extend(handle.join().unwrap_or_default());
+        }
+    });
+    decoded.sort_by_key(|(index, _)| *index);
+    decoded.into_iter().map(|(_, path)| path).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn warm_package_locations(paths: &[(usize, String)]) {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    for (_, path) in paths {
+        if let Some(family) = package_family(path) {
+            if seen.insert(family.clone()) {
+                let _ = resolve_package_dirs(&family);
+            }
+        }
+    }
+}
+
+pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) -> Vec<String> {
+    ensure_worker_com_initialized();
+    let cold = unique_cold_icon_paths(rows, cache);
+    #[cfg(target_os = "windows")]
+    warm_package_locations(&cold);
+    decode_icon_paths(cache, &cold)
 }
 
 #[cfg(test)]
@@ -1153,6 +1394,65 @@ mod tests {
     fn empty_path_returns_none() {
         let cache = IconCache::default();
         assert!(cache.png_bytes("").is_none());
+    }
+
+    #[test]
+    fn missing_icon_paths_decode_to_empty_list() {
+        let cache = IconCache::default();
+        let paths = vec![
+            (1, String::from(r"C:\nex-icon-test-missing-a.exe")),
+            (0, String::from(r"C:\nex-icon-test-missing-b.exe")),
+        ];
+        assert!(decode_icon_paths(&cache, &paths).is_empty());
+    }
+
+    #[test]
+    fn package_family_parses_apps_folder_identity() {
+        assert_eq!(
+            package_family(r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"),
+            Some(String::from("Microsoft.WindowsTerminal_8wekyb3d8bbwe"))
+        );
+        assert_eq!(package_family(r"C:\Windows\System32\notepad.exe"), None);
+    }
+
+    #[test]
+    fn package_directory_cache_ignores_missing_directories() {
+        remember_package_dirs(
+            "nex-test-missing-family",
+            &[PathBuf::from(r"C:\nex-icon-test-missing-package")],
+        );
+        assert_eq!(cached_package_dirs("nex-test-missing-family"), None);
+    }
+
+    /// Head/tail split contract with `shim::set_results`: rows
+    /// `[..8]` are prioritized before `[8..]` by the prefetch thread.
+    /// A 12-row batch must split into an 8-row head and a 4-row tail.
+    #[test]
+    fn viewport_split_covers_whole_batch() {
+        const VIEWPORT_ROWS: usize = 8;
+        let rows: Vec<OverlayRow> = (0..12)
+            .map(|i| OverlayRow {
+                role: crate::overlay::model::OverlayRowRole::Item,
+                result_index: Some(i),
+                kind: "app".into(),
+                title: format!("t{i}"),
+                path: String::new(),
+                url: None,
+                icon_path: format!("C:\\app{i}.exe"),
+                clipboard_thumbnail: None,
+                clipboard_full_image: None,
+                tile_size: None,
+            })
+            .collect();
+        let head_end = VIEWPORT_ROWS.min(rows.len());
+        let tail: &[OverlayRow] = if rows.len() > VIEWPORT_ROWS {
+            &rows[VIEWPORT_ROWS..]
+        } else {
+            &[]
+        };
+        assert_eq!(head_end, 8);
+        assert_eq!(tail.len(), 4);
+        assert_eq!(rows[..head_end].len() + tail.len(), rows.len());
     }
 
     #[test]

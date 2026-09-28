@@ -150,7 +150,9 @@ pub(crate) enum UiCommand {
     Apply,
     /// Icons decoded in the background are now cached — re-send the
     /// icon data JSON so the page can patch placeholder <img> elements.
-    ApplyIcons,
+    /// The payload contains only newly decoded icon paths, avoiding a
+    /// full snapshot re-encode on every icon batch.
+    ApplyIcons(Vec<String>),
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
     /// Only the status text changed — send a lightweight update.
@@ -402,17 +404,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         push_status(&webview, &state);
                     }
                 }
-                UiCommand::ApplyIcons => {
+                UiCommand::ApplyIcons(decoded_paths) => {
                     // Progressive icon delivery: the background prefetch
-                    // thread decoded icons and posted this command. Re-send
-                    // the icon data JSON so the page can patch placeholder
-                    // <img> elements that painted with no src (cold cache).
+                    // thread decoded icons and posted this command. Send only
+                    // the newly decoded icon data so the page can patch
+                    // placeholder <img> elements that painted with no src
+                    // (cold cache) without re-encoding the whole snapshot.
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         let snapshot = {
                             let Ok(s) = state.lock() else { return };
                             s.clone()
                         };
-                        let icons_json = snapshot_icons_json(&snapshot, &icon_cache);
+                        let icons_json =
+                            snapshot_icon_subset_json(&snapshot, &icon_cache, &decoded_paths);
                         if !icons_json.is_empty() {
                             if let Some(wv) = webview.as_ref() {
                                 post_json(wv, &icons_json);
@@ -498,8 +502,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_state(&webview, &state, &icon_cache, true);
                 }
                 UiCommand::FocusInput => {
+                    // Start/Explorer can reassert foreground after the
+                    // initial show. Treat refocus as a complete native focus
+                    // handoff, not only a WebView DOM focus request.
+                    // Do not optimistically mark focus: the delayed reassert
+                    // below checks actual foreground ownership.
+                    let visible = state.lock().map(|s| s.visible).unwrap_or(false);
+                    if visible {
+                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        force_foreground(hwnd);
+                        crate::overlay::hotkey::signal_overlay_ready();
+                    }
                     window.set_focus();
                     focus_input(&webview);
+                    if visible {
+                        let proxy_reassert = proxy.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(250));
+                            try_send_ui(&proxy_reassert, UiCommand::FocusReassert);
+                        });
+                    }
                 }
                 UiCommand::Hide => {
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
@@ -602,11 +624,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // Keep WebView + ready so re-open is always the
                         // warm path (consistent timing). Drop decoded
                         // PNG icons — the bulk of reclaimable overlay
-                        // heap outside Chromium.
+                        // heap outside Chromium — but keep the 48 most
+                        // recent so top hits repaint without re-decode.
                         let entries = icon_cache.len();
-                        icon_cache.clear();
+                        icon_cache.retain_recent(48);
+                        let kept = icon_cache.len();
                         crate::logging::info(&format!(
-                            "[nex] ui warm-release: icon cache cleared entries={entries} (webview kept warm)"
+                            "[nex] ui warm-release: icon cache trimmed entries={entries} kept={kept} (webview kept warm)"
                         ));
                     }
                 }
@@ -757,12 +781,25 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // focus theft on Win key hotkeys.  Same as the initial
                     // force_foreground + focus_input, but runs after
                     // Explorer has finished its re-assertion cycle.
-                    // Only fire when overlay IS visible but lost focus —
-                    // force_foreground calls ShowWindow(SW_SHOW) which
-                    // would re-show a hidden window.
-                    let should_reassert = state.lock().map(|s| s.visible && !s.has_focus).unwrap_or(false);
-                    if should_reassert {
-                        force_foreground(hwnd);
+                    // Only fire when overlay IS visible but another window
+                    // actually owns the foreground — force_foreground calls
+                    // ShowWindow(SW_SHOW) which would re-show a hidden
+                    // window. Use native ownership rather than logical focus
+                    // state, which can lag WebView2 focus transitions.
+                    let (visible, logical_focused) = state
+                        .lock()
+                        .map(|s| (s.visible, s.has_focus))
+                        .unwrap_or((false, false));
+                    let foreground_owned = unsafe { GetForegroundWindow() == hwnd };
+                    // The container can own the OS foreground while the
+                    // WebView input remains unfocused after Start/Explorer
+                    // takes and returns focus. Recover DOM focus in that
+                    // state too; only retake the OS foreground when needed.
+                    if visible && (!foreground_owned || !logical_focused) {
+                        if !foreground_owned {
+                            force_foreground(hwnd);
+                            window.set_focus();
+                        }
                         focus_input(&webview);
                     }
                 }
@@ -799,9 +836,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::SettingsHotkeyRecorded { combo } => {
                     if let Some((_, wv)) = &settings_ui {
-                        let _ = wv.evaluate_script(&format!(
-                            "window.hotkeyRecorded && window.hotkeyRecorded('{combo}')"
-                        ));
+                        // Combo originates from the recordHotkey native path,
+                        // not free-form JS — but still JSON-escape it before
+                        // interpolating into script so a quote can never
+                        // break out of the string literal.
+                        let arg = serde_json::to_string(&combo).unwrap_or_default();
+                        let script =
+                            format!("window.hotkeyRecorded && window.hotkeyRecorded({arg})");
+                        let _ = wv.evaluate_script(&script);
                     }
                 }
                 UiCommand::OpenSettings { snapshot}=> {
@@ -833,37 +875,59 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 serve_asset(request)
                             })
                             .with_ipc_handler(move |req| {
+                                use crate::overlay::ipc::{parse_settings, SettingsMessage};
                                 let body = req.body().clone();
-                                if body.contains("\"t\":\"save\"") {
-                                    let _ = save_tx.send(OverlayEvent::SaveSettings(body));
-                                } else if body.contains("\"t\":\"ready\"") {
-                                    let snap = snapshot_for_ipc.lock().unwrap().clone();
-                                    if let Some(snap) = snap {
-                                        let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings { snapshot: snap });
-                                    };
-                                } else if body.contains("\"t\":\"recordHotkey\"") {
-                                    RECORDING_HOTKEY.store(true, Ordering::SeqCst);
-                                    // Keep Start menu shut while capturing
-                                    register_raw_input_sink(record_hwnd, true);
-                                } else if body.contains("\"t\":\"cancelRecord\"") {
-                                    RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-                                    // Restore normal Win routing.
-                                    register_raw_input_sink(
-                                        record_hwnd,
-                                        crate::overlay::hotkey::is_win_key_hotkey(),
-                                    );
-                                } else if body.contains("\"t\":\"minimize\"") {
-                                    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-                                    if let Ok(slot) = settings_hwnd_for_ipc.lock() {
-                                        if let Some(h) = *slot {
-                                            unsafe { ShowWindow(h, SW_MINIMIZE); }
+                                match parse_settings(&body) {
+                                    Ok(SettingsMessage::Save(payload)) => {
+                                        if payload.cfg.is_object() {
+                                            let _ = save_tx.send(OverlayEvent::SaveSettings(body));
+                                        } else {
+                                            crate::runtime::log_info(
+                                                "[nex] settings ipc rejected: save cfg is not an object",
+                                            );
                                         }
                                     }
-                                } else if body.contains("\"t\":\"close\"") {
-                                    let _ = proxy_for_ipc.send_event(UiCommand::CloseSettings);
-                                }
-                                else {
-                                    crate::runtime::log_info(&format!("[nex] settings ipc: {body}"));
+                                    Ok(SettingsMessage::Ready(_)) => {
+                                        let snap = snapshot_for_ipc.lock().unwrap().clone();
+                                        if let Some(snap) = snap {
+                                            let _ = proxy_for_ipc.send_event(UiCommand::OpenSettings {
+                                                snapshot: snap,
+                                            });
+                                        };
+                                    }
+                                    Ok(SettingsMessage::RecordHotkey(_)) => {
+                                        RECORDING_HOTKEY.store(true, Ordering::SeqCst);
+                                        // Keep Start menu shut while capturing
+                                        register_raw_input_sink(record_hwnd, true);
+                                    }
+                                    Ok(SettingsMessage::CancelRecord(_)) => {
+                                        RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                                        // Restore normal Win routing.
+                                        register_raw_input_sink(
+                                            record_hwnd,
+                                            crate::overlay::hotkey::is_win_key_hotkey(),
+                                        );
+                                    }
+                                    Ok(SettingsMessage::Minimize(_)) => {
+                                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                                            ShowWindow, SW_MINIMIZE,
+                                        };
+                                        if let Ok(slot) = settings_hwnd_for_ipc.lock() {
+                                            if let Some(h) = *slot {
+                                                unsafe {
+                                                    ShowWindow(h, SW_MINIMIZE);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(SettingsMessage::Close(_)) => {
+                                        let _ = proxy_for_ipc.send_event(UiCommand::CloseSettings);
+                                    }
+                                    Err(reject) => {
+                                        crate::runtime::log_info(&format!(
+                                            "[nex] settings ipc rejected: {reject}"
+                                        ));
+                                    }
                                 }
                             })
                             .build(&sw)
@@ -1173,131 +1237,116 @@ fn base64_data_uri(bytes: &[u8]) -> String {
     out
 }
 
-/// Parse one IPC message from the page and act on it.
+/// Parse one IPC message from the page and act on it. The body is
+/// strictly deserialized into [`crate::overlay::ipc::OverlayMessage`]:
+/// malformed JSON, unknown message types, and unknown fields are
+/// rejected with a log line instead of being silently coerced.
 fn handle_ipc(
     body: &str,
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
 ) {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return;
+    use crate::overlay::ipc::{OverlayMessage, parse_overlay};
+    let msg = match parse_overlay(body) {
+        Ok(msg) => msg,
+        Err(reject) => {
+            crate::runtime::log_info(&format!("[nex] overlay ipc rejected: {reject}"));
+            return;
+        }
     };
-    let t = value.get("t").and_then(|v| v.as_str()).unwrap_or("");
-    match t {
-        "ready" => {
+    match msg {
+        OverlayMessage::Ready(_) => {
             try_send_ui(proxy, UiCommand::WebviewReady);
         }
-        "query" => {
+        OverlayMessage::Query(p) => {
             // Ignore queries that fire after hide (debounced input
             // races with Escape).  The shim clears query/rows on
             // hide; a stale query would prevent idle-state setup.
             if !state.lock().map(|s| s.visible).unwrap_or(false) {
                 return;
             }
-            let q = value
-                .get("v")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let q = p.v;
             if let Ok(mut s) = state.lock() {
                 s.query = q.clone();
             }
             let _ = event_tx.send(OverlayEvent::QueryChanged(q));
         }
-        "submit" => {
-            let idx = value.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        OverlayMessage::Submit(p) => {
+            let idx = p.v as usize;
             if let Ok(mut s) = state.lock() {
                 s.selected = idx;
             }
             let _ = event_tx.send(OverlayEvent::Submit);
         }
-        "select" => {
-            let idx = value.get("v").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        OverlayMessage::Select(p) => {
+            let idx = p.v as usize;
             if let Ok(mut s) = state.lock() {
                 s.selected = idx;
             }
         }
-        "escape" => {
+        OverlayMessage::Escape(_) => {
             let _ = event_tx.send(OverlayEvent::Escape);
         }
-        "resize" => {
+        OverlayMessage::Resize(p) => {
             // JS sends {t:"resize", v:{v:h, immediate:bool}} (new) or
             // {t:"resize", v:h} (legacy number-only).
-            let (h, immediate) = match value.get("v") {
-                Some(serde_json::Value::Object(obj)) => {
-                    let h = obj.get("v").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let imm = obj.get("immediate").and_then(|v| v.as_bool()).unwrap_or(false);
-                    (h, imm)
-                }
-                Some(serde_json::Value::Number(n)) => {
-                    (n.as_f64().unwrap_or(0.0), false)
-                }
-                _ => return,
-            };
+            let (h, immediate) = p.v.height_and_immediate();
             try_send_ui(proxy, UiCommand::Resize { h, immediate });
         }
-        "painted" => {
+        OverlayMessage::Painted(_) => {
             // First paint after push_state — safe to show the window.
             // Deferred from WebviewReady / Show to avoid a flash of
             // uncomposited content before the WebView2 paints.
             try_send_ui(proxy, UiCommand::Painted);
         }
-        "pin" => {
-            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::PinApp(title.to_string()));
-            }
+        OverlayMessage::Pin(p) => {
+            let _ = event_tx.send(OverlayEvent::PinApp(p.v));
         }
-        "unpin" => {
-            if let Some(title) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::UnpinApp(title.to_string()));
-            }
+        OverlayMessage::Unpin(p) => {
+            let _ = event_tx.send(OverlayEvent::UnpinApp(p.v));
         }
-        "bookmark" => {
-            let payload = value.get("v").cloned().unwrap_or_default();
-            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let url = payload.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            let remove = payload.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
-            let _ = event_tx.send(OverlayEvent::Bookmark(title.to_string(), url.to_string(), remove));
+        OverlayMessage::Bookmark(p) => {
+            let _ = event_tx.send(OverlayEvent::Bookmark(p.v.title, p.v.url, p.v.remove));
         }
-        "addToQuickLaunch" => {
-            if let Some(path) = value.get("v").and_then(|v| v.as_str()) {
-                let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(path.to_string()));
-            }
+        OverlayMessage::AddToQuickLaunch(p) => {
+            let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(p.v));
         }
-        "powerAction" => {
-            if let Some(action) = value.get("v").and_then(|v| v.as_str()) {
-                let event = match action {
-                    "lock" => OverlayEvent::TrayLock,
-                    "sleep" => OverlayEvent::TraySleep,
-                    "shutdown" => OverlayEvent::PowerMenuShutdown,
-                    "restart" => OverlayEvent::PowerMenuRestart,
-                    "signout" => OverlayEvent::TraySignOut,
-                    _ => return,
-                };
-                let _ = event_tx.send(event);
-            }
+        OverlayMessage::PowerAction(p) => {
+            let event = match p.v.as_str() {
+                "lock" => OverlayEvent::TrayLock,
+                "sleep" => OverlayEvent::TraySleep,
+                "shutdown" => OverlayEvent::PowerMenuShutdown,
+                "restart" => OverlayEvent::PowerMenuRestart,
+                "signout" => OverlayEvent::TraySignOut,
+                // Unreachable: the parser allow-lists power actions, but
+                // log rather than silently drop if schemas ever diverge.
+                _ => {
+                    crate::runtime::log_info(&format!(
+                        "[nex] overlay ipc rejected: unknown power action {:?}",
+                        p.v
+                    ));
+                    return;
+                }
+            };
+            let _ = event_tx.send(event);
         }
-        "contextAction" => {
-            let action = value.get("v").and_then(|v| v.get("action")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let title = value.get("v").and_then(|v| v.get("title")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let path = value.get("v").and_then(|v| v.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let _ = event_tx.send(OverlayEvent::ContextAction(action, title, path));
+        OverlayMessage::ContextAction(p) => {
+            let _ = event_tx.send(OverlayEvent::ContextAction(p.v.action, p.v.title, p.v.path));
         }
-        "settings" => {
+        OverlayMessage::Settings(_) => {
             let _ = event_tx.send(OverlayEvent::OpenSettings);
         }
-        "checkUpdates" => {
+        OverlayMessage::CheckUpdates(_) => {
             let _ = event_tx.send(OverlayEvent::CheckUpdates);
         }
-        "dragStart" => {
+        OverlayMessage::DragStart(_) => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button
             // release — no per-move IPC at all, so the window tracks
             // the cursor 1:1 with no lag and no ghost frames.
             try_send_ui(proxy, UiCommand::DragStart);
         }
-        _ => {}
     }
 }
 
@@ -1628,6 +1677,40 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "updateAvailable": s.update_available,
     })
     .to_string()
+}
+
+fn snapshot_icon_subset_json(
+    s: &ShimState,
+    icons: &Arc<IconCache>,
+    decoded_paths: &[String],
+) -> String {
+    let wanted: std::collections::HashSet<&str> =
+        decoded_paths.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
+    let icon_map: serde_json::Map<String, serde_json::Value> = s
+        .rows
+        .iter()
+        .filter(|r| !r.icon_path.is_empty())
+        .filter(|r| wanted.contains(r.icon_path.as_str()))
+        .filter(|r| seen.insert(r.icon_path.clone()))
+        .filter_map(|r| {
+            let b64 = icons
+                .png_bytes_cached(&r.icon_path)
+                .map(|arc| base64_data_uri(arc.as_ref()))
+                .unwrap_or_default();
+            if b64.is_empty() {
+                None
+            } else {
+                Some((r.icon_path.clone(), serde_json::Value::String(b64)))
+            }
+        })
+        .collect();
+
+    if icon_map.is_empty() {
+        return String::new();
+    }
+
+    serde_json::json!({ "icons": icon_map }).to_string()
 }
 
 /// Serialize icon data as `{"icons": {path: dataUri, ...}}`.

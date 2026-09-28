@@ -654,14 +654,14 @@
   // Called after icon data arrives. Updates <img> elements from cache.
   // Does NOT skip placeholder elements — on cold cache, render() creates
   // icons without src, and patchIcons() must update them all.
+  //
+  // No pop-in animation here: assigning src to a data: URI decodes
+  // synchronously, so the new pixels are already in place when the
+  // swap is batched in a single rAF below. The old per-batch
+  // `nexIconIn` restart (opacity 0 → 1) made every cold icon visibly
+  // blink — twice when head + tail arrived as separate pushes.
   function patchIcons() {
-    // Assign every pending src synchronously so the pre-rasterized
-    // viewport paints rows complete with icons before the window
-    // reveals them. The pop-in runs as ONE list-level CSS animation
-    // scoped to the images actually swapped this pass — the old
-    // per-image offsetWidth read forced a sync reflow per icon,
-    // stalling the renderer on large expansions.
-    const swapped = [];
+    const pending = [];
     for (const li of list.children) {
       const img = li.querySelector("img.icon");
       if (!img) continue;
@@ -669,22 +669,19 @@
       const path = img.dataset.iconPath;
       if (path && iconCache.has(path)) {
         const dataUri = iconCache.get(path);
-        if (img.src !== dataUri) {
-          img.src = dataUri;
-          img.classList.add("icon-swap");
-          swapped.push(img);
-        }
+        if (img.src !== dataUri) pending.push([img, dataUri]);
       }
     }
-    if (swapped.length && !reduceMotion) {
-      list.classList.remove("icons-pop");
-      void list.offsetWidth;
-      list.classList.add("icons-pop");
-      clearTimeout(patchIcons.timer);
-      patchIcons.timer = setTimeout(() => {
-        list.classList.remove("icons-pop");
-        for (const img of swapped) img.classList.remove("icon-swap");
-      }, 220);
+    if (!pending.length) return;
+    const apply = () => {
+      for (const [img, dataUri] of pending) {
+        if (img.isConnected && img.src !== dataUri) img.src = dataUri;
+      }
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(apply);
+    } else {
+      apply();
     }
   }
 

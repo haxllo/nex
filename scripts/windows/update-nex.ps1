@@ -271,8 +271,11 @@ function Stop-Runtime {
     Start-Sleep -Milliseconds 400
   }
 
+  # Do not use taskkill /T here: the updater is a child of Nex.exe when launched
+  # from the update button, so terminating the whole process tree would kill
+  # the updater before it can install or restart the new version.
   foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
-    cmd /c "taskkill /IM $imageName /F /T >NUL 2>&1" | Out-Null
+    cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
   }
   Start-Sleep -Milliseconds 200
 }
@@ -436,11 +439,18 @@ try {
   }
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
+  $logPath = Join-Path $workDir "setup.log"
+  $scopeArg = if ($needsElevation) { "/ALLUSERS" } else { "/CURRENTUSER" }
+  # Fully automatic install: silent progress UI with no wizard prompts, no
+  # restart, an installer log for diagnostics, and the explicit scope and
+  # target directory. /NEXUPDATER tells the installer not to launch Nex
+  # itself — the updater restarts it after verification.
+  $setupArgs = "/SILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /SP- /LOG=`"$logPath`" /DIR=`"$InstallRoot`" $scopeArg /NEXUPDATER"
   if ($needsElevation) {
-    $proc = Start-Process -FilePath $setupPath -ArgumentList "--nex-updater" -Verb RunAs -PassThru -WindowStyle Normal
+    $proc = Start-Process -FilePath $setupPath -ArgumentList $setupArgs -Verb RunAs -PassThru -WindowStyle Normal
   }
   else {
-    $proc = Start-Process -FilePath $setupPath -ArgumentList "--nex-updater" -PassThru -WindowStyle Normal
+    $proc = Start-Process -FilePath $setupPath -ArgumentList $setupArgs -PassThru -WindowStyle Normal
   }
   Bring-ProcessToFront -Process $proc
   $proc.WaitForExit()

@@ -110,7 +110,7 @@ end;
 
 function ShouldLaunchNexAfterInstall(): Boolean;
 begin
-  Result := Pos('--nex-updater', Lowercase(GetCmdTail())) = 0;
+  Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
 end;
 
 procedure InitializeWizard();

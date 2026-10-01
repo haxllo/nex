@@ -377,7 +377,7 @@ foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
   }
 }
 if ($legacyOrphan -and -not $needsElevation) {
-  Write-Host "Legacy Nex copy found outside the registered install; elevating the installer once so it can remove it." -ForegroundColor Yellow
+  Write-Host "Legacy Nex copy found outside the registered install; elevating the installer once so it can remove it (install scope stays per-user)." -ForegroundColor Yellow
   $needsElevation = $true
 }
 
@@ -470,7 +470,11 @@ try {
 
   Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
   $logPath = Join-Path $workDir "setup.log"
-  $scopeArg = if ($needsElevation) { "/ALLUSERS" } else { "/CURRENTUSER" }
+  # Scope follows the registered install and NEVER changes with elevation:
+  # elevation is only about permission (e.g. removing a legacy orphan),
+  # while /ALLUSERS vs /CURRENTUSER decides registry hives and folders.
+  # Coupling them once registered a per-user install machine-wide.
+  $scopeArg = if ($installInfo.NeedsElevation) { "/ALLUSERS" } else { "/CURRENTUSER" }
   # Fully automatic install: silent progress UI with no wizard prompts, no
   # restart, an installer log for diagnostics, and the explicit scope and
   # target directory. /NEXUPDATER tells the installer not to launch Nex

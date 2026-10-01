@@ -100,6 +100,14 @@ pub enum OverlayEvent {
     HotkeyRecorded(String),
     /// Check for updates (triggered from update notice button).
     CheckUpdates,
+    /// Media transport controls from the media widget.
+    MediaToggle,
+    MediaNext,
+    MediaPrev,
+    /// The media view was opened — push a fresh now-playing snapshot.
+    MediaRefresh,
+    /// Seek the current track to a position in milliseconds.
+    MediaSeek(u64),
     /// Update availability status from background check.
     UpdateAvailable(bool),
 

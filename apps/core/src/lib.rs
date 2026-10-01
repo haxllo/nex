@@ -20,6 +20,8 @@ pub mod hotkey_runtime;
 pub(crate) mod hot_prefix;
 pub mod index_store;
 pub mod logging;
+#[cfg(target_os = "windows")]
+pub(crate) mod media;
 pub mod model;
 pub mod overlay_state;
 pub mod plugin_sdk;

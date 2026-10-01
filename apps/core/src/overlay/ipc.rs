@@ -98,6 +98,13 @@ pub(crate) struct IndexPayload {
     pub v: u64,
 }
 
+/// Seek target in whole milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SeekPayload {
+    pub v: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TextPayload {
@@ -212,6 +219,16 @@ pub(crate) enum OverlayMessage {
     Settings(NoPayload),
     #[serde(rename = "checkUpdates")]
     CheckUpdates(NoPayload),
+    #[serde(rename = "mediaToggle")]
+    MediaToggle(NoPayload),
+    #[serde(rename = "mediaNext")]
+    MediaNext(NoPayload),
+    #[serde(rename = "mediaPrev")]
+    MediaPrev(NoPayload),
+    #[serde(rename = "mediaRefresh")]
+    MediaRefresh(NoPayload),
+    #[serde(rename = "mediaSeek")]
+    MediaSeek(SeekPayload),
     #[serde(rename = "dragStart")]
     DragStart(NoPayload),
 }
@@ -266,6 +283,11 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "contextAction",
         "settings",
         "checkUpdates",
+        "mediaToggle",
+        "mediaNext",
+        "mediaPrev",
+        "mediaRefresh",
+        "mediaSeek",
         "dragStart",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -297,6 +319,11 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             let (h, _) = p.v.height_and_immediate();
             if !h.is_finite() {
                 return Err(IpcReject::BadPayload("resize height is not finite".into()));
+            }
+        }
+        OverlayMessage::MediaSeek(p) => {
+            if p.v > 24 * 3600 * 1000 {
+                return Err(IpcReject::BadPayload("seek position out of range".into()));
             }
         }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {

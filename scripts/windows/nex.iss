@@ -389,6 +389,25 @@ begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
+procedure RemoveStaleHybridUninstallEntry();
+var
+  Location: string;
+begin
+  if RegQueryStringValue(
+    HKLM,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}',
+    'InstallLocation',
+    Location
+  ) then
+  begin
+    if CompareText(Trim(Location), Trim(ExpandConstant('{app}'))) = 0 then
+      RegDeleteKeyIncludingSubkeys(
+        HKLM,
+        'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}'
+      );
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
@@ -407,6 +426,12 @@ begin
       ewWaitUntilTerminated,
       ResultCode
     );
+  // A previous updater bug could register a per-user file install
+  // machine-wide (hybrid registration). If the HKLM entry points at this
+  // very install dir, it is that stale hybrid entry — remove it so exactly
+  // one registration (this install's own hive) remains.
+  if (CurStep = ssPostInstall) and (not IsAdminInstallMode) then
+    RemoveStaleHybridUninstallEntry();
 end;
 
 procedure InitializeUninstallWizard();

@@ -127,10 +127,20 @@ function Download-ReleaseAsset {
     $Asset,
     [string]$OutFile
   )
-  Invoke-WebRequest `
-    -Uri $Asset.browser_download_url `
-    -Headers @{ "User-Agent" = "Nex-Updater"; "Accept" = "application/octet-stream" } `
-    -OutFile $OutFile
+  # Windows PowerShell 5.1 renders a progress bar for every Invoke-WebRequest
+  # chunk, which throttles multi-MB downloads to a crawl. Silencing progress
+  # (or WebClient below) is an order of magnitude faster.
+  $previousProgressPreference = $ProgressPreference
+  $ProgressPreference = 'SilentlyContinue'
+  try {
+    Invoke-WebRequest `
+      -Uri $Asset.browser_download_url `
+      -Headers @{ "User-Agent" = "Nex-Updater"; "Accept" = "application/octet-stream" } `
+      -OutFile $OutFile
+  }
+  finally {
+    $ProgressPreference = $previousProgressPreference
+  }
 }
 
 function Get-Sha256([string]$Path) {

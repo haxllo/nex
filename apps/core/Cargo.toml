@@ -1,6 +1,6 @@
 [package]
 name = "nex"
-version = "2.22.6"
+version = "2.22.7"
 edition = "2024"
 authors = ["haxllo"]
 description = "A keyboard-first launcher for Windows"

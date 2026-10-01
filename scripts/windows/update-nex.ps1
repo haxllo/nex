@@ -266,18 +266,45 @@ function Write-UpdateResult {
   $obj = @{ status = $Status }
   if ($Version) { $obj.version = $Version }
   if ($Message) { $obj.message = $Message }
-  Write-Host "NEX_UPDATE_RESULT: $(ConvertTo-Json -Compress $obj)"
+  $line = "NEX_UPDATE_RESULT: $(ConvertTo-Json -Compress $obj)"
+  # The parent process may already be gone (it is killed as part of the
+  # update), in which case console output throws under Stop preference.
+  # The marker must still reach the log file, so never let it be fatal.
+  try { Write-Host $line } catch {}
+  if ($script:UpdateLogPath) {
+    try { Add-Content -LiteralPath $script:UpdateLogPath -Value $line -ErrorAction SilentlyContinue } catch {}
+  }
+}
+
+$script:UpdateLogPath = $null
+
+function Write-UpdateLog {
+  param([string]$Message, [string]$Color)
+  # Progress output must never be fatal: once Nex.exe is stopped, stdout
+  # may have no reader, and a throwing Write-Host would skip rollback.
+  if ($script:UpdateLogPath) {
+    try { Add-Content -LiteralPath $script:UpdateLogPath -Value $Message -ErrorAction SilentlyContinue } catch {}
+  }
+  try {
+    if ($Color) { Write-Host $Message -ForegroundColor $Color } else { Write-Host $Message }
+  } catch {}
 }
 
 function Stop-Runtime {
   param([string]$InstalledExePath)
+
+  # The elevated helper cannot be killed by taskkill from this
+  # medium-integrity process — end it through its own scheduled task
+  # first. Otherwise it keeps bin\NexHelper.exe locked and every later
+  # file operation on the install tree fails after Nex is already dead.
+  cmd /c "schtasks /end /tn NexHelperV2 >NUL 2>&1" | Out-Null
 
   if (Test-Path -LiteralPath $InstalledExePath) {
     try {
       & $InstalledExePath --quit | Out-Null
     }
     catch {
-      Write-Host "Warning: graceful quit failed; using hard stop fallback." -ForegroundColor Yellow
+      Write-UpdateLog "Warning: graceful quit failed; using hard stop fallback." "Yellow"
     }
     Start-Sleep -Milliseconds 400
   }
@@ -287,6 +314,19 @@ function Stop-Runtime {
   # the updater before it can install or restart the new version.
   foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
     cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
+  }
+
+  # Verify everything actually died before touching the install tree.
+  # Aborting here is safe (nothing moved yet); proceeding with a live
+  # process holding files is what bricks the install with no rollback.
+  for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    $remaining = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  $remaining = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+  if ($remaining.Count -gt 0) {
+    throw "Could not stop running processes: $($remaining.Name -join ', '). Aborting update before touching the install."
   }
   Start-Sleep -Milliseconds 200
 }
@@ -446,16 +486,17 @@ $manifestAsset = Resolve-ReleaseAsset -Release $targetRelease -AssetNames $manif
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $workDir = Join-Path $CacheRoot "$artifactBase-update-$stamp"
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+$script:UpdateLogPath = Join-Path $workDir "updater.log"
 
 $setupPath = Join-Path $workDir $setupAsset.name
 $manifestPath = Join-Path $workDir $manifestAsset.name
 
-Write-Host "[1/5] Downloading manifest and installer..." -ForegroundColor Yellow
+Write-UpdateLog "[1/5] Downloading manifest and installer..." "Yellow"
 Download-ReleaseAsset -Asset $manifestAsset -OutFile $manifestPath
 Download-ReleaseAsset -Asset $setupAsset -OutFile $setupPath
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-Write-Host "[2/5] Verifying integrity..." -ForegroundColor Yellow
+Write-UpdateLog "[2/5] Verifying integrity..." "Yellow"
 Verify-ManifestAndInstaller `
   -Manifest $manifest `
   -ExpectedVersion $resolvedVersion `
@@ -467,18 +508,30 @@ $installedExe = Resolve-InstalledRuntimePath -Root $InstallRoot
 $backupDir = $null
 
 try {
-  Write-Host "[3/5] Stopping active runtime and preparing rollback snapshot..." -ForegroundColor Yellow
+  Write-UpdateLog "[3/5] Stopping active runtime and preparing rollback snapshot..." "Yellow"
   Stop-Runtime -InstalledExePath $installedExe
 
   if (Test-Path -LiteralPath $InstallRoot) {
     $backupRoot = Join-Path $CacheRoot "backups"
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
     $backupDir = Join-Path $backupRoot "nex-backup-$stamp"
-    Move-Item -LiteralPath $InstallRoot -Destination $backupDir
-    Write-Host "Backup created: $backupDir"
+    # Retry transient locks (AV scans, dying processes releasing handles).
+    $moved = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $moved; $attempt++) {
+      try {
+        Move-Item -LiteralPath $InstallRoot -Destination $backupDir -ErrorAction Stop
+        $moved = $true
+      }
+      catch {
+        if ($attempt -eq 3) { throw }
+        Write-UpdateLog "Backup move blocked, retrying ($attempt/3)..." "Yellow"
+        Start-Sleep -Seconds 1
+      }
+    }
+    Write-UpdateLog "Backup created: $backupDir"
   }
 
-  Write-Host "[4/5] Installing update..." -ForegroundColor Yellow
+  Write-UpdateLog "[4/5] Installing update..." "Yellow"
   $logPath = Join-Path $workDir "setup.log"
   # Scope follows the registered install and NEVER changes with elevation:
   # elevation is only about permission (e.g. removing a legacy orphan),
@@ -522,38 +575,52 @@ try {
     $backupDir = $null
   }
 
-  Write-Host "[5/5] Update complete." -ForegroundColor Green
-  Write-Host "Installed version: $resolvedVersion"
+  Write-UpdateLog "[5/5] Update complete." "Green"
+  Write-UpdateLog "Installed version: $resolvedVersion"
   if ($backupDir) {
-    Write-Host "Rollback snapshot retained: $backupDir"
+    Write-UpdateLog "Rollback snapshot retained: $backupDir"
   }
   Write-UpdateResult -Status "updated" -Version $resolvedVersion
 }
 catch {
-  Write-Host "Update failed: $($_.Exception.Message)" -ForegroundColor Red
-  Write-UpdateResult -Status "failed" -Message $_.Exception.Message
-  Write-Host "Attempting rollback..." -ForegroundColor Yellow
-
+  # Capture first: every diagnostic below must survive a dead parent pipe.
+  $failure = $_.Exception.Message
   try {
-    Stop-Runtime -InstalledExePath (Resolve-InstalledRuntimePath -Root $InstallRoot)
-    if (Test-Path -LiteralPath $InstallRoot) {
-      Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+    Write-UpdateLog "Update failed: $failure" "Red"
+    Write-UpdateLog "Attempting rollback..." "Yellow"
+    try {
+      Stop-Runtime -InstalledExePath (Resolve-InstalledRuntimePath -Root $InstallRoot)
+    }
+    catch {
+      Write-UpdateLog "Warning: stop during rollback failed: $($_.Exception.Message)" "Yellow"
     }
     if ($backupDir -and (Test-Path -LiteralPath $backupDir)) {
+      if (Test-Path -LiteralPath $InstallRoot) {
+        Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+      }
       Move-Item -LiteralPath $backupDir -Destination $InstallRoot
       $restoredExe = Resolve-InstalledRuntimePath -Root $InstallRoot
       if ($StartAfterUpdate -and (Test-Path -LiteralPath $restoredExe)) {
         Start-Process -FilePath $restoredExe -ArgumentList "--foreground" -WindowStyle Hidden
       }
-      Write-Host "Rollback complete: restored previous installation." -ForegroundColor Green
+      Write-UpdateLog "Rollback complete: restored previous installation." "Green"
+    }
+    elseif (Test-Path -LiteralPath $installedExe) {
+      # Aborted before anything moved: the original install is untouched,
+      # so restart it instead of leaving the user with nothing running.
+      if ($StartAfterUpdate) {
+        Start-Process -FilePath $installedExe -ArgumentList "--foreground" -WindowStyle Hidden
+      }
+      Write-UpdateLog "Update aborted before any files moved; restarted previous version." "Yellow"
     }
     else {
-      Write-Host "No backup snapshot available for rollback." -ForegroundColor Yellow
+      Write-UpdateLog "No backup snapshot available for rollback." "Yellow"
     }
   }
   catch {
-    Write-Host "Rollback failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-UpdateLog "Rollback failed: $($_.Exception.Message)" "Red"
   }
+  Write-UpdateResult -Status "failed" -Message $failure
 
   throw
 }

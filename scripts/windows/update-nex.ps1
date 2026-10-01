@@ -421,9 +421,27 @@ $needsElevation = $installInfo.NeedsElevation
 # unavoidable exactly once for this cleanup.
 $legacyOrphan = $false
 foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe')) -and -not (Test-Path "HKLM:\$UninstallSubkey")) {
+  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe'))) {
     $legacyOrphan = $true
     break
+  }
+}
+# Hybrid registration from an older updater bug: a machine-wide entry pointing
+# at a per-user directory. There is no legitimate install to preserve there,
+# but removing it still needs elevation.
+if (-not $legacyOrphan) {
+  $hklmLocation = (Get-ItemProperty -LiteralPath "HKLM:\$UninstallSubkey" -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+  if ($hklmLocation) {
+    $underProgramFiles = $false
+    foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+      if ($programFiles -and ($hklmLocation -like "$programFiles*")) {
+        $underProgramFiles = $true
+        break
+      }
+    }
+    if (-not $underProgramFiles) {
+      $legacyOrphan = $true
+    }
   }
 }
 if ($legacyOrphan -and -not $needsElevation) {

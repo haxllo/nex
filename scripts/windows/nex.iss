@@ -55,14 +55,8 @@ Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: i
 [InstallDelete]
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
-; Remove an orphaned pre-AppId install at the old machine-wide location,
-; plus its stale all-users Start Menu shortcut (which otherwise keeps
-; launching the orphan). Only for per-user installs with no registered
-; all-users install — never touch a legitimate all-users install.
-; NOTE: this only works when the installer actually runs elevated; see the
-; updater, which elevates the installer launch when it detects the orphan.
-Type: filesandordirs; Name: "{commonpf}\Nex"; Check: ShouldRemoveLegacyProgramFilesNex
-Type: files; Name: "{commonprograms}\Nex.lnk"; Check: ShouldRemoveLegacyProgramFilesNex
+; Legacy-orphan removal lives in [Code] RemoveLegacyOrphan (called from
+; CurStepChanged) so the hybrid-key check provably runs before deletion.
 
 [Icons]
 Name: "{autoprograms}\Nex"; Filename: "{app}\bin\Nex.exe"; Parameters: "--background"
@@ -121,12 +115,7 @@ begin
   Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
 end;
 
-function ShouldRemoveLegacyProgramFilesNex(): Boolean;
-begin
-  Result :=
-    (not IsAdminInstallMode) and
-    (not RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}'));
-end;
+procedure RemoveLegacyOrphan(); forward;
 
 procedure InitializeWizard();
 begin
@@ -389,23 +378,52 @@ begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;
 
-procedure RemoveStaleHybridUninstallEntry();
+procedure RemoveLegacyOrphan();
 var
   Location: string;
+  HasHklmEntry: Boolean;
+  LegacyDir, LegacyShortcut: string;
 begin
-  if RegQueryStringValue(
+  // Runs for per-user installs only (see CurStepChanged). Removes, in order:
+  // 1. the orphaned pre-AppId tree + its stale all-users shortcut, but ONLY
+  //    when no legitimate all-users install is registered — a registered
+  //    entry pointing anywhere other than this install dir means hands off;
+  // 2. a stale hybrid machine-wide entry left by an older updater bug, which
+  //    is exactly an HKLM entry pointing at this per-user install dir.
+  // Kept in [Code] (not [InstallDelete]) so the key removal provably happens
+  // before the directory removal is evaluated.
+  HasHklmEntry := RegQueryStringValue(
     HKLM,
     'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}',
     'InstallLocation',
     Location
-  ) then
+  );
+  LegacyDir := ExpandConstant('{commonpf}\Nex');
+  if (not HasHklmEntry) or (CompareText(Trim(Location), Trim(ExpandConstant('{app}'))) = 0) then
   begin
-    if CompareText(Trim(Location), Trim(ExpandConstant('{app}'))) = 0 then
-      RegDeleteKeyIncludingSubkeys(
+    if DirExists(LegacyDir) then
+    begin
+      if DelTree(LegacyDir, True, True, True) then
+        Log('Removed legacy orphan dir: ' + LegacyDir)
+      else
+        Log('WARNING: could not remove legacy orphan dir (need elevation?): ' + LegacyDir);
+    end;
+    LegacyShortcut := ExpandConstant('{commonprograms}\Nex.lnk');
+    if FileExists(LegacyShortcut) and DeleteFile(LegacyShortcut) then
+      Log('Removed stale all-users shortcut: ' + LegacyShortcut);
+    if HasHklmEntry then
+    begin
+      if RegDeleteKeyIncludingSubkeys(
         HKLM,
         'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}'
-      );
-  end;
+      ) then
+        Log('Removed stale hybrid machine-wide uninstall entry')
+      else
+        Log('WARNING: could not remove stale hybrid machine-wide uninstall entry');
+    end;
+  end
+  else
+    Log('Keeping machine-wide install at: ' + Trim(Location));
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -426,12 +444,10 @@ begin
       ewWaitUntilTerminated,
       ResultCode
     );
-  // A previous updater bug could register a per-user file install
-  // machine-wide (hybrid registration). If the HKLM entry points at this
-  // very install dir, it is that stale hybrid entry — remove it so exactly
-  // one registration (this install's own hive) remains.
+  // Clean up a legacy orphan / hybrid registration left by older
+  // installers (per-user installs only — never touch admin installs).
   if (CurStep = ssPostInstall) and (not IsAdminInstallMode) then
-    RemoveStaleHybridUninstallEntry();
+    RemoveLegacyOrphan();
 end;
 
 procedure InitializeUninstallWizard();

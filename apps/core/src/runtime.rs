@@ -239,6 +239,16 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         runtime_config.config_path.display(),
         runtime_config.index_db_path.display(),
     ));
+    #[cfg(target_os = "windows")]
+    if let Some((running_exe, registered_root)) = crate::startup::install_skew() {
+        log_warn(&format!(
+            "[nex] INSTALL SKEW: running from '{}' but the registered install is '{}'. \
+            An orphaned copy may be shadowing updates — quit this process, remove the stale \
+            copy, and start Nex from the registered install.",
+            running_exe.display(),
+            registered_root.display()
+        ));
+    }
 
     let service = CoreService::new(runtime_config.clone())?.with_runtime_providers();
     #[cfg(target_os = "windows")]

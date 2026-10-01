@@ -55,6 +55,10 @@ Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: i
 [InstallDelete]
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
+; Remove an orphaned pre-AppId install at the old machine-wide location.
+; Only for per-user installs with no registered all-users install — never
+; touch a legitimate all-users install (which this would otherwise delete).
+Type: filesandordirs; Name: "{commonpf}\Nex"; Check: ShouldRemoveLegacyProgramFilesNex
 
 [Icons]
 Name: "{autoprograms}\Nex"; Filename: "{app}\bin\Nex.exe"; Parameters: "--background"
@@ -111,6 +115,13 @@ end;
 function ShouldLaunchNexAfterInstall(): Boolean;
 begin
   Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
+end;
+
+function ShouldRemoveLegacyProgramFilesNex(): Boolean;
+begin
+  Result :=
+    (not IsAdminInstallMode) and
+    (not RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}'));
 end;
 
 procedure InitializeWizard();

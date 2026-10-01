@@ -7,6 +7,7 @@ param(
   [switch]$KeepBackup,
   [switch]$Force,
   [switch]$CheckOnly,
+  [string]$RunningVersion,
   [string]$InstallRoot = "$env:LOCALAPPDATA\Programs\Nex",
   [string]$CacheRoot = "$env:LOCALAPPDATA\Nex\updates"
 )
@@ -246,7 +247,7 @@ function Compare-Versions {
 
 function Write-UpdateResult {
   param(
-    [ValidateSet("up-to-date", "updated", "failed")]
+    [ValidateSet("up-to-date", "updated", "failed", "version-skew")]
     [string]$Status,
     [string]$Version,
     [string]$Message
@@ -388,6 +389,18 @@ $manifestNames = $artifactBaseCandidates | ForEach-Object { "$_-manifest.json" }
 Write-Host "Target release: $($targetRelease.tag_name)" -ForegroundColor Green
 
 $installedVersion = Resolve-InstalledVersion -Root $InstallRoot
+
+# The updater resolves the *registered* install, but the process that
+# launched it may be an orphaned copy elsewhere. Updating the registered
+# install while a stale binary holds the single-instance slot only adds
+# confusion — tell the user to restart from the installed location.
+if ($RunningVersion -and $installedVersion -and (Compare-Versions $RunningVersion $installedVersion) -lt 0) {
+  $skewMessage = "running v$RunningVersion but v$installedVersion is installed; restart Nex from the installed location instead of updating"
+  Write-Host "Version skew detected ($skewMessage)." -ForegroundColor Yellow
+  Write-UpdateResult -Status "version-skew" -Version $installedVersion -Message $skewMessage
+  exit 0
+}
+
 if (-not $Force -and $installedVersion -and (Compare-Versions $installedVersion $resolvedVersion) -ge 0) {
   Write-Host "Already up to date (installed $installedVersion, latest $resolvedVersion)." -ForegroundColor Green
   Write-UpdateResult -Status "up-to-date" -Version $installedVersion

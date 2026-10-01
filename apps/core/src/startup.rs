@@ -29,6 +29,9 @@ impl From<std::io::Error> for StartupError {
 #[cfg(target_os = "windows")]
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(target_os = "windows")]
+const UNINSTALL_SUBKEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{E3A739E3-FAF7-4E18-BD8B-01744C9E7C27}_is1";
+#[cfg(target_os = "windows")]
 const VALUE_NAME: &str = "Nex";
 #[cfg(target_os = "windows")]
 const LEGACY_VALUE_NAME: &str = "SwiftFind";
@@ -213,6 +216,63 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
     }
 
     Err(registry_error("delete legacy run value", legacy_status))
+}
+
+/// Install location registered by the Nex installer (HKCU first, then
+/// HKLM). `None` when no registered install exists (portable/dev runs).
+#[cfg(target_os = "windows")]
+pub fn registered_install_location() -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    let subkey = to_wide(UNINSTALL_SUBKEY);
+    let value_name = to_wide("InstallLocation");
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let mut buffer = [0u16; 1024];
+        let mut buffer_size = (buffer.len() * 2) as u32;
+        let mut value_type = 0u32;
+        let status = unsafe {
+            RegGetValueW(
+                hive,
+                subkey.as_ptr(),
+                value_name.as_ptr(),
+                RRF_RT_REG_SZ,
+                &mut value_type,
+                buffer.as_mut_ptr() as *mut std::ffi::c_void,
+                &mut buffer_size,
+            )
+        };
+        if status != ERROR_SUCCESS || buffer_size < 2 {
+            continue;
+        }
+        let char_count = (buffer_size as usize).saturating_sub(2) / 2;
+        let location = String::from_utf16_lossy(&buffer[..char_count]);
+        let trimmed = location.trim();
+        if !trimmed.is_empty() {
+            return Some(std::path::PathBuf::from(trimmed));
+        }
+    }
+    None
+}
+
+/// Warn loudly when this process runs from outside the registered install
+/// (e.g. a stale copy shadowing the real install). Returns the registered
+/// location when one exists and differs, so callers can surface it.
+#[cfg(target_os = "windows")]
+pub fn install_skew() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let registered = registered_install_location()?;
+    let current_exe = std::env::current_exe().ok()?;
+    // Installed layout is `<root>\bin\Nex.exe`.
+    let running_root = current_exe.parent()?.parent()?.to_path_buf();
+    let normalize = |path: &std::path::Path| {
+        path.to_string_lossy().trim().replace('/', "\\").to_ascii_lowercase()
+    };
+    if normalize(&running_root) != normalize(&registered) {
+        return Some((current_exe, registered));
+    }
+    None
 }
 
 #[cfg(not(target_os = "windows"))]

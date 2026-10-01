@@ -88,6 +88,13 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
                 return match status {
                     "up-to-date" => format!("Up to date (v{version})"),
                     "updated" => format!("Updated to v{version}"),
+                    "version-skew" => {
+                        let message = value
+                            .get("message")
+                            .and_then(|field| field.as_str())
+                            .unwrap_or("running copy differs from installed copy; restart Nex");
+                        format!("Restart Nex: {message}")
+                    }
                     _ => {
                         let message = value
                             .get("message")
@@ -136,6 +143,15 @@ pub fn check_update_available(channel: UpdateChannel) -> Result<bool, UpdateLaun
                     .get("status")
                     .and_then(|field| field.as_str())
                     .unwrap_or("");
+                if status == "version-skew" {
+                    let message = value
+                        .get("message")
+                        .and_then(|field| field.as_str())
+                        .unwrap_or("running copy differs from installed copy");
+                    crate::runtime::log_warn(&format!(
+                        "[nex] update check aborted: {message}"
+                    ));
+                }
                 return Ok(status == "update-available");
             }
         }
@@ -211,14 +227,16 @@ fn run_updater_script(
     script_path: &Path,
     channel: UpdateChannel,
 ) -> Result<std::process::Output, UpdateLaunchError> {
-    build_updater_command(script_path, channel)
-        .output()
-        .map_err(|error| {
-            UpdateLaunchError::LaunchFailed(format!(
-                "failed to run updater script '{}': {error}",
-                script_path.display()
-            ))
-        })
+    let mut command = build_updater_command(script_path, channel);
+    // Lets the script detect version skew between this running copy and
+    // the registered install before doing anything destructive.
+    command.arg("-RunningVersion").arg(env!("CARGO_PKG_VERSION"));
+    command.output().map_err(|error| {
+        UpdateLaunchError::LaunchFailed(format!(
+            "failed to run updater script '{}': {error}",
+            script_path.display()
+        ))
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -228,6 +246,7 @@ fn run_updater_script_check_only(
 ) -> Result<std::process::Output, UpdateLaunchError> {
     let mut command = build_updater_command(script_path, channel);
     command.arg("-CheckOnly");
+    command.arg("-RunningVersion").arg(env!("CARGO_PKG_VERSION"));
     command.output().map_err(|error| {
         UpdateLaunchError::LaunchFailed(format!(
             "failed to check for updates with '{}': {error}",

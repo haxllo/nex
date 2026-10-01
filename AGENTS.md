@@ -95,7 +95,7 @@ pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1
 
 # 4. push + create GitHub release
 git push origin master --tags
-gh release create v<ver> --title "v<ver> — <title>" --notes-file docs/releases/v<ver>-notes.md artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe,manifest.json}
+gh release create v<ver> --title "v<ver>" --notes-file docs/releases/v<ver>-notes.md artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe,manifest.json}
 ```
 
 Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + manifest.

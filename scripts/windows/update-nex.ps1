@@ -200,22 +200,106 @@ function Resolve-InstalledRuntimePath {
   return (Join-Path $Root "bin\Nex.exe")
 }
 
+function Test-IsUnderProgramFiles([string]$Path) {
+  if (-not $Path) {
+    return $false
+  }
+  $full = $Path.Trim().TrimEnd('\', '/')
+  if ($full.Length -eq 0) {
+    return $false
+  }
+  foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
+    if ($pf) {
+      $base = ([string]$pf).Trim().TrimEnd('\', '/')
+      if ($base -and ($full.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $true
+      }
+    }
+  }
+  return $false
+}
+
+function Get-RunningInstallRoot {
+  # The installed updater lives at <install_root>\scripts\update-nex.ps1,
+  # so its own directory reveals which scope copy is actually running.
+  # Returns $null for repo/dev runs (scripts\windows\... has no bin\Nex.exe).
+  $dir = $PSScriptRoot
+  if (-not $dir) {
+    return $null
+  }
+  $parent = Split-Path -Parent $dir
+  if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe"))) {
+    return $parent
+  }
+  return $null
+}
+
+function Get-RegistryInstallLocation {
+  param([string]$Hive)
+
+  $key = "$Hive`:\$UninstallSubkey"
+  if (-not (Test-Path $key)) {
+    return $null
+  }
+  $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+  if ($null -eq $props -or $null -eq $props.InstallLocation) {
+    return $null
+  }
+  $candidate = ([string]$props.InstallLocation).Trim()
+  if ($candidate.Length -eq 0) {
+    return $null
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe"))) {
+    return $null
+  }
+  return $candidate
+}
+
 function Resolve-InstallRoot {
   param([string]$DefaultRoot)
 
-  foreach ($hive in @('HKCU', 'HKLM')) {
-    $key = "$hive`:\$UninstallSubkey"
-    if (Test-Path $key) {
-      $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
-      if ($null -ne $props.InstallLocation -and [string]$props.InstallLocation.Trim().Length -gt 0) {
-        $candidate = [string]$props.InstallLocation
-        if (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe")) {
-          return [pscustomobject]@{
-            Root = $candidate
-            NeedsElevation = ($hive -eq 'HKLM')
-          }
-        }
-      }
+  $runningRoot = Get-RunningInstallRoot
+  $hkcuLoc = Get-RegistryInstallLocation -Hive 'HKCU'
+  $hklmLoc = Get-RegistryInstallLocation -Hive 'HKLM'
+  # A machine-wide entry outside Program Files is never a legitimate
+  # all-users install — it is the stale hybrid left by the older updater
+  # bug (HKLM pointing at a per-user %LOCALAPPDATA% path). It must not
+  # decide scope; it only triggers one-time elevated cleanup.
+  $legitHklmLoc = $null
+  if ($hklmLoc -and (Test-IsUnderProgramFiles $hklmLoc)) {
+    $legitHklmLoc = $hklmLoc
+  }
+
+  # Prefer the copy that is actually running — this is what disambiguates
+  # dual-scope machines (both hives registered). Scope follows location:
+  # under Program Files means all-users, otherwise current user.
+  if ($runningRoot) {
+    return [pscustomobject]@{
+      Root = $runningRoot
+      NeedsElevation = (Test-IsUnderProgramFiles $runningRoot)
+    }
+  }
+
+  if ($hkcuLoc) {
+    return [pscustomobject]@{
+      Root = $hkcuLoc
+      NeedsElevation = $false
+    }
+  }
+
+  if ($legitHklmLoc) {
+    return [pscustomobject]@{
+      Root = $legitHklmLoc
+      NeedsElevation = $true
+    }
+  }
+
+  # Stale hybrid only (HKCU missing, HKLM points per-user): update that
+  # per-user path instead of treating it as all-users.
+  if ($hklmLoc) {
+    return [pscustomobject]@{
+      Root = $hklmLoc
+      NeedsElevation = $false
     }
   }
 

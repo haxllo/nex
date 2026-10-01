@@ -244,6 +244,62 @@ begin
     Result := 'current user';
 end;
 
+function TrimTrailingBackslash(Value: string): string;
+begin
+  Result := Trim(Value);
+  while (Length(Result) > 0) and ((Result[Length(Result)] = '\') or (Result[Length(Result)] = '/')) do
+    Result := Copy(Result, 1, Length(Result) - 1);
+end;
+
+function SameInstallDir(A, B: string): Boolean;
+begin
+  Result := CompareText(TrimTrailingBackslash(A), TrimTrailingBackslash(B)) = 0;
+end;
+
+function IsUnderDir(PathValue, DirValue: string): Boolean;
+var
+  P, D: string;
+begin
+  P := TrimTrailingBackslash(PathValue);
+  D := TrimTrailingBackslash(DirValue);
+  Result :=
+    (D <> '') and (Length(P) >= Length(D)) and
+    (CompareText(Copy(P, 1, Length(D)), D) = 0) and
+    ((Length(P) = Length(D)) or (P[Length(D) + 1] = '\') or (P[Length(D) + 1] = '/'));
+end;
+
+function IsUnderProgramFiles(Value: string): Boolean;
+begin
+  Result :=
+    IsUnderDir(Value, ExpandConstant('{commonpf}')) or
+    IsUnderDir(Value, ExpandConstant('{commonpf32}')) or
+    IsUnderDir(Value, GetEnv('ProgramW6432'));
+end;
+
+function TryCleanStaleHybridMachineEntry(): Boolean;
+var
+  Location: string;
+begin
+  Result := False;
+  if not TryGetInstallLocation(HKLM, Location) then
+    exit;
+  Location := StripWrappingQuotes(Trim(Location));
+  { Stale hybrid = machine-wide entry pointing at this per-user install,
+    or anywhere outside Program Files (legit all-users installs always
+    live under Program Files). Genuine all-users installs return False
+    so the caller keeps the hard error. }
+  if (not SameInstallDir(Location, ExpandConstant('{app}'))) and IsUnderProgramFiles(Location) then
+    exit;
+  Log('Removing stale hybrid machine-wide entry pointing at: ' + Location);
+  if RegDeleteKeyIncludingSubkeys(HKLM, NexUninstallSubkey) then
+  begin
+    Log('Removed stale hybrid machine-wide uninstall entry (pre-install)');
+    Result := True;
+  end
+  else
+    Log('WARNING: could not remove stale hybrid machine-wide entry (needs elevation?)');
+end;
+
 procedure StopRuntimeByExecutable(RuntimeExe: string);
 var
   ResultCode: Integer;
@@ -328,6 +384,15 @@ begin
 
   if (OtherScopeRoot = HKLM) and not IsAdminInstallMode then
   begin
+    { Stale hybrid (HKLM pointing at this per-user dir, or anywhere outside
+      Program Files) is cleaned silently — only genuine all-users installs
+      under Program Files keep the hard error. The updater elevates the
+      installer once for this cleanup while scope stays per-user. }
+    if TryCleanStaleHybridMachineEntry() then
+    begin
+      Result := '';
+      exit;
+    end;
     Result :=
       ExpandConstant('{#MyAppName}') + ' is already installed for all users.' + #13#10 + #13#10 +
       'Existing install: ' + RuntimeExe + #13#10 + #13#10 +

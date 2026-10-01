@@ -364,6 +364,23 @@ $installInfo = Resolve-InstallRoot -DefaultRoot $InstallRoot
 $InstallRoot = $installInfo.Root
 $needsElevation = $installInfo.NeedsElevation
 
+# A legacy orphan outside the registered install (e.g. a pre-AppId copy under
+# Program Files) can only be removed by an elevated installer — a per-user
+# installer physically cannot touch Program Files. Elevate just the installer
+# launch (scope stays per-user via /CURRENTUSER); the UAC prompt is
+# unavoidable exactly once for this cleanup.
+$legacyOrphan = $false
+foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe')) -and -not (Test-Path "HKLM:\$UninstallSubkey")) {
+    $legacyOrphan = $true
+    break
+  }
+}
+if ($legacyOrphan -and -not $needsElevation) {
+  Write-Host "Legacy Nex copy found outside the registered install; elevating the installer once so it can remove it." -ForegroundColor Yellow
+  $needsElevation = $true
+}
+
 Write-Host "== Nex Update ==" -ForegroundColor Cyan
 Write-Host "Channel: $Channel"
 if ($Version) {

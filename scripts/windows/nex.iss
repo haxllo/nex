@@ -55,10 +55,14 @@ Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: i
 [InstallDelete]
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
-; Remove an orphaned pre-AppId install at the old machine-wide location.
-; Only for per-user installs with no registered all-users install — never
-; touch a legitimate all-users install (which this would otherwise delete).
+; Remove an orphaned pre-AppId install at the old machine-wide location,
+; plus its stale all-users Start Menu shortcut (which otherwise keeps
+; launching the orphan). Only for per-user installs with no registered
+; all-users install — never touch a legitimate all-users install.
+; NOTE: this only works when the installer actually runs elevated; see the
+; updater, which elevates the installer launch when it detects the orphan.
 Type: filesandordirs; Name: "{commonpf}\Nex"; Check: ShouldRemoveLegacyProgramFilesNex
+Type: files; Name: "{commonprograms}\Nex.lnk"; Check: ShouldRemoveLegacyProgramFilesNex
 
 [Icons]
 Name: "{autoprograms}\Nex"; Filename: "{app}\bin\Nex.exe"; Parameters: "--background"

@@ -833,6 +833,162 @@ html[data-theme="light"] img.icon.glyph {
   transform: translateY(-1px);
 }
 
+/* ── media view ────────────────────────────────────────── */
+/* Tab opens this when a media session is active; search UI hides. */
+#panel.media-open #search-row,
+#panel.media-open #body,
+#panel.media-open #footer {
+  display: none;
+}
+
+#media-view {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 20px 16px;
+}
+
+#panel.media-open #media-view {
+  display: flex;
+}
+
+#media-art {
+  width: 148px;
+  height: 148px;
+  border-radius: 12px;
+  object-fit: cover;
+  background: var(--icon-bg);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+#media-art[src=""],
+#media-art:not([src]) {
+  visibility: hidden;
+}
+
+.media-title {
+  font-size: 14px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-artist {
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#media-progress {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hover);
+  overflow: visible;
+  margin-top: 4px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* Fat invisible hit area — the visible bar stays 4px. */
+#media-progress::after {
+  content: "";
+  position: absolute;
+  inset: -8px 0;
+}
+
+#media-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 2px;
+  background: var(--accent);
+  /* No CSS transition: the rAF loop sets width every frame and a
+     transition would fight it, causing visible wobble. */
+}
+
+#media-progress-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+#media-progress:hover #media-progress-knob,
+#media-progress.seeking #media-progress-knob {
+  opacity: 1;
+}
+
+.media-times {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.media-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 2px;
+}
+
+.media-controls button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.media-controls button:hover {
+  background: var(--hover);
+}
+
+.media-controls button:active {
+  background: var(--sel);
+}
+
+.media-controls button:focus {
+  outline: none;
+}
+
+.media-controls button.media-play {
+  width: 48px;
+  height: 48px;
+  background: #1db954;
+  color: #191414;
+}
+
+.media-controls button.media-play:hover {
+  background: #1ed760;
+}
+
+.media-controls button.media-play:active {
+  background: #169c46;
+}
+
 /* ── update notice ───────────────────────────────────────── */
 #update-notice {
   position: relative;

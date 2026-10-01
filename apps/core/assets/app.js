@@ -27,6 +27,21 @@
   const updateNotice = $("update-notice");
   const updateBtn = $("update-btn");
   const updateBtnLabel = updateBtn.querySelector("span");
+  const mediaArt = $("media-art");
+  const mediaTitle = $("media-title");
+  const mediaArtist = $("media-artist");
+  const mediaProgressFill = $("media-progress-fill");
+  const mediaProgressKnob = $("media-progress-knob");
+  const mediaPos = $("media-pos");
+  const mediaDur = $("media-dur");
+  const mediaPlayIcon = $("media-play-icon");
+  const mediaPauseIcon = $("media-pause-icon");
+
+  // Now-playing media state pushed by Rust ({active,title,artist,...}).
+  // Tab opens the media view only when a session is active; otherwise
+  // Tab keeps its normal input-select behavior.
+  let mediaState = null;
+  let mediaOpen = false;
 
   // Local mirror of pushed state.
   let rows = [];
@@ -67,7 +82,7 @@
   // frames. Clicking any draggable (non-interactive) spot also
   // focuses the input and selects its content so the user can type
   // a fresh query without clearing the old one by hand.
-  const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, .power-panel, .power-confirm";
+  const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, #media-progress, .power-panel, .power-confirm";
   panel.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
     if (!contextMenu.classList.contains("hidden") && !e.target.closest("#context-menu")) {
@@ -812,6 +827,30 @@
   window.addEventListener(
     "keydown",
     (e) => {
+      // Media view open: transport keys act on playback; typing
+      // returns to search (the key lands in the refocused input).
+      if (mediaOpen && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.key === " ") {
+          e.preventDefault();
+          post("mediaToggle");
+          return;
+        }
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          post("mediaPrev");
+          return;
+        }
+        if (e.key === "ArrowRight") {
+          e.preventDefault();
+          post("mediaNext");
+          return;
+        }
+        if (e.key.length === 1) {
+          closeMediaView();
+          input.focus();
+          return;
+        }
+      }
       // ── command mode: `@` to enter (legacy `>` still accepted),
       // backspace-on-empty to exit ──
       if ((e.key === "@" || e.key === ">") && !inCommandMode && document.activeElement === input) {
@@ -859,8 +898,22 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Tab") {
+        // Media view open: Tab closes it and returns to search.
+        if (mediaOpen) {
+          e.preventDefault();
+          closeMediaView();
+          input.focus();
+          return;
+        }
         if (tryCompleteCommand()) {
           e.preventDefault();
+          return;
+        }
+        // Media session active: Tab opens the media view instead of
+        // selecting input text. Otherwise Tab keeps its normal behavior.
+        if (mediaState && mediaState.active) {
+          e.preventDefault();
+          openMediaView();
           return;
         }
         // Tab focuses the search input and selects its content so
@@ -869,6 +922,13 @@
         input.focus();
         input.select();
       } else if (e.key === "Escape") {
+        // Media view open: Escape closes it locally, overlay stays open.
+        if (mediaOpen) {
+          e.preventDefault();
+          closeMediaView();
+          input.focus();
+          return;
+        }
         if (topPower.hasConfirm()) {
           topPower.closeConfirm();
           input.focus();
@@ -1172,6 +1232,13 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      // Media state message: {"media": {...}} — no rows, no re-render.
+      if (state.media && typeof state.media === "object" && !Array.isArray(state.rows)) {
+        mediaState = state.media;
+        renderMedia();
+        return;
+      }
+
       // Icon data message: {"icons": {"path": "data:...", ...}}
       // Sent as a separate PostWebMessageAsJson after the state message.
       // Early return before closing footer menu — icons-only pushes must not
@@ -1360,6 +1427,225 @@
     updateBtnLabel.textContent = "Updating...";
     post("checkUpdates");
   });
+
+  // ── media view ──────────────────────────────────────────────
+  function fmtTime(secs) {
+    if (!isFinite(secs) || secs < 0) secs = 0;
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function postMediaResize() {
+    // The panel height changed (search UI hidden/shown) — tell Rust to
+    // hug the new content height immediately, like structural resizes.
+    requestAnimationFrame(() => {
+      const h = Math.ceil(panel.getBoundingClientRect().height);
+      if (h > 0) {
+        lastH = h;
+        post("resize", { v: h, immediate: true });
+      }
+    });
+  }
+
+  // Monotonic playback clock. Rust pushes are authoritative but arrive
+  // late and can disagree with each other by fractions of a second; naively
+  // adopting each push makes the bar sawtooth back and forth. Instead each
+  // push (re)anchors wall-clock time, and frames derive position from the
+  // monotonic wall clock — so the bar can never move backward except on a
+  // genuine discontinuity (track change, seek, play/pause).
+  let mediaAnchor = { key: "", status: "", pos: 0, at: 0 };
+  let mediaRaf = 0;
+
+  function mediaTrackKey(m) {
+    // Normalized + duration rounded: SMTC metadata can flicker cosmetically
+    // (whitespace, float dust) without the track actually changing.
+    const norm = (s) => (s || "").trim().replace(/\s+/g, " ");
+    return [norm(m.title), norm(m.artist), norm(m.album), Math.round(Number(m.duration_secs) || 0)].join("");
+  }
+
+  function mediaShownPos() {
+    const m = mediaState;
+    if (!m || m.status !== "playing") return mediaAnchor.pos;
+    return mediaAnchor.pos + (performance.now() - mediaAnchor.at) / 1000;
+  }
+
+  // Awaiting-confirmation jump: a single far-off push may be a stale
+  // SMTC read, so large jumps only apply after two consecutive pushes
+  // agree. Genuine seeks/track changes confirm within ~1s.
+  let pendingJump = null;
+
+  function syncMediaAnchor(m) {
+    const key = mediaTrackKey(m);
+    const pushed = Number(m.position_secs) || 0;
+    const now = performance.now();
+    // Mid-drag: the user owns the bar — only adopt identity changes,
+    // never yank the position back to a stale push.
+    if (seeking && key === mediaAnchor.key) {
+      mediaAnchor.status = m.status;
+      return;
+    }
+    // New track, status flip, or first sighting: adopt the new identity,
+    // but keep bar continuity — if the push is only slightly behind what
+    // is already shown, it is flicker/latency, not a real jump.
+    if (key !== mediaAnchor.key || m.status !== mediaAnchor.status) {
+      const shown = mediaShownPos();
+      mediaAnchor = { key, status: m.status, pos: pushed, at: now };
+      pendingJump = null;
+      if (m.status === "playing" && pushed < shown && shown - pushed <= 3) {
+        mediaAnchor.pos = shown;
+      }
+      return;
+    }
+    if (m.status !== "playing") {
+      mediaAnchor.pos = pushed;
+      mediaAnchor.at = now;
+      return;
+    }
+    // Same track, still playing: a large jump is only trusted once a
+    // second consecutive push confirms it (real seek or track restart).
+    // A lone far-off push is treated as a stale SMTC read and ignored,
+    // so one glitchy sample can never yank the bar back and forth.
+    if (Math.abs(pushed - mediaShownPos()) > 3) {
+      if (pendingJump && Math.abs(pushed - pendingJump.pos) <= 1) {
+        pendingJump.hits += 1;
+        if (pendingJump.hits >= 2) {
+          mediaAnchor = { key, status: m.status, pos: pushed, at: now };
+          pendingJump = null;
+        }
+      } else {
+        pendingJump = { pos: pushed, hits: 1 };
+      }
+    } else {
+      pendingJump = null;
+    }
+  }
+
+  function paintMediaProgress() {
+    const m = mediaState;
+    if (!m) return;
+    const dur = Number(m.duration_secs) || 0;
+    const pos = Math.min(mediaShownPos(), dur || Infinity);
+    const pct = dur > 0 ? (pos / dur * 100).toFixed(1) + "%" : "0%";
+    mediaProgressFill.style.width = pct;
+    mediaProgressKnob.style.left = pct;
+    const label = fmtTime(pos);
+    if (mediaPos.textContent !== label) mediaPos.textContent = label;
+  }
+
+  function mediaFrame() {
+    mediaRaf = 0;
+    if (!mediaOpen) return;
+    paintMediaProgress();
+    if (mediaState && mediaState.status === "playing") {
+      mediaRaf = requestAnimationFrame(mediaFrame);
+    }
+  }
+
+  function kickMediaFrame() {
+    if (mediaOpen && !mediaRaf) mediaRaf = requestAnimationFrame(mediaFrame);
+  }
+
+  function renderMedia() {
+    if (!mediaOpen) return;
+    const m = mediaState;
+    if (!m || !m.active) {
+      closeMediaView();
+      return;
+    }
+    // Re-anchor the monotonic clock to the authoritative push.
+    syncMediaAnchor(m);
+    mediaTitle.textContent = m.title || "Unknown track";
+    mediaArtist.textContent = [m.artist, m.album].filter(Boolean).join(" — ");
+    if (m.art) {
+      if (mediaArt.getAttribute("src") !== m.art) mediaArt.setAttribute("src", m.art);
+    } else {
+      mediaArt.removeAttribute("src");
+    }
+    const dur = Number(m.duration_secs) || 0;
+    mediaDur.textContent = fmtTime(dur);
+    const playing = m.status === "playing";
+    mediaPlayIcon.classList.toggle("hidden", playing);
+    mediaPauseIcon.classList.toggle("hidden", !playing);
+    paintMediaProgress();
+    kickMediaFrame();
+  }
+
+  function openMediaView() {
+    if (mediaOpen || !mediaState || !mediaState.active) return;
+    topPower.closeMenu();
+    topPower.closeConfirm();
+    hideContextMenu();
+    mediaOpen = true;
+    panel.classList.add("media-open");
+    renderMedia();
+    kickMediaFrame();
+    postMediaResize();
+    // Ask Rust for a fresh snapshot — the view may have opened on a
+    // tick-old state and transport buttons need current data.
+    post("mediaRefresh");
+  }
+
+  function closeMediaView() {
+    if (!mediaOpen) return;
+    mediaOpen = false;
+    if (mediaRaf) {
+      cancelAnimationFrame(mediaRaf);
+      mediaRaf = 0;
+    }
+    panel.classList.remove("media-open");
+    postMediaResize();
+  }
+
+  // Click/drag-to-seek on the progress bar. The anchor jumps
+  // optimistically; the Rust push after the seek confirms it.
+  const mediaProgress = $("media-progress");
+  let seeking = false;
+
+  function seekFromEvent(e) {
+    const r = mediaProgress.getBoundingClientRect();
+    if (!(r.width > 0)) return;
+    const ratio = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+    const dur = Number(mediaState?.duration_secs) || 0;
+    if (!(dur > 0)) return;
+    const target = ratio * dur;
+    mediaAnchor = {
+      key: mediaState ? mediaTrackKey(mediaState) : "",
+      status: mediaState?.status || "",
+      pos: target,
+      at: performance.now(),
+    };
+    paintMediaProgress();
+    post("mediaSeek", Math.round(target * 1000));
+  }
+
+  mediaProgress.addEventListener("pointerdown", (e) => {
+    if (!mediaState?.active) return;
+    e.preventDefault();
+    seeking = true;
+    mediaProgress.classList.add("seeking");
+    try { mediaProgress.setPointerCapture(e.pointerId); } catch (_) {}
+    seekFromEvent(e);
+  });
+  mediaProgress.addEventListener("pointermove", (e) => {
+    if (seeking) seekFromEvent(e);
+  });
+  const endSeek = () => {
+    seeking = false;
+    mediaProgress.classList.remove("seeking");
+  };
+  mediaProgress.addEventListener("pointerup", endSeek);
+  mediaProgress.addEventListener("pointercancel", endSeek);
+
+  document.getElementById("media-prev").addEventListener("click", () => post("mediaPrev"));
+  document.getElementById("media-toggle").addEventListener("click", () => {
+    // Optimistic flip — the Rust refresh corrects the icon within ~1s.
+    const playing = mediaPlayIcon.classList.contains("hidden");
+    mediaPlayIcon.classList.toggle("hidden", !playing);
+    mediaPauseIcon.classList.toggle("hidden", playing);
+    post("mediaToggle");
+  });
+  document.getElementById("media-next").addEventListener("click", () => post("mediaNext"));
 
   // ── scrollbar idle fade ────────────────────────────────────
   // Thumb fades out after 1.4s without scroll/hover over the list;

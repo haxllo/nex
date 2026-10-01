@@ -70,6 +70,26 @@
         <div id="status" class="hidden"></div>
       </div>
 
+      <div id="media-view" aria-label="Now playing">
+        <img id="media-art" alt="" />
+        <div id="media-title" class="media-title">Nothing playing</div>
+        <div id="media-artist" class="media-artist"></div>
+        <div id="media-progress"><div id="media-progress-fill"></div><div id="media-progress-knob"></div></div>
+        <div class="media-times"><span id="media-pos">0:00</span><span id="media-dur">0:00</span></div>
+        <div class="media-controls">
+          <button type="button" id="media-prev" title="Previous" aria-label="Previous track">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+          </button>
+          <button type="button" id="media-toggle" class="media-play" title="Play/Pause" aria-label="Play or pause">
+            <svg id="media-play-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="media-pause-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" class="hidden"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+          </button>
+          <button type="button" id="media-next" title="Next" aria-label="Next track">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>
+          </button>
+        </div>
+      </div>
+
       <div id="power-panel" class="power-panel hidden">
         <div id="power-menu" class="power-row">
           <button type="button" class="pcircle" data-power="back"><svg viewBox="0 0 24 24"><path d="M19 12H5"/><polyline points="12 19 5 12 12 5"/></svg><span>Back</span></button>

@@ -539,6 +539,20 @@ fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
         });
 }
 
+/// Fire a media transport command off the message-pump thread (WinRT calls
+/// can block), then request a fresh now-playing push so the media view
+/// updates immediately instead of waiting for the next periodic tick.
+fn media_control(action: crate::media::MediaAction, overlay: &NativeOverlayShell) {
+    let overlay = overlay.clone();
+    std::thread::Builder::new()
+        .name("nex-media-control".into())
+        .spawn(move || match crate::media::control(action) {
+            Ok(_) => overlay.refresh_media(),
+            Err(error) => log_warn(&format!("[nex] media control failed: {error}")),
+        })
+        .ok();
+}
+
 /// How often the recent-documents recency overlay is allowed to re-scan the
 /// shell MRU. Launching an app or opening a document is what moves the MRU,
 /// and the overlay only *advances* recency, so a coarse interval loses
@@ -1647,6 +1661,11 @@ impl RuntimeWorker {
                             self.show_idle_or_quick_launch();
                         }
                         self.overlay.show_and_focus();
+                        // Fresh media state on every show: the overlay may
+                        // reopen into a surviving media view, and Spotify may
+                        // have quit while hidden. The push auto-closes the
+                        // view if no session is active.
+                        self.overlay.refresh_media();
                         if self.runtime_config.clipboard_enabled {
                             let cfg = self.runtime_config.clone();
                             std::thread::Builder::new()
@@ -1705,6 +1724,10 @@ impl RuntimeWorker {
                 }
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
+                // Same as ShowAndFocus: revalidate media on show so a
+                // surviving media view closes promptly if playback ended
+                // while hidden.
+                self.overlay.refresh_media();
                 if self.runtime_config.clipboard_enabled {
                     let cfg = self.runtime_config.clone();
                     std::thread::Builder::new()
@@ -1914,6 +1937,34 @@ impl RuntimeWorker {
             OverlayEvent::Tick => {
                 // Periodic background tasks
                 // Updates are checked on startup only, not periodically
+                static MEDIA_REFRESH_TICKS: AtomicU64 = AtomicU64::new(0);
+                // Refresh now-playing state ~2/s while the overlay is
+                // visible so the media view progress bar and play state
+                // stay live without a full state push. The page also
+                // interpolates locally between pushes.
+                if self.overlay.is_visible()
+                    && MEDIA_REFRESH_TICKS.fetch_add(1, Ordering::Relaxed) % 2 == 0
+                {
+                    self.overlay.refresh_media();
+                }
+            }
+            OverlayEvent::MediaToggle => {
+                media_control(crate::media::MediaAction::Toggle, &self.overlay);
+            }
+            OverlayEvent::MediaNext => {
+                media_control(crate::media::MediaAction::Next, &self.overlay);
+            }
+            OverlayEvent::MediaPrev => {
+                media_control(crate::media::MediaAction::Prev, &self.overlay);
+            }
+            OverlayEvent::MediaRefresh => {
+                self.overlay.refresh_media();
+            }
+            OverlayEvent::MediaSeek(position_ms) => {
+                media_control(
+                    crate::media::MediaAction::Seek(position_ms as f64 / 1000.0),
+                    &self.overlay,
+                );
             }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();

@@ -56,6 +56,13 @@ struct Inner {
     /// steal wake tokens (MPMC fan-out) and reintroduce the delay.
     prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>>,
     prefetch_notify_tx: Sender<()>,
+    /// Wake-up for the single persistent media-refresh thread. Refresh
+    /// requests only set this flag — the worker always snapshots the
+    /// *current* session, so coalesced ticks never pile up work.
+    /// Media snapshot does blocking WinRT calls and must never run on
+    /// the host event-loop thread (a slow session wedges the overlay).
+    media_dirty: Arc<AtomicBool>,
+    media_notify_tx: Sender<()>,
 
 }
 
@@ -81,6 +88,47 @@ impl NativeOverlayShell {
         // proxy_slot() returns the same Arc the thread holds.
         let proxy: Arc<Mutex<Option<EventLoopProxy<UiCommand>>>> = Arc::new(Mutex::new(None));
         let proxy_for_thread = proxy.clone();
+        let proxy_for_media = proxy.clone();
+        let (media_notify_tx, media_notify_for_thread) =
+            crossbeam_channel::bounded::<()>(1);
+        let media_dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let media_dirty_for_thread = media_dirty.clone();
+
+        // Spawn a single persistent media-refresh thread. WinRT session
+        // calls can block (slow thumbnails, busy sessions) — they run
+        // here, never on the host event-loop thread. Only ready JSON is
+        // posted back via `UiCommand::ApplyMediaData`.
+        std::thread::Builder::new()
+            .name("nex-media-refresh".into())
+            .spawn(move || loop {
+                // 500 ms poll fallback so a lost wake token only delays,
+                // never stalls, the media view.
+                let _ = media_notify_for_thread.recv_timeout(Duration::from_millis(500));
+                if !media_dirty_for_thread.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+                std::thread::Builder::new()
+                    .name("nex-media-snapshot".into())
+                    .spawn(move || {
+                        let state = crate::media::snapshot();
+                        let json = serde_json::json!({ "media": state }).to_string();
+                        let _ = snapshot_tx.send(json);
+                    })
+                    .ok();
+                // A hung WinRT call must not wedge the worker: abandon the
+                // snapshot (and its thread) and try again on next refresh.
+                let Ok(json) = snapshot_rx.recv_timeout(Duration::from_secs(3)) else {
+                    crate::logging::warn("[nex] media snapshot timed out; skipping refresh");
+                    continue;
+                };
+                if let Ok(slot) = proxy_for_media.lock() {
+                    if let Some(proxy) = slot.as_ref() {
+                        let _ = proxy.send_event(UiCommand::ApplyMediaData(json));
+                    }
+                }
+            })
+            .ok();
 
         // Spawn a single persistent icon-prefetch thread. It loops,
         // draining the shared work slot and processing the latest batch.
@@ -161,6 +209,8 @@ impl NativeOverlayShell {
                 stop_rx,
                 prefetch_work,
                 prefetch_notify_tx,
+                media_dirty,
+                media_notify_tx,
             }),
         })
     }
@@ -329,6 +379,16 @@ impl NativeOverlayShell {
     pub fn set_query_text(&self, query: &str) {
         self.with_state(|s| s.query = query.to_string());
         self.post(UiCommand::Apply);
+    }
+
+    /// Request a now-playing media refresh. Only wakes the media worker —
+    /// the snapshot runs off the event-loop thread and posts back ready
+    /// JSON, so this never blocks the caller.
+    pub fn refresh_media(&self) {
+        self.inner
+            .media_dirty
+            .store(true, Ordering::SeqCst);
+        let _ = self.inner.media_notify_tx.try_send(());
     }
 
     pub fn set_status_text(&self, message: &str) {

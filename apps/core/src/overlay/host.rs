@@ -155,6 +155,9 @@ pub(crate) enum UiCommand {
     ApplyIcons(Vec<String>),
     /// Only the selected index changed — send a lightweight update.
     SelectChanged(usize),
+    /// Ready now-playing media JSON from the background media worker.
+    /// Posted, never computed, on the event-loop thread.
+    ApplyMediaData(String),
     /// Only the status text changed — send a lightweight update.
     ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -421,6 +424,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             if let Some(wv) = webview.as_ref() {
                                 post_json(wv, &icons_json);
                             }
+                        }
+                    }
+                }
+                UiCommand::ApplyMediaData(json) => {
+                    // Ready media JSON from the background worker — just
+                    // post it. Never snapshot WinRT here: blocking calls
+                    // wedge the event loop (frozen overlay, no hide/input).
+                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &json);
                         }
                     }
                 }
@@ -1339,6 +1352,21 @@ fn handle_ipc(
         }
         OverlayMessage::CheckUpdates(_) => {
             let _ = event_tx.send(OverlayEvent::CheckUpdates);
+        }
+        OverlayMessage::MediaToggle(_) => {
+            let _ = event_tx.send(OverlayEvent::MediaToggle);
+        }
+        OverlayMessage::MediaNext(_) => {
+            let _ = event_tx.send(OverlayEvent::MediaNext);
+        }
+        OverlayMessage::MediaPrev(_) => {
+            let _ = event_tx.send(OverlayEvent::MediaPrev);
+        }
+        OverlayMessage::MediaRefresh(_) => {
+            let _ = event_tx.send(OverlayEvent::MediaRefresh);
+        }
+        OverlayMessage::MediaSeek(p) => {
+            let _ = event_tx.send(OverlayEvent::MediaSeek(p.v));
         }
         OverlayMessage::DragStart(_) => {
             // Latch + enter the native caption-drag modal loop on the

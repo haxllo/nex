@@ -506,6 +506,17 @@ $workDir = Join-Path $CacheRoot "$artifactBase-update-$stamp"
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 $script:UpdateLogPath = Join-Path $workDir "updater.log"
 
+# Leave whatever directory we were launched from: if our own working
+# directory sits inside the install tree (inherited from Nex), the later
+# Move-Item of that tree fails with "in use" — held open by ourselves.
+try {
+  Set-Location -LiteralPath $workDir -ErrorAction Stop
+  Write-UpdateLog "Working directory: $workDir"
+}
+catch {
+  Set-Location -LiteralPath ([System.IO.Path]::GetTempPath())
+}
+
 $setupPath = Join-Path $workDir $setupAsset.name
 $manifestPath = Join-Path $workDir $manifestAsset.name
 

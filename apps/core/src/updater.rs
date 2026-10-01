@@ -190,6 +190,10 @@ fn build_updater_command(script_path: &Path, channel: UpdateChannel) -> std::pro
     }
 
     let mut command = std::process::Command::new("powershell.exe");
+    // Never inherit our working directory: if Nex runs from inside its own
+    // install tree, the updater child would hold that tree open and its
+    // later Move-Item of the install would fail with "in use" — by itself.
+    command.current_dir(std::env::temp_dir());
     command
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")

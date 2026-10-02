@@ -1966,6 +1966,18 @@ impl RuntimeWorker {
                     &self.overlay,
                 );
             }
+            OverlayEvent::MediaVolume(percent) => {
+                media_control(
+                    crate::media::MediaAction::Volume((percent.min(100) as f32) / 100.0),
+                    &self.overlay,
+                );
+            }
+            OverlayEvent::MediaMute => {
+                let muted = crate::media::volume_state()
+                    .map(|(_, muted)| !muted)
+                    .unwrap_or(true);
+                media_control(crate::media::MediaAction::Mute(muted), &self.overlay);
+            }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();

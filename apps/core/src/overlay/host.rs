@@ -1368,6 +1368,12 @@ fn handle_ipc(
         OverlayMessage::MediaSeek(p) => {
             let _ = event_tx.send(OverlayEvent::MediaSeek(p.v));
         }
+        OverlayMessage::MediaVolume(p) => {
+            let _ = event_tx.send(OverlayEvent::MediaVolume(p.v));
+        }
+        OverlayMessage::MediaMute(_) => {
+            let _ = event_tx.send(OverlayEvent::MediaMute);
+        }
         OverlayMessage::DragStart(_) => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button

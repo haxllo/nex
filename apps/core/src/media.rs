@@ -34,6 +34,12 @@ pub struct MediaState {
     pub duration_secs: f64,
     /// Album art as a data URI, when the session provides a thumbnail.
     pub art: Option<String>,
+    /// Master output volume 0.0–1.0. SMTC exposes no per-session volume,
+    /// so this is the device endpoint level.
+    pub volume: f32,
+    pub muted: bool,
+    /// False when the endpoint query failed — the UI hides the slider.
+    pub volume_supported: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +48,9 @@ pub enum MediaAction {
     Next,
     Prev,
     Seek(f64),
+    /// Master output volume 0.0–1.0 (clamped).
+    Volume(f32),
+    Mute(bool),
 }
 
 static ART_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -50,7 +59,7 @@ fn art_cache() -> &'static Mutex<HashMap<String, String>> {
     ART_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn ensure_com() {
+pub(crate) fn ensure_com() {
     thread_local! {
         static COM_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -118,25 +127,77 @@ fn cached_session() -> Option<Session> {
     Some(session)
 }
 
-/// Prefer the Spotify session; fall back to whatever Windows calls current.
+/// Session liveness probe: a listed session whose app already quit (or a
+/// suspended/transient source like a closed browser tab) answers enumeration
+/// but throws on any real call. Only sessions that answer this are usable —
+/// firing transport commands or property reads at a dead COM server is what
+/// hangs the snapshot and wedges the media view.
+fn playback_status_usable(session: &Session) -> bool {
+    session
+        .GetPlaybackInfo()
+        .and_then(|info| info.PlaybackStatus())
+        .is_ok()
+}
+
+/// Rank a candidate session: lower is better. Playing beats paused (a paused
+/// corpse holds stale metadata forever); Spotify keeps its historical
+/// preference within each tier.
+fn session_rank(is_spotify: bool, playing: bool) -> u8 {
+    match (playing, is_spotify) {
+        (true, true) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    }
+}
+
+/// Prefer a live Spotify session, then any live playing session, then paused;
+/// fall back to whatever Windows calls current when it answers. Dead sessions
+/// are skipped outright instead of becoming the "current" corpse the view
+/// opens on top of.
 fn pick_session(manager: &SessionManager) -> Option<Session> {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as S;
+
+    let mut best: Option<(u8, Session)> = None;
     if let Ok(sessions) = manager.GetSessions() {
         if let Ok(count) = sessions.Size() {
             for index in 0..count {
                 let Ok(session) = sessions.GetAt(index) else {
                     continue;
                 };
+                let status = session
+                    .GetPlaybackInfo()
+                    .and_then(|info| info.PlaybackStatus());
+                let Ok(status) = status else {
+                    continue;
+                };
+                if !matches!(status, S::Playing | S::Paused) {
+                    continue;
+                }
                 let id = session
                     .SourceAppUserModelId()
                     .map(|id| id.to_string())
                     .unwrap_or_default();
-                if id.to_ascii_lowercase().contains("spotify") {
-                    return Some(session);
+                let rank = session_rank(
+                    id.to_ascii_lowercase().contains("spotify"),
+                    status == S::Playing,
+                );
+                match &best {
+                    Some((best_rank, _)) if *best_rank <= rank => {}
+                    _ => best = Some((rank, session)),
                 }
             }
         }
     }
-    manager.GetCurrentSession().ok()
+    if let Some((_, session)) = best {
+        return Some(session);
+    }
+    let current = manager.GetCurrentSession().ok()?;
+    if playback_status_usable(&current) {
+        Some(current)
+    } else {
+        None
+    }
 }
 
 fn status_name(
@@ -161,6 +222,61 @@ fn friendly_source(app_id: &str) -> String {
         "media".to_string()
     } else {
         base.to_string()
+    }
+}
+
+fn clamp01(level: f32) -> f32 {
+    if !level.is_finite() {
+        return 0.0;
+    }
+    level.clamp(0.0, 1.0)
+}
+
+/// Master output volume via the MMDevice endpoint API. SMTC has no
+/// per-session volume, so this is the device level — the only volume knob
+/// Windows exposes without per-app audio-session matching. Fast,
+/// non-blocking COM; every failure degrades to `None` (UI hides slider).
+fn endpoint_volume() -> Option<
+    windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
+> {
+    use windows::Win32::Media::Audio::{
+        Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole,
+        eRender,
+    };
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+
+    ensure_com();
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()? };
+    let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()? };
+    unsafe { device.Activate(CLSCTX_ALL, None).ok() }
+}
+
+/// Current master level + mute. `None` = no usable endpoint.
+pub fn volume_state() -> Option<(f32, bool)> {
+    let volume = endpoint_volume()?;
+    let level = unsafe { volume.GetMasterVolumeLevelScalar().ok()? };
+    let muted = unsafe { volume.GetMute().ok()?.as_bool() };
+    Some((clamp01(level), muted))
+}
+
+/// Set master level 0.0–1.0 (clamped; NaN → 0).
+pub fn set_volume(level: f32) -> Result<(), String> {
+    let volume = endpoint_volume().ok_or("no audio endpoint")?;
+    unsafe {
+        volume
+            .SetMasterVolumeLevelScalar(clamp01(level), std::ptr::null())
+            .map_err(|e| format!("volume set failed: {e}"))
+    }
+}
+
+/// Set master mute.
+pub fn set_muted(muted: bool) -> Result<(), String> {
+    let volume = endpoint_volume().ok_or("no audio endpoint")?;
+    unsafe {
+        volume
+            .SetMute(muted, std::ptr::null())
+            .map_err(|e| format!("mute set failed: {e}"))
     }
 }
 
@@ -287,6 +403,13 @@ fn snapshot_inner() -> MediaState {
         .unwrap_or("unknown")
         .to_string();
 
+    // Only live sessions open the view. Stopped/closed corpses can carry
+    // stale metadata — treating them as active is what opened the view on
+    // top of a dead session whose controls then hung.
+    if status != "playing" && status != "paused" {
+        return MediaState::default();
+    }
+
     let (position_secs, duration_secs) = session
         .GetTimelineProperties()
         .map(|timeline| {
@@ -302,6 +425,10 @@ fn snapshot_inner() -> MediaState {
     let cache_key = format!("{title}\u{1f}{artist}\u{1f}{album}");
     let art = read_thumbnail_data_uri(&session, &cache_key);
 
+    let (volume, muted, volume_supported) = volume_state()
+        .map(|(level, muted)| (level, muted, true))
+        .unwrap_or((1.0, false, false));
+
     MediaState {
         active: true,
         title,
@@ -312,12 +439,35 @@ fn snapshot_inner() -> MediaState {
         position_secs,
         duration_secs,
         art,
+        volume,
+        muted,
+        volume_supported,
     }
 }
 
 /// Fire a transport command at the preferred session.
 pub fn control(action: MediaAction) -> Result<bool, String> {
+    // Volume/mute never touch the media session (SMTC has no volume API) —
+    // they go straight at the fast, non-blocking endpoint.
+    match action {
+        MediaAction::Volume(level) => {
+            set_volume(level)?;
+            return Ok(true);
+        }
+        MediaAction::Mute(muted) => {
+            set_muted(muted)?;
+            return Ok(true);
+        }
+        _ => {}
+    }
     let session = cached_session().ok_or("no media session")?;
+    // The session can die between pick and command (quit app, closed tab).
+    // Firing into a corpse hangs the WinRT call — revalidate first and
+    // drop it so the next pick finds a live one.
+    if !playback_status_usable(&session) {
+        forget_cached_session();
+        return Err("media session is gone".to_string());
+    }
     match action {
         MediaAction::Toggle => session
             .TryTogglePlayPauseAsync()
@@ -335,14 +485,27 @@ pub fn control(action: MediaAction) -> Result<bool, String> {
             .get()
             .map_err(|e| format!("media control failed: {e}")),
         MediaAction::Seek(position_secs) => {
-            // SMTC takes 100ns ticks; clamp to the track bounds.
-            let ticks = (position_secs.max(0.0) * 10_000_000.0) as i64;
+            // Live streams and unsupported sessions report no duration —
+            // seeking there is meaningless and some sessions hang the call.
+            let duration_secs = session
+                .GetTimelineProperties()
+                .ok()
+                .and_then(|t| t.EndTime().ok())
+                .map(|t| t.Duration.max(0) as f64 / 10_000_000.0)
+                .unwrap_or(0.0);
+            if !(duration_secs > 0.0) {
+                return Err("seek not supported for this stream".to_string());
+            }
+            let clamped = position_secs.max(0.0).min(duration_secs);
+            // SMTC takes 100ns ticks; clamped to the track bounds.
+            let ticks = (clamped * 10_000_000.0) as i64;
             session
                 .TryChangePlaybackPositionAsync(ticks)
                 .map_err(|e| format!("media seek failed: {e}"))?
                 .get()
                 .map_err(|e| format!("media seek failed: {e}"))
         }
+        MediaAction::Volume(_) | MediaAction::Mute(_) => unreachable!(),
     }
 }
 
@@ -374,5 +537,21 @@ mod tests {
     fn friendly_source_trims_app_id() {
         assert_eq!(friendly_source("Spotify.exe_abc!Spotify"), "Spotify.exe");
         assert_eq!(friendly_source(""), "media");
+    }
+
+    #[test]
+    fn volume_clamp_bounds() {
+        assert_eq!(clamp01(0.5), 0.5);
+        assert_eq!(clamp01(-0.25), 0.0);
+        assert_eq!(clamp01(1.5), 1.0);
+        assert_eq!(clamp01(f32::NAN), 0.0);
+        assert_eq!(clamp01(f32::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn session_rank_prefers_playing_spotify() {
+        assert!(session_rank(true, true) < session_rank(false, true));
+        assert!(session_rank(false, true) < session_rank(true, false));
+        assert!(session_rank(true, false) < session_rank(false, false));
     }
 }

@@ -93,6 +93,13 @@ impl NativeOverlayShell {
             crossbeam_channel::bounded::<()>(1);
         let media_dirty: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
         let media_dirty_for_thread = media_dirty.clone();
+        // A hung WinRT call abandons its snapshot thread (see the 3s timeout
+        // below). Without this flag every 500ms tick would spawn another
+        // thread into the same hung session — unbounded pile-up until the
+        // process keels over. While one snapshot is in flight, ticks just
+        // coalesce into it.
+        let media_inflight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+        let media_inflight_for_thread = media_inflight.clone();
 
         // Spawn a single persistent media-refresh thread. WinRT session
         // calls can block (slow thumbnails, busy sessions) — they run
@@ -107,19 +114,34 @@ impl NativeOverlayShell {
                 if !media_dirty_for_thread.swap(false, Ordering::SeqCst) {
                     continue;
                 }
+                if media_inflight_for_thread.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
                 let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
-                std::thread::Builder::new()
+                let inflight_for_snapshot = media_inflight_for_thread.clone();
+                if std::thread::Builder::new()
                     .name("nex-media-snapshot".into())
                     .spawn(move || {
                         let state = crate::media::snapshot();
                         let json = serde_json::json!({ "media": state }).to_string();
                         let _ = snapshot_tx.send(json);
+                        inflight_for_snapshot.store(false, Ordering::SeqCst);
                     })
-                    .ok();
+                    .is_err()
+                {
+                    // Spawn failed (thread exhaustion) — release the flag so
+                    // a later refresh can retry instead of wedging forever.
+                    media_inflight_for_thread.store(false, Ordering::SeqCst);
+                    continue;
+                }
                 // A hung WinRT call must not wedge the worker: abandon the
                 // snapshot (and its thread) and try again on next refresh.
                 let Ok(json) = snapshot_rx.recv_timeout(Duration::from_secs(3)) else {
                     crate::logging::warn("[nex] media snapshot timed out; skipping refresh");
+                    // Flag stays set: the hung thread clears it when (if) its
+                    // WinRT call returns. Clearing here would spawn a fresh
+                    // thread into the same hung session every 3s — the exact
+                    // pile-up this flag exists to prevent.
                     continue;
                 };
                 if let Ok(slot) = proxy_for_media.lock() {

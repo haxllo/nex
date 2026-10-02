@@ -36,6 +36,10 @@
   const mediaDur = $("media-dur");
   const mediaPlayIcon = $("media-play-icon");
   const mediaPauseIcon = $("media-pause-icon");
+  const mediaVolumeInline = $("media-volume-inline");
+  const mediaVolumeSlider = $("media-volume-slider");
+  const mediaVolIcon = $("media-vol-icon");
+  const mediaMuteIcon = $("media-mute-icon");
 
   // Now-playing media state pushed by Rust ({active,title,artist,...}).
   // Tab opens the media view only when a session is active; otherwise
@@ -845,6 +849,11 @@
           post("mediaNext");
           return;
         }
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          nudgeVolume(e.key === "ArrowUp" ? 5 : -5);
+          return;
+        }
         if (e.key.length === 1) {
           closeMediaView();
           input.focus();
@@ -1567,6 +1576,7 @@
     const playing = m.status === "playing";
     mediaPlayIcon.classList.toggle("hidden", playing);
     mediaPauseIcon.classList.toggle("hidden", !playing);
+    syncVolumeUi(m);
     paintMediaProgress();
     kickMediaFrame();
   }
@@ -1646,6 +1656,84 @@
     post("mediaToggle");
   });
   document.getElementById("media-next").addEventListener("click", () => post("mediaNext"));
+
+  // ── output volume (device endpoint; SMTC has no per-session knob) ──
+  let volDragging = false;
+  let volPostAt = 0;
+  let volPending = null;
+
+  function volumePct(m) {
+    const v = Number(m?.volume);
+    return Math.min(Math.max(Math.round((isFinite(v) ? v : 1) * 100), 0), 100);
+  }
+
+  function paintVolumeSlider(pct) {
+    mediaVolumeSlider.value = String(pct);
+    mediaVolumeSlider.title = "Volume " + pct;
+    mediaVolumeSlider.style.setProperty("--vol", pct + "%");
+  }
+
+  function syncVolumeUi(m) {
+    if (!m.volume_supported) {
+      mediaVolumeInline.classList.add("hidden");
+      return;
+    }
+    mediaVolumeInline.classList.remove("hidden");
+    if (!volDragging) {
+      paintVolumeSlider(volumePct(m));
+    }
+    const muted = !!m.muted;
+    mediaVolIcon.classList.toggle("hidden", muted);
+    mediaMuteIcon.classList.toggle("hidden", !muted);
+  }
+
+  function sendVolume(pct) {
+    const now = performance.now();
+    // Live-drag posts throttled to ~8/s; the trailing value always sends.
+    if (now - volPostAt >= 120) {
+      volPostAt = now;
+      volPending = null;
+      post("mediaVolume", pct);
+    } else {
+      volPending = pct;
+      setTimeout(() => {
+        if (volPending !== null && performance.now() - volPostAt >= 120) {
+          volPostAt = performance.now();
+          post("mediaVolume", volPending);
+          volPending = null;
+        }
+      }, 130);
+    }
+  }
+
+  function nudgeVolume(delta) {
+    if (!mediaState?.volume_supported) return;
+    const pct = Math.min(Math.max(Number(mediaVolumeSlider.value || 0) + delta, 0), 100);
+    paintVolumeSlider(pct);
+    sendVolume(pct);
+  }
+
+  mediaVolumeSlider.addEventListener("pointerdown", () => { volDragging = true; });
+  window.addEventListener("pointerup", () => { volDragging = false; });
+  mediaVolumeSlider.addEventListener("input", () => {
+    const pct = Math.min(Math.max(Math.round(Number(mediaVolumeSlider.value) || 0), 0), 100);
+    paintVolumeSlider(pct);
+    sendVolume(pct);
+  });
+  mediaVolumeSlider.addEventListener("change", () => {
+    volDragging = false;
+    const pct = Math.min(Math.max(Math.round(Number(mediaVolumeSlider.value) || 0), 0), 100);
+    volPostAt = 0;
+    volPending = null;
+    post("mediaVolume", pct);
+  });
+  document.getElementById("media-mute").addEventListener("click", () => {
+    // Optimistic flip — the Rust refresh corrects the icon within ~1s.
+    const nowMuted = mediaVolIcon.classList.contains("hidden");
+    mediaVolIcon.classList.toggle("hidden", !nowMuted);
+    mediaMuteIcon.classList.toggle("hidden", nowMuted);
+    post("mediaMute");
+  });
 
   // ── scrollbar idle fade ────────────────────────────────────
   // Thumb fades out after 1.4s without scroll/hover over the list;

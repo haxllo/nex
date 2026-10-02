@@ -105,6 +105,13 @@ pub(crate) struct SeekPayload {
     pub v: u64,
 }
 
+/// Master volume in whole percent (0–100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VolumePayload {
+    pub v: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TextPayload {
@@ -229,6 +236,10 @@ pub(crate) enum OverlayMessage {
     MediaRefresh(NoPayload),
     #[serde(rename = "mediaSeek")]
     MediaSeek(SeekPayload),
+    #[serde(rename = "mediaVolume")]
+    MediaVolume(VolumePayload),
+    #[serde(rename = "mediaMute")]
+    MediaMute(NoPayload),
     #[serde(rename = "dragStart")]
     DragStart(NoPayload),
 }
@@ -288,6 +299,8 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaPrev",
         "mediaRefresh",
         "mediaSeek",
+        "mediaVolume",
+        "mediaMute",
         "dragStart",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -324,6 +337,11 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         OverlayMessage::MediaSeek(p) => {
             if p.v > 24 * 3600 * 1000 {
                 return Err(IpcReject::BadPayload("seek position out of range".into()));
+            }
+        }
+        OverlayMessage::MediaVolume(p) => {
+            if p.v > 100 {
+                return Err(IpcReject::BadPayload("volume percent out of range".into()));
             }
         }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {
@@ -526,5 +544,15 @@ mod tests {
             Err(IpcReject::BadPayload(_))
         ));
         assert!(parse_overlay(r#"{"t":"submit","v":3}"#).is_ok());
+    }
+
+    #[test]
+    fn volume_percent_parses_and_rejects_over_100() {
+        assert!(parse_overlay(r#"{"t":"mediaVolume","v":57}"#).is_ok());
+        assert!(parse_overlay(r#"{"t":"mediaMute"}"#).is_ok());
+        assert!(matches!(
+            parse_overlay(r#"{"t":"mediaVolume","v":101}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 }

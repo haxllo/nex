@@ -87,6 +87,13 @@
           <button type="button" id="media-next" title="Next" aria-label="Next track">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>
           </button>
+          <span class="media-volume-inline hidden" id="media-volume-inline">
+            <button type="button" id="media-mute" title="Mute" aria-label="Mute or unmute">
+              <svg id="media-vol-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+              <svg id="media-mute-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="hidden"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 9l6 6M22 9l-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+            </button>
+            <input type="range" id="media-volume-slider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+          </span>
         </div>
       </div>
 

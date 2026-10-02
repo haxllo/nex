@@ -108,6 +108,10 @@ pub enum OverlayEvent {
     MediaRefresh,
     /// Seek the current track to a position in milliseconds.
     MediaSeek(u64),
+    /// Set master output volume in whole percent (0–100).
+    MediaVolume(u8),
+    /// Flip master mute.
+    MediaMute,
     /// Update availability status from background check.
     UpdateAvailable(bool),
 

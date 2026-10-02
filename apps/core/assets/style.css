@@ -845,8 +845,8 @@ html[data-theme="light"] img.icon.glyph {
   display: none;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 18px 20px 16px;
+  gap: 6px;
+  padding: 16px 20px 14px;
 }
 
 #panel.media-open #media-view {
@@ -871,6 +871,7 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 14px;
   font-weight: 600;
   max-width: 100%;
+  margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -880,6 +881,7 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 12px;
   color: var(--text-faint);
   max-width: 100%;
+  margin-bottom: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -892,7 +894,7 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 2px;
   background: var(--hover);
   overflow: visible;
-  margin-top: 4px;
+  margin-top: 6px;
   cursor: pointer;
   touch-action: none;
 }
@@ -937,6 +939,7 @@ html[data-theme="light"] img.icon.glyph {
   display: flex;
   justify-content: space-between;
   width: 100%;
+  margin-bottom: 2px;
   font-size: 10.5px;
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
@@ -945,8 +948,8 @@ html[data-theme="light"] img.icon.glyph {
 .media-controls {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: 2px;
+  gap: 10px;
+  margin-top: 4px;
 }
 
 .media-controls button {
@@ -987,6 +990,89 @@ html[data-theme="light"] img.icon.glyph {
 
 .media-controls button.media-play:active {
   background: #169c46;
+}
+
+/* Compact output volume tucked into the transport row, split off by a
+   divider. Hidden when the endpoint query fails. */
+.media-volume-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--hover);
+}
+
+.media-volume-inline.hidden {
+  display: none;
+}
+
+.media-volume-inline button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.media-volume-inline button:hover {
+  background: var(--hover);
+}
+
+.media-volume-inline button:active {
+  background: var(--sel);
+}
+
+.media-volume-inline button:focus {
+  outline: none;
+}
+
+/* Custom slider dressed like the progress bar: 4px track, accent fill,
+   white knob that only appears on hover. Native accent-color renders a
+   chunky mismatched control, so it gets fully restyled. */
+#media-volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 84px;
+  height: 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+#media-volume-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right,
+    var(--accent) 0%, var(--accent) var(--vol, 100%),
+    var(--hover) var(--vol, 100%), var(--hover) 100%);
+}
+
+#media-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+#media-volume-slider:hover::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+#media-volume-slider:focus {
+  outline: none;
 }
 
 /* ── update notice ───────────────────────────────────────── */

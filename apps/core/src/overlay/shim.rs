@@ -294,6 +294,15 @@ impl NativeOverlayShell {
             .unwrap_or(false)
     }
 
+    /// Pending post-update version with unseen notes, if any.
+    pub fn whats_new_pending(&self) -> Option<String> {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .and_then(|s| s.whats_new_pending.clone())
+    }
+
     pub fn has_focus(&self) -> bool {
         self.inner
             .state
@@ -524,6 +533,24 @@ impl NativeOverlayShell {
     pub fn set_update_available(&self, available: bool) {
         self.with_state(|s| s.update_available = available);
         self.post(UiCommand::Apply);
+    }
+
+    /// Arm the post-update What's New entry point for `version`.
+    pub fn set_whats_new_pending(&self, version: String) {
+        self.with_state(|s| s.whats_new_pending = Some(version));
+        self.post(UiCommand::Apply);
+    }
+
+    /// Clear the pending version (viewed/dismissed) — the update notice
+    /// returns to its normal update-available behavior.
+    pub fn clear_whats_new_pending(&self) {
+        self.with_state(|s| s.whats_new_pending = None);
+        self.post(UiCommand::Apply);
+    }
+
+    /// Push fetched What's New content JSON into the open view.
+    pub fn push_whats_new(&self, json: String) {
+        self.post(UiCommand::ApplyWhatsNew(json));
     }
 
     pub fn set_hotkey_issue_active(&self, active: bool) {

@@ -27,6 +27,9 @@
   const updateNotice = $("update-notice");
   const updateBtn = $("update-btn");
   const updateBtnLabel = updateBtn.querySelector("span");
+  const whatsNewTitle = $("whats-new-title");
+  const whatsNewItems = $("whats-new-items");
+  const whatsNewTips = $("whats-new-tips");
   const mediaArt = $("media-art");
   const mediaTitle = $("media-title");
   const mediaArtist = $("media-artist");
@@ -46,6 +49,14 @@
   // Tab keeps its normal input-select behavior.
   let mediaState = null;
   let mediaOpen = false;
+
+  // Post-update What's New: Rust pushes `whatsNewPending` ("x.y.z") once
+  // per installed version. While set, the update notice opens the
+  // dedicated view instead of running an update check.
+  let updateAvailable = false;
+  let whatsNewPending = null;
+  let whatsNewOpen = false;
+  let whatsNewContent = null;
 
   // Local mirror of pushed state.
   let rows = [];
@@ -860,6 +871,13 @@
           return;
         }
       }
+      // What's New open: typing returns to search (the key lands in the
+      // refocused input), like the media view above.
+      if (whatsNewOpen && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) {
+        closeWhatsNew();
+        input.focus();
+        return;
+      }
       // ── command mode: `@` to enter (legacy `>` still accepted),
       // backspace-on-empty to exit ──
       if ((e.key === "@" || e.key === ">") && !inCommandMode && document.activeElement === input) {
@@ -907,11 +925,16 @@
         e.preventDefault();
         if (selected >= 0) post("submit", selected);
       } else if (e.key === "Tab") {
-        // Media view open: Tab closes it and returns to search.
+        // Dedicated views open: Tab closes them and returns to search.
         if (mediaOpen) {
           e.preventDefault();
           closeMediaView();
           input.focus();
+          return;
+        }
+        if (whatsNewOpen) {
+          e.preventDefault();
+          closeWhatsNew();
           return;
         }
         if (tryCompleteCommand()) {
@@ -931,11 +954,16 @@
         input.focus();
         input.select();
       } else if (e.key === "Escape") {
-        // Media view open: Escape closes it locally, overlay stays open.
+        // Dedicated views open: Escape closes them locally, overlay stays.
         if (mediaOpen) {
           e.preventDefault();
           closeMediaView();
           input.focus();
+          return;
+        }
+        if (whatsNewOpen) {
+          e.preventDefault();
+          closeWhatsNew();
           return;
         }
         if (topPower.hasConfirm()) {
@@ -1248,6 +1276,14 @@
         return;
       }
 
+      // What's New content: {"whatsNew": {"version","markdown"}} — renders
+      // into the open view without touching search state.
+      if (state.whatsNew && typeof state.whatsNew === "object" && !Array.isArray(state.rows)) {
+        whatsNewContent = state.whatsNew;
+        renderWhatsNew();
+        return;
+      }
+
       // Icon data message: {"icons": {"path": "data:...", ...}}
       // Sent as a separate PostWebMessageAsJson after the state message.
       // Early return before closing footer menu — icons-only pushes must not
@@ -1328,9 +1364,17 @@
       // text, so stale values can never overwrite the input.
       completion = typeof state.completion === "string" ? state.completion : "";
 
-      // Update availability: show/hide update notice
-      if (typeof state.updateAvailable === "boolean") {
-        updateNotice.classList.toggle("hidden", !state.updateAvailable);
+      // Update availability: show/hide update notice. A pending
+      // post-update version takes over the notice: it opens the
+      // What's New view instead of running an update check.
+      if (typeof state.updateAvailable === "boolean" || typeof state.whatsNewPending !== "undefined") {
+        if (typeof state.updateAvailable === "boolean") {
+          updateAvailable = state.updateAvailable;
+        }
+        if (typeof state.whatsNewPending !== "undefined") {
+          whatsNewPending = typeof state.whatsNewPending === "string" ? state.whatsNewPending : null;
+        }
+        syncUpdateNotice();
       }
 
       // Track QL presence before overwriting rows — used to detect
@@ -1431,10 +1475,140 @@
   });
 
   // ── update button ───────────────────────────────────────────
+  function syncUpdateNotice() {
+    const show = updateAvailable || whatsNewPending !== null;
+    updateNotice.classList.toggle("hidden", !show);
+    updateNotice.classList.toggle("whats-new", whatsNewPending !== null);
+    if (whatsNewPending !== null) {
+      updateBtn.disabled = false;
+      updateBtn.title = "See what's new";
+      updateBtn.setAttribute("aria-label", "See what's new in version " + whatsNewPending);
+      updateBtnLabel.textContent = "What's new";
+    } else if (!updateBtn.disabled || updateBtnLabel.textContent === "What's new") {
+      updateBtn.title = "Update available";
+      updateBtn.setAttribute("aria-label", "Update available");
+      updateBtnLabel.textContent = "Update";
+    }
+  }
+
   updateBtn.addEventListener("click", () => {
+    // Post-update, once per version: open the What's New view instead
+    // of the normal update flow. Rust marks the version seen on open.
+    if (whatsNewPending !== null) {
+      openWhatsNew();
+      return;
+    }
     updateBtn.disabled = true;
     updateBtnLabel.textContent = "Updating...";
     post("checkUpdates");
+  });
+
+  // ── what's new view ─────────────────────────────────────────
+  // Static interaction tips: the hidden gestures users otherwise never
+  // discover. Always shown under the version highlights.
+  const WHATS_NEW_TIPS = [
+    ["Tab", "opens the media view while music plays"],
+    ["@", "enters command mode"],
+    ["↑ ↓", "move through results"],
+    ["Enter", "launches the selected item"],
+    ["Esc", "closes the overlay"],
+  ];
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // Tiny markdown subset for release notes: ### headings, - bullets with
+  // **bold** labels, [links](url), `code`. Raw HTML never passes through.
+  function renderInlineMd(s) {
+    let out = escapeHtml(s);
+    out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+    out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="wn-link">$1</span>');
+    return out;
+  }
+
+  function renderWhatsNewMarkdown(md) {
+    const items = [];
+    let count = 0;
+    for (const raw of md.split("\n")) {
+      const line = raw.trim();
+      if (!line || count >= 10) continue;
+      if (/^#{2,4}\s/.test(line)) {
+        items.push({ h: line.replace(/^#{2,4}\s*/, "") });
+        continue;
+      }
+      if (/^[-*]\s/.test(line)) {
+        items.push({ li: line.replace(/^[-*]\s*/, "") });
+        count++;
+      }
+    }
+    if (!items.length) return "";
+    return items
+      .map((it) =>
+        it.h
+          ? `<h4>${renderInlineMd(it.h)}</h4>`
+          : `<div class="whats-new-item"><span>${renderInlineMd(it.li)}</span></div>`
+      )
+      .join("");
+  }
+
+  function postWhatsNewResize() {
+    requestAnimationFrame(() => {
+      const h = Math.ceil(panel.getBoundingClientRect().height);
+      if (h > 0) {
+        lastH = h;
+        post("resize", { v: h, immediate: true });
+      }
+    });
+  }
+
+  function renderWhatsNew() {
+    if (!whatsNewOpen) return;
+    const version = whatsNewContent?.version || whatsNewPending || "";
+    whatsNewTitle.textContent = version ? "Nex v" + version + " is here" : "Nex updated";
+    const md = whatsNewContent && typeof whatsNewContent.markdown === "string"
+      ? whatsNewContent.markdown.trim()
+      : "";
+    whatsNewItems.innerHTML = md
+      ? renderWhatsNewMarkdown(md)
+      : `<div class="whats-new-item"><span>This release brings fixes and polish. You're all set.</span></div>`;
+    whatsNewTips.innerHTML =
+      `<div class="tips-heading">Good to know</div>` +
+      WHATS_NEW_TIPS.map(([k, v]) => `<div><kbd>${escapeHtml(k)}</kbd> ${escapeHtml(v)}</div>`).join("");
+    postWhatsNewResize();
+  }
+
+  function openWhatsNew() {
+    if (whatsNewOpen) return;
+    if (mediaOpen) closeMediaView();
+    topPower.closeMenu();
+    topPower.closeConfirm();
+    hideContextMenu();
+    whatsNewOpen = true;
+    whatsNewContent = null;
+    panel.classList.add("whats-new-open");
+    renderWhatsNew();
+    postWhatsNewResize();
+    // Triggers the notes fetch; Rust marks this version seen on open, so
+    // the view shows exactly once per installed version.
+    post("whatsNew");
+    // The pending flag is spent locally — Rust confirms via snapshot.
+    whatsNewPending = null;
+    syncUpdateNotice();
+  }
+
+  function closeWhatsNew() {
+    if (!whatsNewOpen) return;
+    whatsNewOpen = false;
+    whatsNewContent = null;
+    panel.classList.remove("whats-new-open");
+    postWhatsNewResize();
+    input.focus();
+  }
+
+  document.getElementById("whats-new-dismiss").addEventListener("click", () => {
+    closeWhatsNew();
   });
 
   // ── media view ──────────────────────────────────────────────

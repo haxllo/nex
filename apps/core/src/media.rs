@@ -240,7 +240,7 @@ fn endpoint_volume() -> Option<
     windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
 > {
     use windows::Win32::Media::Audio::{
-        Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole,
+        MMDeviceEnumerator, IMMDeviceEnumerator, eConsole,
         eRender,
     };
     use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};

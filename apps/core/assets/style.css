@@ -1127,6 +1127,139 @@ html[data-theme="light"] #update-btn:hover {
   background: rgba(22, 163, 74, 0.25);
 }
 
+/* Post-update entry point: same pill, accent palette instead of green. */
+#update-notice.whats-new #update-btn {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+
+#update-notice.whats-new #update-btn:hover {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* ── what's new view ─────────────────────────────────────── */
+/* Dedicated post-update view; mirrors the media view pattern:
+   search UI hides while open, Escape / Got it returns to search. */
+#panel.whats-new-open #search-row,
+#panel.whats-new-open #body,
+#panel.whats-new-open #footer {
+  display: none;
+}
+
+#whats-new-view {
+  display: none;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 18px 20px 16px;
+  text-align: left;
+}
+
+#panel.whats-new-open #whats-new-view {
+  display: flex;
+}
+
+.whats-new-eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.whats-new-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.whats-new-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.whats-new-items h4 {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.whats-new-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.whats-new-item::before {
+  content: "•";
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.whats-new-item strong {
+  font-weight: 600;
+}
+
+.whats-new-item .wn-link {
+  color: var(--accent);
+}
+
+.whats-new-item code,
+.whats-new-tips kbd {
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--hover);
+}
+
+.whats-new-tips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--hover);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.whats-new-tips .tips-heading {
+  font-weight: 600;
+  color: var(--text);
+}
+
+#whats-new-dismiss {
+  align-self: flex-end;
+  margin-top: 2px;
+  padding: 6px 18px;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#whats-new-dismiss:hover {
+  filter: brightness(1.08);
+}
+
+#whats-new-dismiss:active {
+  transform: scale(0.98);
+}
+
+#whats-new-dismiss:focus {
+  outline: none;
+}
+
 /* ── power panel (circle row) ─────────────────────────────── */
 /* Only the power menu + its back button are visible while open. */
 #panel.power-menu-open #search-row,

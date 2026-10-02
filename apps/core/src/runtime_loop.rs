@@ -257,6 +257,13 @@ pub(crate) fn run_windows_runtime(
         })
         .ok();
 
+    // Post-update hook: if the app was updated since the user last saw
+    // release notes, arm the What's New entry point (once per version).
+    if let Some(pending) = crate::whats_new::check_pending() {
+        log_info(&format!("[nex] whats-new pending for v{pending}"));
+        overlay.set_whats_new_pending(pending);
+    }
+
     // The power popup is initialized by the overlay host after its own
     // WebView2 build completes (host.rs) — never here. WebView2 env
     // creation is not concurrency-safe across threads sharing the same
@@ -1784,6 +1791,30 @@ impl RuntimeWorker {
             OverlayEvent::UpdateAvailable(available) => {
                 self.overlay.set_update_available(available);
                 log_info(&format!("[nex] update_available={}", available));
+            }
+            OverlayEvent::WhatsNew => {
+                // The view is opening — this counts as seen even if the
+                // notes fetch below fails (the fallback still renders).
+                // Silent update flow untouched: this only reads state.
+                if let Some(version) = self.overlay.whats_new_pending() {
+                    crate::whats_new::mark_seen(&version);
+                    self.overlay.clear_whats_new_pending();
+                    let event_tx = self.event_tx.clone();
+                    std::thread::Builder::new()
+                        .name("nex-whats-new-fetch".into())
+                        .spawn(move || {
+                            let markdown = crate::whats_new::fetch_notes_markdown(&version);
+                            let json = serde_json::json!({
+                                "whatsNew": { "version": version, "markdown": markdown },
+                            })
+                            .to_string();
+                            let _ = event_tx.send(OverlayEvent::WhatsNewReady(json));
+                        })
+                        .ok();
+                }
+            }
+            OverlayEvent::WhatsNewReady(json) => {
+                self.overlay.push_whats_new(json);
             }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {

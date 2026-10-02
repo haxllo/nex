@@ -100,6 +100,10 @@ pub enum OverlayEvent {
     HotkeyRecorded(String),
     /// Check for updates (triggered from update notice button).
     CheckUpdates,
+    /// Open the What's New view (update notice button, post-update once).
+    WhatsNew,
+    /// Fetched What's New content JSON for the page.
+    WhatsNewReady(String),
     /// Media transport controls from the media widget.
     MediaToggle,
     MediaNext,
@@ -172,6 +176,9 @@ pub struct ShimState {
     pub completion: Option<String>,
     /// Whether a new update is available. When true, show update notification.
     pub update_available: bool,
+    /// Post-update version with unseen notes. When set, the update notice
+    /// opens the What's New view instead of running an update check.
+    pub whats_new_pending: Option<String>,
 }
 
 impl Default for ShimState {
@@ -199,6 +206,7 @@ impl Default for ShimState {
             bento_view: false,
             completion: None,
             update_available: false,
+            whats_new_pending: None,
         }
     }
 }

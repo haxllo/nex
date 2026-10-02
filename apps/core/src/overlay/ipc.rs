@@ -240,6 +240,8 @@ pub(crate) enum OverlayMessage {
     MediaVolume(VolumePayload),
     #[serde(rename = "mediaMute")]
     MediaMute(NoPayload),
+    #[serde(rename = "whatsNew")]
+    WhatsNew(NoPayload),
     #[serde(rename = "dragStart")]
     DragStart(NoPayload),
 }
@@ -301,6 +303,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaSeek",
         "mediaVolume",
         "mediaMute",
+        "whatsNew",
         "dragStart",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -554,5 +557,10 @@ mod tests {
             parse_overlay(r#"{"t":"mediaVolume","v":101}"#),
             Err(IpcReject::BadPayload(_))
         ));
+    }
+
+    #[test]
+    fn whats_new_request_parses() {
+        assert!(parse_overlay(r#"{"t":"whatsNew"}"#).is_ok());
     }
 }

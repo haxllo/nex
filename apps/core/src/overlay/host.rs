@@ -158,6 +158,8 @@ pub(crate) enum UiCommand {
     /// Ready now-playing media JSON from the background media worker.
     /// Posted, never computed, on the event-loop thread.
     ApplyMediaData(String),
+    /// Fetched What's New content JSON from the background fetch thread.
+    ApplyWhatsNew(String),
     /// Only the status text changed — send a lightweight update.
     ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -431,6 +433,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Ready media JSON from the background worker — just
                     // post it. Never snapshot WinRT here: blocking calls
                     // wedge the event loop (frozen overlay, no hide/input).
+                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &json);
+                        }
+                    }
+                }
+                UiCommand::ApplyWhatsNew(json) => {
+                    // Fetched notes JSON — same fire-and-forget push; the
+                    // network fetch ran on the runtime worker thread.
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         if let Some(wv) = webview.as_ref() {
                             post_json(wv, &json);
@@ -1374,6 +1385,9 @@ fn handle_ipc(
         OverlayMessage::MediaMute(_) => {
             let _ = event_tx.send(OverlayEvent::MediaMute);
         }
+        OverlayMessage::WhatsNew(_) => {
+            let _ = event_tx.send(OverlayEvent::WhatsNew);
+        }
         OverlayMessage::DragStart(_) => {
             // Latch + enter the native caption-drag modal loop on the
             // UI thread. The loop blocks the event loop until button
@@ -1709,6 +1723,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,
+        "whatsNewPending": s.whats_new_pending,
     })
     .to_string()
 }

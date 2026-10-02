@@ -50,6 +50,7 @@ pub(crate) mod tantivy_search;
 pub mod transport;
 pub mod uninstall_registry;
 pub mod updater;
+pub mod whats_new;
 #[cfg(target_os = "windows")]
 pub(crate) mod overlay;
 pub(crate) mod settings_snapshot;

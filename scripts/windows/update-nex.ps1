@@ -242,7 +242,10 @@ function Get-RegistryInstallLocation {
     return $null
   }
   $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
-  if ($null -eq $props -or $null -eq $props.InstallLocation) {
+  if ($null -eq $props) {
+    return $null
+  }
+  if ($null -eq $props.InstallLocation) {
     return $null
   }
   $candidate = ([string]$props.InstallLocation).Trim()
@@ -514,7 +517,11 @@ foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
 # at a per-user directory. There is no legitimate install to preserve there,
 # but removing it still needs elevation.
 if (-not $legacyOrphan) {
-  $hklmLocation = (Get-ItemProperty -LiteralPath "HKLM:\$UninstallSubkey" -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+  # Get-ItemPropertyValue (not Get-ItemProperty) — accessing .InstallLocation
+  # on a $null result throws under StrictMode when the HKLM key is absent,
+  # which is the normal state of a pure per-user install. That one crash
+  # killed the whole script: no update button, no updates, no log.
+  $hklmLocation = Get-ItemPropertyValue -LiteralPath "HKLM:\$UninstallSubkey" -Name InstallLocation -ErrorAction SilentlyContinue
   if ($hklmLocation) {
     $underProgramFiles = $false
     foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {

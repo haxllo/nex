@@ -240,6 +240,8 @@ pub(crate) enum OverlayMessage {
     MediaVolume(VolumePayload),
     #[serde(rename = "mediaMute")]
     MediaMute(NoPayload),
+    #[serde(rename = "mediaSession")]
+    MediaSession(TextPayload),
     #[serde(rename = "whatsNew")]
     WhatsNew(NoPayload),
     #[serde(rename = "dragStart")]
@@ -303,6 +305,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaSeek",
         "mediaVolume",
         "mediaMute",
+        "mediaSession",
         "whatsNew",
         "dragStart",
     ];
@@ -346,6 +349,9 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             if p.v > 100 {
                 return Err(IpcReject::BadPayload("volume percent out of range".into()));
             }
+        }
+        OverlayMessage::MediaSession(p) => {
+            check_len(&p.v, 256, "media session key").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {
             check_len(&p.v, MAX_TITLE_CHARS, "pin target").map_err(IpcReject::BadPayload)?;
@@ -562,5 +568,14 @@ mod tests {
     #[test]
     fn whats_new_request_parses() {
         assert!(parse_overlay(r#"{"t":"whatsNew"}"#).is_ok());
+    }
+
+    #[test]
+    fn media_session_key_parses_and_rejects_overlong() {
+        assert!(parse_overlay(r#"{"t":"mediaSession","v":"Spotify.exe_x!Spotify"}"#).is_ok());
+        assert!(matches!(
+            parse_overlay(&format!(r#"{{"t":"mediaSession","v":"{}"}}"#, "x".repeat(257))),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 }

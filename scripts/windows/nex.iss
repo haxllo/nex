@@ -376,6 +376,17 @@ begin
   else
     OtherScopeRoot := HKLM;
 
+  { Location-based stale-hybrid cleanup BEFORE file gate. Updater moves tree
+    to backup before setup, so FileExists false on updater runs. }
+  if (OtherScopeRoot = HKLM) and (not IsAdminInstallMode) then
+  begin
+    if TryCleanStaleHybridMachineEntry() then
+    begin
+      Result := '';
+      exit;
+    end;
+  end;
+
   if not TryGetRegisteredRuntimeExe(OtherScopeRoot, RuntimeExe) then
   begin
     Result := '';
@@ -384,15 +395,8 @@ begin
 
   if (OtherScopeRoot = HKLM) and not IsAdminInstallMode then
   begin
-    { Stale hybrid (HKLM pointing at this per-user dir, or anywhere outside
-      Program Files) is cleaned silently — only genuine all-users installs
-      under Program Files keep the hard error. The updater elevates the
-      installer once for this cleanup while scope stays per-user. }
-    if TryCleanStaleHybridMachineEntry() then
-    begin
-      Result := '';
-      exit;
-    end;
+    { Stale hybrid already cleaned above by registry path; reaching here
+      means genuine all-users install under Program Files. }
     Result :=
       ExpandConstant('{#MyAppName}') + ' is already installed for all users.' + #13#10 + #13#10 +
       'Existing install: ' + RuntimeExe + #13#10 + #13#10 +
@@ -453,8 +457,9 @@ begin
   // 1. the orphaned pre-AppId tree + its stale all-users shortcut, but ONLY
   //    when no legitimate all-users install is registered — a registered
   //    entry pointing anywhere other than this install dir means hands off;
-  // 2. a stale hybrid machine-wide entry left by an older updater bug, which
-  //    is exactly an HKLM entry pointing at this per-user install dir.
+  // 2. a stale hybrid machine-wide entry left by an older updater bug:
+  //    an HKLM entry pointing at this per-user install dir, or anywhere
+  //    outside Program Files (legit all-users always under Program Files).
   // Kept in [Code] (not [InstallDelete]) so the key removal provably happens
   // before the directory removal is evaluated.
   HasHklmEntry := RegQueryStringValue(
@@ -463,8 +468,10 @@ begin
     'InstallLocation',
     Location
   );
+  if HasHklmEntry then
+    Location := StripWrappingQuotes(Trim(Location));
   LegacyDir := ExpandConstant('{commonpf}\Nex');
-  if (not HasHklmEntry) or (CompareText(Trim(Location), Trim(ExpandConstant('{app}'))) = 0) then
+  if (not HasHklmEntry) or SameInstallDir(Location, ExpandConstant('{app}')) or (not IsUnderProgramFiles(Location)) then
   begin
     if DirExists(LegacyDir) then
     begin

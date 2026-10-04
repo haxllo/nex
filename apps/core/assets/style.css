@@ -1,6 +1,4 @@
-/* Nex — premium Raycast-dark cmdk overlay.
-   The native window is transparent with a DWM acrylic backdrop; the
-   panel paints a subtle tint on top so it reads as frosted glass. */
+/* Nex overlay: DWM supplies desktop blur; CSS adds a restrained glass tint. */
 
 @font-face {
   font-family: "InterVariable";
@@ -10,16 +8,22 @@
 }
 
 :root {
-  --radius: 12px;
-  --row-radius: 8px;
+  --radius: 8px;
+  --row-radius: 6px;
   --pad-x: 16px;
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   /* dark palette */
   --bg: #1E1E1E;
   --bg-opaque: #1E1E1E;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
   --panel-surface: var(--bg);
-  --panel-highlight: rgba(255, 255, 255, 0.08);
+  --panel-highlight: rgba(255, 255, 255, 0.12);
+  --panel-edge: rgba(255, 255, 255, 0.12);
+  --panel-glint: rgba(255, 255, 255, 0.12);
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
@@ -46,7 +50,10 @@
 html[data-theme="light"] {
   --bg: #ffffff;
   --bg-opaque: #ffffff;
-  --panel-highlight: rgba(255, 255, 255, 0.8);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+  --panel-highlight: rgba(255, 255, 255, 0.65);
+  --panel-edge: rgba(0, 0, 0, 0.10);
+  --panel-glint: rgba(255, 255, 255, 0.25);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
@@ -71,11 +78,23 @@ html[data-theme="light"] {
 }
 
 html[data-native-material="acrylic"] {
-  --panel-surface: rgba(28, 28, 30, 0.42);
+  --panel-surface: rgba(17, 20, 27, 0.12);
+  --panel-highlight: rgba(255, 255, 255, 0.24);
+  --panel-edge: rgba(255, 255, 255, 0.2);
+  --panel-glint: rgba(255, 255, 255, 0.12);
+  --panel-sheen: rgba(255, 255, 255, 0.075);
+  --panel-reflection: rgba(255, 255, 255, 0.035);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.3);
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
-  --panel-surface: rgba(250, 250, 252, 0.5);
+  --panel-surface: rgba(248, 250, 253, 0.2);
+  --panel-highlight: rgba(255, 255, 255, 0.88);
+  --panel-edge: rgba(255, 255, 255, 0.72);
+  --panel-glint: rgba(255, 255, 255, 0.32);
+  --panel-sheen: rgba(255, 255, 255, 0.22);
+  --panel-reflection: rgba(255, 255, 255, 0.12);
+  --panel-bottom-edge: rgba(55, 72, 101, 0.14);
 }
 
 * {
@@ -88,21 +107,34 @@ html[data-theme="light"][data-native-material="acrylic"] {
 
 html,
 body {
-  background: transparent;
+  width: 100%;
+  height: 100%;
+  background-color: transparent;
   font-family: var(--font);
   font-weight: 400;
   letter-spacing: 0.2px;
   color: var(--text);
-  overflow: visible;
+  overflow: hidden;
+}
+
+body {
+  background: transparent;
 }
 
 #panel {
   width: 100%;
-  background: var(--panel-surface);
-  border: 1px solid var(--border);
+  background:
+    linear-gradient(136deg, var(--panel-glint) 0%, transparent 28%, transparent 74%, var(--panel-reflection) 100%),
+    var(--panel-surface);
+  border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.38),
-    inset 0 1px 0 var(--panel-highlight);
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.36),
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 var(--panel-highlight),
+    inset 1px 0 0 var(--panel-sheen),
+    inset -1px 0 0 var(--panel-sheen),
+    inset 0 -1px 0 var(--panel-bottom-edge);
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the
      window and margins don't collapse past the measured height. */
@@ -248,11 +280,12 @@ body {
   overflow-y: auto;
   padding: 0 6px;
   scroll-behavior: smooth;
-  /* Modern scrollbar API: thumb fades out while idle (class toggled in
-     JS); Chromium WebView2 supports scrollbar-color + transitions. */
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
   transition: scrollbar-color 300ms ease;
+}
+#list.scroll-idle {
+  scrollbar-color: transparent transparent;
 }
 #list.list-results {
   max-height: 410px;
@@ -261,9 +294,6 @@ body {
 #list.grid-results {
   max-height: 410px;
   margin-bottom: 6px;
-}
-#list.scroll-idle {
-  scrollbar-color: transparent transparent;
 }
 #list.grid-view {
   display: grid;
@@ -280,11 +310,18 @@ body {
 #list::-webkit-scrollbar {
   width: 8px;
 }
+#list::-webkit-scrollbar-track {
+  background: transparent;
+}
 #list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
   border: 2px solid transparent;
   background-clip: padding-box;
+  transition: background-color 300ms ease;
+}
+#list.scroll-idle::-webkit-scrollbar-thumb {
+  background: transparent;
 }
 
 .row {
@@ -857,10 +894,11 @@ html[data-theme="light"] img.icon.glyph {
 
 #media-view {
   display: none;
-  flex-direction: column;
+  position: relative;
+  flex-direction: row;
   align-items: center;
-  gap: 8px;
-  padding: 18px 22px 16px;
+  gap: 16px;
+  padding: 16px 20px 14px;
 }
 
 #panel.media-open #media-view {
@@ -873,14 +911,58 @@ html[data-theme="light"] img.icon.glyph {
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Session switcher dots: one per live app, top-right. Hidden unless 2+. */
+#media-dots {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 1;
+}
+
+#media-dots.hidden {
+  display: none;
+}
+
+#media-dots button {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--text-faint);
+  opacity: 0.45;
+  cursor: pointer;
+  transition: opacity 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+#media-dots button:hover {
+  opacity: 1;
+  transform: scale(1.25);
+}
+
+#media-dots button:focus {
+  outline: none;
+}
+
+#media-dots button.dot-active {
+  background: var(--accent);
+  opacity: 1;
+}
+
+#media-dots button.dot-playing:not(.dot-active) {
+  opacity: 0.8;
+}
+
 #media-art {
-  width: 148px;
-  height: 148px;
-  border-radius: 14px;
+  width: 120px;
+  height: 120px;
+  flex: 0 0 auto;
+  border-radius: 12px;
   object-fit: cover;
   background: var(--icon-bg);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.3),
-    0 0 0 1px var(--border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
 }
 
 #media-art[src=""],
@@ -888,12 +970,20 @@ html[data-theme="light"] img.icon.glyph {
   visibility: hidden;
 }
 
+.media-main {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
 .media-title {
   font-size: 15px;
   font-weight: 600;
   line-height: 1.25;
   max-width: 100%;
-  margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -903,7 +993,7 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 12.5px;
   color: var(--text-dim);
   max-width: 100%;
-  margin-bottom: 2px;
+  margin-bottom: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -916,7 +1006,7 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 2px;
   background: var(--hover);
   overflow: visible;
-  margin-top: 6px;
+  margin-top: 2px;
   cursor: pointer;
   touch-action: none;
 }
@@ -967,9 +1057,43 @@ html[data-theme="light"] img.icon.glyph {
   font-variant-numeric: tabular-nums;
 }
 
+.media-times-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Live badge shown in place of the duration for live radio. */
+#media-live {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  transform: translateY(1px);
+}
+
+#media-live.hidden {
+  display: none;
+}
+
+/* Locked bar (ads, unseekable sources): progress still shows, but no
+   pointer and no knob — there is nothing to drag. */
+#media-progress.locked {
+  cursor: default;
+  pointer-events: none;
+}
+
+#media-progress.locked #media-progress-knob {
+  display: none;
+}
+
 .media-controls {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   margin-top: 4px;
 }
@@ -997,21 +1121,6 @@ html[data-theme="light"] img.icon.glyph {
 
 .media-controls button:focus {
   outline: none;
-}
-
-.media-controls button.media-play {
-  width: 48px;
-  height: 48px;
-  background: #1db954;
-  color: #191414;
-}
-
-.media-controls button.media-play:hover {
-  background: #1ed760;
-}
-
-.media-controls button.media-play:active {
-  background: #169c46;
 }
 
 /* Compact output volume tucked into the transport row, split off by a

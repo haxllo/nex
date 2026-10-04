@@ -92,7 +92,11 @@ use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TRANSITIONS_FORCEDISABLED,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMSBT_TRANSIENTWINDOW,
+    DWMWCP_ROUND,
+};
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
@@ -134,18 +138,12 @@ const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
+const MEDIA_CLOCK_JS: &str = include_str!("../../assets/media_clock.js");
 const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
 document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
 }, true);
 "#;
-const NATIVE_MATERIAL_SCRIPT: &str = r#"
-document.addEventListener('DOMContentLoaded', function () {
-  document.documentElement.dataset.nativeMaterial = 'acrylic';
-}, { once: true });
-"#;
-
-
 /// Commands the shim posts to the UI thread via the event-loop proxy.
 #[derive(Debug, Clone)]
 pub(crate) enum UiCommand {
@@ -753,8 +751,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             crate::runtime::log_info("[nex] host Painted: stale (visible=false), skipping show");
                             return;
                         }
-                        window.set_visible(true);
-                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Always register raw input sink so the overlay
                         // receives WM_INPUT for all keyboard events while
                         // foreground.  This works around Chromium/WebView2
@@ -764,7 +760,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        // Activate the hidden window before its first visible
+                        // frame so DWM doesn't show Acrylic's inactive fallback.
                         force_foreground(hwnd);
+                        window.set_visible(true);
+                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.
                         focus_input(&webview);
@@ -907,7 +907,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
-                                serve_asset(request)
+                                serve_asset(request, false)
                             })
                             .with_ipc_handler(move |req| {
                                 use crate::overlay::ipc::{parse_settings, SettingsMessage};
@@ -1199,15 +1199,10 @@ fn build_webview(
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0));
-    let builder = if acrylic_available {
-        builder.with_initialization_script(NATIVE_MATERIAL_SCRIPT)
-    } else {
-        builder
-    };
     let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request)
+            serve_asset(request, acrylic_available)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
@@ -1221,13 +1216,27 @@ fn build_webview(
 /// Serve embedded UI assets.
 fn serve_asset(
     request: Request<Vec<u8>>,
+    acrylic_available: bool,
 ) -> Response<std::borrow::Cow<'static, [u8]>> {
     let path = request.uri().path().to_string();
 
     let (content_type, body): (&str, std::borrow::Cow<'static, [u8]>) = match path.as_str() {
-        "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
+        "/" | "/index.html" => {
+            if acrylic_available {
+                // Set the glass theme before the linked stylesheet can paint.
+                let html = INDEX_HTML.replacen(
+                    "<html lang=\"en\" data-theme=\"dark\">",
+                    "<html lang=\"en\" data-theme=\"dark\" data-native-material=\"acrylic\">",
+                    1,
+                );
+                ("text/html", html.into_bytes().into())
+            } else {
+                ("text/html", INDEX_HTML.as_bytes().into())
+            }
+        }
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
+        "/media_clock.js" => ("text/javascript", MEDIA_CLOCK_JS.as_bytes().into()),
         "/settings.html" => ("text/html", SETTINGS_HTML.as_bytes().into()),
         "/settings.js" => ("text/javascript", SETTINGS_JS.as_bytes().into()),
         _ => return not_found(),
@@ -1403,6 +1412,9 @@ fn handle_ipc(
         }
         OverlayMessage::MediaMute(_) => {
             let _ = event_tx.send(OverlayEvent::MediaMute);
+        }
+        OverlayMessage::MediaSession(p) => {
+            let _ = event_tx.send(OverlayEvent::MediaSession(p.v));
         }
         OverlayMessage::WhatsNew(_) => {
             let _ = event_tx.send(OverlayEvent::WhatsNew);
@@ -1821,32 +1833,51 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // Win32 glue: window chrome, positioning, focus
 // ─────────────────────────────────────────────────────────────────
 
-/// Apply native acrylic; the CSS surface remains opaque if DWM rejects it.
+/// Apply DWM's real desktop acrylic, with legacy acrylic as a Windows 10 fallback.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
-    // Disable DWM transition animation (zoom-out+fade) so hide is instant.
     let hwnd = window.hwnd() as HWND;
-    unsafe {
-        let disabled: i32 = 1;
-        DwmSetWindowAttribute(
-            hwnd,
-            3, // DWMWA_TRANSITIONS_FORCEDISABLED
-            &disabled as *const i32 as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
-    // Acrylic blur behind the (transparent) WebView. Falls back to a
-    // CSS-painted panel if the OS refuses (window-vibrancy returns Err).
-    let tint = if dark {
-        Some((18, 18, 20, 172))
+    let transitions_disabled = 1_i32;
+    let immersive_dark = i32::from(dark);
+    let rounded_corners = DWMWCP_ROUND;
+    let _ = set_dwm_attribute(
+        hwnd,
+        DWMWA_TRANSITIONS_FORCEDISABLED,
+        &transitions_disabled,
+    );
+    let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
+    let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+
+    // Windows 11 22H2+: DWM draws and blurs the real desktop backdrop behind
+    // the transparent WebView. The accent-color parameter of apply_acrylic
+    // is ignored by this newer DWM API, so use it only for older Windows.
+    let backdrop = DWMSBT_TRANSIENTWINDOW;
+    let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
+    let available = if native_backdrop {
+        true
     } else {
-        Some((245, 245, 248, 160))
+        let tint = if dark {
+            Some((20, 22, 28, 112))
+        } else {
+            Some((245, 247, 250, 104))
+        };
+        window_vibrancy::apply_acrylic(window, tint).is_ok()
     };
-    let available = window_vibrancy::apply_acrylic(window, tint).is_ok();
     if !available {
-        crate::logging::info("[nex] acrylic unavailable; using opaque panel");
+        crate::logging::info("[nex] native acrylic unavailable; using opaque CSS fallback");
     }
     available
+}
+
+fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute as u32,
+            value as *const T as *const std::ffi::c_void,
+            std::mem::size_of::<T>() as u32,
+        ) >= 0
+    }
 }
 
 /// Keep the WebView viewport pinned to the maximum panel size so content
@@ -2025,14 +2056,14 @@ fn hide_overlay_window(hwnd: HWND, window: &Window) {
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-        ShowWindow, SW_SHOW,
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_SHOW, SW_SHOWNA,
     };
     unsafe {
         // Already foreground — skip the synthetic Alt tap which would
         // blur the WebView2 child's focused input element.
         let fg = GetForegroundWindow();
-        if fg == hwnd {
+        if fg == hwnd && IsWindowVisible(hwnd) != 0 {
             return;
         }
         // Classic foreground-lock unlock: a synthetic key event marks
@@ -2071,9 +2102,15 @@ fn force_foreground(hwnd: HWND) {
             // AllowSetForegroundWindow (called by helper) handles it.
             let _ = AttachThreadInput(cur_tid, fg_tid, 1);
         }
-        ShowWindow(hwnd, SW_SHOW);
+        let foreground_before_show = fg == hwnd || SetForegroundWindow(hwnd) != 0;
+        ShowWindow(
+            hwnd,
+            if foreground_before_show { SW_SHOWNA } else { SW_SHOW },
+        );
         BringWindowToTop(hwnd);
-        SetForegroundWindow(hwnd);
+        if !foreground_before_show {
+            SetForegroundWindow(hwnd);
+        }
         // NOTE: deliberately NO SetFocus(hwnd) here — keyboard focus must
         // land on the WebView2 CHILD window, not the container. Forcing it
         // onto the container leaves the page unable to receive typing.

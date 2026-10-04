@@ -116,6 +116,8 @@ pub enum OverlayEvent {
     MediaVolume(u8),
     /// Flip master mute.
     MediaMute,
+    /// Pin the switcher to one app's session (raw app id; empty = auto).
+    MediaSession(String),
     /// Update availability status from background check.
     UpdateAvailable(bool),
 

@@ -2009,6 +2009,12 @@ impl RuntimeWorker {
                     .unwrap_or(true);
                 media_control(crate::media::MediaAction::Mute(muted), &self.overlay);
             }
+            OverlayEvent::MediaSession(key) => {
+                // Pinning is lock-only (no WinRT) — safe inline, then a
+                // fresh snapshot so the view flips immediately.
+                crate::media::select_session(&key);
+                self.overlay.refresh_media();
+            }
             OverlayEvent::Escape => {
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();

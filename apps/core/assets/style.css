@@ -20,6 +20,9 @@
   --bg-opaque: #1E1E1E;
   --scrollbar-thumb: rgba(255, 255, 255, 0.16);
   --panel-surface: var(--bg);
+  --panel-highlight: rgba(255, 255, 255, 0.12);
+  --panel-edge: rgba(255, 255, 255, 0.12);
+  --panel-glint: rgba(255, 255, 255, 0.12);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
@@ -47,6 +50,9 @@ html[data-theme="light"] {
   --bg: #ffffff;
   --bg-opaque: #ffffff;
   --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+  --panel-highlight: rgba(255, 255, 255, 0.65);
+  --panel-edge: rgba(0, 0, 0, 0.10);
+  --panel-glint: rgba(255, 255, 255, 0.25);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
@@ -70,13 +76,12 @@ html[data-theme="light"] {
   --shutdown: #dc2626;
 }
 
-/* Windows' transient acrylic backdrop is bright; let the theme tint lead. */
 html[data-native-material="acrylic"] {
-  --panel-surface: rgba(28, 28, 30, 0.9);
+  --panel-surface: rgba(28, 28, 30, 0.42);
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
-  --panel-surface: rgba(250, 250, 252, 0.9);
+  --panel-surface: rgba(250, 250, 252, 0.5);
 }
 
 * {
@@ -99,9 +104,12 @@ body {
 
 #panel {
   width: 100%;
-  background: var(--panel-surface);
+  background: linear-gradient(145deg, var(--panel-glint), transparent 46%),
+    var(--panel-surface);
+  border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 var(--panel-highlight);
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the
      window and margins don't collapse past the measured height. */

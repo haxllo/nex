@@ -359,10 +359,13 @@ fn runtime_provider_reconfigure_applies_new_roots() {
         .unwrap()
         .as_nanos();
 
-    let root_a = std::env::temp_dir().join(format!("nex-recfg-a-{unique}"));
-    let root_b = std::env::temp_dir().join(format!("nex-recfg-b-{unique}"));
+    let test_root = std::env::temp_dir().join(format!("nex-recfg-{unique}"));
+    let root_a = test_root.join("root-a");
+    let root_b = test_root.join("root-b");
+    let index_dir = test_root.join("index");
     std::fs::create_dir_all(&root_a).unwrap();
     std::fs::create_dir_all(&root_b).unwrap();
+    std::fs::create_dir_all(&index_dir).unwrap();
     let file_a = root_a.join("AlphaRoot.txt");
     let file_b = root_b.join("BetaRoot.txt");
     std::fs::write(&file_a, b"a").unwrap();
@@ -370,6 +373,7 @@ fn runtime_provider_reconfigure_applies_new_roots() {
 
     let mut cfg_a = nex_core::config::Config::default();
     cfg_a.show_files = true;
+    cfg_a.index_db_path = index_dir.join("index.sqlite3");
     cfg_a.discovery_roots = vec![root_a.clone()];
     cfg_a.discovery_exclude_roots = vec![];
     let db = nex_core::index_store::open_memory().unwrap();
@@ -391,10 +395,8 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     assert!(after_a.is_empty());
     assert!(!after_b.is_empty());
 
-    std::fs::remove_file(&file_a).unwrap();
-    std::fs::remove_file(&file_b).unwrap();
-    std::fs::remove_dir_all(&root_a).unwrap();
-    std::fs::remove_dir_all(&root_b).unwrap();
+    drop(service);
+    std::fs::remove_dir_all(&test_root).unwrap();
 }
 
 #[test]

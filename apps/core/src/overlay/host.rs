@@ -760,10 +760,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
-                        // Prepare foreground permission before the first
-                        // visible frame; force_foreground performs the native
-                        // show after its input handoff, avoiding an inactive
-                        // Acrylic fallback from tao's plain set_visible call.
+                        // Activate the hidden window before its first visible
+                        // frame so DWM doesn't show Acrylic's inactive fallback.
                         force_foreground(hwnd);
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
@@ -2059,7 +2057,7 @@ fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
-        SetForegroundWindow, ShowWindow, SW_SHOW,
+        SetForegroundWindow, ShowWindow, SW_SHOW, SW_SHOWNA,
     };
     unsafe {
         // Already foreground — skip the synthetic Alt tap which would
@@ -2104,9 +2102,15 @@ fn force_foreground(hwnd: HWND) {
             // AllowSetForegroundWindow (called by helper) handles it.
             let _ = AttachThreadInput(cur_tid, fg_tid, 1);
         }
-        ShowWindow(hwnd, SW_SHOW);
+        let foreground_before_show = fg == hwnd || SetForegroundWindow(hwnd) != 0;
+        ShowWindow(
+            hwnd,
+            if foreground_before_show { SW_SHOWNA } else { SW_SHOW },
+        );
         BringWindowToTop(hwnd);
-        SetForegroundWindow(hwnd);
+        if !foreground_before_show {
+            SetForegroundWindow(hwnd);
+        }
         // NOTE: deliberately NO SetFocus(hwnd) here — keyboard focus must
         // land on the WebView2 CHILD window, not the container. Forcing it
         // onto the container leaves the page unable to receive typing.

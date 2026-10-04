@@ -1,4 +1,4 @@
-/* Nex overlay: transparent window with a blurred, reflected glass face. */
+/* Nex overlay: DWM supplies desktop blur; CSS adds a restrained glass tint. */
 
 @font-face {
   font-family: "InterVariable";
@@ -21,10 +21,9 @@
   --panel-highlight: rgba(255, 255, 255, 0.12);
   --panel-edge: rgba(255, 255, 255, 0.12);
   --panel-glint: rgba(255, 255, 255, 0.12);
-  --panel-sheen: transparent;
-  --panel-reflection: transparent;
-  --panel-bottom-edge: transparent;
-  --glass-ambient: none;
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
@@ -79,31 +78,23 @@ html[data-theme="light"] {
 }
 
 html[data-native-material="acrylic"] {
-  --panel-surface: rgba(17, 22, 31, 0.2);
-  --panel-highlight: rgba(255, 255, 255, 0.34);
-  --panel-edge: rgba(255, 255, 255, 0.42);
-  --panel-glint: rgba(255, 255, 255, 0.42);
-  --panel-sheen: rgba(255, 255, 255, 0.11);
-  --panel-reflection: rgba(255, 255, 255, 0.1);
+  --panel-surface: rgba(17, 20, 27, 0.32);
+  --panel-highlight: rgba(255, 255, 255, 0.24);
+  --panel-edge: rgba(255, 255, 255, 0.2);
+  --panel-glint: rgba(255, 255, 255, 0.12);
+  --panel-sheen: rgba(255, 255, 255, 0.075);
+  --panel-reflection: rgba(255, 255, 255, 0.035);
   --panel-bottom-edge: rgba(0, 0, 0, 0.3);
-  --glass-ambient:
-    radial-gradient(circle 112px at 15% 30%, rgba(255, 70, 50, 0.98) 0 66%, rgba(255, 125, 36, 0.96) 84%, transparent 100%),
-    radial-gradient(circle 98px at 87% 23%, rgba(255, 190, 28, 0.98) 0 56%, rgba(255, 105, 27, 0.96) 84%, transparent 100%),
-    radial-gradient(ellipse 220px 110px at 52% 112%, rgba(54, 111, 205, 0.72) 0 68%, rgba(88, 82, 171, 0.42) 88%, transparent 100%);
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
-  --panel-surface: rgba(249, 250, 252, 0.26);
+  --panel-surface: rgba(248, 250, 253, 0.38);
   --panel-highlight: rgba(255, 255, 255, 0.88);
-  --panel-edge: rgba(255, 255, 255, 0.92);
-  --panel-glint: rgba(255, 255, 255, 0.92);
-  --panel-sheen: rgba(255, 255, 255, 0.2);
-  --panel-reflection: rgba(255, 255, 255, 0.3);
-  --panel-bottom-edge: rgba(44, 65, 100, 0.16);
-  --glass-ambient:
-    radial-gradient(circle 112px at 15% 30%, rgba(255, 79, 58, 0.9) 0 66%, rgba(255, 137, 47, 0.9) 84%, transparent 100%),
-    radial-gradient(circle 98px at 87% 23%, rgba(255, 196, 48, 0.94) 0 56%, rgba(255, 119, 42, 0.9) 84%, transparent 100%),
-    radial-gradient(ellipse 220px 110px at 52% 112%, rgba(74, 142, 221, 0.54) 0 68%, rgba(114, 116, 197, 0.3) 88%, transparent 100%);
+  --panel-edge: rgba(255, 255, 255, 0.72);
+  --panel-glint: rgba(255, 255, 255, 0.32);
+  --panel-sheen: rgba(255, 255, 255, 0.22);
+  --panel-reflection: rgba(255, 255, 255, 0.12);
+  --panel-bottom-edge: rgba(55, 72, 101, 0.14);
 }
 
 * {
@@ -127,25 +118,22 @@ body {
 }
 
 body {
-  background-image: var(--glass-ambient);
-  background-attachment: fixed;
+  background: transparent;
 }
 
 #panel {
   width: 100%;
   background:
-    radial-gradient(120% 95% at 4% 0%, var(--panel-glint), transparent 58%),
-    linear-gradient(132deg, var(--panel-sheen), transparent 64%),
-    linear-gradient(180deg, var(--panel-reflection), transparent 42%),
+    linear-gradient(136deg, var(--panel-glint) 0%, transparent 28%, transparent 74%, var(--panel-reflection) 100%),
     var(--panel-surface);
-  -webkit-backdrop-filter: blur(28px) saturate(1.65);
-  backdrop-filter: blur(28px) saturate(1.65);
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.36),
     0 0 0 1px rgba(255, 255, 255, 0.04),
     inset 0 1px 0 var(--panel-highlight),
+    inset 1px 0 0 var(--panel-sheen),
+    inset -1px 0 0 var(--panel-sheen),
     inset 0 -1px 0 var(--panel-bottom-edge);
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the

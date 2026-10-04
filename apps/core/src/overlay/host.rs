@@ -144,13 +144,6 @@ document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
 }, true);
 "#;
-const NATIVE_MATERIAL_SCRIPT: &str = r#"
-document.addEventListener('DOMContentLoaded', function () {
-  document.documentElement.dataset.nativeMaterial = 'acrylic';
-}, { once: true });
-"#;
-
-
 /// Commands the shim posts to the UI thread via the event-loop proxy.
 #[derive(Debug, Clone)]
 pub(crate) enum UiCommand {
@@ -912,7 +905,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
-                                serve_asset(request)
+                                serve_asset(request, false)
                             })
                             .with_ipc_handler(move |req| {
                                 use crate::overlay::ipc::{parse_settings, SettingsMessage};
@@ -1204,15 +1197,10 @@ fn build_webview(
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(true)
         .with_background_color((0, 0, 0, 0));
-    let builder = if acrylic_available {
-        builder.with_initialization_script(NATIVE_MATERIAL_SCRIPT)
-    } else {
-        builder
-    };
     let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request)
+            serve_asset(request, acrylic_available)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
@@ -1226,11 +1214,24 @@ fn build_webview(
 /// Serve embedded UI assets.
 fn serve_asset(
     request: Request<Vec<u8>>,
+    acrylic_available: bool,
 ) -> Response<std::borrow::Cow<'static, [u8]>> {
     let path = request.uri().path().to_string();
 
     let (content_type, body): (&str, std::borrow::Cow<'static, [u8]>) = match path.as_str() {
-        "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
+        "/" | "/index.html" => {
+            if acrylic_available {
+                // Set the glass theme before the linked stylesheet can paint.
+                let html = INDEX_HTML.replacen(
+                    "<html lang=\"en\" data-theme=\"dark\">",
+                    "<html lang=\"en\" data-theme=\"dark\" data-native-material=\"acrylic\">",
+                    1,
+                );
+                ("text/html", html.into_bytes().into())
+            } else {
+                ("text/html", INDEX_HTML.as_bytes().into())
+            }
+        }
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
         "/media_clock.js" => ("text/javascript", MEDIA_CLOCK_JS.as_bytes().into()),

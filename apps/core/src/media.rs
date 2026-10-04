@@ -86,10 +86,8 @@ fn session_manager() -> Option<SessionManager> {
 }
 
 thread_local! {
-    /// The media worker thread is persistent, so the manager/session pair
-    /// survives across snapshots. Re-requesting the manager and
-    /// re-enumerating sessions every second is what made progress updates
-    /// arrive late — the cached pair is revalidated with one cheap call.
+    /// Cache is local to a worker thread; isolated snapshot threads do not
+    /// retain it between polls.
     static CACHED: std::cell::RefCell<Option<(SessionManager, Session)>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -413,10 +411,24 @@ fn snapshot_inner() -> MediaState {
     let (position_secs, duration_secs) = session
         .GetTimelineProperties()
         .map(|timeline| {
-            let position = timeline.Position().map(|t| t.Duration).unwrap_or(0);
+            let position = timeline.Position().ok().map(|t| t.Duration);
             let duration = timeline.EndTime().map(|t| t.Duration).unwrap_or(0);
+            let last_updated = timeline
+                .LastUpdatedTime()
+                .ok()
+                .map(|time| time.UniversalTime)
+                .filter(|updated| *updated > 0);
             (
-                position.max(0) as f64 / 10_000_000.0,
+                position
+                    .map(|position| {
+                        crate::media_position::estimate_position_secs(
+                            position,
+                            last_updated,
+                            crate::media_position::winrt_utc_now_ticks(),
+                            status == "playing",
+                        )
+                    })
+                    .unwrap_or(0.0),
                 duration.max(0) as f64 / 10_000_000.0,
             )
         })

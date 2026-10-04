@@ -471,7 +471,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
                         show_pending = true;
-                        match build_webview(&window, &state, &proxy, &event_tx) {
+                        match build_webview(
+                            &window,
+                            &state,
+                            &proxy,
+                            &event_tx,
+                            acrylic_available,
+                        ) {
                             Ok(wv) => {
                                 subscribe_webview2_diagnostics(&wv);
                                 webview = Some(wv);

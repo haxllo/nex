@@ -16,7 +16,7 @@
   /* dark palette */
   --bg: #1E1E1E;
   --bg-opaque: #1E1E1E;
-  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
   --panel-surface: var(--bg);
   --panel-highlight: rgba(255, 255, 255, 0.12);
   --panel-edge: rgba(255, 255, 255, 0.12);
@@ -27,8 +27,8 @@
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
-  --text-dim: #818181;
-  --text-faint: #76767f;
+  --text-dim: #c3c9d2;
+  --text-faint: #aeb6c2;
   --sel: rgba(255, 255, 255, 0.05);
   --sel-border: rgba(255, 255, 255, 0.08);
   --hover: rgba(255, 255, 255, 0.08);
@@ -50,15 +50,15 @@
 html[data-theme="light"] {
   --bg: #ffffff;
   --bg-opaque: #ffffff;
-  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.28);
   --panel-highlight: rgba(255, 255, 255, 0.65);
   --panel-edge: rgba(0, 0, 0, 0.10);
   --panel-glint: rgba(255, 255, 255, 0.25);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
-  --text-dim: #55555f;
-  --text-faint: #8a8a93;
+  --text-dim: #4b515c;
+  --text-faint: #68717e;
   --sel: rgba(0, 0, 0, 0.04);
   --sel-border: rgba(0, 0, 0, 0.06);
   --hover: rgba(0, 0, 0, 0.07);
@@ -157,7 +157,7 @@ body {
 #search-icon {
   flex: 0 0 auto;
   fill: none;
-  stroke: var(--border-strong);
+  stroke: var(--text-faint);
   stroke-width: 2;
   stroke-linecap: round;
   transition: opacity 120ms ease;

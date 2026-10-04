@@ -78,7 +78,7 @@ html[data-theme="light"] {
 }
 
 html[data-native-material="acrylic"] {
-  --panel-surface: rgba(17, 20, 27, 0.32);
+  --panel-surface: rgba(17, 20, 27, 0.12);
   --panel-highlight: rgba(255, 255, 255, 0.24);
   --panel-edge: rgba(255, 255, 255, 0.2);
   --panel-glint: rgba(255, 255, 255, 0.12);
@@ -88,7 +88,7 @@ html[data-native-material="acrylic"] {
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
-  --panel-surface: rgba(248, 250, 253, 0.38);
+  --panel-surface: rgba(248, 250, 253, 0.2);
   --panel-highlight: rgba(255, 255, 255, 0.88);
   --panel-edge: rgba(255, 255, 255, 0.72);
   --panel-glint: rgba(255, 255, 255, 0.32);

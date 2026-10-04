@@ -51,6 +51,7 @@
   // Tab keeps its normal input-select behavior.
   let mediaState = null;
   let mediaOpen = false;
+  let mediaRefreshTimer = 0;
 
   // Post-update What's New: Rust pushes `whatsNewPending` ("x.y.z") once
   // per installed version. While set, the update notice opens the
@@ -1641,6 +1642,8 @@
   // move backward except on a real discontinuity.
   let mediaAnchor = { key: "", status: "", pos: 0, at: 0 };
   let mediaRaf = 0;
+  let mediaLastPushAt = 0;
+  let mediaLastPushPos = 0;
 
   function mediaTrackKey(m) {
     // Normalized + duration rounded: SMTC metadata can flicker cosmetically
@@ -1650,15 +1653,13 @@
   }
 
   function mediaShownPos() {
-    const m = mediaState;
-    if (!m || m.status !== "playing") return mediaAnchor.pos;
-    // Stalled source: hold the displayed spot, never coast or snap.
-    if (stallHold !== null) return stallHold;
-    const now = performance.now();
-    // Pushes stopped (hung session): freeze at the last confirmed spot
-    // instead of racing the bar to the end on wall clock alone.
-    if (now - mediaAnchor.at > 4000) return mediaAnchor.pos;
-    return mediaAnchor.pos + (now - mediaAnchor.at) / 1000;
+    return window.NexMediaClock.shownPosition(
+      mediaAnchor,
+      performance.now(),
+      mediaLastPushAt,
+      mediaLastPushPos,
+      stallHold,
+    );
   }
 
   // Awaiting-confirmation jump: a single far-off push may be a stale
@@ -1686,6 +1687,7 @@
     const key = mediaTrackKey(m);
     const pushed = Number(m.position_secs) || 0;
     const now = performance.now();
+    const sourceWasStale = mediaLastPushAt > 0 && now - mediaLastPushAt > 4000;
     // Mid-drag: the user owns the bar — only adopt identity changes,
     // never yank the position back to a stale push.
     if (seeking && key === mediaAnchor.key) {
@@ -1720,6 +1722,19 @@
       // optimistically; external seeks apply on resume.
       return;
     }
+    if (sourceWasStale) {
+      mediaAnchor = window.NexMediaClock.resumeFromHold(
+        { ...mediaAnchor, key, status: m.status },
+        mediaLastPushPos,
+        pushed,
+        now,
+      );
+      stallPos = pushed;
+      stallAt = now;
+      stallHold = null;
+      pendingJump = null;
+      return;
+    }
     // Stall: source frozen while claiming playing (buffering, slow
     // network). Without this the frozen pair agrees, the confirm path
     // adopts it, and the bar yanks backward — then forward on recovery.
@@ -1731,9 +1746,18 @@
         return;
       }
     } else {
+      const held = stallHold;
       stallPos = pushed;
       stallAt = now;
       stallHold = null;
+      if (held !== null) {
+        mediaAnchor = window.NexMediaClock.resumeFromHold(
+          { ...mediaAnchor, key, status: m.status },
+          held,
+          pushed,
+          now,
+        );
+      }
     }
     // Same track, still playing: a large jump is only trusted once a
     // second consecutive push confirms it (real seek or track restart).
@@ -1815,8 +1839,13 @@
     // in-flight snapshots must not move the bar backward.
     const sample = Number(m.sampled_ms) || 0;
     if (sample > 0 && sample < anchorFloor) return;
-    // Re-anchor the monotonic clock to the authoritative push.
-    syncMediaAnchor(m);
+    // Reopening may render the cached snapshot before its refresh returns.
+    // Keep the existing clock until a current sample arrives.
+    if (!sample || Date.now() - sample <= 4000) {
+      syncMediaAnchor(m);
+      mediaLastPushAt = performance.now();
+      mediaLastPushPos = Math.max(mediaShownPos(), 0);
+    }
     mediaTitle.textContent = m.title || "Unknown track";
     mediaArtist.textContent = [m.artist, m.album].filter(Boolean).join(" — ");
     if (m.art) {
@@ -1864,6 +1893,8 @@
           // Fresh anchor on switch — the session-keyed track identity
           // re-adopts on the next push; clear now so nothing glides.
           // Pre-switch snapshots are stale: floor them out by sample time.
+          mediaLastPushPos = mediaShownPos();
+          mediaLastPushAt = performance.now();
           mediaAnchor.key = "";
           anchorFloor = Date.now();
           stallPos = null;
@@ -1894,14 +1925,22 @@
     renderMedia();
     kickMediaFrame();
     postMediaResize();
-    // Ask Rust for a fresh snapshot — the view may have opened on a
-    // tick-old state and transport buttons need current data.
+    // Keep playback state fresh while the progress clock is visible.
     post("mediaRefresh");
+    if (!mediaRefreshTimer) {
+      mediaRefreshTimer = window.setInterval(() => {
+        if (mediaOpen) post("mediaRefresh");
+      }, 1000);
+    }
   }
 
   function closeMediaView() {
     if (!mediaOpen) return;
     mediaOpen = false;
+    if (mediaRefreshTimer) {
+      window.clearInterval(mediaRefreshTimer);
+      mediaRefreshTimer = 0;
+    }
     if (mediaRaf) {
       cancelAnimationFrame(mediaRaf);
       mediaRaf = 0;
@@ -1932,6 +1971,8 @@
       pos: target,
       at: performance.now(),
     };
+    mediaLastPushAt = mediaAnchor.at;
+    mediaLastPushPos = target;
     // Pre-seek snapshots are stale the moment the drag moves: floor them
     // out by sample time, coast optimistically through the round trip,
     // and drop any stall state from the old spot.

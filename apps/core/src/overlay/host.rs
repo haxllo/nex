@@ -134,6 +134,7 @@ const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
+const MEDIA_CLOCK_JS: &str = include_str!("../../assets/media_clock.js");
 const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
 document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
@@ -1228,6 +1229,7 @@ fn serve_asset(
         "/" | "/index.html" => ("text/html", INDEX_HTML.as_bytes().into()),
         "/style.css" => ("text/css", STYLE_CSS.as_bytes().into()),
         "/app.js" => ("text/javascript", APP_JS.as_bytes().into()),
+        "/media_clock.js" => ("text/javascript", MEDIA_CLOCK_JS.as_bytes().into()),
         "/settings.html" => ("text/html", SETTINGS_HTML.as_bytes().into()),
         "/settings.js" => ("text/javascript", SETTINGS_JS.as_bytes().into()),
         _ => return not_found(),

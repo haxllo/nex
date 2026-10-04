@@ -1841,11 +1841,12 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         );
     }
     // Acrylic blur behind the (transparent) WebView. Falls back to a
-    // CSS-painted panel if the OS refuses (window-vibrancy returns Err).
+    // CSS-painted glass panel if the OS refuses (window-vibrancy returns Err).
+    // Keep the legacy acrylic tint light so the desktop blur remains visible.
     let tint = if dark {
-        Some((18, 18, 20, 172))
+        Some((18, 18, 20, 112))
     } else {
-        Some((245, 245, 248, 160))
+        Some((245, 245, 248, 104))
     };
     let available = window_vibrancy::apply_acrylic(window, tint).is_ok();
     if !available {

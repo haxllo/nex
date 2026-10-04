@@ -213,6 +213,17 @@ impl TantivyIndex {
             .lock()
             .map_err(|e| format!("tantivy writer lock error: {e}"))?;
 
+        // Commit buffered mutations before delete_all_documents: it removes
+        // committed segments, so pending documents could otherwise survive
+        // a full replacement.
+        writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
+
         writer
             .delete_all_documents()
             .map_err(|e| format!("tantivy delete all error: {e}"))?;
@@ -236,6 +247,10 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
 
         // Reclaim disk + mmap RSS from the prior segments that
         // `delete_all_documents` logically removed but the file
@@ -253,11 +268,23 @@ impl TantivyIndex {
             .map_err(|e| format!("tantivy writer lock error: {e}"))?;
 
         writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
+
+        writer
             .delete_all_documents()
             .map_err(|e| format!("tantivy delete all error: {e}"))?;
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
         let _ = writer.garbage_collect_files().wait();
 
         Ok(())
@@ -691,6 +718,30 @@ mod tests {
 
         index.upsert_item(&stale).unwrap();
         index.incremental_sync_items(&[]).unwrap();
+
+        assert_eq!(index.num_docs().unwrap(), 0);
+        assert!(index.search("staledoc", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_tantivy_full_sync_removes_uncommitted_upsert() {
+        let (index, _dir) = open_temp_index();
+        let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
+
+        index.upsert_item(&stale).unwrap();
+        index.index_items(&[]).unwrap();
+
+        assert_eq!(index.num_docs().unwrap(), 0);
+        assert!(index.search("staledoc", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_tantivy_clear_removes_uncommitted_upsert() {
+        let (index, _dir) = open_temp_index();
+        let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
+
+        index.upsert_item(&stale).unwrap();
+        index.clear().unwrap();
 
         assert_eq!(index.num_docs().unwrap(), 0);
         assert!(index.search("staledoc", 10).unwrap().is_empty());

@@ -1,11 +1,42 @@
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nex_core::config::Config;
 use nex_core::core_service::CoreService;
 #[cfg(not(target_os = "windows"))]
 use nex_core::discovery::StartMenuAppDiscoveryProvider;
 use nex_core::discovery::{
     AppProvider, DiscoveryProvider, FileProvider, FileSystemDiscoveryProvider,
 };
+
+struct IsolatedTestIndex(PathBuf);
+
+impl IsolatedTestIndex {
+    // CoreService opens Tantivy beside index_db_path; parallel tests need separate directories.
+    fn new(label: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nex-discovery-tantivy-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        Self(path)
+    }
+
+    fn config(&self) -> Config {
+        let mut config = Config::default();
+        config.index_db_path = self.0.join("index.sqlite3");
+        config
+    }
+}
+
+impl Drop for IsolatedTestIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 #[test]
 fn app_provider_fixture_is_deterministic() {
@@ -79,7 +110,8 @@ fn rebuild_index_uses_registered_providers() {
     std::fs::write(&app_path, b"app").unwrap();
     std::fs::write(&file_path, b"file").unwrap();
 
-    let config = nex_core::config::Config::default();
+    let test_index = IsolatedTestIndex::new("registered-providers");
+    let config = test_index.config();
     let db = nex_core::index_store::open_memory().unwrap();
 
     let service = CoreService::with_connection(config, db)
@@ -124,7 +156,8 @@ fn runtime_providers_use_configured_roots() {
     let file_path = root.join("RuntimeDoc.txt");
     std::fs::write(&file_path, b"runtime").unwrap();
 
-    let mut config = nex_core::config::Config::default();
+    let test_index = IsolatedTestIndex::new("runtime-roots");
+    let mut config = test_index.config();
     config.show_files = true;
     config.discovery_roots = vec![root.clone()];
     // Ensure this test root is not filtered by default exclude roots (which may include %TEMP%).
@@ -156,7 +189,8 @@ fn runtime_providers_respect_show_files_and_folders_toggles() {
     let file_path = root.join("HiddenDoc.txt");
     std::fs::write(&file_path, b"runtime").unwrap();
 
-    let mut config = nex_core::config::Config::default();
+    let test_index = IsolatedTestIndex::new("hidden-roots");
+    let mut config = test_index.config();
     config.discovery_roots = vec![root.clone()];
     config.discovery_exclude_roots = vec![];
     config.show_files = false;
@@ -184,7 +218,8 @@ fn runtime_providers_prune_existing_file_entries_when_disabled() {
     let root = std::env::temp_dir().join(format!("nex-runtime-prune-roots-{unique}"));
     std::fs::create_dir_all(&root).unwrap();
 
-    let mut config = nex_core::config::Config::default();
+    let test_index = IsolatedTestIndex::new("prune-roots");
+    let mut config = test_index.config();
     config.discovery_roots = vec![root.clone()];
     config.discovery_exclude_roots = vec![];
     config.show_files = false;
@@ -341,7 +376,8 @@ fn file_system_provider_excludes_explicit_system_roots() {
 
 #[test]
 fn runtime_providers_keep_start_menu_apps_when_file_like_paths_are_excluded() {
-    let config = nex_core::config::Config::default();
+    let test_index = IsolatedTestIndex::new("runtime-provider-names");
+    let config = test_index.config();
     let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db)
         .unwrap()

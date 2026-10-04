@@ -134,7 +134,11 @@ impl TantivyIndex {
         let query = build_prefix_query(
             &searcher.index(),
             query_text,
-            &[self.fields.title_norm, self.fields.path, self.fields.subtitle],
+            &[
+                self.fields.title_norm,
+                self.fields.path,
+                self.fields.subtitle,
+            ],
             self.fields.title_norm,
         )
         .map_err(|e| format!("tantivy query build error: {e}"))?;
@@ -298,6 +302,22 @@ impl TantivyIndex {
     }
 
     pub fn incremental_sync_items(&self, items: &[SearchItem]) -> Result<(), String> {
+        // Publish buffered upserts/deletes before using the reader to compute
+        // the existing-ID set; otherwise an uncommitted document can escape
+        // the diff and be committed again by this sync after it was removed.
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+        writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
+        drop(writer);
+
         // Phase 1: Collect existing document IDs using the reader only.
         // The reader is independent from the writer — no writer lock needed.
         // This is the expensive part (iterates all live docs) and runs
@@ -341,14 +361,12 @@ impl TantivyIndex {
 
         // Delete removed items (exist in index but not in incoming set)
         for existing_id in existing_ids.difference(&incoming_ids) {
-            writer
-                .delete_term(tantivy::Term::from_field_text(self.fields.id, existing_id));
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.id, existing_id));
         }
 
         // Add/update incoming items
         for item in items {
-            writer
-                .delete_term(tantivy::Term::from_field_text(self.fields.id, &item.id));
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.id, &item.id));
             writer
                 .add_document(doc!(
                     self.fields.id => item.id.as_str(),
@@ -664,6 +682,18 @@ mod tests {
         let empty: Vec<SearchItem> = vec![];
         index.incremental_sync_items(&empty).unwrap();
         assert_eq!(index.num_docs().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_tantivy_incremental_sync_removes_uncommitted_upsert() {
+        let (index, _dir) = open_temp_index();
+        let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
+
+        index.upsert_item(&stale).unwrap();
+        index.incremental_sync_items(&[]).unwrap();
+
+        assert_eq!(index.num_docs().unwrap(), 0);
+        assert!(index.search("staledoc", 10).unwrap().is_empty());
     }
 
     #[test]

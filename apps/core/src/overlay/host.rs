@@ -92,7 +92,11 @@ use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TRANSITIONS_FORCEDISABLED,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMSBT_TRANSIENTWINDOW,
+    DWMWCP_ROUND,
+};
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
@@ -1826,33 +1830,51 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // Win32 glue: window chrome, positioning, focus
 // ─────────────────────────────────────────────────────────────────
 
-/// Apply native acrylic; the CSS surface remains opaque if DWM rejects it.
+/// Apply DWM's real desktop acrylic, with legacy acrylic as a Windows 10 fallback.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
-    // Disable DWM transition animation (zoom-out+fade) so hide is instant.
     let hwnd = window.hwnd() as HWND;
-    unsafe {
-        let disabled: i32 = 1;
-        DwmSetWindowAttribute(
-            hwnd,
-            3, // DWMWA_TRANSITIONS_FORCEDISABLED
-            &disabled as *const i32 as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-    }
-    // Acrylic blur behind the (transparent) WebView. Falls back to a
-    // CSS-painted glass panel if the OS refuses (window-vibrancy returns Err).
-    // Keep the legacy acrylic tint light so the desktop blur remains visible.
-    let tint = if dark {
-        Some((18, 18, 20, 112))
+    let transitions_disabled = 1_i32;
+    let immersive_dark = i32::from(dark);
+    let rounded_corners = DWMWCP_ROUND;
+    let _ = set_dwm_attribute(
+        hwnd,
+        DWMWA_TRANSITIONS_FORCEDISABLED,
+        &transitions_disabled,
+    );
+    let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
+    let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+
+    // Windows 11 22H2+: DWM draws and blurs the real desktop backdrop behind
+    // the transparent WebView. The accent-color parameter of apply_acrylic
+    // is ignored by this newer DWM API, so use it only for older Windows.
+    let backdrop = DWMSBT_TRANSIENTWINDOW;
+    let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
+    let available = if native_backdrop {
+        true
     } else {
-        Some((245, 245, 248, 104))
+        let tint = if dark {
+            Some((20, 22, 28, 112))
+        } else {
+            Some((245, 247, 250, 104))
+        };
+        window_vibrancy::apply_acrylic(window, tint).is_ok()
     };
-    let available = window_vibrancy::apply_acrylic(window, tint).is_ok();
     if !available {
-        crate::logging::info("[nex] acrylic unavailable; using opaque panel");
+        crate::logging::info("[nex] native acrylic unavailable; using opaque CSS fallback");
     }
     available
+}
+
+fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute as u32,
+            value as *const T as *const std::ffi::c_void,
+            std::mem::size_of::<T>() as u32,
+        ) >= 0
+    }
 }
 
 /// Keep the WebView viewport pinned to the maximum panel size so content

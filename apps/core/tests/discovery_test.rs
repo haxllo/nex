@@ -245,9 +245,10 @@ fn runtime_providers_prune_existing_file_entries_when_disabled() {
     let before = service.search("staledoc", 10).unwrap();
     assert!(!before.is_empty());
 
-    let _ = service.rebuild_index().unwrap();
+    let report = service.rebuild_index_incremental_with_report().unwrap();
+    assert_eq!(report.removed_total, 1);
     let after = service.search("staledoc", 10).unwrap();
-    assert!(after.is_empty());
+    assert!(after.iter().all(|item| item.id != "file:stale-doc"));
 
     std::fs::remove_file(&stale_path).unwrap();
     std::fs::remove_dir_all(&root).unwrap();

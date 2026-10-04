@@ -751,8 +751,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             crate::runtime::log_info("[nex] host Painted: stale (visible=false), skipping show");
                             return;
                         }
-                        window.set_visible(true);
-                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Always register raw input sink so the overlay
                         // receives WM_INPUT for all keyboard events while
                         // foreground.  This works around Chromium/WebView2
@@ -762,7 +760,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        // Prepare foreground permission before the first
+                        // visible frame; force_foreground performs the native
+                        // show after its input handoff, avoiding an inactive
+                        // Acrylic fallback from tao's plain set_visible call.
                         force_foreground(hwnd);
+                        window.set_visible(true);
+                        OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.
                         focus_input(&webview);
@@ -2054,14 +2058,14 @@ fn hide_overlay_window(hwnd: HWND, window: &Window) {
 fn force_foreground(hwnd: HWND) {
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-        ShowWindow, SW_SHOW,
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_SHOW,
     };
     unsafe {
         // Already foreground — skip the synthetic Alt tap which would
         // blur the WebView2 child's focused input element.
         let fg = GetForegroundWindow();
-        if fg == hwnd {
+        if fg == hwnd && IsWindowVisible(hwnd) != 0 {
             return;
         }
         // Classic foreground-lock unlock: a synthetic key event marks

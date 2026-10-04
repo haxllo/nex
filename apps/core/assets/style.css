@@ -843,9 +843,10 @@ html[data-theme="light"] img.icon.glyph {
 
 #media-view {
   display: none;
-  flex-direction: column;
+  position: relative;
+  flex-direction: row;
   align-items: center;
-  gap: 6px;
+  gap: 16px;
   padding: 16px 20px 14px;
 }
 
@@ -853,9 +854,54 @@ html[data-theme="light"] img.icon.glyph {
   display: flex;
 }
 
+/* Session switcher dots: one per live app, top-right. Hidden unless 2+. */
+#media-dots {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 1;
+}
+
+#media-dots.hidden {
+  display: none;
+}
+
+#media-dots button {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--text-faint);
+  opacity: 0.45;
+  cursor: pointer;
+  transition: opacity 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+#media-dots button:hover {
+  opacity: 1;
+  transform: scale(1.25);
+}
+
+#media-dots button:focus {
+  outline: none;
+}
+
+#media-dots button.dot-active {
+  background: var(--accent);
+  opacity: 1;
+}
+
+#media-dots button.dot-playing:not(.dot-active) {
+  opacity: 0.8;
+}
+
 #media-art {
-  width: 148px;
-  height: 148px;
+  width: 120px;
+  height: 120px;
+  flex: 0 0 auto;
   border-radius: 12px;
   object-fit: cover;
   background: var(--icon-bg);
@@ -867,11 +913,19 @@ html[data-theme="light"] img.icon.glyph {
   visibility: hidden;
 }
 
+.media-main {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+
 .media-title {
   font-size: 14px;
   font-weight: 600;
   max-width: 100%;
-  margin-top: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -881,7 +935,7 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 12px;
   color: var(--text-faint);
   max-width: 100%;
-  margin-bottom: 2px;
+  margin-bottom: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -894,7 +948,7 @@ html[data-theme="light"] img.icon.glyph {
   border-radius: 2px;
   background: var(--hover);
   overflow: visible;
-  margin-top: 6px;
+  margin-top: 2px;
   cursor: pointer;
   touch-action: none;
 }
@@ -945,9 +999,43 @@ html[data-theme="light"] img.icon.glyph {
   font-variant-numeric: tabular-nums;
 }
 
+.media-times-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Live badge shown in place of the duration for live radio. */
+#media-live {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  transform: translateY(1px);
+}
+
+#media-live.hidden {
+  display: none;
+}
+
+/* Locked bar (ads, unseekable sources): progress still shows, but no
+   pointer and no knob — there is nothing to drag. */
+#media-progress.locked {
+  cursor: default;
+  pointer-events: none;
+}
+
+#media-progress.locked #media-progress-knob {
+  display: none;
+}
+
 .media-controls {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   margin-top: 4px;
 }
@@ -975,21 +1063,6 @@ html[data-theme="light"] img.icon.glyph {
 
 .media-controls button:focus {
   outline: none;
-}
-
-.media-controls button.media-play {
-  width: 48px;
-  height: 48px;
-  background: #1db954;
-  color: #191414;
-}
-
-.media-controls button.media-play:hover {
-  background: #1ed760;
-}
-
-.media-controls button.media-play:active {
-  background: #169c46;
 }
 
 /* Compact output volume tucked into the transport row, split off by a

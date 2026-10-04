@@ -1385,6 +1385,9 @@ fn handle_ipc(
         OverlayMessage::MediaMute(_) => {
             let _ = event_tx.send(OverlayEvent::MediaMute);
         }
+        OverlayMessage::MediaSession(p) => {
+            let _ = event_tx.send(OverlayEvent::MediaSession(p.v));
+        }
         OverlayMessage::WhatsNew(_) => {
             let _ = event_tx.send(OverlayEvent::WhatsNew);
         }

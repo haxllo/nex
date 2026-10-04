@@ -268,8 +268,8 @@ const ADVANCE_EPS_SECS: f64 = 0.5;
 /// (thread-local cache never hits), so memory must be process-wide.
 static LAST_PICK: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
-/// Per-app position anchor for stuck detection: (pos, time, logged).
-static ADVANCE_MAP: OnceLock<Mutex<HashMap<String, (f64, u64, bool)>>> = OnceLock::new();
+/// Per-app position anchor for stuck detection: (pos, time).
+static ADVANCE_MAP: OnceLock<Mutex<HashMap<String, (f64, u64)>>> = OnceLock::new();
 
 fn set_last_pick(app_id: &str) {
     if let Ok(mut last) = LAST_PICK
@@ -290,9 +290,7 @@ fn advancement_fresh(anchor_pos: f64, anchor_time_ms: u64, pos: f64, now_ms: u64
 }
 
 /// A playing-like session counts as effectively playing unless its
-/// position froze past the grace (background-tab stall, e.g. Brave
-/// reporting playing at one spot for 100s). Demotion logs once
-/// (TEMP-DIAG) until the ping-pong hunt closes.
+/// position froze past the grace (background-tab stall).
 fn effectively_playing(app_id: &str, session: &Session, now_ms: u64) -> bool {
     let pos = ticks_to_secs(
         session
@@ -306,19 +304,12 @@ fn effectively_playing(app_id: &str, session: &Session, now_ms: u64) -> bool {
     let Ok(mut guard) = map.lock() else {
         return true;
     };
-    let entry = guard.entry(app_id.to_string()).or_insert((pos, now_ms, false));
+    let entry = guard.entry(app_id.to_string()).or_insert((pos, now_ms));
     if advancement_fresh(entry.0, entry.1, pos, now_ms) {
         if pos > entry.0 + ADVANCE_EPS_SECS {
-            *entry = (pos, now_ms, false);
+            *entry = (pos, now_ms);
         }
         return true;
-    }
-    if !entry.2 {
-        entry.2 = true;
-        crate::logging::warn(&format!(
-            "[nex][media-diag] stuck {app_id} pos {pos:.2} unchanged {}s",
-            now_ms.saturating_sub(entry.1) / 1000,
-        ));
     }
     false
 }
@@ -551,39 +542,6 @@ fn resolve_seek_window(
     (lo, hi, seekable, false)
 }
 
-// TEMP-DIAG ping-pong hunt. Logs only on: active session change,
-// backward position jump >1s, live-count change. REMOVE after diagnosis.
-fn diag_media_push(app_id: &str, title: &str, status: &str, pos: f64, live_count: usize) {
-    static STATE: OnceLock<Mutex<(String, f64, usize)>> = OnceLock::new();
-    let lock = STATE.get_or_init(|| Mutex::new((String::new(), 0.0, 0)));
-    let Ok(mut s) = lock.lock() else {
-        return;
-    };
-    let key = format!("{app_id}\u{1f}{title}");
-    if s.0 != key {
-        crate::logging::warn(&format!(
-            "[nex][media-diag] active now {app_id} title={title:?} status={status} pos={pos:.2} dots={live_count}"
-        ));
-        s.0 = key;
-        s.1 = pos;
-        s.2 = live_count;
-        return;
-    }
-    if pos < s.1 - 1.0 {
-        crate::logging::warn(&format!(
-            "[nex][media-diag] BACKWARD {app_id} {old:.2} -> {pos:.2} status={status} dots={live_count}",
-            old = s.1,
-        ));
-    } else if live_count != s.2 {
-        crate::logging::warn(&format!(
-            "[nex][media-diag] dots {old} -> {live_count} ({app_id} {status} pos={pos:.2})",
-            old = s.2,
-        ));
-    }
-    s.1 = pos;
-    s.2 = live_count;
-}
-
 /// Master output volume via the MMDevice endpoint API. SMTC has no
 /// per-session volume, so this is the device level — the only volume knob
 /// Windows exposes without per-app audio-session matching. Fast,
@@ -752,9 +710,6 @@ fn snapshot_inner() -> MediaState {
         if let Some((last_id, last_playing, last_state, t)) = guard.as_ref() {
             let age = now_ms.saturating_sub(*t);
             if should_hold(last_id, *last_playing, &app_id, picked_playing, age, pin_set) {
-                crate::logging::warn(&format!(
-                    "[nex][media-diag] hold {last_id} -> {app_id} (gap {age}ms)"
-                ));
                 return last_state.clone();
             }
         }
@@ -837,10 +792,6 @@ fn snapshot_inner() -> MediaState {
         .unwrap_or((1.0, false, false));
 
     let (sessions, session_key) = switcher_entries(&live, &app_id);
-
-    // TEMP-DIAG ping-pong hunt: logs active-session changes, backward
-    // position jumps, and live-count changes. REMOVE after diagnosis.
-    diag_media_push(&app_id, &title, &status, position_secs, sessions.len());
 
     let state = MediaState {
         active: true,

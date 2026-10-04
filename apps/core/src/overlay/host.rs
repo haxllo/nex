@@ -139,6 +139,11 @@ document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
 }, true);
 "#;
+const NATIVE_MATERIAL_SCRIPT: &str = r#"
+document.addEventListener('DOMContentLoaded', function () {
+  document.documentElement.dataset.nativeMaterial = 'acrylic';
+}, { once: true });
+"#;
 
 
 /// Commands the shim posts to the UI thread via the event-loop proxy.
@@ -246,7 +251,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     if let Ok(mut s) = state.lock() {
         s.hwnd = hwnd as isize;
     }
-    apply_window_chrome(&window, &state);
+    let acrylic_available = apply_window_chrome(&window, &state);
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
     // Register raw input sink permanently at startup so the overlay
@@ -266,7 +271,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  The WebView
     // stays resident; only the icon cache is released on idle.
-    let mut webview = match build_webview(&window, &state, &proxy, &event_tx) {
+    let mut webview = match build_webview(&window, &state, &proxy, &event_tx, acrylic_available) {
         Ok(wv) => Some(wv),
         Err(e) => {
             crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -1178,14 +1183,22 @@ fn build_webview(
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
+    acrylic_available: bool,
 ) -> Result<WebView, String> {
     let ipc_state = state.clone();
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
 
-    let webview = WebViewBuilder::new()
+    let builder = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
-        .with_background_color((30, 30, 30, 255))
+        .with_transparent(true)
+        .with_background_color((0, 0, 0, 0));
+    let builder = if acrylic_available {
+        builder.with_initialization_script(NATIVE_MATERIAL_SCRIPT)
+    } else {
+        builder
+    };
+    let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
             serve_asset(request)
@@ -1805,8 +1818,8 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // Win32 glue: window chrome, positioning, focus
 // ─────────────────────────────────────────────────────────────────
 
-/// Apply acrylic backdrop. CSS handles border-radius + box-shadow on #panel.
-fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
+/// Apply native acrylic; the CSS surface remains opaque if DWM rejects it.
+fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
     // Disable DWM transition animation (zoom-out+fade) so hide is instant.
     let hwnd = window.hwnd() as HWND;
@@ -1822,13 +1835,15 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) {
     // Acrylic blur behind the (transparent) WebView. Falls back to a
     // CSS-painted panel if the OS refuses (window-vibrancy returns Err).
     let tint = if dark {
-        Some((0, 0, 0, 230))
+        Some((18, 18, 20, 172))
     } else {
-        Some((245, 245, 247, 140))
+        Some((245, 245, 248, 160))
     };
-    if let Err(_e) = window_vibrancy::apply_acrylic(window, tint) {
+    let available = window_vibrancy::apply_acrylic(window, tint).is_ok();
+    if !available {
         crate::logging::info("[nex] acrylic unavailable; using opaque panel");
     }
+    available
 }
 
 /// Keep the WebView viewport pinned to the maximum panel size so content

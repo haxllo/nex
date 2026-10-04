@@ -118,10 +118,8 @@ fn session_manager() -> Option<SessionManager> {
 }
 
 thread_local! {
-    /// The media worker thread is persistent, so the manager/session pair
-    /// survives across snapshots. Re-requesting the manager and
-    /// re-enumerating sessions every second is what made progress updates
-    /// arrive late — the cached pair is revalidated with one cheap call.
+    /// Cache is local to a worker thread; isolated snapshot threads do not
+    /// retain it between polls.
     static CACHED: std::cell::RefCell<Option<(SessionManager, Session)>> =
         const { std::cell::RefCell::new(None) };
 }

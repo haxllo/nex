@@ -60,7 +60,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowRect, RegisterClassW, SetWindowDisplayAffinity,
+    CreateWindowExW, DefWindowProcW, RegisterClassW, SetWindowDisplayAffinity,
     SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WDA_EXCLUDEFROMCAPTURE,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     WS_POPUP,
@@ -1165,9 +1165,20 @@ fn physical_px(logical: f64, scale: f64) -> u32 {
 }
 
 fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
-    let main = HWND(main_sys as *mut std::ffi::c_void);
+    // Extended frame bounds, not GetWindowRect: the latter includes the
+    // invisible DWM drop shadow (~8px per side), which made the glass
+    // poke out around the panel. RECT is the windows (not windows_sys)
+    // shape already imported here.
     let mut rect: RECT = unsafe { std::mem::zeroed() };
-    if unsafe { GetWindowRect(main, &mut rect as *mut _).is_err() } {
+    let ok = unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            main_sys as *mut std::ffi::c_void,
+            windows_sys::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut rect as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    } == 0;
+    if !ok {
         return None;
     }
     let (w, h) = ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1));

@@ -17,12 +17,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, D2D1_BITMAP_OPTIONS,
     D2D1_BITMAP_OPTIONS_NONE,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CHANNEL_SELECTOR_G,
-    D2D1_CHANNEL_SELECTOR_R,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DISPLACEMENTMAP_PROP_SCALE,
-    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_UINT32,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT,
     CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
 };
@@ -462,20 +460,9 @@ impl GlassLayer {
                     &BEND_SCALE.to_ne_bytes(),
                 )
                 .map_err(|e| format!("displace scale failed: {e:?}"))?;
-            displace
-                .SetValue(
-                    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32,
-                    D2D1_PROPERTY_TYPE_UINT32,
-                    &D2D1_CHANNEL_SELECTOR_R.0.to_ne_bytes(),
-                )
-                .map_err(|e| format!("displace X channel failed: {e:?}"))?;
-            displace
-                .SetValue(
-                    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32,
-                    D2D1_PROPERTY_TYPE_UINT32,
-                    &D2D1_CHANNEL_SELECTOR_G.0.to_ne_bytes(),
-                )
-                .map_err(|e| format!("displace Y channel failed: {e:?}"))?;
+            // No channel selects: X=R and Y=G are already the defaults,
+            // and setting them explicitly fails E_INVALIDARG on this box.
+            // The map is generated R-for-X, G-for-Y to match.
             displace.SetInput(0, &blur_output(&blur)?, true);
             displace.SetInput(1, &map, true);
         }

@@ -529,7 +529,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Spike glass follows the main window: same rect,
                     // ordered directly below it (never activating).
                     if let Some(layer) = glass_layer.as_mut() {
-                        layer.sync_to_main(hwnd as isize);
+                        layer.sync_to_main(hwnd as isize, window.scale_factor());
                     }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
@@ -1928,7 +1928,7 @@ fn apply_window_height(
         keep_webview_viewport_max(wv);
     }
     if let Some(layer) = glass {
-        layer.sync_to_main(window.hwnd() as isize);
+        layer.sync_to_main(window.hwnd() as isize, window.scale_factor());
     }
 }
 

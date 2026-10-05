@@ -116,6 +116,11 @@ impl GlassLayer {
         }
         match GlassWindow::create(main_sys, logical_w, logical_h, scale) {
             Ok(window) => {
+                // The main window's own DWM backdrop would blur our live
+                // pixels along with the desktop (that's the acrylic wash
+                // hiding the glass). Hand the background to the glass;
+                // Acrylic stays as-is when this call fails or glass dies.
+                disable_main_backdrop(main_sys);
                 let (tx, rx) = channel();
                 // HWND is a raw pointer (not Send): move it as isize and
                 // rebuild it on the worker.
@@ -144,8 +149,11 @@ impl GlassLayer {
     }
 
     /// Align to the main window and mark visible. Called on show/resize.
-    pub fn sync_to_main(&self, main_sys: isize) {
+    pub fn sync_to_main(&self, main_sys: isize, scale: f64) {
         self.window.move_below(main_sys);
+        if let Some((_, _, w, h)) = main_rect(main_sys) {
+            self.window.apply_round_region(w, h, scale);
+        }
         let _ = self.tx.send(GlassConfig {
             visible: true,
             main_sys,
@@ -159,6 +167,30 @@ impl GlassLayer {
             visible: show,
             main_sys: 0,
         });
+    }
+}
+
+/// Hand the background to the glass: the main window's DWM backdrop
+/// would otherwise blur our live pixels into the acrylic wash.
+fn disable_main_backdrop(main_sys: isize) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    };
+    let backdrop = DWMSBT_NONE;
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            main_sys as *mut std::ffi::c_void,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &backdrop as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&backdrop) as u32,
+        )
+    };
+    if hr == 0 {
+        crate::logging::info("[nex][refract] main DWM backdrop off (glass owns the background)");
+    } else {
+        crate::logging::warn(&format!(
+            "[nex][refract] backdrop off failed: HRESULT {hr} (glass will wash out)"
+        ));
     }
 }
 
@@ -253,6 +285,26 @@ impl GlassWindow {
             let _ = ShowWindow(self.hwnd, if show { SW_SHOWNA } else { SW_HIDE });
         }
         crate::logging::info(&format!("[nex][refract] glass visible={show}"));
+    }
+
+    /// Match the panel's rounded corners so sharp desktop slivers never
+    /// peek past the glass. Runs on every sync; no-ops visually when same.
+    fn apply_round_region(&self, w_px: u32, h_px: u32, scale: f64) {
+        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+        // Panel radius token is 8 logical px; region wants diameters.
+        let d = ((8.0 * scale * 2.0).round() as i32).max(2);
+        let rgn = unsafe {
+            CreateRoundRectRgn(0, 0, w_px as i32 + 1, h_px as i32 + 1, d, d)
+        };
+        if rgn.is_null() {
+            return;
+        }
+        // Ownership passes to the OS on success; delete only on failure.
+        if unsafe { SetWindowRgn(self.hwnd.0, rgn, 1) } == 0 {
+            unsafe {
+                DeleteObject(rgn);
+            }
+        }
     }
 }
 

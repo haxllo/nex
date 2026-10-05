@@ -102,6 +102,18 @@ fn physical_px(logical: f64, scale: f64) -> u32 {
     ((logical * scale).round() as u32).max(1)
 }
 
+/// Spike probe offset (px): shift the glass right+down past the panel
+/// edge so part of it sticks out with no page above it. If the exposed
+/// part shows the effect, composition works and the page was covering
+/// it; if it shows desktop, the surface still never reaches DWM.
+/// Env NEX_REFRACT_OFFSET, 0 = aligned (default).
+fn probe_offset() -> i32 {
+    std::env::var("NEX_REFRACT_OFFSET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
 /// Create the glass top-level window for the overlay. `None` when the
 /// flag is off (info-logged) or on any failure (warn-logged, caller
 /// falls back to Acrylic). Starts hidden at the main window's rect;
@@ -554,12 +566,19 @@ impl GlassLayer {
     }
 
     /// Align to the main window: same rect, ordered directly below it,
-    /// never activating. Called on show and resize.
+    /// never activating. Called on show and resize. The probe offset
+    /// (NEX_REFRACT_OFFSET) hangs part of the glass past the panel edge
+    /// with no page above it.
     pub fn sync_to_main(&mut self, main_sys: isize) {
-        let Some((x, y, width, height)) = main_rect(main_sys) else {
+        let Some((mx, my, width, height)) = main_rect(main_sys) else {
             crate::logging::warn("[nex][refract] sync_to_main: main rect unreadable");
             return;
         };
+        let off = probe_offset();
+        let (x, y) = (mx + off, my + off);
+        if off != 0 {
+            crate::logging::info(&format!("[nex][refract] probe offset {off}px -> ({x},{y})"));
+        }
         let main = HWND(main_sys as *mut std::ffi::c_void);
         unsafe {
             let _ = SetWindowPos(

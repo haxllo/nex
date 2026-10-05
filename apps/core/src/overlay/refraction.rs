@@ -63,11 +63,12 @@ pub fn enabled() -> bool {
 }
 
 /// Step-2 effect knobs (logged at setup). Blur in px stddev, bend as
-/// displacement scale, bezel margin in px, checker cell in px.
-const BLUR_STDDEV: f32 = 16.0;
-const BEND_SCALE: f32 = 20.0;
+/// displacement scale, bezel margin in px, checker cell in px. Kept
+/// crisp on purpose: heavy blur melts the pattern that proves the bend.
+const BLUR_STDDEV: f32 = 8.0;
+const BEND_SCALE: f32 = 24.0;
 const BEZEL_MARGIN: usize = 28;
-const CHECKER_CELL: usize = 32;
+const CHECKER_CELL: usize = 64;
 
 pub struct GlassLayer {
     hwnd: HWND,
@@ -377,11 +378,26 @@ fn bitmap_props_with_alpha(
     }
 }
 
-/// Procedural backdrop: gray checkerboard so blur + bend read clearly.
+/// Procedural backdrop: gray checkerboard so blur + bend read clearly,
+/// plus a bright frame inset from the rim — a straight frame that
+/// renders curved is the unmistakable bend proof.
 fn checker_bytes(w: usize, h: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         for x in 0..w {
+            // Frame: 4px band, 6px inside every edge.
+            let in_frame = x >= 6
+                && x < w.saturating_sub(6)
+                && y >= 6
+                && y < h.saturating_sub(6)
+                && (x < 10
+                    || x >= w.saturating_sub(10)
+                    || y < 10
+                    || y >= h.saturating_sub(10));
+            if in_frame {
+                out.extend_from_slice(&[60, 60, 230, 255]);
+                continue;
+            }
             let cell = ((x / CHECKER_CELL) + (y / CHECKER_CELL)) % 2;
             let c = if cell == 0 { 200u8 } else { 110u8 };
             out.extend_from_slice(&[c, c, c, 255]);

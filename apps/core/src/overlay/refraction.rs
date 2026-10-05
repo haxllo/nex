@@ -31,10 +31,12 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongW, RegisterClassW, MoveWindow, SetWindowPos,
+    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongW, IsWindowVisible,
+    RegisterClassW, MoveWindow, SetWindowPos,
     GWL_EXSTYLE, HWND_BOTTOM, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, WINDOW_EX_STYLE,
     WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_VISIBLE,
 };
+use windows::Win32::Foundation::RECT;
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
 
 /// Env flag gating the whole spike. String compare keeps `=0`/unset off.
@@ -348,6 +350,37 @@ impl GlassLayer {
         Ok(())
     }
 
+    /// Spike probe only: re-assert TOP ordering at show time, re-present,
+    /// and log live HWND state (visibility + client rect). Creation-time
+    /// pinning is worthless on its own — the WebView child is created
+    /// after us and later siblings paint above. No-op unless NEX_REFRACT_TOP=1.
+    pub fn repin_top_for_probe(&self) {
+        if !force_top() {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
+        let visible = unsafe { IsWindowVisible(self.hwnd) };
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        let rect_ok = unsafe { GetClientRect(self.hwnd, &mut rect as *mut _).is_ok() };
+        crate::logging::warn(&format!(
+            "[nex][refract] probe repin TOP visible={} rect_ok={rect_ok} rect={},{},{},{}",
+            visible.0 != 0,
+            rect.left, rect.top, rect.right, rect.bottom
+        ));
+        if let Err(error) = self.present() {
+            crate::logging::warn(&format!("[nex][refract] probe re-present failed: {error}"));
+        }
+    }
     /// Track the panel size (physical px). No-op when unchanged.
     pub fn resize_for_logical(&mut self, logical_w: f64, logical_h: f64, scale: f64) {
         let width = physical_px(logical_w, scale);

@@ -540,6 +540,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         s.theme = crate::overlay::platform::detect_system_theme();
                     }
                     apply_window_chrome(&window, &state);
+                    // Spike probe: re-assert TOP at show time — WebView
+                    // creation (and any wry reordering) happens after our
+                    // creation-time pin and can bury the glass child.
+                    if let Some(layer) = glass_layer.as_ref() {
+                        layer.repin_top_for_probe();
+                    }
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);

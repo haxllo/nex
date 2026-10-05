@@ -1690,7 +1690,7 @@ html.glass-native #panel {
 }
 
 html.glass-native #divider {
-  background: transparent;
+  background: color-mix(in srgb, var(--text) 16%, transparent);
 }
 
 html.glass-native .row:hover::before,

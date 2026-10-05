@@ -18,16 +18,23 @@
 #![cfg(target_os = "windows")]
 
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::overlay::host::UiCommand;
+use tao::event_loop::EventLoopProxy;
 use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DISPLACEMENTMAP_PROP_SCALE,
+    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT,
+    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R,
     CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
     ID2D1SolidColorBrush,
@@ -80,9 +87,12 @@ const BEND_SCALE: f32 = 28.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
 const TINT_ALPHA: f32 = 56.0 / 255.0;
+/// Extra desktop pixels around the panel keep the blur kernel away from
+/// the capture boundary. Matches the reference renderer's 3σ + 2 pad.
+const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 
 /// Render cap: live frames present at most this often.
-const MIN_FRAME_MS: u128 = 33;
+const MIN_FRAME_MS: u128 = 16;
 
 /// Host -> worker config. `main_sys == 0` means unchanged.
 struct GlassConfig {
@@ -95,6 +105,7 @@ struct GlassConfig {
 pub struct GlassLayer {
     window: GlassWindow,
     tx: Sender<GlassConfig>,
+    ready: Arc<AtomicBool>,
 }
 
 struct GlassWindow {
@@ -110,6 +121,7 @@ impl GlassLayer {
         logical_w: f64,
         logical_h: f64,
         scale: f64,
+        proxy: EventLoopProxy<UiCommand>,
     ) -> Option<GlassLayer> {
         if !enabled() {
             crate::logging::info("[nex][refract] lab flag off — acrylic path");
@@ -123,16 +135,18 @@ impl GlassLayer {
                 // Acrylic stays as-is when this call fails or glass dies.
                 disable_main_backdrop(main_sys);
                 let (tx, rx) = channel();
+                let ready = Arc::new(AtomicBool::new(false));
+                let worker_ready = Arc::clone(&ready);
                 // HWND is a raw pointer (not Send): move it as isize and
                 // rebuild it on the worker.
                 let hwnd_sys = window.hwnd().0 as isize;
                 match std::thread::Builder::new()
                     .name("glass-capture".into())
-                    .spawn(move || worker_main(hwnd_sys, rx))
+                    .spawn(move || worker_main(hwnd_sys, main_sys, rx, proxy, worker_ready))
                 {
                     Ok(_) => {
                         crate::logging::info("[nex][refract] capture worker spawned");
-                        Some(GlassLayer { window, tx })
+                        Some(GlassLayer { window, tx, ready })
                     }
                     Err(error) => {
                         crate::logging::warn(&format!(
@@ -163,11 +177,24 @@ impl GlassLayer {
 
     /// Show/hide with the panel. No animation, no activation.
     pub fn set_visible(&self, show: bool) {
-        self.window.show(show);
+        if !show || self.ready.load(Ordering::Acquire) {
+            self.window.show(show);
+        }
         let _ = self.tx.send(GlassConfig {
             visible: show,
             main_sys: 0,
         });
+    }
+
+    /// Reveal only after the renderer has presented a captured frame.
+    pub fn show_ready_frame(&self) {
+        if self.ready.load(Ordering::Acquire) {
+            self.window.show(true);
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
     }
 }
 
@@ -315,8 +342,8 @@ impl GlassWindow {
     }
 }
 
-/// Worker-owned renderer: every D3D/D2D object. Built lazily on the
-/// first visible frame; rebuilt on size change.
+/// Worker-owned renderer: every D3D/D2D object. Prewarmed while hidden
+/// and rebuilt on size change.
 struct Engine {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -457,16 +484,29 @@ impl Engine {
     /// displacement map, and blur→displacement pair. Live captured frames
     /// replace the source via ingest_frame before presentation.
     fn rebuild_content(&mut self) -> Result<(), String> {
-        let (w, h) = (self.width as usize, self.height as usize);
+        let (w, h) = (
+            self.width as usize + BLUR_PAD as usize * 2,
+            self.height as usize + BLUR_PAD as usize * 2,
+        );
         let src_bytes = vec![0u8; w * h * 4];
-        let map_bytes = bezel_bytes(w, h);
+        let mut map_bytes = vec![128u8; w * h * 4];
+        for alpha in map_bytes.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        let panel_map = bezel_bytes(self.width as usize, self.height as usize);
+        for row in 0..self.height as usize {
+            let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
+            let src = row * self.width as usize * 4;
+            map_bytes[dst..dst + self.width as usize * 4]
+                .copy_from_slice(&panel_map[src..src + self.width as usize * 4]);
+        }
         let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
         let source: ID2D1Bitmap1 = unsafe {
             self.d2d
                 .CreateBitmap(
                     D2D_SIZE_U {
-                        width: self.width,
-                        height: self.height,
+                        width: w as u32,
+                        height: h as u32,
                     },
                     Some(src_bytes.as_ptr() as *const _),
                     (w * 4) as u32,
@@ -478,8 +518,8 @@ impl Engine {
             self.d2d
                 .CreateBitmap(
                     D2D_SIZE_U {
-                        width: self.width,
-                        height: self.height,
+                        width: w as u32,
+                        height: h as u32,
                     },
                     Some(map_bytes.as_ptr() as *const _),
                     (w * 4) as u32,
@@ -515,10 +555,26 @@ impl Engine {
                     &BEND_SCALE.to_ne_bytes(),
                 )
                 .map_err(|e| format!("displace scale failed: {e:?}"))?;
-            // X=R and Y=G are the defaults; setting them explicitly
-            // fails E_INVALIDARG on some boxes. The map matches.
+            // The effect defaults both axes to alpha, which is opaque in
+            // this map and creates a constant down-right sample offset.
+            // The bezel encodes horizontal displacement in red and vertical
+            // displacement in green, so select those channels explicitly.
             displace.SetInput(0, &blur_output(&blur)?, true);
             displace.SetInput(1, &map, true);
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &D2D1_CHANNEL_SELECTOR_R.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace X channel select failed: {e:?}"))?;
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &D2D1_CHANNEL_SELECTOR_G.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace Y channel select failed: {e:?}"))?;
         }
         self.source = Some(source);
         self.map = Some(map);
@@ -532,7 +588,9 @@ impl Engine {
     /// queued covers the next one.
     fn ingest_frame(&self, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
         let source = self.source.as_ref().ok_or("no source bitmap")?;
-        if w != self.width || h != self.height {
+        let expected_w = self.width + BLUR_PAD * 2;
+        let expected_h = self.height + BLUR_PAD * 2;
+        if w != expected_w || h != expected_h {
             return Err("size drift, dropped".to_string());
         }
         if pixels.len() != (w * h * 4) as usize {
@@ -566,10 +624,16 @@ impl Engine {
         unsafe {
             self.d2d.SetTarget(&target);
             self.d2d.BeginDraw();
+            let source_rect = D2D_RECT_F {
+                left: BLUR_PAD as f32,
+                top: BLUR_PAD as f32,
+                right: (BLUR_PAD + self.width) as f32,
+                bottom: (BLUR_PAD + self.height) as f32,
+            };
             self.d2d.DrawImage(
                 &blur_output(displace)?,
                 None,
-                None,
+                Some(&source_rect as *const _),
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             );
@@ -584,8 +648,11 @@ impl Engine {
             self.d2d
                 .EndDraw(None, None)
                 .map_err(|e| format!("EndDraw failed: {e:?}"))?;
+            // Keep the newest desktop frame flowing. In a composed window,
+            // Present(0) avoids the extra vblank wait that was throttling the
+            // glass to ~20 FPS when the desktop was also presenting video.
             self.swapchain
-                .Present(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
+                .Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
                 .ok()
                 .map_err(|e| format!("Present failed: {e:?}"))?;
         }
@@ -594,6 +661,10 @@ impl Engine {
 
     /// ResizeBuffers + content rebuild for a new panel size.
     fn resize_buffers(&mut self, width: u32, height: u32) -> Result<(), String> {
+        // D2D retains the last target even after render_frame's local bitmap
+        // is dropped. Detach it before ResizeBuffers or DXGI sees a live
+        // backbuffer reference and rejects the resize.
+        unsafe { self.d2d.SetTarget(None) };
         let result = unsafe {
             self.swapchain.ResizeBuffers(
                 0,
@@ -738,21 +809,29 @@ struct Capture {
     protected_logged: bool,
 }
 
-fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
+fn worker_main(
+    glass_sys: isize,
+    initial_main_sys: isize,
+    rx: Receiver<GlassConfig>,
+    proxy: EventLoopProxy<UiCommand>,
+    ready: Arc<AtomicBool>,
+) {
     let hwnd = HWND(glass_sys as *mut std::ffi::c_void);
     crate::logging::info("[nex][refract] worker alive (D3D11/DXGI/D2D need no COM init here)");
     let mut engine: Option<Engine> = None;
     let mut capture: Option<Capture> = None;
     let mut visible = false;
-    let mut main_sys: isize = 0;
+    let mut main_sys: isize = initial_main_sys;
+    // Build and render one frame while hidden, so the first show has a
+    // ready surface instead of waiting for D3D/capture initialization.
+    let mut prewarm_pending = true;
     let mut last_present = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
     let mut stat_t = Instant::now();
-    let (mut n_cap, mut n_pre, mut copy_us) = (0u64, 0u64, 0u64);
-    // Last panel position the glass was aligned to. The host aligns on
-    // show/resize only — drags would otherwise strand the glass, leaving
-    // the panel over bare desktop (reads as "solid").
+    let (mut n_cap, mut n_pre, mut copy_us, mut render_us) = (0u64, 0u64, 0u64, 0u64);
+    // Last panel position the glass was aligned to. Re-align if the
+    // window position changes while the capture worker is active.
     let mut last_glass_at = (0i32, 0i32);
     // Straight failures in a row: a poisoned device/capture never heals
     // by retrying the same calls, so rebuild everything after a few.
@@ -765,7 +844,7 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 main_sys = cfg.main_sys;
             }
         }
-        if !visible || main_sys == 0 {
+        if (!visible && !prewarm_pending) || main_sys == 0 {
             if capture.take().is_some() {
                 crate::logging::info("[nex][refract] capture stopped (hidden)");
             }
@@ -865,10 +944,10 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         if info.ProtectedContentMaskedOut.0 != 0 {
             if !cap.protected_logged {
                 cap.protected_logged = true;
-                crate::logging::warn("[nex][refract] protected content masked (renders black)");
+                crate::logging::warn(
+                    "[nex][refract] protected pixels are masked by Windows; presenting the rest of each frame",
+                );
             }
-        } else {
-            cap.protected_logged = false;
         }
         // FPS cap: skip upload/draw but always release.
         if Instant::now().duration_since(last_present) < Duration::from_millis(MIN_FRAME_MS as u64) {
@@ -876,12 +955,16 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
-        let (bx, by, bw, bh) = clamp_panel_box(mx, my, mw, mh, cap.origin_x, cap.origin_y, cap.frame_w, cap.frame_h);
-        if bw == 0 || bh == 0 {
+        let pad = BLUR_PAD as i32;
+        let (bx, by, bw, bh) = clamp_panel_box(
+            mx - pad, my - pad, mw + BLUR_PAD * 2, mh + BLUR_PAD * 2,
+            cap.origin_x, cap.origin_y, cap.frame_w, cap.frame_h,
+        );
+        if bw != mw + BLUR_PAD * 2 || bh != mh + BLUR_PAD * 2 {
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             continue;
         }
-        let frame_ok = (|| -> Result<u64, String> {
+        let frame_ok = (|| -> Result<(u64, u64), String> {
             let tex: ID3D11Texture2D = resource
                 .as_ref()
                 .ok_or("empty frame resource")?
@@ -951,17 +1034,30 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 eng.context.Unmap(&cap.staging, 0);
             }
             let us = t0.elapsed().as_micros() as u64;
+            let render_t = Instant::now();
             eng.ingest_frame(&pixels, bw, bh)?;
             eng.render_frame()?;
+            let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
-            Ok(us)
+            Ok((us, render_us))
         })();
         match frame_ok {
-            Ok(us) => {
+            Ok((us, frame_render_us)) => {
                 copy_us += us;
+                render_us += frame_render_us;
                 n_pre += 1;
                 n_fail = 0;
                 last_present = Instant::now();
+                if !ready.swap(true, Ordering::AcqRel) {
+                    let _ = proxy.send_event(UiCommand::GlassReady);
+                }
+                if prewarm_pending {
+                    prewarm_pending = false;
+                    if !visible {
+                        capture = None;
+                        crate::logging::info("[nex][refract] first frame prewarmed while hidden");
+                    }
+                }
             }
             Err(error) => {
                 let _ = unsafe { cap.duplication.ReleaseFrame() };
@@ -982,13 +1078,15 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         }
         if stat_t.elapsed() >= Duration::from_secs(1) {
             let avg = if n_pre > 0 { copy_us / n_pre } else { 0 };
+            let render_avg = if n_pre > 0 { render_us / n_pre } else { 0 };
             crate::logging::info(&format!(
-                "[nex][refract] captured/s={n_cap} presented/s={n_pre} copy_avg={avg}us"
+                "[nex][refract] captured/s={n_cap} presented/s={n_pre} copy_avg={avg}us render_avg={render_avg}us"
             ));
             stat_t = Instant::now();
             n_cap = 0;
             n_pre = 0;
             copy_us = 0;
+            render_us = 0;
         }
     }
 }

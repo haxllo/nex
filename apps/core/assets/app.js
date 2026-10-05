@@ -90,28 +90,18 @@
     { passive: true }
   );
 
-  // Drag the overlay by holding anywhere that isn't interactive
-  // (input, button, row, context-menu, power menu, etc.). Position
-  // resets to the default anchor on every show — only the current
-  // show's drag sticks. On mousedown we post a single `dragStart`;
-  // Rust enters the native caption-drag modal loop (WM_SYSCOMMAND
-  // + SC_MOVE | HTCAPTION) and the OS moves the window in lockstep
-  // with the cursor — no per-move IPC, no delta math, no ghost
-  // frames. Clicking any draggable (non-interactive) spot also
-  // focuses the input and selects its content so the user can type
-  // a fresh query without clearing the old one by hand.
-  const DRAG_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, #media-progress, .power-panel, .power-confirm";
+  // Blank panel space still focuses the search box, but never moves the
+  // overlay. Interactive controls keep their own mouse behavior.
+  const FOCUS_BLOCKED = "input, button, textarea, select, .row, [role='button'], #context-menu, #media-progress, .power-panel, .power-confirm";
   panel.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
     if (!contextMenu.classList.contains("hidden") && !e.target.closest("#context-menu")) {
       hideContextMenu();
     }
-    if (e.target.closest(DRAG_BLOCKED)) return;
-    if (e.target.isContentEditable) return;
+    if (e.target.closest(FOCUS_BLOCKED) || e.target.isContentEditable) return;
     e.preventDefault();
     input.focus();
     input.select();
-    post("dragStart");
   });
 
   // Persistent icon cache — survives DOM rebuilds across state pushes.

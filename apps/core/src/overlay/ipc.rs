@@ -244,8 +244,6 @@ pub(crate) enum OverlayMessage {
     MediaSession(TextPayload),
     #[serde(rename = "whatsNew")]
     WhatsNew(NoPayload),
-    #[serde(rename = "dragStart")]
-    DragStart(NoPayload),
 }
 
 /// Settings-window IPC envelope. Deliberately separate from
@@ -307,7 +305,6 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaMute",
         "mediaSession",
         "whatsNew",
-        "dragStart",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
         return Err(IpcReject::UnknownType(tag));

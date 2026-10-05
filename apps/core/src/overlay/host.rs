@@ -58,12 +58,6 @@ pub(crate) fn rearm_raw_input_sink() {
     register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
 }
 
-/// True while the user is mid native caption-drag of the overlay.
-/// Flipped around the modal move loop in [`UiCommand::DragStart`].
-/// While true, [`UiCommand::Show`] skips `position_window`
-/// so the next show doesn't yank a still-held window back to center.
-static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// Set to `true` before `run_return` enters and `false` after it
 /// returns.  Guarded proxy sends ( [`try_send_ui`] ) check this so
 /// straggler messages cannot land on a destroyed tao runner.
@@ -180,6 +174,8 @@ pub(crate) enum UiCommand {
     Teardown(u64),
     /// The page painted after a push_state — trigger deferred show.
     Painted,
+    /// The first native glass frame was presented and can be revealed.
+    GlassReady,
     /// The page measured its content height (CSS px); resize to hug it.
     Resize { h: f64, immediate: bool },
     /// Exit the event loop (clean shutdown).
@@ -199,11 +195,6 @@ pub(crate) enum UiCommand {
     FocusReassert,
     /// Close (hide) the settings window via tao API.
     CloseSettings,
-    /// JS drag began. Latches DRAG_ACTIVE, then enters the native
-    /// caption-drag modal loop (WM_NCLBUTTONDOWN + HTCAPTION) — the OS
-    /// moves the window in lockstep with the cursor, so there is no
-    /// per-move IPC, no delta math, no lag, and no ghost frames.
-    DragStart,
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -260,6 +251,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         WINDOW_WIDTH,
         INITIAL_HEIGHT,
         window.scale_factor(),
+        proxy.clone(),
     );
     // The page drops its painted backgrounds when native glass is live
     // so refracted pixels show through (pushed with every snapshot).
@@ -310,6 +302,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    let mut painted_waiting_for_glass = false;
     let mut previous_foreground: Option<HWND> = None;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
@@ -408,16 +401,29 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     UiCommand::WebviewReady => {
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                         ready = true;
-                    if state.lock().map(|s| s.visible).unwrap_or(false) {
-                        position_window(&window, hwnd);
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
-                        last_applied_height = INITIAL_HEIGHT;
-                        pending_resize = None;
-                        first_resize_after_show = true;
-                        push_state(&webview, &state, &icon_cache, true);
-                        show_pending = true;
+                        if state.lock().map(|s| s.visible).unwrap_or(false) {
+                            position_window(&window, hwnd);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                            last_applied_height = INITIAL_HEIGHT;
+                            pending_resize = None;
+                            first_resize_after_show = true;
+                            push_state(&webview, &state, &icon_cache, true);
+                            show_pending = true;
+                            painted_waiting_for_glass = false;
+                        }
                     }
-                }
+                    UiCommand::GlassReady => {
+                        if show_pending && painted_waiting_for_glass {
+                            painted_waiting_for_glass = false;
+                            try_send_ui(&proxy, UiCommand::Painted);
+                        } else if OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                            && state.lock().map(|s| s.visible).unwrap_or(false)
+                        {
+                            if let Some(layer) = glass_layer.as_ref() {
+                                layer.show_ready_frame();
+                            }
+                        }
+                    }
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         push_state(&webview, &state, &icon_cache, false);
@@ -485,6 +491,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
                         show_pending = true;
+                        painted_waiting_for_glass = false;
                         match build_webview(
                             &window,
                             &state,
@@ -512,6 +519,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebviewReady is already queued and completes the
                         // show via show_pending.
                         show_pending = true;
+                        painted_waiting_for_glass = false;
                         return;
                     }
                     // Set show_pending FIRST so spurious Focused(false) during
@@ -519,19 +527,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // trigger Escape (which would desync OverlayState from
                     // the actual window state).
                     show_pending = true;
+                    painted_waiting_for_glass = false;
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
                     // Bump the epoch so any in-flight deferred-hide thread
                     // from the previous cycle detects it is stale.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
                     deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                    // If the user is mid native drag (caption-drag of a
-                    // borderless popup), don't re-center the window — that
-                    // would yank it from under their cursor. The drag will
-                    // finish naturally; the next show after that resets.
-                    if !DRAG_ACTIVE.load(Ordering::SeqCst) {
-                        position_window(&window, hwnd);
-                    }
+                    position_window(&window, hwnd);
                     // Spike glass follows the main window: same rect,
                     // ordered directly below it (never activating).
                     if let Some(layer) = glass_layer.as_mut() {
@@ -627,12 +630,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     was_focused = false;
                     show_pending = false;
+                    painted_waiting_for_glass = false;
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
                     deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                    // Drop any in-flight drag so the next show re-centers.
-                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -662,7 +664,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     focus_reassert_used = false;
                     show_pending = false;
-                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
+                    painted_waiting_for_glass = false;
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -758,10 +760,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
                     if show_pending {
-                        show_pending = false;
-                        last_show = Instant::now();
-                        was_focused = false;
-                        focus_reassert_used = false;
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.
@@ -771,8 +769,22 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let should_show = state.lock().map(|s| s.visible).unwrap_or(false);
                         if !should_show {
                             crate::runtime::log_info("[nex] host Painted: stale (visible=false), skipping show");
+                            show_pending = false;
+                            painted_waiting_for_glass = false;
                             return;
                         }
+                        if glass_layer.as_ref().is_some_and(|layer| !layer.is_ready()) {
+                            painted_waiting_for_glass = true;
+                            crate::runtime::log_info(
+                                "[nex] host Painted: waiting for first captured glass frame",
+                            );
+                            return;
+                        }
+                        show_pending = false;
+                        painted_waiting_for_glass = false;
+                        last_show = Instant::now();
+                        was_focused = false;
+                        focus_reassert_used = false;
                         // Always register raw input sink so the overlay
                         // receives WM_INPUT for all keyboard events while
                         // foreground.  This works around Chromium/WebView2
@@ -787,9 +799,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         force_foreground(hwnd);
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
-                        // Spike glass appears with the panel (it was
-                        // aligned while hidden in the Show arm). The
-                        // worker renders on the next visible frame.
+                        // Start glass capture with the panel. Its HWND is
+                        // revealed only after the worker presents a frame.
                         if let Some(layer) = glass_layer.as_ref() {
                             layer.set_visible(true);
                         }
@@ -873,15 +884,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         crate::runtime::log_info("[nex] settings window hidden via custom close");
                         let _ = event_tx.send(OverlayEvent::SettingsClosed);
                     }
-                }
-                UiCommand::DragStart => {
-                    // Latches so the next Show skips position_window,
-                    // then enters the native modal move loop. The
-                    // loop returns when the user releases the button,
-                    // so clearing the latch here is correct.
-                    DRAG_ACTIVE.store(true, Ordering::SeqCst);
-                    unsafe { begin_native_drag(hwnd); }
-                    DRAG_ACTIVE.store(false, Ordering::SeqCst);
                 }
                 UiCommand::Quit => {
                     *control_flow = ControlFlow::Exit;
@@ -1447,13 +1449,6 @@ fn handle_ipc(
         OverlayMessage::WhatsNew(_) => {
             let _ = event_tx.send(OverlayEvent::WhatsNew);
         }
-        OverlayMessage::DragStart(_) => {
-            // Latch + enter the native caption-drag modal loop on the
-            // UI thread. The loop blocks the event loop until button
-            // release — no per-move IPC at all, so the window tracks
-            // the cursor 1:1 with no lag and no ghost frames.
-            try_send_ui(proxy, UiCommand::DragStart);
-        }
     }
 }
 
@@ -1948,32 +1943,6 @@ fn apply_window_height(
     }
     if let Some(layer) = glass {
         layer.sync_to_main(window.hwnd() as isize, window.scale_factor());
-    }
-}
-
-/// Enter the native caption-drag modal move loop. The OS drives the
-/// move from the actual cursor position — zero IPC, zero delta math —
-/// so the window tracks the cursor 1:1 with no ghost frames (the old
-/// per-mousemove `SetWindowPos` loop repainted the transparent,
-/// no-redirection-bitmap surface faster than DWM recomposed it).
-///
-/// Returns when the user releases the left button. Must run on the
-/// UI thread (blocks the event loop for the duration of the drag).
-unsafe fn begin_native_drag(hwnd: HWND) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageW, HTCAPTION, SC_MOVE, WM_SYSCOMMAND,
-    };
-    // The blessed winit/tao sequence for a caption drag:
-    // ReleaseCapture first — the WebView2 child holds the mouse capture
-    // from the mousedown that triggered this — then WM_SYSCOMMAND with
-    // SC_MOVE | HTCAPTION starts the modal move loop and takes capture
-    // itself. (WM_NCLBUTTONDOWN + HTCAPTION does NOT work here: the
-    // child's capture swallows the NC hit-test and the loop never gets
-    // WM_MOUSEMOVE.)
-    unsafe {
-        let _ = ReleaseCapture();
-        SendMessageW(hwnd, WM_SYSCOMMAND, (SC_MOVE | HTCAPTION) as WPARAM, 0);
     }
 }
 

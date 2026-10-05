@@ -16,7 +16,7 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, D2D1_BITMAP_OPTIONS,
-    D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DISPLACEMENTMAP_PROP_SCALE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
@@ -352,9 +352,13 @@ fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
 /// Swapchain backbuffers on this box come from the bitblt path, which
 /// carries no alpha — declaring PREMULTIPLIED there fails binding with
 /// E_INVALIDARG. IGNORE matches the surface; the layer is opaque and
-/// the page blends above it, so nothing is lost.
+/// the page blends above it, so nothing is lost. CANNOT_DRAW is required
+/// for swapchain-bound targets.
 fn target_props() -> D2D1_BITMAP_PROPERTIES1 {
-    bitmap_props_with_alpha(D2D1_BITMAP_OPTIONS_TARGET, D2D1_ALPHA_MODE_IGNORE)
+    bitmap_props_with_alpha(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1_ALPHA_MODE_IGNORE,
+    )
 }
 
 fn bitmap_props_with_alpha(

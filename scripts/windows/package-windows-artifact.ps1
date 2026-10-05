@@ -12,6 +12,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
+$targetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+  Join-Path $repoRoot "target"
+} else {
+  [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+}
+
 # ---------------------------------------------------------------------------
 # Everything SDK download URL
 # ---------------------------------------------------------------------------
@@ -61,10 +68,13 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets") | Out-N
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "docs") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-Null
 
-cargo build -p nex --release --quiet
-cargo build -p nex-helper --release --quiet
+$workspaceManifest = Join-Path $repoRoot "Cargo.toml"
+cargo build --manifest-path $workspaceManifest -p nex --release --quiet
+if ($LASTEXITCODE -ne 0) { throw "Failed to build Nex (exit code $LASTEXITCODE)." }
+cargo build --manifest-path $workspaceManifest -p nex-helper --release --quiet
+if ($LASTEXITCODE -ne 0) { throw "Failed to build NexHelper (exit code $LASTEXITCODE)." }
 
-$coreExe = "target/release/Nex.exe"
+$coreExe = Join-Path $targetRoot "release/Nex.exe"
 if (-not (Test-Path $coreExe)) {
   throw "Expected core executable not found at $coreExe"
 }
@@ -118,7 +128,7 @@ else {
 
 Copy-Item $coreExe (Join-Path $stageDir "bin/Nex.exe") -Force
 
-$helperExe = "target/release/NexHelper.exe"
+$helperExe = Join-Path $targetRoot "release/NexHelper.exe"
 if (-not (Test-Path $helperExe)) {
   throw "Expected helper executable not found at $helperExe"
 }

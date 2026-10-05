@@ -31,10 +31,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowLongW, IsWindowVisible,
+    CreateWindowExW, DefWindowProcW, EnumChildWindows, GetClassNameW, GetClientRect,
+    GetParent, GetWindowLongW, IsWindowVisible,
     RegisterClassW, MoveWindow, SetWindowPos,
     GWL_EXSTYLE, HWND_BOTTOM, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, WINDOW_EX_STYLE,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_VISIBLE,
+    WNDCLASSW, WNDENUMPROC, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_VISIBLE,
 };
 use windows::Win32::Foundation::RECT;
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
@@ -78,6 +79,75 @@ unsafe extern "system" fn glass_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+unsafe extern "system" fn enum_child_probe(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> windows_core::BOOL {
+    let out = &mut *(lparam.0 as *mut Vec<String>);
+    let mut class: [u16; 64] = [0; 64];
+    let len = GetClassNameW(hwnd, &mut class);
+    let name = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+    let mut rect: RECT = std::mem::zeroed();
+    let _ = GetClientRect(hwnd, &mut rect as *mut _);
+    let visible = IsWindowVisible(hwnd);
+    out.push(format!(
+        "hwnd={hwnd:?} class={name} visible={} rect={},{},{},{}",
+        visible.0 != 0,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom
+    ));
+    windows_core::BOOL(1)
+}
+
+/// DWM cloak flag for an HWND (`"1"` cloaked, `"0"` live, `"err"` on failure).
+fn dwm_cloaked(hwnd: HWND) -> String {
+    let mut cloaked: u32 = 0;
+    let hr = unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            hwnd.0,
+            windows_sys::Win32::Graphics::Dwm::DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if hr == 0 {
+        format!("{cloaked}")
+    } else {
+        format!("err({hr})")
+    }
+}
+
+/// Fill the whole child client area solid blue via GDI. Returns what
+/// happened; the caller logs it next to the swapchain verdict.
+fn gdi_fill_probe(hwnd: HWND) -> &'static str {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateSolidBrush, DeleteObject, FillRect, GetDC, ReleaseDC,
+    };
+    use windows_sys::Win32::Foundation::RECT as SysRect;
+    unsafe {
+        let hdc = GetDC(hwnd.0);
+        if hdc.is_null() {
+            return "getdc-failed";
+        }
+        // Client size is tracked by the layer; a generous fixed rect
+        // covers it (overpaint outside clips harmlessly).
+        let rect = SysRect {
+            left: 0,
+            top: 0,
+            right: 4096,
+            bottom: 4096,
+        };
+        // 0x00BBGGRR: pure blue, unmistakable next to swapchain red.
+        let brush = CreateSolidBrush(0x00FF0000);
+        FillRect(hdc, &rect, brush);
+        DeleteObject(brush);
+        ReleaseDC(hwnd.0, hdc);
+    }
+    "painted-blue"
 }
 
 fn last_error_code() -> u32 {
@@ -369,11 +439,30 @@ impl GlassLayer {
                 SWP_NOMOVE | SWP_NOSIZE,
             );
         }
+        // Spy++-style dump: every child of our parent (class, rect,
+        // visibility) — answers whether the WebView is even a sibling
+        // HWND and where our child sits among them.
+        unsafe {
+            if let Ok(parent) = GetParent(self.hwnd) {
+                let mut kids: Vec<String> = Vec::new();
+                let lparam = LPARAM(&mut kids as *mut Vec<String> as isize);
+                let _ = EnumChildWindows(Some(parent), Some(enum_child_probe), lparam);
+                for (index, info) in kids.iter().take(8).enumerate() {
+                    crate::logging::warn(&format!("[nex][refract] child[{index}] {info}"));
+                }
+                crate::logging::warn(&format!("[nex][refract] child count={}", kids.len()));
+            }
+        }
+        // DWM cloaked state: a cloaked window presents into the void.
+        let cloaked = dwm_cloaked(self.hwnd);
+        // GDI paint test (blue): if blue shows but swapchain red never
+        // does, the HWND composes fine and only the DXGI binding is dead.
+        let gdi = gdi_fill_probe(self.hwnd);
         let visible = unsafe { IsWindowVisible(self.hwnd) };
         let mut rect: RECT = unsafe { std::mem::zeroed() };
         let rect_ok = unsafe { GetClientRect(self.hwnd, &mut rect as *mut _).is_ok() };
         crate::logging::warn(&format!(
-            "[nex][refract] probe repin TOP visible={} rect_ok={rect_ok} rect={},{},{},{}",
+            "[nex][refract] probe repin TOP visible={} rect_ok={rect_ok} rect={},{},{},{} cloaked={cloaked} gdi={gdi}",
             visible.0 != 0,
             rect.left, rect.top, rect.right, rect.bottom
         ));

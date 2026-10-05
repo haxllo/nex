@@ -1693,3 +1693,7 @@ html.glass-native .row.selected::before {
   background: rgba(255, 255, 255, 0.14);
   box-shadow: none;
 }
+
+html.glass-native .row .icon.placeholder {
+  background: transparent;
+}

@@ -781,6 +781,16 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         .unwrap_or_else(Instant::now);
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us) = (0u64, 0u64, 0u64);
+    // Spike probe (NEX_REFRACT_PATTERN=1): skip capture entirely and
+    // render the procedural checkerboard. Unmistakable anywhere on
+    // screen — separates "boring content" from "broken pipeline".
+    let pattern_only = std::env::var("NEX_REFRACT_PATTERN")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if pattern_only {
+        crate::logging::warn("[nex][refract] PATTERN probe on: checkerboard instead of capture");
+    }
+    let mut pattern_size = (0u32, 0u32);
     // Last panel position the glass was aligned to. The host aligns on
     // show/resize only — drags would otherwise strand the glass, leaving
     // the panel over bare desktop (reads as "solid").
@@ -840,6 +850,26 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 continue;
             }
         };
+        // Pattern probe: render checkerboard on size change, no capture.
+        if pattern_only {
+            if (mw, mh) != pattern_size {
+                match eng.render_frame() {
+                    Ok(()) => {
+                        pattern_size = (mw, mh);
+                        crate::logging::info(&format!(
+                            "[nex][refract] pattern frame {mw}x{mh}px"
+                        ));
+                    }
+                    Err(error) => {
+                        crate::logging::warn(&format!("[nex][refract] pattern render failed: {error}"));
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            continue;
+        }
         // Capture ensure (per monitor; restarts on move/ACCESS_LOST).
         let monitor_now = unsafe {
             MonitorFromWindow(HWND(main_sys as *mut std::ffi::c_void), MONITOR_DEFAULTTONEAREST)

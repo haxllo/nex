@@ -1685,7 +1685,12 @@ html[data-theme="light"] #update-btn:hover {
    gradient wash. Text gets a soft shadow for legibility over video. */
 html.glass-native #panel {
   background: transparent;
+  box-shadow: none;
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+html.glass-native #divider {
+  background: transparent;
 }
 
 html.glass-native .row:hover::before,
@@ -1696,15 +1701,4 @@ html.glass-native .row.selected::before {
 
 html.glass-native .row .icon.placeholder {
   background: transparent;
-}
-
-/* TEMPORARY full-nuke diagnostic: every painted background in the
-   panel goes transparent (text, borders, icons, opacity untouched).
-   If live glass shows through, the pipeline is proven and the job
-   becomes choosing which chrome to restore. If still solid, the
-   opacity is below the page (frame/WebView surface). REMOVE after. */
-html.glass-native #panel,
-html.glass-native #panel * {
-  background: transparent !important;
-  box-shadow: none !important;
 }

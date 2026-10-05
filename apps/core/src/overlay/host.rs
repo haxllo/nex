@@ -94,7 +94,8 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TRANSITIONS_FORCEDISABLED,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMSBT_TRANSIENTWINDOW,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMSBT_NONE,
+    DWMSBT_TRANSIENTWINDOW,
     DWMWCP_ROUND,
 };
 use windows_sys::Win32::UI::Input::{
@@ -1863,7 +1864,10 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 
 /// Apply DWM's real desktop acrylic, with legacy acrylic as a Windows 10 fallback.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
-    let dark = state.lock().map(|s| s.theme == Theme::Dark).unwrap_or(true);
+    let (dark, glass_native) = state
+        .lock()
+        .map(|s| (s.theme == Theme::Dark, s.glass_native))
+        .unwrap_or((true, false));
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
@@ -1876,13 +1880,22 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
 
-    // Windows 11 22H2+: DWM draws and blurs the real desktop backdrop behind
-    // the transparent WebView. The accent-color parameter of apply_acrylic
-    // is ignored by this newer DWM API, so use it only for older Windows.
-    let backdrop = DWMSBT_TRANSIENTWINDOW;
+    // Keep DWM acrylic for the fallback path. With the native refraction
+    // layer active, even reapplying acrylic on a later show paints over the
+    // captured image, so keep the main window backdrop disabled.
+    let backdrop = if glass_native {
+        DWMSBT_NONE
+    } else {
+        DWMSBT_TRANSIENTWINDOW
+    };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
     let available = if native_backdrop {
         true
+    } else if glass_native {
+        crate::logging::warn(
+            "[nex][refract] could not keep the main DWM backdrop disabled on show",
+        );
+        false
     } else {
         let tint = if dark {
             Some((20, 22, 28, 112))

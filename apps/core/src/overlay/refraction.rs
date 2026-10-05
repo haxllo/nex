@@ -74,12 +74,12 @@ pub fn enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Step-2 effect knobs (logged at setup). Blur in px stddev, bend as
-/// displacement scale, bezel margin in px, checker cell in px.
-const BLUR_STDDEV: f32 = 8.0;
-const BEND_SCALE: f32 = 24.0;
-const BEZEL_MARGIN: usize = 28;
-const CHECKER_CELL: usize = 64;
+/// Match the reference liquid-glass renderer at 96 DPI.
+const BLUR_STDDEV: f32 = 3.0;
+const BEND_SCALE: f32 = 28.0;
+const BEZEL_MARGIN: f32 = 32.0;
+const CORNER_RADIUS: f32 = 8.0;
+const TINT_ALPHA: f32 = 56.0 / 255.0;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 33;
@@ -326,16 +326,14 @@ struct Engine {
     displace: Option<ID2D1Effect>,
     source: Option<ID2D1Bitmap1>,
     map: Option<ID2D1Bitmap1>,
-    /// Spike probe brush (green frame). Proves our pixels are on screen;
-    /// remove before productizing.
-    probe_brush: Option<ID2D1SolidColorBrush>,
+    tint_brush: ID2D1SolidColorBrush,
     width: u32,
     height: u32,
 }
 
 impl Engine {
     /// Build everything for a panel size: device, swapchain (first
-    /// working desc wins), D2D graph, checkerboard fallback content.
+    /// working desc wins), D2D graph, and effect resources.
     fn build(hwnd: HWND, width: u32, height: u32) -> Result<Engine, String> {
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
@@ -426,22 +424,18 @@ impl Engine {
         crate::logging::info(&format!(
             "[nex][refract] d2d effect ready blur={BLUR_STDDEV} bend={BEND_SCALE} margin={BEZEL_MARGIN}px"
         ));
-        // Spike probe brush: bright green frame over every frame. If the
-        // frame is on screen, our pixels are on screen — no judgment call.
-        let probe_brush: ID2D1SolidColorBrush = unsafe {
+        let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 1.0,
-                    b: 0.0,
-                    a: 1.0,
+                    r: 12.0 / 255.0,
+                    g: 14.0 / 255.0,
+                    b: 20.0 / 255.0,
+                    a: TINT_ALPHA,
                 },
                 None,
             )
-            .map_err(|e| format!("probe brush failed: {e:?}"))?
+            .map_err(|e| format!("glass tint brush failed: {e:?}"))?
         };
-        crate::logging::warn("[nex][refract] green probe frame ON (remove before productizing)");
-
         let mut engine = Engine {
             device,
             context,
@@ -451,7 +445,7 @@ impl Engine {
             displace: None,
             source: None,
             map: None,
-            probe_brush: Some(probe_brush),
+            tint_brush,
             width,
             height,
         };
@@ -459,12 +453,12 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Rebuild size-dependent content: procedural checkerboard fallback
-    /// + displacement map + the blur→displacement pair wired between
-    /// them. Live frames overwrite the source via ingest_frame.
+    /// Rebuild size-dependent content: a transparent initial source,
+    /// displacement map, and blur→displacement pair. Live captured frames
+    /// replace the source via ingest_frame before presentation.
     fn rebuild_content(&mut self) -> Result<(), String> {
         let (w, h) = (self.width as usize, self.height as usize);
-        let src_bytes = checker_bytes(w, h);
+        let src_bytes = vec![0u8; w * h * 4];
         let map_bytes = bezel_bytes(w, h);
         let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
         let source: ID2D1Bitmap1 = unsafe {
@@ -579,26 +573,14 @@ impl Engine {
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             );
-            // Probe frame: 8px green band just inside every edge, over
-            // the effect. Visible = our pixels on screen, full stop.
-            if let Some(brush) = self.probe_brush.as_ref() {
-                let (w, h) = (self.width as f32, self.height as f32);
-                let bands = [
-                    (0.0, 0.0, w, 8.0),
-                    (0.0, h - 8.0, w, h),
-                    (0.0, 8.0, 8.0, h - 8.0),
-                    (w - 8.0, 8.0, w, h - 8.0),
-                ];
-                for (l, t, r, b) in bands {
-                    let rect = D2D_RECT_F {
-                        left: l,
-                        top: t,
-                        right: r,
-                        bottom: b,
-                    };
-                    self.d2d.FillRectangle(&rect as *const _, brush);
-                }
-            }
+            let tint = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: self.width as f32,
+                bottom: self.height as f32,
+            };
+            self.d2d
+                .FillRectangle(&tint as *const _, &self.tint_brush);
             self.d2d
                 .EndDraw(None, None)
                 .map_err(|e| format!("EndDraw failed: {e:?}"))?;
@@ -702,55 +684,42 @@ fn blur_output(blur: &ID2D1Effect) -> Result<ID2D1Image, String> {
     }
 }
 
-/// Procedural backdrop: gray checkerboard so blur + bend read clearly,
-/// plus a bright frame inset in the bend zone — straight lines rendering
-/// curved is the unmistakable bend proof.
-fn checker_bytes(w: usize, h: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(w * h * 4);
-    for y in 0..h {
-        for x in 0..w {
-            // Frame: 4px band, 6px inside every edge.
-            let in_frame = x >= 6
-                && x < w.saturating_sub(6)
-                && y >= 6
-                && y < h.saturating_sub(6)
-                && (x < 10
-                    || x >= w.saturating_sub(10)
-                    || y < 10
-                    || y >= h.saturating_sub(10));
-            if in_frame {
-                out.extend_from_slice(&[60, 60, 230, 255]);
-                continue;
-            }
-            let cell = ((x / CHECKER_CELL) + (y / CHECKER_CELL)) % 2;
-            let c = if cell == 0 { 200u8 } else { 110u8 };
-            out.extend_from_slice(&[c, c, c, 255]);
-        }
-    }
-    out
-}
-
-/// Convex-rim displacement map: neutral gray center, edges encoding an
-/// outward push (Win2D samples Source[p + Amount·(channel − 0.5)]).
+/// Rounded convex-rim displacement map: neutral gray center, bevel
+/// channels bend samples inward (Source[p + Amount·(channel − 0.5)]).
 fn bezel_bytes(w: usize, h: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * 4);
-    let margin = BEZEL_MARGIN as f64;
+    let (width, height) = (w as f32, h as f32);
     for y in 0..h {
         for x in 0..w {
-            let mut ox = 0.0;
-            let mut oy = 0.0;
-            if (x as f64) < margin {
-                ox = -((margin - x as f64) / margin);
-            } else if x > w.saturating_sub(1 + BEZEL_MARGIN) {
-                ox = ((x - (w - 1 - BEZEL_MARGIN)) as f64) / margin;
-            }
-            if (y as f64) < margin {
-                oy = -((margin - y as f64) / margin);
-            } else if y > h.saturating_sub(1 + BEZEL_MARGIN) {
-                oy = ((y - (h - 1 - BEZEL_MARGIN)) as f64) / margin;
-            }
-            let r = (128.0 + ox * 127.0).clamp(0.0, 255.0) as u8;
-            let g = (128.0 + oy * 127.0).clamp(0.0, 255.0) as u8;
+            // Rounded-rectangle signed-distance field from the lab:
+            // the center remains undistorted while the curved rim eases
+            // the captured image toward the pane's center.
+            let px = x as f32 + 0.5 - width / 2.0;
+            let py = y as f32 + 0.5 - height / 2.0;
+            let qx = px.abs() - (width / 2.0 - CORNER_RADIUS);
+            let qy = py.abs() - (height / 2.0 - CORNER_RADIUS);
+            let ox = qx.max(0.0);
+            let oy = qy.max(0.0);
+            let outside = (ox * ox + oy * oy).sqrt();
+            let depth = -(outside + qx.max(qy).min(0.0) - CORNER_RADIUS);
+            let t = (depth / BEZEL_MARGIN).clamp(0.0, 1.0);
+            let (dx, dy) = if t >= 1.0 {
+                (0.0, 0.0)
+            } else {
+                let sx = if px < 0.0 { -1.0 } else { 1.0 };
+                let sy = if py < 0.0 { -1.0 } else { 1.0 };
+                let (nx, ny) = if qx > 0.0 && qy > 0.0 {
+                    (qx / outside * sx, qy / outside * sy)
+                } else if qx > qy {
+                    (sx, 0.0)
+                } else {
+                    (0.0, sy)
+                };
+                let strength = (1.0 - t) * (1.0 - t);
+                (-nx * strength, -ny * strength)
+            };
+            let r = (128.0 + dx * 127.0).round().clamp(0.0, 255.0) as u8;
+            let g = (128.0 + dy * 127.0).round().clamp(0.0, 255.0) as u8;
             out.extend_from_slice(&[128, g, r, 255]);
         }
     }
@@ -781,16 +750,6 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         .unwrap_or_else(Instant::now);
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us) = (0u64, 0u64, 0u64);
-    // Spike probe (NEX_REFRACT_PATTERN=1): skip capture entirely and
-    // render the procedural checkerboard. Unmistakable anywhere on
-    // screen — separates "boring content" from "broken pipeline".
-    let pattern_only = std::env::var("NEX_REFRACT_PATTERN")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if pattern_only {
-        crate::logging::warn("[nex][refract] PATTERN probe on: checkerboard instead of capture");
-    }
-    let mut pattern_size = (0u32, 0u32);
     // Last panel position the glass was aligned to. The host aligns on
     // show/resize only — drags would otherwise strand the glass, leaving
     // the panel over bare desktop (reads as "solid").
@@ -850,26 +809,6 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 continue;
             }
         };
-        // Pattern probe: render checkerboard on size change, no capture.
-        if pattern_only {
-            if (mw, mh) != pattern_size {
-                match eng.render_frame() {
-                    Ok(()) => {
-                        pattern_size = (mw, mh);
-                        crate::logging::info(&format!(
-                            "[nex][refract] pattern frame {mw}x{mh}px"
-                        ));
-                    }
-                    Err(error) => {
-                        crate::logging::warn(&format!("[nex][refract] pattern render failed: {error}"));
-                        std::thread::sleep(Duration::from_millis(500));
-                    }
-                }
-            } else {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            continue;
-        }
         // Capture ensure (per monitor; restarts on move/ACCESS_LOST).
         let monitor_now = unsafe {
             MonitorFromWindow(HWND(main_sys as *mut std::ffi::c_void), MONITOR_DEFAULTTONEAREST)

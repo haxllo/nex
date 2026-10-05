@@ -242,10 +242,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         s.hwnd = hwnd as isize;
     }
     let acrylic_available = apply_window_chrome(&window, &state);
-    // Refraction spike (NEX_REFRACT_LAB=1): native glass child beneath
-    // the WebView. Created before build_webview so it sits lower in
-    // z-order without ever needing the WebView's HWND. None (flag off
-    // or any failure) keeps the Acrylic path untouched.
+    // Native refraction layer (enabled by default; NEX_REFRACT_LAB=0 opts
+    // out) sits below the WebView. Create it before build_webview so it
+    // stays lower in z-order without needing the WebView HWND. Any
+    // initialization failure keeps the Acrylic fallback available.
     let mut glass_layer = crate::overlay::refraction::GlassLayer::create_for_window(
         hwnd as isize,
         WINDOW_WIDTH,

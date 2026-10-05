@@ -12,8 +12,8 @@
 //! worker thread; the UI thread only moves/shows the window. The host
 //! sends configs; the worker owns every D3D/D2D object.
 //!
-//! Everything here is gated on `NEX_REFRACT_LAB=1`; flag off means
-//! zero behavior change. Logs use the `[nex][refract]` prefix.
+//! Refraction is enabled by default. Set `NEX_REFRACT_LAB=0` to force
+//! the Acrylic fallback. Logs use the `[nex][refract]` prefix.
 
 #![cfg(target_os = "windows")]
 
@@ -74,11 +74,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
 
-/// Env flag gating the whole spike. String compare keeps `=0`/unset off.
+/// Refraction is on by default; an explicit zero keeps the Acrylic fallback.
 pub fn enabled() -> bool {
     std::env::var("NEX_REFRACT_LAB")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(true)
 }
 
 /// Match the reference liquid-glass renderer at 96 DPI.
@@ -113,9 +118,9 @@ struct GlassWindow {
 }
 
 impl GlassLayer {
-    /// Create the glass top-level window + worker. `None` when the flag
-    /// is off (info-logged) or on any failure (warn-logged, caller falls
-    /// back to Acrylic). Starts hidden; the host shows it with the panel.
+    /// Create the glass top-level window + worker. `None` when explicitly
+    /// disabled or on any failure (warn-logged, caller falls back to
+    /// Acrylic). Starts hidden; the host shows it with the panel.
     pub fn create_for_window(
         main_sys: isize,
         logical_w: f64,
@@ -124,7 +129,7 @@ impl GlassLayer {
         proxy: EventLoopProxy<UiCommand>,
     ) -> Option<GlassLayer> {
         if !enabled() {
-            crate::logging::info("[nex][refract] lab flag off — acrylic path");
+            crate::logging::info("[nex][refract] disabled by environment — acrylic path");
             return None;
         }
         match GlassWindow::create(main_sys, logical_w, logical_h, scale) {

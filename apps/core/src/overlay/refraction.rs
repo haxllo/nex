@@ -30,10 +30,11 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT,
     CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
-    D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -334,6 +335,9 @@ struct Engine {
     displace: Option<ID2D1Effect>,
     source: Option<ID2D1Bitmap1>,
     map: Option<ID2D1Bitmap1>,
+    /// Spike probe brush (green frame). Proves our pixels are on screen;
+    /// remove before productizing.
+    probe_brush: Option<ID2D1SolidColorBrush>,
     width: u32,
     height: u32,
 }
@@ -431,6 +435,21 @@ impl Engine {
         crate::logging::info(&format!(
             "[nex][refract] d2d effect ready blur={BLUR_STDDEV} bend={BEND_SCALE} margin={BEZEL_MARGIN}px"
         ));
+        // Spike probe brush: bright green frame over every frame. If the
+        // frame is on screen, our pixels are on screen — no judgment call.
+        let probe_brush: ID2D1SolidColorBrush = unsafe {
+            d2d.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                None,
+            )
+            .map_err(|e| format!("probe brush failed: {e:?}"))?
+        };
+        crate::logging::warn("[nex][refract] green probe frame ON (remove before productizing)");
 
         let mut engine = Engine {
             device,
@@ -441,6 +460,7 @@ impl Engine {
             displace: None,
             source: None,
             map: None,
+            probe_brush: Some(probe_brush),
             width,
             height,
         };
@@ -568,6 +588,26 @@ impl Engine {
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             );
+            // Probe frame: 8px green band just inside every edge, over
+            // the effect. Visible = our pixels on screen, full stop.
+            if let Some(brush) = self.probe_brush.as_ref() {
+                let (w, h) = (self.width as f32, self.height as f32);
+                let bands = [
+                    (0.0, 0.0, w, 8.0),
+                    (0.0, h - 8.0, w, h),
+                    (0.0, 8.0, 8.0, h - 8.0),
+                    (w - 8.0, 8.0, w, h - 8.0),
+                ];
+                for (l, t, r, b) in bands {
+                    let rect = D2D_RECT_F {
+                        left: l,
+                        top: t,
+                        right: r,
+                        bottom: b,
+                    };
+                    self.d2d.FillRectangle(&rect as *const _, brush);
+                }
+            }
             self.d2d
                 .EndDraw(None, None)
                 .map_err(|e| format!("EndDraw failed: {e:?}"))?;

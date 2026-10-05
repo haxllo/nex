@@ -21,12 +21,14 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_SCALING_STRETCH,
+    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_SCALING, DXGI_SCALING_NONE,
+    DXGI_SCALING_STRETCH,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
     IDXGIFactory2, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_ALPHA_MODE_UNSPECIFIED,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, RegisterClassW, MoveWindow, WINDOW_EX_STYLE,
@@ -168,7 +170,12 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
     let factory: IDXGIFactory2 =
         unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
             .map_err(|e| format!("CreateDXGIFactory2 failed: {e:?}"))?;
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
+    // The textbook desc fails on some machines with DXGI_ERROR_INVALID_CALL
+    // and the OS won't say which field. Try combos in order, log every
+    // HRESULT, keep the first that works. UNSPECIFIED alpha is opaque —
+    // diagnostic only (proves device + HWND are fine); real glass needs
+    // PREMULTIPLIED.
+    let mut desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: width,
         Height: height,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -181,11 +188,42 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
-    let swapchain: IDXGISwapChain1 = unsafe {
-        factory
-            .CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)
-            .map_err(|e| format!("CreateSwapChainForHwnd failed: {e:?}"))?
-    };
+    let variants: [(&str, DXGI_SCALING, DXGI_ALPHA_MODE); 3] = [
+        ("premultiplied+stretch", desc.Scaling, desc.AlphaMode),
+        (
+            "premultiplied+none",
+            DXGI_SCALING_NONE,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+        ),
+        (
+            "unspecified+stretch",
+            DXGI_SCALING_STRETCH,
+            DXGI_ALPHA_MODE_UNSPECIFIED,
+        ),
+    ];
+    let mut swapchain: Option<IDXGISwapChain1> = None;
+    let mut used_variant = "";
+    for (name, scaling, alpha) in variants {
+        desc.Scaling = scaling;
+        desc.AlphaMode = alpha;
+        match unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None) } {
+            Ok(chain) => {
+                crate::logging::info(&format!("[nex][refract] swapchain ok via {name}"));
+                swapchain = Some(chain);
+                used_variant = name;
+                break;
+            }
+            Err(error) => crate::logging::warn(&format!(
+                "[nex][refract] swapchain {name} failed: {error:?}"
+            )),
+        }
+    }
+    let swapchain = swapchain.ok_or("all swapchain desc variants failed")?;
+    if used_variant.starts_with("unspecified") {
+        crate::logging::warn(
+            "[nex][refract] running OPAQUE diagnostic fallback — transparency still unproven",
+        );
+    }
 
     let mut layer = GlassLayer {
         hwnd,

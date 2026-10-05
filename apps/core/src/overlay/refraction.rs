@@ -284,16 +284,7 @@ impl GlassWindow {
 
     /// Same rect as main, ordered directly below it, never activating.
     fn move_below(&self, main_sys: isize) {
-        let Some((x, y, width, height)) = main_rect(main_sys) else {
-            crate::logging::warn("[nex][refract] move_below: main rect unreadable");
-            return;
-        };
-        let main = HWND(main_sys as *mut std::ffi::c_void);
-        if let Err(error) = unsafe {
-            SetWindowPos(self.hwnd, Some(main), x, y, width as i32, height as i32, SWP_NOACTIVATE)
-        } {
-            crate::logging::warn(&format!("[nex][refract] move_below failed: {error:?}"));
-        }
+        align_glass_to_main(self.hwnd, main_sys);
     }
 
     fn show(&self, show: bool) {
@@ -790,6 +781,10 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         .unwrap_or_else(Instant::now);
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us) = (0u64, 0u64, 0u64);
+    // Last panel position the glass was aligned to. The host aligns on
+    // show/resize only — drags would otherwise strand the glass, leaving
+    // the panel over bare desktop (reads as "solid").
+    let mut last_glass_at = (0i32, 0i32);
     // Straight failures in a row: a poisoned device/capture never heals
     // by retrying the same calls, so rebuild everything after a few.
     let mut n_fail = 0u32;
@@ -812,6 +807,12 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         };
+        // Position follow (see declaration): re-align + log on moves.
+        if (mx, my) != last_glass_at {
+            align_glass_to_main(hwnd, main_sys);
+            crate::logging::info(&format!("[nex][refract] glass follows panel to ({mx},{my})"));
+            last_glass_at = (mx, my);
+        }
         // Engine ensure / resize (buffers only when one exists).
         if engine.is_none() {
             match Engine::build(hwnd, mw, mh) {
@@ -1162,6 +1163,29 @@ fn last_error_code() -> u32 {
 
 fn physical_px(logical: f64, scale: f64) -> u32 {
     ((logical * scale).round() as u32).max(1)
+}
+
+/// Align a glass window to the main panel: same rect, ordered directly
+/// below it, never activating. Shared by the host (show/resize) and the
+/// worker (position follows — nothing else re-syncs after a drag).
+fn align_glass_to_main(glass: HWND, main_sys: isize) -> Option<(u32, u32)> {
+    let (x, y, width, height) = main_rect(main_sys)?;
+    let main = HWND(main_sys as *mut std::ffi::c_void);
+    if let Err(error) = unsafe {
+        SetWindowPos(
+            glass,
+            Some(main),
+            x,
+            y,
+            width as i32,
+            height as i32,
+            SWP_NOACTIVATE,
+        )
+    } {
+        crate::logging::warn(&format!("[nex][refract] align failed: {error:?}"));
+        return None;
+    }
+    Some((width, height))
 }
 
 fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {

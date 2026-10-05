@@ -1677,3 +1677,19 @@ html[data-theme="light"] #update-btn:hover {
 #list.bento-view .row:has(.tile-image) {
   padding: 0;
 }
+
+/* ── native glass mode (spike) ──────────────────────────── */
+/* A live refracted layer sits below the page: drop painted
+   backgrounds so its pixels show through. Borders, glows and text
+   stay — selection keeps a flat translucent fill instead of the
+   gradient wash. Text gets a soft shadow for legibility over video. */
+html.glass-native #panel {
+  background: transparent;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+html.glass-native .row:hover::before,
+html.glass-native .row.selected::before {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: none;
+}

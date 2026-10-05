@@ -191,7 +191,22 @@ fn disable_main_backdrop(main_sys: isize) {
         crate::logging::warn(&format!(
             "[nex][refract] backdrop off failed: HRESULT {hr} (glass will wash out)"
         ));
+        return;
     }
+    // Read back ground truth: the set above can silently not stick.
+    let mut back: i32 = -1;
+    let read_hr = unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+            main_sys as *mut std::ffi::c_void,
+            windows_sys::Win32::Graphics::Dwm::DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &mut back as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of_val(&back) as u32,
+        )
+    };
+    // NONE=1, TRANSIENTWINDOW=3. Anything but 1 means the wash is still on.
+    crate::logging::info(&format!(
+        "[nex][refract] backdrop readback={back} (want 1=NONE, 3=TRANSIENT; get/rc={read_hr})"
+    ));
 }
 
 impl GlassWindow {

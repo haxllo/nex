@@ -1380,6 +1380,12 @@
         syncUpdateNotice();
       }
 
+      // Native glass below the page: drop painted backgrounds so the
+      // refracted layer shows through instead of acrylic.
+      if (typeof state.glassNative === "boolean") {
+        document.documentElement.classList.toggle("glass-native", state.glassNative);
+      }
+
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");

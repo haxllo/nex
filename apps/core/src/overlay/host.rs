@@ -260,6 +260,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         INITIAL_HEIGHT,
         window.scale_factor(),
     );
+    // The page drops its painted backgrounds when native glass is live
+    // so refracted pixels show through (pushed with every snapshot).
+    if let Ok(mut s) = state.lock() {
+        s.glass_native = glass_layer.is_some();
+    }
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
     // Register raw input sink permanently at startup so the overlay
@@ -1777,6 +1782,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,
         "whatsNewPending": s.whats_new_pending,
+        "glassNative": s.glass_native,
     })
     .to_string()
 }

@@ -178,6 +178,9 @@ pub struct ShimState {
     pub completion: Option<String>,
     /// Whether a new update is available. When true, show update notification.
     pub update_available: bool,
+    /// Native glass layer active below the page: the page drops its own
+    /// painted backgrounds so live pixels show through (spike).
+    pub glass_native: bool,
     /// Post-update version with unseen notes. When set, the update notice
     /// opens the What's New view instead of running an update check.
     pub whats_new_pending: Option<String>,
@@ -209,6 +212,7 @@ impl Default for ShimState {
             completion: None,
             update_available: false,
             whats_new_pending: None,
+            glass_native: false,
         }
     }
 }

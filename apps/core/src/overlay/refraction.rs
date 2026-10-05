@@ -12,19 +12,36 @@
 
 #![cfg(target_os = "windows")]
 
+use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, D2D1_BITMAP_OPTIONS,
+    D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CHANNEL_SELECTOR_G,
+    D2D1_CHANNEL_SELECTOR_R,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DISPLACEMENTMAP_PROP_SCALE,
+    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_UINT32,
+    CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
+    ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
+};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_VIEWPORT, ID3D11Device,
-    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_SCALING,
     DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT,
     DXGI_SWAP_EFFECT_DISCARD, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain1,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_ALPHA_MODE_UNSPECIFIED,
@@ -46,16 +63,24 @@ pub fn enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Spike probe tint: opaque red, unmistakable against the panel. The
-/// effect (step 2) replaces this with processed desktop pixels.
-const PROBE_TINT: [f32; 4] = [1.0, 0.12, 0.12, 1.0];
+/// Step-2 effect knobs (logged at setup). Blur in px stddev, bend as
+/// displacement scale, bezel margin in px, checker cell in px.
+const BLUR_STDDEV: f32 = 16.0;
+const BEND_SCALE: f32 = 20.0;
+const BEZEL_MARGIN: usize = 28;
+const CHECKER_CELL: usize = 32;
 
 pub struct GlassLayer {
     hwnd: HWND,
-    device: ID3D11Device,
+    // Held for lifetime + step 3 (capture copies need both devices).
+    _device: ID3D11Device,
     swapchain: IDXGISwapChain1,
-    context: ID3D11DeviceContext,
-    rtv: Option<ID3D11RenderTargetView>,
+    _context: ID3D11DeviceContext,
+    d2d: ID2D1DeviceContext,
+    blur: Option<ID2D1Effect>,
+    displace: Option<ID2D1Effect>,
+    source: Option<ID2D1Bitmap1>,
+    map: Option<ID2D1Bitmap1>,
     width: u32,
     height: u32,
 }
@@ -260,60 +285,246 @@ fn create_inner(
     }
     let swapchain = swapchain.ok_or("all swapchain desc variants failed")?;
 
+    let d2d = d2d_setup(&device)?;
+    crate::logging::info(&format!(
+        "[nex][refract] d2d effect ready blur={BLUR_STDDEV} bend={BEND_SCALE} margin={BEZEL_MARGIN}px"
+    ));
+
     let mut layer = GlassLayer {
         hwnd,
-        device,
+        _device: device,
         swapchain,
-        context,
-        rtv: None,
+        _context: context,
+        d2d,
+        blur: None,
+        displace: None,
+        source: None,
+        map: None,
         width,
         height,
     };
-    layer.recreate_target()?;
+    layer.rebuild_content()?;
     layer.present()?;
     Ok(layer)
 }
 
+fn d2d_setup(d3d: &ID3D11Device) -> Result<ID2D1DeviceContext, String> {
+    let factory: ID2D1Factory = unsafe {
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+            .map_err(|e| format!("D2D1CreateFactory failed: {e:?}"))?
+    };
+    let dxgi: IDXGIDevice = d3d
+        .cast()
+        .map_err(|e| format!("QI IDXGIDevice failed: {e:?}"))?;
+    // CreateDevice lives on ID2D1Factory1+, not the base factory.
+    let factory1: ID2D1Factory1 = factory
+        .cast()
+        .map_err(|e| format!("QI ID2D1Factory1 failed: {e:?}"))?;
+    let device: ID2D1Device = unsafe {
+        factory1
+            .CreateDevice(&dxgi)
+            .map_err(|e| format!("ID2D1Factory::CreateDevice failed: {e:?}"))?
+    };
+    let d2d: ID2D1DeviceContext = unsafe {
+        device
+            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+            .map_err(|e| format!("CreateDeviceContext failed: {e:?}"))?
+    };
+    // DIPs == px everywhere: bitmaps carry 96 DPI and DrawImage maps 1:1.
+    unsafe {
+        d2d.SetDpi(96.0, 96.0);
+    }
+    Ok(d2d)
+}
+
+/// Output image of an effect. Effects derive from ID2D1Properties, not
+/// ID2D1Image, so chaining and drawing go through GetOutput.
+fn blur_output(blur: &ID2D1Effect) -> Result<ID2D1Image, String> {
+    unsafe {
+        blur.GetOutput()
+            .map_err(|e| format!("effect GetOutput failed: {e:?}"))
+    }
+}
+
+fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
+    D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: options,
+        colorContext: std::mem::ManuallyDrop::new(None),
+    }
+}
+
+/// Procedural backdrop: gray checkerboard so blur + bend read clearly.
+fn checker_bytes(w: usize, h: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let cell = ((x / CHECKER_CELL) + (y / CHECKER_CELL)) % 2;
+            let c = if cell == 0 { 200u8 } else { 110u8 };
+            out.extend_from_slice(&[c, c, c, 255]);
+        }
+    }
+    out
+}
+
+/// Convex-rim displacement map: neutral gray center, edges encoding an
+/// outward push (Win2D samples Source[p + Amount·(channel − 0.5)]).
+fn bezel_bytes(w: usize, h: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * 4);
+    let margin = BEZEL_MARGIN as f64;
+    for y in 0..h {
+        for x in 0..w {
+            let mut ox = 0.0;
+            let mut oy = 0.0;
+            if (x as f64) < margin {
+                ox = -((margin - x as f64) / margin);
+            } else if x > w.saturating_sub(1 + BEZEL_MARGIN) {
+                ox = ((x - (w - 1 - BEZEL_MARGIN)) as f64) / margin;
+            }
+            if (y as f64) < margin {
+                oy = -((margin - y as f64) / margin);
+            } else if y > h.saturating_sub(1 + BEZEL_MARGIN) {
+                oy = ((y - (h - 1 - BEZEL_MARGIN)) as f64) / margin;
+            }
+            let r = (128.0 + ox * 127.0).clamp(0.0, 255.0) as u8;
+            let g = (128.0 + oy * 127.0).clamp(0.0, 255.0) as u8;
+            out.extend_from_slice(&[128, g, r, 255]);
+        }
+    }
+    out
+}
+
 impl GlassLayer {
-    fn recreate_target(&mut self) -> Result<(), String> {
+    /// Rebuild size-dependent content: procedural source + displacement
+    /// map bitmaps and the blur→displacement effect pair wired between
+    /// them. Called at creation and on resize.
+    fn rebuild_content(&mut self) -> Result<(), String> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let src_bytes = checker_bytes(w, h);
+        let map_bytes = bezel_bytes(w, h);
+        let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
+        let source: ID2D1Bitmap1 = unsafe {
+            self.d2d
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: self.width,
+                        height: self.height,
+                    },
+                    Some(src_bytes.as_ptr() as *const _),
+                    (w * 4) as u32,
+                    &props as *const _,
+                )
+                .map_err(|e| format!("source CreateBitmap failed: {e:?}"))?
+        };
+        let map: ID2D1Bitmap1 = unsafe {
+            self.d2d
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: self.width,
+                        height: self.height,
+                    },
+                    Some(map_bytes.as_ptr() as *const _),
+                    (w * 4) as u32,
+                    &props as *const _,
+                )
+                .map_err(|e| format!("map CreateBitmap failed: {e:?}"))?
+        };
+        let blur: ID2D1Effect = unsafe {
+            self.d2d
+                .CreateEffect(&CLSID_D2D1GaussianBlur as *const _)
+                .map_err(|e| format!("blur CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            blur
+                .SetValue(
+                    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &BLUR_STDDEV.to_ne_bytes(),
+                )
+                .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
+            blur.SetInput(0, &source, true);
+        }
+        let displace: ID2D1Effect = unsafe {
+            self.d2d
+                .CreateEffect(&CLSID_D2D1DisplacementMap as *const _)
+                .map_err(|e| format!("displace CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &BEND_SCALE.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace scale failed: {e:?}"))?;
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_UINT32,
+                    &D2D1_CHANNEL_SELECTOR_R.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace X channel failed: {e:?}"))?;
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_UINT32,
+                    &D2D1_CHANNEL_SELECTOR_G.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace Y channel failed: {e:?}"))?;
+            displace.SetInput(0, &blur_output(&blur)?, true);
+            displace.SetInput(1, &map, true);
+        }
+        self.source = Some(source);
+        self.map = Some(map);
+        self.blur = Some(blur);
+        self.displace = Some(displace);
+        Ok(())
+    }
+
+    /// Render one effect frame into the current backbuffer and present
+    /// it. The target is rebound every frame: flip-model buffers rotate.
+    /// Static for now — creation and resize only; step 3 drives it per
+    /// capture frame.
+    pub fn present(&self) -> Result<(), String> {
+        let displace = self.displace.as_ref().ok_or("glass effect not built")?;
         let texture: ID3D11Texture2D = unsafe {
             self.swapchain
                 .GetBuffer(0)
                 .map_err(|e| format!("swapchain GetBuffer failed: {e:?}"))?
         };
-        let mut rtv: Option<ID3D11RenderTargetView> = None;
+        let surface: IDXGISurface = texture
+            .cast()
+            .map_err(|e| format!("QI IDXGISurface failed: {e:?}"))?;
+        let target: ID2D1Bitmap1 = unsafe {
+            self.d2d
+                .CreateBitmapFromDxgiSurface(&surface, Some(&bitmap_props(D2D1_BITMAP_OPTIONS_TARGET) as *const _))
+                .map_err(|e| format!("target bind failed: {e:?}"))?
+        };
         unsafe {
-            self.device
-                .CreateRenderTargetView(&texture, None, Some(&mut rtv as *mut _))
-                .map_err(|e| format!("CreateRenderTargetView failed: {e:?}"))?;
-        }
-        self.rtv = rtv;
-        Ok(())
-    }
-
-    /// Present the current tint. Surface loss is an Err the caller logs;
-    /// no recovery in the spike.
-    pub fn present(&self) -> Result<(), String> {
-        let rtv = self.rtv.as_ref().ok_or("glass has no render target")?;
-        unsafe {
-            self.context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
-            let viewport = D3D11_VIEWPORT {
-                TopLeftX: 0.0,
-                TopLeftY: 0.0,
-                Width: self.width as f32,
-                Height: self.height as f32,
-                MinDepth: 0.0,
-                MaxDepth: 1.0,
-            };
-            self.context.RSSetViewports(Some(&[viewport]));
-            self.context.ClearRenderTargetView(rtv, &PROBE_TINT);
+            self.d2d.SetTarget(&target);
+            self.d2d.BeginDraw();
+            self.d2d.DrawImage(
+                &blur_output(displace)?,
+                None,
+                None,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
+            self.d2d
+                .EndDraw(None, None)
+                .map_err(|e| format!("EndDraw failed: {e:?}"))?;
             self.swapchain
                 .Present(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
                 .ok()
                 .map_err(|e| format!("Present failed: {e:?}"))?;
         }
         crate::logging::info(&format!(
-            "[nex][refract] presented {}x{}px probe",
+            "[nex][refract] rendered effect frame {}x{}px",
             self.width, self.height
         ));
         Ok(())
@@ -345,7 +556,8 @@ impl GlassLayer {
             "[nex][refract] sync {}x{} -> {}x{}px",
             self.width, self.height, width, height
         ));
-        self.rtv.take();
+        // Backbuffer target rebinds every frame (flip buffers rotate);
+        // content bitmaps only rebuild here on size change.
         let result = unsafe {
             self.swapchain.ResizeBuffers(
                 0,
@@ -360,7 +572,7 @@ impl GlassLayer {
                 let (old_w, old_h) = (self.width, self.height);
                 self.width = width;
                 self.height = height;
-                if let Err(error) = self.recreate_target().and_then(|_| self.present()) {
+                if let Err(error) = self.rebuild_content().and_then(|_| self.present()) {
                     self.width = old_w;
                     self.height = old_h;
                     crate::logging::warn(&format!("[nex][refract] sync present failed: {error}"));

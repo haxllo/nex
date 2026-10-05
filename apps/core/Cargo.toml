@@ -68,7 +68,7 @@ lru = "0.12"
 wry = { version = "0.55.1", default-features = false, features = ["os-webview", "protocol"] }
 tao = "0.35.3"
 window-vibrancy = "0.7.1"
-windows = { version = "0.61", features = ["Media_Control", "Storage_Streams", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+windows = { version = "0.61", features = ["Media_Control", "Storage_Streams", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
 
 [dev-dependencies]
 tempfile = "3.12.0"

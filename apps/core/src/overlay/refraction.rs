@@ -83,7 +83,7 @@ pub fn enabled() -> bool {
 
 /// Match the reference liquid-glass renderer at 96 DPI.
 const BLUR_STDDEV: f32 = 3.0;
-const BEND_SCALE: f32 = 28.0;
+const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
 const TINT_ALPHA: f32 = 56.0 / 255.0;

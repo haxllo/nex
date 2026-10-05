@@ -343,61 +343,23 @@ body {
   inset: 0;
   z-index: 0;
   border-radius: inherit;
-  background:
-    radial-gradient(circle at 24% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 58%),
-    linear-gradient(145deg, color-mix(in srgb, var(--hover) 88%, white 12%), var(--hover));
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 14%, transparent),
-    inset 0 -1px 0 color-mix(in srgb, black 18%, transparent),
-    0 3px 10px color-mix(in srgb, black 18%, transparent);
+  background: var(--hover);
   opacity: 0;
   pointer-events: none;
-  transition: none;
-}
-.row::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  border: 1px solid transparent;
-  border-radius: inherit;
-  background:
-    linear-gradient(145deg, color-mix(in srgb, var(--accent) 42%, transparent), transparent 42%, color-mix(in srgb, white 12%, transparent)) border-box;
-  -webkit-mask:
-    linear-gradient(#fff 0 0) padding-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0;
-  pointer-events: none;
-  transition: none;
+  transition: opacity 120ms ease-out;
 }
 .row > * {
   position: relative;
   z-index: 1;
 }
-.row:hover {
-  border-color: transparent;
-}
-.row:hover::before,
-.row:hover::after {
+.row:hover::before {
   opacity: 1;
 }
-/* Keyboard/click selection — must win over :hover so the user can see
-   which row is active when the cursor is parked elsewhere. */
-.row.selected {
-  background: transparent;
-  border-color: transparent;
-}
-.row.selected::before,
-.row.selected::after {
+.row.selected::before {
+  background: var(--sel);
   opacity: 1;
 }
-.row.selected:hover {
-  border-color: transparent;
-}
-.keyboard-nav .row:hover:not(.selected)::before,
-.keyboard-nav .row:hover:not(.selected)::after {
+.keyboard-nav .row:hover:not(.selected)::before {
   opacity: 0;
 }
 /* Folder path revealed on hover — overlaid right side, never shifts the title. */
@@ -1691,12 +1653,6 @@ html.glass-native #panel {
 
 html.glass-native #divider {
   background: color-mix(in srgb, var(--text) 16%, transparent);
-}
-
-html.glass-native .row:hover::before,
-html.glass-native .row.selected::before {
-  background: rgba(255, 255, 255, 0.14);
-  box-shadow: none;
 }
 
 html.glass-native .row .icon.placeholder {

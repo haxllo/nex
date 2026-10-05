@@ -25,7 +25,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
+    D2D1_COMPOSITE_MODE_SOURCE_OVER,
     D2D1_PIXEL_FORMAT, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -345,6 +346,21 @@ fn blur_output(blur: &ID2D1Effect) -> Result<ID2D1Image, String> {
 }
 
 fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
+    bitmap_props_with_alpha(options, D2D1_ALPHA_MODE_PREMULTIPLIED)
+}
+
+/// Swapchain backbuffers on this box come from the bitblt path, which
+/// carries no alpha — declaring PREMULTIPLIED there fails binding with
+/// E_INVALIDARG. IGNORE matches the surface; the layer is opaque and
+/// the page blends above it, so nothing is lost.
+fn target_props() -> D2D1_BITMAP_PROPERTIES1 {
+    bitmap_props_with_alpha(D2D1_BITMAP_OPTIONS_TARGET, D2D1_ALPHA_MODE_IGNORE)
+}
+
+fn bitmap_props_with_alpha(
+    options: D2D1_BITMAP_OPTIONS,
+    alpha: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE,
+) -> D2D1_BITMAP_PROPERTIES1 {
     D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT {
             format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -489,7 +505,7 @@ impl GlassLayer {
             .map_err(|e| format!("QI IDXGISurface failed: {e:?}"))?;
         let target: ID2D1Bitmap1 = unsafe {
             self.d2d
-                .CreateBitmapFromDxgiSurface(&surface, Some(&bitmap_props(D2D1_BITMAP_OPTIONS_TARGET) as *const _))
+                .CreateBitmapFromDxgiSurface(&surface, Some(&target_props() as *const _))
                 .map_err(|e| format!("target bind failed: {e:?}"))?
         };
         unsafe {

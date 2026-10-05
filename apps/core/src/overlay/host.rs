@@ -254,7 +254,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // the WebView. Created before build_webview so it sits lower in
     // z-order without ever needing the WebView's HWND. None (flag off
     // or any failure) keeps the Acrylic path untouched.
-    let mut glass_layer = crate::overlay::refraction::create_for_window(
+    let mut glass_layer = crate::overlay::refraction::GlassLayer::create_for_window(
         hwnd as isize,
         WINDOW_WIDTH,
         INITIAL_HEIGHT,
@@ -782,17 +782,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Spike glass appears with the panel (it was
-                        // aligned while hidden in the Show arm), then
-                        // re-presents: presents made while hidden are
-                        // discarded by DWM, so showing without a fresh
-                        // present leaves void buffers on screen.
+                        // aligned while hidden in the Show arm). The
+                        // worker renders on the next visible frame.
                         if let Some(layer) = glass_layer.as_ref() {
                             layer.set_visible(true);
-                            if let Err(error) = layer.present() {
-                                crate::logging::warn(&format!(
-                                    "[nex][refract] show present failed: {error}"
-                                ));
-                            }
                         }
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.

@@ -22,18 +22,18 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_SCALING, DXGI_SCALING_NONE,
-    DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIFactory2, IDXGISwapChain1,
+    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT,
+    DXGI_SWAP_EFFECT_DISCARD, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_ALPHA_MODE_UNSPECIFIED,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, MoveWindow, SetWindowPos,
-    HWND_BOTTOM, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, WINDOW_EX_STYLE,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, GetWindowLongW, RegisterClassW, MoveWindow, SetWindowPos,
+    GWL_EXSTYLE, HWND_BOTTOM, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, WINDOW_EX_STYLE,
+    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_VISIBLE,
 };
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
 
@@ -141,6 +141,14 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
     }
 
     let parent = HWND(parent_sys as *mut std::ffi::c_void);
+    // Record what tao actually built: LAYERED vs NOREDIRECTIONBITMAP
+    // decides which swapchain models can ever compose here.
+    let ex_style = unsafe { GetWindowLongW(parent, GWL_EXSTYLE) } as u32;
+    crate::logging::info(&format!(
+        "[nex][refract] parent exstyle=0x{ex_style:08x} layered={} no_redirection_bitmap={}",
+        ex_style & WS_EX_LAYERED.0 != 0,
+        ex_style & WS_EX_NOREDIRECTIONBITMAP.0 != 0,
+    ));
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -224,24 +232,43 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
         AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
-    let variants: [(&str, DXGI_SCALING, DXGI_ALPHA_MODE); 3] = [
-        ("premultiplied+stretch", desc.Scaling, desc.AlphaMode),
+    let variants: [(&str, DXGI_SCALING, DXGI_ALPHA_MODE, u32, DXGI_SWAP_EFFECT); 4] = [
+        (
+            "premultiplied+stretch",
+            DXGI_SCALING_STRETCH,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+            2,
+            DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        ),
         (
             "premultiplied+none",
             DXGI_SCALING_NONE,
             DXGI_ALPHA_MODE_PREMULTIPLIED,
+            2,
+            DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        ),
+        (
+            "bitblt+discard",
+            DXGI_SCALING_STRETCH,
+            DXGI_ALPHA_MODE_UNSPECIFIED,
+            1,
+            DXGI_SWAP_EFFECT_DISCARD,
         ),
         (
             "unspecified+stretch",
             DXGI_SCALING_STRETCH,
             DXGI_ALPHA_MODE_UNSPECIFIED,
+            2,
+            DXGI_SWAP_EFFECT_FLIP_DISCARD,
         ),
     ];
     let mut swapchain: Option<IDXGISwapChain1> = None;
     let mut used_variant = "";
-    for (name, scaling, alpha) in variants {
+    for (name, scaling, alpha, buffer_count, effect) in variants {
         desc.Scaling = scaling;
         desc.AlphaMode = alpha;
+        desc.BufferCount = buffer_count;
+        desc.SwapEffect = effect;
         match unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None) } {
             Ok(chain) => {
                 crate::logging::info(&format!("[nex][refract] swapchain ok via {name}"));

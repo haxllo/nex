@@ -346,7 +346,6 @@ body {
   background: var(--hover);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease-out;
 }
 .row > * {
   position: relative;
@@ -354,10 +353,14 @@ body {
 }
 .row:hover::before {
   opacity: 1;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 .row.selected::before {
   background: var(--sel);
   opacity: 1;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 .keyboard-nav .row:hover:not(.selected)::before {
   opacity: 0;
@@ -427,6 +430,7 @@ body {
 }
 .power-panel .pcircle {
   animation: none;
+  opacity: 1;
 }
 }
 
@@ -1396,18 +1400,17 @@ html[data-theme="light"] #update-btn:hover {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
   max-width: 96px;
-  padding: 12px 4px 16px;
+  padding: 10px 4px 12px;
   border: 1px solid transparent;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--bg-opaque) 52%, transparent);
+  border-radius: 12px;
+  background: transparent;
   color: var(--c);
   cursor: pointer;
   opacity: 0;
   box-shadow: none;
-  transition: background 150ms ease, border-color 150ms ease;
   animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 .power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
@@ -1417,56 +1420,42 @@ html[data-theme="light"] #update-btn:hover {
 .power-panel .pcircle:nth-child(5) { animation-delay: 100ms; }
 .power-panel .pcircle:nth-child(6) { animation-delay: 120ms; }
 .power-panel .pcircle svg {
-  width: 50px;
-  height: 50px;
+  width: 46px;
+  height: 46px;
   box-sizing: border-box;
-  padding: 12px;
+  padding: 11px;
   border: 1px solid transparent;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--c) 9%, var(--bg-opaque));
+  background: color-mix(in srgb, var(--c) 9%, transparent);
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-  transition: border-color 150ms ease, background 150ms ease;
 }
 .power-panel .pcircle span {
   margin-top: 1px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--text-dim);
   letter-spacing: 0.1px;
   white-space: nowrap;
-  transition: color 150ms ease;
-}
-/* Accent indicator dot under the label (8px gap below). */
-.power-panel .pcircle::after {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--c);
-  opacity: 0.85;
-  transition: opacity 150ms ease;
 }
 .power-panel .pcircle:hover {
-  background: color-mix(in srgb, white 7%, var(--bg-opaque));
-  border-color: transparent;
+  background: var(--hover);
   box-shadow: none;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 .power-panel .pcircle:hover svg {
-  border-color: transparent;
-  background: color-mix(in srgb, white 10%, var(--bg-opaque));
-}
-.power-panel .pcircle:hover span {
-  color: var(--text);
-}
-.power-panel .pcircle:hover::after {
-  opacity: 1;
+  background: color-mix(in srgb, var(--c) 14%, transparent);
 }
 .power-panel .pcircle:active {
-  background: color-mix(in srgb, white 12%, var(--bg-opaque));
+  background: var(--sel);
+}
+.power-panel .pcircle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 35%, transparent);
+  outline-offset: 1px;
 }
 .power-panel .pcircle[data-power="back"] {
   --c: var(--text-faint);
@@ -1475,9 +1464,9 @@ html[data-theme="light"] #update-btn:hover {
   height: 34px;
   padding: 0;
   gap: 0;
-  border: 1px solid var(--border-strong);
+  border: 1px solid transparent;
   border-radius: 50%;
-  background: var(--surface-2);
+  background: transparent;
   color: var(--text-faint);
 }
 .power-panel .pcircle[data-power="back"] svg {
@@ -1486,13 +1475,11 @@ html[data-theme="light"] #update-btn:hover {
   padding: 7px;
   background: transparent;
 }
-.power-panel .pcircle[data-power="back"] span,
-.power-panel .pcircle[data-power="back"]::after {
+.power-panel .pcircle[data-power="back"] span {
   display: none;
 }
 .power-panel .pcircle[data-power="back"]:hover {
-  background: color-mix(in srgb, white 10%, var(--bg-opaque));
-  border-color: var(--border-strong);
+  background: var(--hover);
 }
 
 @keyframes nexPowerRise {
@@ -1525,11 +1512,13 @@ html[data-theme="light"] #update-btn:hover {
 #context-menu {
   position: fixed;
   min-width: 180px;
-  padding: 4px;
-  border-radius: var(--radius);
-  background: var(--bg-opaque);
-  border: 1px solid var(--border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  padding: 5px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-opaque) 42%, transparent);
+  border: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(30px) saturate(1.35);
+  backdrop-filter: blur(30px) saturate(1.35);
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   z-index: 9999;
@@ -1538,9 +1527,10 @@ html[data-theme="light"] #update-btn:hover {
 #context-menu button {
   display: block;
   width: 100%;
-  padding: 6px 10px;
+  min-height: 30px;
+  padding: 6px 9px;
   border: none;
-  border-radius: var(--row-radius);
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   font-family: inherit;
@@ -1549,11 +1539,20 @@ html[data-theme="light"] #update-btn:hover {
   text-align: left;
 }
 #context-menu button:hover {
+  background: var(--hover);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+#context-menu button:active {
   background: var(--sel);
+}
+#context-menu button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 35%, transparent);
+  outline-offset: -2px;
 }
 #context-menu hr {
   height: 1px;
-  margin: 4px 6px;
+  margin: 5px 6px;
   border: none;
   background: var(--divider);
 }

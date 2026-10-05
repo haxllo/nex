@@ -794,18 +794,30 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
                         // to suppress Start at the RIT level.
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        // Prime DOM focus before revealing the window. Once
+                        // visible, there must not be a gap where the overlay
+                        // can receive WM_CHAR while no editable element owns
+                        // WebView focus (Windows beeps for those unhandled
+                        // characters).
+                        focus_input(&webview);
                         // Activate the hidden window before its first visible
                         // frame so DWM doesn't show Acrylic's inactive fallback.
                         force_foreground(hwnd);
                         window.set_visible(true);
+                        // Set focus on the native host after activation, then
+                        // restore DOM focus to the WebView's search control.
+                        // Foreground activation alone can leave focus on the
+                        // previous window or the host HWND during first show.
+                        let _ = window.set_focus();
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Start glass capture with the panel. Its HWND is
                         // revealed only after the worker presents a frame.
                         if let Some(layer) = glass_layer.as_ref() {
                             layer.set_visible(true);
                         }
-                        // Focus the page's input — without this the first
-                        // show after launch is visible but unfocused.
+                        // Reassert the focused page input after native window
+                        // activation; the pre-show focus above closes the
+                        // immediate-typing race while this completes handoff.
                         focus_input(&webview);
                         // SetWindowPos(SWP_NOACTIVATE) is used on hide to keep
                         // Explorer from exposing the taskbar. Depending on
@@ -1676,6 +1688,14 @@ fn push_status(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>) {
 
 fn focus_input(webview: &Option<WebView>) {
     if let Some(wv) = webview {
+        // DOM focus alone (`input.focus()`) does not move WebView2's native
+        // controller focus. On a fresh show, Windows can therefore deliver
+        // the first WM_CHAR to the host/previous focus target and play the
+        // system error sound. Move native keyboard focus into WebView2 first,
+        // then focus the editable search element inside the page.
+        if let Err(error) = wv.focus() {
+            crate::runtime::log_info(&format!("[nex] WebView native focus failed: {error}"));
+        }
         let _ = wv.evaluate_script("window.nex&&window.nex.focus()");
     }
 }
@@ -2072,9 +2092,9 @@ fn hide_overlay_window(
     let _ = window.set_visible(false);
 }
 
-/// Steal foreground focus reliably. winit/tao cannot do this on its own
-/// because Windows blocks `SetForegroundWindow` from background apps;
-/// the `AttachThreadInput` trick is the standard workaround.
+/// Activate the overlay without injecting keyboard input. `AttachThreadInput`
+/// lets the foreground transfer share the active input queue when Windows
+/// permits it; the elevated helper handles the UIPI case.
 ///
 /// When an elevated window (Task Manager, High IL) has foreground,
 /// `AttachThreadInput` fails silently because of UIPI — that's fine.
@@ -2093,28 +2113,6 @@ fn force_foreground(hwnd: HWND) {
         if fg == hwnd && IsWindowVisible(hwnd) != 0 {
             return;
         }
-        // Classic foreground-lock unlock: a synthetic key event marks
-        // input as recent, satisfying the OS check that otherwise makes
-        // SetForegroundWindow silently no-op against stubborn windows.
-        let tap = |down: bool| {
-            let mut input: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT =
-                std::mem::zeroed();
-            input.r#type = windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD;
-            input.Anonymous.ki.wVk = 0x12; // VK_MENU (Alt) — harmless tap
-            input.Anonymous.ki.dwFlags = if down {
-                0
-            } else {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_KEYUP
-            };
-            windows_sys::Win32::UI::Input::KeyboardAndMouse::SendInput(
-                1,
-                &input,
-                std::mem::size_of::<windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT>()
-                    as i32,
-            );
-        };
-        let _ = tap(true);
-
         let fg = GetForegroundWindow();
         let cur_tid = GetCurrentThreadId();
         let fg_tid = if fg.is_null() {
@@ -2147,7 +2145,6 @@ fn force_foreground(hwnd: HWND) {
             // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
-        let _ = tap(false); // release the Alt tap
     }
 }
 

@@ -683,6 +683,9 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
         .unwrap_or_else(Instant::now);
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us) = (0u64, 0u64, 0u64);
+    // Straight failures in a row: a poisoned device/capture never heals
+    // by retrying the same calls, so rebuild everything after a few.
+    let mut n_fail = 0u32;
 
     loop {
         while let Ok(cfg) = rx.try_recv() {
@@ -807,6 +810,24 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 .ok_or("empty frame resource")?
                 .cast()
                 .map_err(|e| format!("frame QI texture failed: {e:?}"))?;
+            // Validate the box against the staging target before the
+            // copy: D3D11 queues the copy and surfaces range faults
+            // later (typically at Map) as device-removed, which
+            // misdirects the whole diagnosis.
+            if bx
+                .checked_add(bw)
+                .map(|r| r > cap.frame_w)
+                .unwrap_or(true)
+                || by
+                    .checked_add(bh)
+                    .map(|r| r > cap.frame_h)
+                    .unwrap_or(true)
+            {
+                return Err(format!(
+                    "box {bx},{by} {bw}x{bh} outside staging {}x{}",
+                    cap.frame_w, cap.frame_h
+                ));
+            }
             let srcbox = D3D11_BOX {
                 left: bx,
                 top: by,
@@ -821,10 +842,22 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
                 );
             }
             let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
-            unsafe {
-                eng.context
-                    .Map(&cap.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped as *mut _))
-                    .map_err(|e| format!("staging Map failed: {e:?}"))?;
+            if let Err(e) = unsafe {
+                eng.context.Map(
+                    &cap.staging,
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped as *mut _),
+                )
+            } {
+                // Name the removal cause: TDR/hung/driver behave the
+                // same at Map, and the reason decides the next move.
+                let reason = match unsafe { eng.device.GetDeviceRemovedReason() } {
+                    Ok(()) => "healthy".to_string(),
+                    Err(reason) => format!("0x{:08X}", reason.code().0 as u32),
+                };
+                return Err(format!("staging Map failed: {e:?} (removed reason={reason})"));
             }
             let t0 = Instant::now();
             let mut pixels = vec![0u8; (bw * bh * 4) as usize];
@@ -850,11 +883,23 @@ fn worker_main(glass_sys: isize, rx: Receiver<GlassConfig>) {
             Ok(us) => {
                 copy_us += us;
                 n_pre += 1;
+                n_fail = 0;
                 last_present = Instant::now();
             }
             Err(error) => {
                 let _ = unsafe { cap.duplication.ReleaseFrame() };
+                n_fail += 1;
                 crate::logging::warn(&format!("[nex][refract] frame failed: {error}"));
+                if n_fail >= 3 {
+                    crate::logging::warn(
+                        "[nex][refract] 3 straight frame failures — full engine+capture reset",
+                    );
+                    capture = None;
+                    engine = None;
+                    n_fail = 0;
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
                 std::thread::sleep(Duration::from_millis(250));
             }
         }

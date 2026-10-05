@@ -1697,3 +1697,14 @@ html.glass-native .row.selected::before {
 html.glass-native .row .icon.placeholder {
   background: transparent;
 }
+
+/* TEMPORARY full-nuke diagnostic: every painted background in the
+   panel goes transparent (text, borders, icons, opacity untouched).
+   If live glass shows through, the pipeline is proven and the job
+   becomes choosing which chrome to restore. If still solid, the
+   opacity is below the page (frame/WebView surface). REMOVE after. */
+html.glass-native #panel,
+html.glass-native #panel * {
+  background: transparent !important;
+  box-shadow: none !important;
+}

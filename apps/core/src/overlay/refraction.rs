@@ -31,7 +31,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, MoveWindow, WINDOW_EX_STYLE,
+    CreateWindowExW, DefWindowProcW, RegisterClassW, MoveWindow, SetWindowPos,
+    HWND_BOTTOM, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, WINDOW_EX_STYLE,
     WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
 };
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
@@ -45,6 +46,17 @@ pub fn enabled() -> bool {
 
 /// Solid spike tint, premultiplied RGBA: visible teal, ~45% opaque.
 const TINT: [f32; 4] = [0.045, 0.225, 0.2475, 0.45];
+/// Test-hook tint: opaque red, unmistakable.
+const TOP_TINT: [f32; 4] = [1.0, 0.12, 0.12, 1.0];
+
+/// Temporary z-order probe (spike only): force the glass child ABOVE the
+/// WebView. Clicks die there — look only. Decides whether the swapchain
+/// reaches DWM at all (red visible) or never composites (still nothing).
+fn force_top() -> bool {
+    std::env::var("NEX_REFRACT_TOP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
 
 pub struct GlassLayer {
     hwnd: HWND,
@@ -54,6 +66,7 @@ pub struct GlassLayer {
     rtv: Option<ID3D11RenderTargetView>,
     width: u32,
     height: u32,
+    tint: [f32; 4],
 }
 
 unsafe extern "system" fn glass_wndproc(
@@ -145,6 +158,29 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
         )
         .map_err(|e| format!("CreateWindowExW child failed: {e:?} (last error {})", last_error_code()))?
     };
+    // Creation order should already put us below the not-yet-created
+    // WebView; pin it explicitly so z-order is evidence, not luck.
+    // NEX_REFRACT_TOP=1 inverts this for the compositing probe.
+    let top = force_top();
+    let (anchor, anchor_name) = if top { (HWND_TOP, "TOP(test hook)") } else { (HWND_BOTTOM, "BOTTOM") };
+    if let Err(error) = unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(anchor),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE,
+        )
+    } {
+        crate::logging::warn(&format!("[nex][refract] SetWindowPos {anchor_name} failed: {error:?}"));
+    } else {
+        crate::logging::info(&format!("[nex][refract] glass z-order pinned {anchor_name}"));
+    }
+    if top {
+        crate::logging::warn("[nex][refract] TEST HOOK ACTIVE: opaque red above WebView, clicks blocked — look only");
+    }
 
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
@@ -233,6 +269,7 @@ fn create_inner(parent_sys: isize, logical_w: f64, logical_h: f64, scale: f64) -
         rtv: None,
         width,
         height,
+        tint: if top { TOP_TINT } else { TINT },
     };
     layer.recreate_target()?;
     layer.present()?;
@@ -271,7 +308,7 @@ impl GlassLayer {
                 MaxDepth: 1.0,
             };
             self.context.RSSetViewports(Some(&[viewport]));
-            self.context.ClearRenderTargetView(rtv, &TINT);
+            self.context.ClearRenderTargetView(rtv, &self.tint);
             self.swapchain
                 .Present(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
                 .ok()

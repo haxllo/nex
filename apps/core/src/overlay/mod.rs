@@ -21,6 +21,7 @@
 //!   * [`hotkey`]  — `RegisterHotKey` + `GetMessageW` listener thread.
 //!   * [`tray`]    — system tray icon with context menu.
 //!   * [`indexing_progress`] — progress window for first-time indexing.
+//!   * [`refraction`] — native glass spike: D3D11 child beneath WebView.
 
 #[cfg(target_os = "windows")]
 pub(crate) mod host;
@@ -40,6 +41,8 @@ pub(crate) mod shim;
 pub(crate) mod tray;
 #[cfg(target_os = "windows")]
 pub(crate) mod indexing_progress;
+#[cfg(target_os = "windows")]
+pub(crate) mod refraction;
 
 #[cfg(target_os = "windows")]
 pub use model::{OverlayEvent, OverlayRow, OverlayRowRole};

@@ -250,6 +250,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         s.hwnd = hwnd as isize;
     }
     let acrylic_available = apply_window_chrome(&window, &state);
+    // Refraction spike (NEX_REFRACT_LAB=1): native glass child beneath
+    // the WebView. Created before build_webview so it sits lower in
+    // z-order without ever needing the WebView's HWND. None (flag off
+    // or any failure) keeps the Acrylic path untouched.
+    let mut glass_layer = crate::overlay::refraction::create_for_window(
+        hwnd as isize,
+        WINDOW_WIDTH,
+        INITIAL_HEIGHT,
+        window.scale_factor(),
+    );
     unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
 
     // Register raw input sink permanently at startup so the overlay
@@ -394,7 +404,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                     if state.lock().map(|s| s.visible).unwrap_or(false) {
                         position_window(&window, hwnd);
-                        apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                         last_applied_height = INITIAL_HEIGHT;
                         pending_resize = None;
                         first_resize_after_show = true;
@@ -517,7 +527,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         position_window(&window, hwnd);
                     }
                     // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), INITIAL_HEIGHT);
+                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -679,7 +689,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -689,7 +699,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -697,7 +707,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), h);
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -715,7 +725,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     }
                 }
@@ -1893,11 +1903,20 @@ fn keep_webview_viewport_max(webview: &WebView) {
 }
 
 /// Resize the window and immediately re-assert the oversized WebView
-/// viewport (wry snaps it to the window size on WM_SIZE).
-fn apply_window_height(window: &Window, webview: Option<&WebView>, h: f64) {
+/// viewport (wry snaps it to the window size on WM_SIZE). The glass
+/// child tracks the same size when the spike is active.
+fn apply_window_height(
+    window: &Window,
+    webview: Option<&WebView>,
+    glass: &mut Option<crate::overlay::refraction::GlassLayer>,
+    h: f64,
+) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
+    }
+    if let Some(layer) = glass {
+        layer.resize_for_logical(WINDOW_WIDTH, h, window.scale_factor());
     }
 }
 

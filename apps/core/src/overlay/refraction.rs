@@ -305,13 +305,19 @@ impl GlassLayer {
                 .ResizeBuffers(0, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, windows::Win32::Graphics::Dxgi::DXGI_SWAP_CHAIN_FLAG(0))
         };
         match result {
-            Ok(()) => match self.recreate_target().and_then(|_| self.present()) {
-                Ok(()) => {
-                    self.width = width;
-                    self.height = height;
+            Ok(()) => {
+                // Track the new size BEFORE recreating + presenting: both
+                // use self.width/height for the viewport and the log line.
+                // Reverted on failure so a later retry isn't a no-op.
+                let (old_w, old_h) = (self.width, self.height);
+                self.width = width;
+                self.height = height;
+                if let Err(error) = self.recreate_target().and_then(|_| self.present()) {
+                    self.width = old_w;
+                    self.height = old_h;
+                    crate::logging::warn(&format!("[nex][refract] resize present failed: {error}"));
                 }
-                Err(error) => crate::logging::warn(&format!("[nex][refract] resize present failed: {error}")),
-            },
+            }
             Err(error) => crate::logging::warn(&format!("[nex][refract] ResizeBuffers failed: {error:?}")),
         }
     }

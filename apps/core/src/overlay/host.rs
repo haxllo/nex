@@ -526,6 +526,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if !DRAG_ACTIVE.load(Ordering::SeqCst) {
                         position_window(&window, hwnd);
                     }
+                    // Spike glass follows the main window: same rect,
+                    // ordered directly below it (never activating).
+                    if let Some(layer) = glass_layer.as_mut() {
+                        layer.sync_to_main(hwnd as isize);
+                    }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
@@ -540,12 +545,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         s.theme = crate::overlay::platform::detect_system_theme();
                     }
                     apply_window_chrome(&window, &state);
-                    // Spike probe: re-assert TOP at show time — WebView
-                    // creation (and any wry reordering) happens after our
-                    // creation-time pin and can bury the glass child.
-                    if let Some(layer) = glass_layer.as_ref() {
-                        layer.repin_top_for_probe();
-                    }
+                    // Push state with show_pending so the JS side sends
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -586,7 +586,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window);
+                    hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -642,7 +642,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window);
+                    hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_previous_foreground(&mut previous_foreground);
                     crate::overlay::hotkey::release_mask_after_hide();
@@ -781,6 +781,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         force_foreground(hwnd);
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
+                        // Spike glass appears with the panel (it was
+                        // aligned while hidden in the Show arm).
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.set_visible(true);
+                        }
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.
                         focus_input(&webview);
@@ -1909,8 +1914,8 @@ fn keep_webview_viewport_max(webview: &WebView) {
 }
 
 /// Resize the window and immediately re-assert the oversized WebView
-/// viewport (wry snaps it to the window size on WM_SIZE). The glass
-/// child tracks the same size when the spike is active.
+/// viewport (wry snaps it to the window size on WM_SIZE). The spike
+/// glass re-aligns to the main window rect (size follows for free).
 fn apply_window_height(
     window: &Window,
     webview: Option<&WebView>,
@@ -1922,7 +1927,7 @@ fn apply_window_height(
         keep_webview_viewport_max(wv);
     }
     if let Some(layer) = glass {
-        layer.resize_for_logical(WINDOW_WIDTH, h, window.scale_factor());
+        layer.sync_to_main(window.hwnd() as isize);
     }
 }
 
@@ -2055,7 +2060,15 @@ fn restore_previous_foreground(previous: &mut Option<HWND>) {
     }
 }
 
-fn hide_overlay_window(hwnd: HWND, window: &Window) {
+fn hide_overlay_window(
+    hwnd: HWND,
+    window: &Window,
+    glass: &Option<crate::overlay::refraction::GlassLayer>,
+) {
+    // Spike glass vanishes with the panel.
+    if let Some(layer) = glass {
+        layer.set_visible(false);
+    }
     unsafe {
         SetWindowPos(
             hwnd,

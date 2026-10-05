@@ -782,9 +782,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Spike glass appears with the panel (it was
-                        // aligned while hidden in the Show arm).
+                        // aligned while hidden in the Show arm), then
+                        // re-presents: presents made while hidden are
+                        // discarded by DWM, so showing without a fresh
+                        // present leaves void buffers on screen.
                         if let Some(layer) = glass_layer.as_ref() {
                             layer.set_visible(true);
+                            if let Err(error) = layer.present() {
+                                crate::logging::warn(&format!(
+                                    "[nex][refract] show present failed: {error}"
+                                ));
+                            }
                         }
                         // Focus the page's input — without this the first
                         // show after launch is visible but unfocused.

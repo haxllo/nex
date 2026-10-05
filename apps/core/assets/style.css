@@ -1688,6 +1688,14 @@ html.glass-native #panel {
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
 }
 
+/* TEMPORARY spike sledgehammer: proves the glass-native rules win.
+   If the panel goes magenta, the page path is fully controllable and
+   any remaining solidity is a specific missed rule, not the pipeline.
+   REMOVE before productizing. */
+html.glass-native #search-row {
+  background: rgba(255, 0, 255, 0.35);
+}
+
 html.glass-native .row:hover::before,
 html.glass-native .row.selected::before {
   background: rgba(255, 255, 255, 0.14);

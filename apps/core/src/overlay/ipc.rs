@@ -14,7 +14,7 @@
 
 #![cfg(target_os = "windows")]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Hard cap on the raw IPC body. The largest legitimate message is a
 /// settings save (~1 KB of cfg JSON); 64 KiB leaves wide headroom while
@@ -116,6 +116,33 @@ pub(crate) struct VolumePayload {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TextPayload {
     pub v: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ChatConfigPayload {
+    pub provider: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatTurnPayload {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ChatSendPayload {
+    pub message: String,
+    #[serde(default)]
+    pub history: Vec<ChatTurnPayload>,
 }
 
 /// Resize payload: `{t:"resize", v:{v:h, immediate:bool}}` (current) or
@@ -244,6 +271,18 @@ pub(crate) enum OverlayMessage {
     MediaSession(TextPayload),
     #[serde(rename = "whatsNew")]
     WhatsNew(NoPayload),
+    #[serde(rename = "chatState")]
+    ChatState(NoPayload),
+    #[serde(rename = "chatConfigure")]
+    ChatConfigure(ChatConfigPayload),
+    #[serde(rename = "chatFetchModels")]
+    ChatFetchModels(ChatConfigPayload),
+    #[serde(rename = "chatSend")]
+    ChatSend(ChatSendPayload),
+    #[serde(rename = "chatConnect")]
+    ChatConnect(TextPayload),
+    #[serde(rename = "chatCancel")]
+    ChatCancel(NoPayload),
 }
 
 /// Settings-window IPC envelope. Deliberately separate from
@@ -305,6 +344,12 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaMute",
         "mediaSession",
         "whatsNew",
+        "chatState",
+        "chatConfigure",
+        "chatFetchModels",
+        "chatSend",
+        "chatConnect",
+        "chatCancel",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
         return Err(IpcReject::UnknownType(tag));
@@ -349,6 +394,30 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::MediaSession(p) => {
             check_len(&p.v, 256, "media session key").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::ChatConfigure(p) | OverlayMessage::ChatFetchModels(p) => {
+            check_len(&p.provider, 32, "chat provider").map_err(IpcReject::BadPayload)?;
+            check_len(&p.base_url, 2048, "chat provider URL").map_err(IpcReject::BadPayload)?;
+            check_len(&p.model, 128, "chat model").map_err(IpcReject::BadPayload)?;
+            check_len(&p.api_key, 4096, "chat API key").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::ChatSend(p) => {
+            check_len(&p.message, 16_000, "chat message").map_err(IpcReject::BadPayload)?;
+            if p.history.len() > 24 {
+                return Err(IpcReject::BadPayload("chat history exceeds 24 turns".into()));
+            }
+            let mut total = 0usize;
+            for turn in &p.history {
+                check_len(&turn.role, 16, "chat role").map_err(IpcReject::BadPayload)?;
+                check_len(&turn.content, 6000, "chat history content").map_err(IpcReject::BadPayload)?;
+                total += turn.content.len();
+            }
+            if total > 40_000 {
+                return Err(IpcReject::BadPayload("chat history is too large".into()));
+            }
+        }
+        OverlayMessage::ChatConnect(p) => {
+            check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {
             check_len(&p.v, MAX_TITLE_CHARS, "pin target").map_err(IpcReject::BadPayload)?;

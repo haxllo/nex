@@ -1,0 +1,229 @@
+Design and implement a new Chat view/state for Nex in a new branch.
+
+The Chat view should feel like a native part of Nex, not a separate chatbot application. Follow Nex's existing visual language and existing UI/component system while giving the chat interface enough space and hierarchy for conversations, streaming responses, tool/status states, and different input/output types.
+
+IMPORTANT UI CONSTRAINT:
+- Nex's frosted-glass/translucent window implementation already exists and is already handled by Nex.
+- Do NOT create, redesign, replace, or add a separate background, glass layer, opaque chatbot panel, or alternative window surface for Chat.
+- The Chat view must use the existing Nex window/background/glass implementation exactly as the foundation.
+- UI work should focus on properly designing, composing, positioning, sizing, spacing, and manipulating the existing components to create the Chat experience.
+- Do not treat Chat as a separate application visually.
+- Reuse existing Nex components and interaction patterns wherever appropriate, creating new components only when genuinely necessary.
+
+ACCESS / STATE FLOW
+- Nex currently uses Tab to navigate between states.
+- If media is playing:
+  - First Tab → Media view
+  - Second Tab → Chat view
+- If no media is playing:
+  - First Tab → Chat view
+- Chat should also be directly accessible through voice activation.
+- Make the state transitions smooth and predictable.
+- Do not break the existing Media state or Tab behavior.
+
+CHAT PROVIDERS
+The Chat view should be designed around multiple backend options:
+
+1. OpenAI-compatible BYOK
+   - Custom base URL
+   - API key
+   - Model selection
+   - Compatible with OpenAI-style APIs
+
+2. Codex connection
+   - Allow the user to authenticate/connect their Codex account.
+   - Use the actual supported authentication mechanism rather than assuming it is simply an API key.
+
+3. Claude connection
+   - Allow the user to authenticate/connect Claude.
+   - Use the actual supported authentication mechanism.
+
+4. The architecture should allow additional providers/models to be added later without redesigning the Chat UI.
+
+DESIGN THE COMPLETE CHAT EXPERIENCE
+
+Consider the entire lifecycle rather than only the message list:
+
+- Empty state / first-use state
+- User messages
+- Assistant messages
+- Streaming responses
+- Long responses
+- Markdown
+- Code blocks
+- Inline code
+- Links
+- Lists
+- Tables
+- Errors
+- Network/provider failures
+- Rate limits
+- Authentication failures
+- Loading/thinking states
+- Tool calls/status
+- Cancel generation
+- Regenerate response
+- Copy response/code
+- Conversation history
+- New conversation
+- Model/provider indicator
+- Attachments or future multimodal input
+- Voice input
+- Keyboard input
+- Very short and extremely long messages
+- Very long assistant responses
+- Empty/invalid input
+- Input while the assistant is streaming
+
+UI / COMPONENT DESIGN
+
+Design the Chat view by manipulating and composing the existing Nex UI components correctly.
+
+Focus on:
+
+- Component hierarchy
+- Layout
+- Spacing
+- Alignment
+- Component sizing
+- Content density
+- Typography hierarchy
+- Message grouping
+- Input/composer positioning
+- Button placement
+- Component visibility based on state
+- Scrolling behavior
+- Focus behavior
+- Hover/active/disabled states
+- Loading and streaming states
+- Error states
+- State transitions
+- Subtle animations where appropriate
+
+The Chat UI should have a clear hierarchy between:
+
+- Conversation content
+- Current user input
+- Active generation state
+- Provider/model information
+- Contextual actions
+
+Avoid unnecessary UI elements. Every visible control should have a clear purpose.
+
+Do not redesign the entire Nex component system just for Chat. Extend the existing system consistently where necessary.
+
+INPUT DESIGN
+
+Carefully determine the appropriate input behavior and sizing:
+
+- Single-line input for short messages.
+- Automatically expand into a multiline composer as the message grows.
+- Define sensible minimum and maximum heights.
+- Long messages should scroll inside the composer rather than expanding the Nex window indefinitely.
+- Enter should send and Shift+Enter should create a newline, unless this conflicts with existing Nex conventions.
+- Clearly communicate the current provider/model.
+- Support stopping an active generation.
+- Make the input immediately usable when the Chat state opens.
+- Prevent focus/input timing issues.
+- Handle empty and whitespace-only input correctly.
+- Handle input while a response is streaming.
+- Make the input state visually clear when disabled, submitting, or waiting for a response.
+
+OUTPUT DESIGN
+
+Design the response area to handle:
+
+- Short conversational responses
+- Very long responses
+- Streaming text
+- Markdown headings
+- Paragraphs
+- Lists
+- Code blocks with language labels and copy actions
+- Horizontal overflow for long code lines
+- Tables without breaking the window
+- Error messages
+- Tool execution/status indicators
+- Multiple messages in a conversation
+
+Do not allow a long response to continuously expand the window.
+
+The conversation area should become scrollable while maintaining a clean visual hierarchy.
+
+Make sure streaming updates do not cause:
+
+- Layout jitter
+- Unnecessary component movement
+- Excessive resizing
+- Scroll position problems
+- Flickering
+- Noticeable performance degradation
+
+VOICE ACTIVATION
+
+Chat can be opened directly through voice activation.
+
+Design the state for:
+
+- Voice activation feedback
+- Listening state
+- Transcription state
+- Transcribed user message
+- Sending state
+- Voice unavailable/error state
+- Returning naturally to the Chat view after activation
+
+Use the existing Nex UI components and state/animation conventions for these states where possible.
+
+ARCHITECTURE
+
+Before implementing, inspect the existing Nex state/navigation architecture and determine the cleanest way to add Chat without duplicating existing logic.
+
+Keep provider/authentication logic separated from the UI so the Chat view can support:
+
+- OpenAI-compatible APIs
+- Codex authentication
+- Claude authentication
+- Future providers
+
+Keep these concerns reasonably separated:
+
+- Chat state/navigation
+- Chat UI
+- Conversation state
+- Provider abstraction
+- Authentication
+- Streaming
+- Message rendering
+- Persistence
+- Voice input
+
+Consider:
+
+- Secure API-key/token storage
+- Streaming responses
+- Cancellation
+- Provider errors
+- Authentication errors
+- Provider switching
+- Model configuration
+- Conversation persistence
+- Future multimodal support
+
+Do not expose API keys or authentication credentials unnecessarily to the WebView/UI layer.
+
+IMPLEMENTATION
+
+Do not implement only a visual mockup.
+
+Build the actual Chat state and interaction architecture so it is ready for real backend integration.
+
+First investigate the existing Nex architecture, state system, components, navigation behavior, and conventions.
+
+Then implement Chat consistently with the existing application.
+
+Do not replace working Nex systems unnecessarily.
+
+Do not create a separate visual/window/background system for Chat.
+
+The goal is to make Chat feel like another carefully designed Nex state by using and manipulating the existing components properly, while providing enough UI flexibility to support real conversations, streaming responses, tools, providers, voice activation, and long-form content.

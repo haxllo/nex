@@ -45,6 +45,54 @@
   const mediaMuteIcon = $("media-mute-icon");
   const mediaDots = $("media-dots");
   const mediaLive = $("media-live");
+  const chatView = $("chat-view");
+  const chatScroll = $("chat-scroll");
+  const chatMessagesEl = $("chat-messages");
+  const chatEmpty = $("chat-empty");
+  const chatInput = $("chat-input");
+  const chatSendButton = $("chat-send-button");
+  const chatNotice = $("chat-notice");
+  const chatLiveStatus = $("chat-live-status");
+  const chatSettings = $("chat-settings");
+  const chatProviderInput = $("chat-provider");
+  const chatProviderButton = $("chat-provider-button");
+  const chatProviderChoice = $("chat-provider-choice");
+  const chatProviderOptions = $("chat-provider-options");
+  const chatModelInput = $("chat-model");
+  const chatModelOptions = $("chat-model-options");
+  const chatModelSearch = $("chat-model-search");
+  const chatModelResults = $("chat-model-results");
+  const chatModelMenuButton = $("chat-model-menu-button");
+  const chatModelFetchButton = $("chat-model-fetch");
+  const chatBaseUrlInput = $("chat-base-url");
+  const chatApiKeyInput = $("chat-api-key");
+  const chatEndpointField = $("chat-endpoint-field");
+  const chatKeyField = $("chat-key-field");
+  const chatConnectButton = $("chat-connect-button");
+  const chatCheckButton = $("chat-check-button");
+  const chatConnectionHint = $("chat-connection-hint");
+  const chatHistory = $("chat-history");
+  const CHAT_HISTORY_KEY = "nex.chat.history.v1";
+  let chatOpen = false;
+  let chatReturnToMedia = false;
+  let chatStreaming = false;
+  let chatConfig = { provider: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", configured: false, accountConnected: false };
+  let chatModels = [];
+  let chatModelsProvider = "";
+  let chatModelsLoading = false;
+  let chatModelsTimer = 0;
+  let chatConnectionTimer = 0;
+  let chatConnectTimer = 0;
+  let chatConnectionCheckPending = false;
+  let chatConversations = loadChatConversations();
+  let chatConversationId = "";
+  let chatMessages = [];
+  let chatRenderFrame = 0;
+  let chatStreamMessageId = "";
+  let chatStreamOffset = 0;
+  let chatRecognition = null;
+  let chatAutoSendVoice = false;
+  let chatVoiceTranscript = "";
 
   // Now-playing media state pushed by Rust ({active,title,artist,...}).
   // Tab opens the media view only when a session is active; otherwise
@@ -134,9 +182,11 @@
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
 
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend"]);
   function post(t, v) {
     try {
-      window.ipc.postMessage(JSON.stringify(v === undefined ? { t } : { t, v }));
+      const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
+      window.ipc.postMessage(JSON.stringify(message));
     } catch (_) {}
   }
 
@@ -835,9 +885,32 @@
   window.addEventListener(
     "keydown",
     (e) => {
+      if (chatOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeChatView(true);
+          return;
+        }
+        if (e.key === "Tab") {
+          e.preventDefault();
+          closeChatView(false);
+          input.focus();
+          return;
+        }
+        if (e.target === chatInput && e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          sendChatMessage();
+        }
+        return;
+      }
       // Media view open: transport keys act on playback; typing
       // returns to search (the key lands in the refocused input).
       if (mediaOpen && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.key === "Tab") {
+          e.preventDefault();
+          openChatView(true);
+          return;
+        }
         if (e.key === " ") {
           e.preventDefault();
           post("mediaToggle");
@@ -922,7 +995,7 @@
         if (mediaOpen) {
           e.preventDefault();
           closeMediaView();
-          input.focus();
+          openChatView(true);
           return;
         }
         if (whatsNewOpen) {
@@ -934,13 +1007,16 @@
           e.preventDefault();
           return;
         }
-        // Media session active: Tab opens the media view instead of
-        // selecting input text. Otherwise Tab keeps its normal behavior.
+        // First Tab opens Media when available, then Chat. Without an
+        // active media session, the first Tab opens Chat directly.
         if (mediaState && mediaState.active) {
           e.preventDefault();
           openMediaView();
           return;
         }
+        e.preventDefault();
+        openChatView(false);
+        return;
         // Tab focuses the search input and selects its content so
         // typing replaces the existing query — no manual erase.
         e.preventDefault();
@@ -1259,9 +1335,698 @@
     }
   }, true);
 
+  // ── Chat view ─────────────────────────────────────────────
+  function loadChatConversations() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(CHAT_HISTORY_KEY) || "[]");
+      return Array.isArray(stored) ? stored.filter((item) => item && typeof item.id === "string" && Array.isArray(item.messages)).slice(0, 30) : [];
+    } catch (_) { return []; }
+  }
+
+  function persistChat() {
+    if (!chatConversationId) return;
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    if (conversation) {
+      conversation.messages = chatMessages.slice(-100);
+      conversation.updatedAt = Date.now();
+      conversation.provider = chatConfig.provider;
+      conversation.model = chatConfig.model;
+    }
+    chatConversations = chatConversations.slice(0, 30);
+    try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatConversations)); } catch (_) {}
+  }
+
+  function newChatConversation() {
+    if (chatStreaming) post("chatCancel");
+    chatStreaming = false;
+    chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    chatMessages = [];
+    chatConversations.unshift({ id: chatConversationId, title: "New conversation", messages: [], updatedAt: Date.now(), provider: chatConfig.provider, model: chatConfig.model });
+    chatHistory.hidden = true;
+    chatHistory.replaceChildren();
+    renderChatMessages();
+    updateChatStreamingState();
+    persistChat();
+    chatInput.focus();
+    resizeChatInput();
+    postChatResize();
+  }
+
+  function saveChatTitle() {
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    if (!conversation || conversation.title !== "New conversation") return;
+    const first = chatMessages.find((message) => message.role === "user");
+    if (first) conversation.title = first.content.trim().replace(/\s+/g, " ").slice(0, 54) || "New conversation";
+  }
+
+  function renderChatHistory() {
+    chatHistory.replaceChildren();
+    if (!chatConversations.length) {
+      const empty = document.createElement("div");
+      empty.className = "chat-history-empty";
+      empty.textContent = "Your conversations will appear here.";
+      chatHistory.appendChild(empty);
+      return;
+    }
+    for (const conversation of chatConversations.slice().sort((a, b) => b.updatedAt - a.updatedAt)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chat-history-item" + (conversation.id === chatConversationId ? " active" : "");
+      const title = document.createElement("strong");
+      title.textContent = conversation.title || "New conversation";
+      const date = document.createElement("span");
+      date.textContent = new Date(conversation.updatedAt || Date.now()).toLocaleDateString();
+      button.append(title, date);
+      button.addEventListener("click", () => {
+        if (chatStreaming) post("chatCancel");
+        chatConversationId = conversation.id;
+        chatMessages = conversation.messages.slice(-100);
+        chatConfig.provider = conversation.provider || chatConfig.provider;
+        chatConfig.model = conversation.model || chatConfig.model;
+        chatModelInput.value = chatConfig.model;
+        chatHistory.hidden = true;
+        renderChatMessages();
+        updateChatStreamingState(false);
+        chatInput.focus();
+      });
+      chatHistory.appendChild(button);
+    }
+  }
+
+  function appendChatInline(parent, value) {
+    const token = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+    let start = 0;
+    for (const match of value.matchAll(token)) {
+      if (match.index > start) parent.appendChild(document.createTextNode(value.slice(start, match.index)));
+      const raw = match[0];
+      let node;
+      if (raw.startsWith("`")) {
+        node = document.createElement("code"); node.textContent = raw.slice(1, -1);
+      } else if (raw.startsWith("**")) {
+        node = document.createElement("strong"); node.textContent = raw.slice(2, -2);
+      } else if (raw.startsWith("*")) {
+        node = document.createElement("em"); node.textContent = raw.slice(1, -1);
+      } else {
+        const link = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(raw);
+        node = document.createElement("a");
+        if (link) { node.textContent = link[1]; node.href = link[2]; node.target = "_blank"; node.rel = "noopener noreferrer"; }
+        else node.textContent = raw;
+      }
+      parent.appendChild(node);
+      start = match.index + raw.length;
+    }
+    if (start < value.length) parent.appendChild(document.createTextNode(value.slice(start)));
+  }
+
+  function chatTableCells(line) {
+    return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+  }
+
+  function renderChatMarkdown(target, markdown) {
+    target.replaceChildren();
+    const lines = String(markdown || "").replace(/\r/g, "").split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) { i++; continue; }
+      if (line.trim().startsWith("```")) {
+        const language = line.trim().slice(3).trim().slice(0, 24) || "Code";
+        const source = [];
+        i++;
+        while (i < lines.length && !lines[i].trim().startsWith("```")) source.push(lines[i++]);
+        if (i < lines.length) i++;
+        const block = document.createElement("div"); block.className = "chat-code-block";
+        const head = document.createElement("div"); head.className = "chat-code-header";
+        const lang = document.createElement("span"); lang.textContent = language;
+        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy code";
+        copy.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(source.join("\n")); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
+          catch (_) { copy.textContent = "Unavailable"; }
+        });
+        head.append(lang, copy);
+        const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = source.join("\n"); pre.appendChild(code);
+        block.append(head, pre); target.appendChild(block); continue;
+      }
+      if (i + 1 < lines.length && line.includes("|") && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
+        const table = document.createElement("table"); table.className = "chat-table";
+        const wrap = document.createElement("div"); wrap.className = "chat-table-wrap";
+        const header = document.createElement("tr");
+        for (const cell of chatTableCells(line)) { const th = document.createElement("th"); appendChatInline(th, cell); header.appendChild(th); }
+        const thead = document.createElement("thead"); thead.appendChild(header); table.appendChild(thead);
+        i += 2;
+        const body = document.createElement("tbody");
+        while (i < lines.length && lines[i].includes("|")) {
+          const row = document.createElement("tr");
+          for (const cell of chatTableCells(lines[i])) { const td = document.createElement("td"); appendChatInline(td, cell); row.appendChild(td); }
+          body.appendChild(row); i++;
+        }
+        table.appendChild(body); wrap.appendChild(table); target.appendChild(wrap); continue;
+      }
+      const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+      if (heading) {
+        const node = document.createElement("h" + heading[1].length); appendChatInline(node, heading[2]); target.appendChild(node); i++; continue;
+      }
+      if (/^\s*>/.test(line)) {
+        const quote = document.createElement("blockquote");
+        while (i < lines.length && /^\s*>/.test(lines[i])) { const p = document.createElement("p"); appendChatInline(p, lines[i++].replace(/^\s*>\s?/, "")); quote.appendChild(p); }
+        target.appendChild(quote); continue;
+      }
+      const listMatch = /^\s*([-*+] |\d+\. )(.*)$/.exec(line);
+      if (listMatch) {
+        const ordered = /^\s*\d+\./.test(line); const listNode = document.createElement(ordered ? "ol" : "ul");
+        while (i < lines.length) {
+          const item = /^\s*([-*+] |\d+\. )(.*)$/.exec(lines[i]);
+          if (!item || /^\s*\d+\./.test(lines[i]) !== ordered) break;
+          const li = document.createElement("li"); appendChatInline(li, item[2]); listNode.appendChild(li); i++;
+        }
+        target.appendChild(listNode); continue;
+      }
+      const paragraph = document.createElement("p");
+      const paragraphLines = [];
+      while (i < lines.length && lines[i].trim() && !lines[i].trim().startsWith("```") && !/^(#{1,3})\s/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^\s*([-*+] |\d+\. )/.test(lines[i])) paragraphLines.push(lines[i++]);
+      appendChatInline(paragraph, paragraphLines.join("\n")); target.appendChild(paragraph);
+    }
+  }
+
+  function renderChatMessages(streamOnly = false) {
+    const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
+    chatEmpty.hidden = chatMessages.length > 0;
+    if (!streamOnly) {
+      chatStreamMessageId = "";
+      chatStreamOffset = 0;
+      chatMessagesEl.replaceChildren();
+      for (const message of chatMessages) {
+        const article = document.createElement("article");
+        article.className = "chat-message " + (message.role === "user" ? "user" : "assistant") + (message.error ? " error" : "");
+        article.dataset.messageId = message.id;
+        const content = document.createElement("div"); content.className = "chat-message-content";
+        renderChatMarkdown(content, message.content);
+        article.appendChild(content); chatMessagesEl.appendChild(article);
+        if (message.role === "assistant" && message.content && !message.error) {
+          const actions = document.createElement("div"); actions.className = "chat-message-actions";
+          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy response";
+          copy.addEventListener("click", async () => {
+            try { await navigator.clipboard.writeText(message.content); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
+            catch (_) { copy.textContent = "Unavailable"; }
+          });
+          actions.appendChild(copy);
+          if (message.id === chatMessages.filter((item) => item.role === "assistant").slice(-1)[0]?.id) {
+            const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.title = "Try another response";
+            regenerate.disabled = chatStreaming;
+            regenerate.addEventListener("click", () => regenerateChatResponse(message.id));
+            actions.appendChild(regenerate);
+          }
+          article.appendChild(actions);
+        }
+      }
+    } else {
+      const message = chatMessages[chatMessages.length - 1];
+      if (message) {
+        const article = chatMessagesEl.querySelector('[data-message-id="' + CSS.escape(message.id) + '"]');
+        if (article) {
+          const content = article.querySelector(".chat-message-content");
+          if (chatStreamMessageId !== message.id) {
+            chatStreamMessageId = message.id;
+            chatStreamOffset = 0;
+            content.classList.add("chat-streaming-text");
+            content.replaceChildren(document.createTextNode(""));
+          }
+          if (message.content.length > chatStreamOffset) {
+            content.firstChild.appendData(message.content.slice(chatStreamOffset));
+            chatStreamOffset = message.content.length;
+          }
+        }
+      }
+    }
+    if (atBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  function postChatResize() {
+    requestAnimationFrame(() => {
+      const height = Math.ceil(panel.getBoundingClientRect().height);
+      if (height > 0) { lastH = height; post("resize", { v: height, immediate: true }); }
+    });
+  }
+
+  function resizeChatInput() {
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(112, Math.max(27, chatInput.scrollHeight)) + "px";
+    chatInput.style.overflowY = chatInput.scrollHeight > 112 ? "auto" : "hidden";
+  }
+
+  function chatProviderName(provider) {
+    return provider === "codex" ? "Codex" : "OpenAI compatible";
+  }
+
+  function syncChatConfig() {
+    const provider = chatConfig.provider || "openai-compatible";
+    chatProviderInput.value = provider;
+    chatProviderChoice.textContent = provider === "codex" ? "Codex account" : "OpenAI-compatible API";
+    for (const option of chatProviderOptions.querySelectorAll("[data-chat-provider]")) {
+      option.setAttribute("aria-selected", String(option.dataset.chatProvider === provider));
+    }
+    chatProviderButton.setAttribute("aria-expanded", String(!chatProviderOptions.hidden));
+    chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "") : "gpt-4o-mini");
+    chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
+    chatEndpointField.hidden = provider !== "openai-compatible";
+    chatKeyField.hidden = provider !== "openai-compatible";
+    chatConnectButton.hidden = provider !== "codex" || !!chatConfig.accountConnected;
+    chatCheckButton.hidden = provider !== "codex";
+    chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
+    chatConnectionHint.textContent = provider === "openai-compatible"
+      ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
+      : (chatConfig.accountConnected ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the Codex sign-in window.");
+    $("chat-provider-label").textContent = chatProviderName(provider);
+    $("chat-model-label").textContent = chatConfig.model || "Choose a model";
+  }
+
+  function openChatView(fromMedia = false) {
+    if (chatOpen) return;
+    chatReturnToMedia = !!fromMedia;
+    if (mediaOpen) closeMediaView();
+    topPower.closeMenu(); topPower.closeConfirm(); hideContextMenu();
+    chatOpen = true;
+    chatView.setAttribute("aria-hidden", "false");
+    panel.classList.add("chat-open");
+    if (!chatConversationId || !chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
+    renderChatMessages();
+    post("chatState");
+    resizeChatInput();
+    postChatResize();
+    chatInput.focus();
+  }
+
+  function closeChatView(restorePrevious) {
+    if (!chatOpen) return;
+    chatOpen = false;
+    chatView.setAttribute("aria-hidden", "true");
+    chatSettings.hidden = true;
+    chatHistory.hidden = true;
+    panel.classList.remove("chat-open");
+    if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; }
+    postChatResize();
+    if (restorePrevious && chatReturnToMedia && mediaState && mediaState.active) openMediaView();
+    else input.focus();
+    chatReturnToMedia = false;
+  }
+
+  function updateChatStreamingState(active = chatStreaming) {
+    chatStreaming = !!active;
+    chatView.classList.toggle("is-streaming", chatStreaming);
+    chatSendButton.title = chatStreaming ? "Stop response" : "Send message";
+    chatSendButton.setAttribute("aria-label", chatStreaming ? "Stop response" : "Send message");
+    chatSendButton.disabled = !chatStreaming && !chatInput.value.trim();
+  }
+
+  function startChatRequest(message, reuseUserTurn = false) {
+    if (chatStreaming) post("chatCancel");
+    if (!reuseUserTurn) chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: message });
+    const history = chatMessages.slice(0, reuseUserTurn ? -1 : undefined).filter((turn) => !turn.error && (turn.role === "user" || turn.role === "assistant")).slice(-24).map((turn) => ({ role: turn.role, content: turn.content.slice(0, 6000) }));
+    const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "" };
+    chatMessages.push(assistant);
+    saveChatTitle(); persistChat();
+    renderChatMessages();
+    chatLiveStatus.textContent = "Thinking…";
+    chatNotice.textContent = ""; chatNotice.classList.remove("error");
+    updateChatStreamingState(true);
+    post("chatSend", { message, history });
+    chatInput.focus(); postChatResize();
+  }
+
+  function sendChatMessage() {
+    const message = chatInput.value.trim();
+    if (!message) { chatInput.focus(); return; }
+    chatInput.value = ""; resizeChatInput();
+    startChatRequest(message);
+  }
+
+  function regenerateChatResponse(messageId) {
+    if (chatStreaming) return;
+    const assistantIndex = chatMessages.findIndex((message) => message.id === messageId);
+    if (assistantIndex < 1) return;
+    const previousUser = chatMessages.slice(0, assistantIndex).reverse().find((message) => message.role === "user");
+    if (!previousUser) return;
+    const userIndex = chatMessages.findIndex((message) => message.id === previousUser.id);
+    chatMessages = chatMessages.slice(0, userIndex + 1);
+    startChatRequest(previousUser.content, true);
+  }
+
+  function startChatVoice() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      chatNotice.textContent = "Voice input isn’t available in this Windows WebView. You can type your message instead.";
+      chatNotice.classList.add("error");
+      return;
+    }
+    if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; return; }
+    const recognition = new SpeechRecognition();
+    chatRecognition = recognition; chatVoiceTranscript = ""; chatAutoSendVoice = true;
+    recognition.lang = navigator.language || "en-US"; recognition.interimResults = true; recognition.continuous = false;
+    chatView.classList.add("is-listening");
+    chatLiveStatus.textContent = "Listening…";
+    chatNotice.textContent = "Speak your message. It will send when transcription finishes.";
+    chatNotice.classList.remove("error");
+    recognition.onresult = (event) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const text = event.results[i][0].transcript;
+        if (event.results[i].isFinal) chatVoiceTranscript += text;
+        else interim += text;
+      }
+      chatLiveStatus.textContent = "Transcribing…";
+      chatInput.value = (chatVoiceTranscript + interim).trimStart(); resizeChatInput(); updateChatStreamingState();
+    };
+    recognition.onerror = (event) => {
+      chatAutoSendVoice = false;
+      chatNotice.textContent = event.error === "not-allowed" ? "Allow microphone access in Windows to use voice input." : "Voice input stopped. You can continue by typing.";
+      chatNotice.classList.add("error");
+    };
+    recognition.onend = () => {
+      chatRecognition = null; chatView.classList.remove("is-listening");
+      chatLiveStatus.textContent = "";
+      const shouldSend = chatAutoSendVoice && chatVoiceTranscript.trim().length > 0;
+      chatAutoSendVoice = false;
+      chatNotice.textContent = shouldSend ? "Sending transcription…" : "";
+      if (shouldSend) sendChatMessage();
+      else { chatInput.focus(); updateChatStreamingState(); }
+    };
+    try { recognition.start(); }
+    catch (_) { chatRecognition = null; chatView.classList.remove("is-listening"); chatNotice.textContent = "Voice input could not start. Check microphone access and try again."; chatNotice.classList.add("error"); }
+  }
+
+  function saveChatProvider() {
+    const payload = {
+      provider: chatProviderInput.value,
+      baseUrl: chatBaseUrlInput.value.trim(),
+      model: chatModelInput.value.trim(),
+      apiKey: chatApiKeyInput.value,
+    };
+    post("chatConfigure", payload);
+    chatApiKeyInput.value = "";
+    chatNotice.textContent = "Saving provider settings…";
+    chatNotice.classList.remove("error");
+  }
+
+  function renderChatModelOptions(open = !chatModelOptions.hidden) {
+    chatModelResults.replaceChildren();
+    if (chatModelsLoading) {
+      const loading = document.createElement("div");
+      loading.className = "chat-model-empty";
+      loading.textContent = "Loading available models…";
+      chatModelResults.append(loading);
+      if (open) showChatModelOptions();
+      return;
+    }
+    const query = chatModelSearch.value.trim().toLowerCase();
+    const matches = chatModelsProvider === chatProviderInput.value
+      ? chatModels.filter((model) => !query || `${model.id} ${model.name} ${model.description}`.toLowerCase().includes(query))
+      : [];
+    if (!matches.length) {
+      const empty = document.createElement("div");
+      empty.className = "chat-model-empty";
+      empty.textContent = chatModels.length ? "No matching models. You can still enter a model ID." : "Load models to see what your account can use.";
+      chatModelResults.append(empty);
+      if (open) showChatModelOptions();
+      return;
+    }
+    for (const model of matches) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "chat-model-option";
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(chatModelInput.value === model.id));
+      option.textContent = model.name || model.id;
+      option.addEventListener("click", () => {
+        chatModelInput.value = model.id;
+        chatConfig.model = model.id;
+        chatModelInput.focus();
+        closeChatModelOptions();
+        syncChatConfig();
+      });
+      chatModelResults.append(option);
+    }
+    if (open) showChatModelOptions();
+  }
+
+  function showChatModelOptions() {
+    chatModelOptions.hidden = false;
+    chatModelMenuButton.setAttribute("aria-expanded", "true");
+  }
+
+  function closeChatModelOptions() {
+    chatModelOptions.hidden = true;
+    chatModelMenuButton.setAttribute("aria-expanded", "false");
+  }
+
+  function toggleChatModelOptions() {
+    if (chatModelOptions.hidden) {
+      chatModelSearch.value = "";
+      renderChatModelOptions();
+    } else closeChatModelOptions();
+  }
+
+  function closeChatProviderOptions() {
+    chatProviderOptions.hidden = true;
+    chatProviderButton.setAttribute("aria-expanded", "false");
+  }
+
+  function fetchChatModels(showMenu = true) {
+    if (chatModelsLoading) return;
+    if (chatProviderInput.value === "codex" && !chatConfig.accountConnected) {
+      chatNotice.textContent = "Connect your Codex account before loading models.";
+      chatNotice.classList.add("error");
+      renderChatModelOptions(showMenu);
+      return;
+    }
+    if (chatProviderInput.value === "openai-compatible" && !chatApiKeyInput.value && !chatConfig.configured) {
+      chatNotice.textContent = "Add and save an API key before loading models.";
+      chatNotice.classList.add("error");
+      if (!chatModelOptions.hidden) renderChatModelOptions();
+      return;
+    }
+    const payload = {
+      provider: chatProviderInput.value,
+      baseUrl: chatBaseUrlInput.value.trim(),
+      model: chatModelInput.value.trim(),
+      apiKey: chatApiKeyInput.value,
+    };
+    setChatModelsLoading(true);
+    chatNotice.textContent = "Loading models from your provider…";
+    chatNotice.classList.remove("error");
+    renderChatModelOptions(showMenu);
+    post("chatFetchModels", payload);
+    chatModelsTimer = window.setTimeout(() => {
+      setChatModelsLoading(false);
+      closeChatModelOptions();
+      chatNotice.textContent = "Model loading timed out. Check the provider connection and try again.";
+      chatNotice.classList.add("error");
+    }, 30000);
+  }
+
+  function setChatModelsLoading(loading) {
+    chatModelsLoading = loading;
+    window.clearTimeout(chatModelsTimer);
+    chatModelsTimer = 0;
+    chatModelFetchButton.disabled = loading;
+    chatProviderInput.disabled = loading;
+    chatModelFetchButton.setAttribute("aria-busy", String(loading));
+    chatModelFetchButton.textContent = loading ? "Loading" : "Load";
+  }
+
+  function checkCodexConnection() {
+    if (chatConnectionCheckPending) return;
+    chatConnectionCheckPending = true;
+    chatCheckButton.disabled = true;
+    chatCheckButton.textContent = "Checking…";
+    chatConnectionHint.textContent = "Checking the Codex sign-in status…";
+    chatNotice.textContent = "Checking your Codex account…";
+    chatNotice.classList.remove("error");
+    post("chatState");
+    window.clearTimeout(chatConnectionTimer);
+    chatConnectionTimer = window.setTimeout(() => {
+      chatConnectionCheckPending = false;
+      chatCheckButton.disabled = false;
+      chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
+      chatConnectionHint.textContent = chatConfig.accountConnected
+        ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
+        : "Connect your ChatGPT account through the Codex sign-in window.";
+      chatNotice.textContent = "Nex couldn’t verify Codex right now. Try checking again.";
+      chatNotice.classList.add("error");
+    }, 8000);
+  }
+
+  $("chat-open-button").addEventListener("click", () => openChatView(false));
+  $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
+  $("chat-back").addEventListener("click", () => closeChatView(true));
+  $("chat-new-button").addEventListener("click", newChatConversation);
+  $("chat-history-button").addEventListener("click", () => { renderChatHistory(); chatHistory.hidden = !chatHistory.hidden; });
+  $("chat-model-button").addEventListener("click", () => {
+    chatSettings.hidden = !chatSettings.hidden;
+    if (!chatSettings.hidden) {
+      post("chatState");
+      if (chatProviderInput.value === "codex" && chatConfig.accountConnected && !chatModels.length) fetchChatModels(false);
+    } else { closeChatModelOptions(); closeChatProviderOptions(); }
+    postChatResize();
+  });
+  $("chat-save-button").addEventListener("click", () => {
+    saveChatProvider();
+    chatSettings.hidden = true;
+    closeChatModelOptions();
+    closeChatProviderOptions();
+    postChatResize();
+  });
+  chatProviderInput.addEventListener("change", () => {
+    closeChatProviderOptions();
+    chatModels = [];
+    chatModelsProvider = "";
+    chatModelInput.value = chatProviderInput.value === "codex"
+      ? (chatModels.find((model) => model.default)?.id || chatModels[0]?.id || "gpt-6-luna")
+      : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "gpt-4o-mini") : "gpt-4o-mini");
+    chatConfig.provider = chatProviderInput.value;
+    chatConfig.model = chatModelInput.value;
+    syncChatConfig(); postChatResize();
+  });
+  chatProviderButton.addEventListener("click", () => {
+    const open = chatProviderOptions.hidden;
+    closeChatModelOptions();
+    if (open) {
+      chatProviderOptions.hidden = false;
+      chatProviderButton.setAttribute("aria-expanded", "true");
+      chatProviderOptions.querySelector('[aria-selected="true"]')?.focus();
+    } else closeChatProviderOptions();
+  });
+  for (const option of chatProviderOptions.querySelectorAll("[data-chat-provider]")) {
+    option.addEventListener("click", () => {
+      chatProviderInput.value = option.dataset.chatProvider;
+      chatProviderInput.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  chatConnectButton.addEventListener("click", () => {
+    if (chatConnectButton.disabled) return;
+    chatConnectButton.disabled = true;
+    chatConnectButton.textContent = "Opening…";
+    chatConnectButton.setAttribute("aria-busy", "true");
+    window.clearTimeout(chatConnectTimer);
+    chatConnectTimer = window.setTimeout(() => {
+      chatConnectButton.disabled = false;
+      chatConnectButton.textContent = "Connect account";
+      chatConnectButton.setAttribute("aria-busy", "false");
+      chatNotice.textContent = "Nex didn’t hear back from Codex. Check the sign-in window and try again.";
+      chatNotice.classList.add("error");
+    }, 10000);
+    saveChatProvider();
+    post("chatConnect", chatProviderInput.value);
+  });
+  chatCheckButton.addEventListener("click", () => {
+    checkCodexConnection();
+  });
+  chatModelFetchButton.addEventListener("click", fetchChatModels);
+  chatModelInput.addEventListener("focus", () => {
+    if (chatModelOptions.hidden) {
+      chatModelSearch.value = "";
+      renderChatModelOptions(true);
+    }
+  });
+  chatModelMenuButton.addEventListener("click", toggleChatModelOptions);
+  chatModelSearch.addEventListener("input", renderChatModelOptions);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!chatModelOptions.hidden) {
+      closeChatModelOptions();
+      chatModelMenuButton.focus();
+    } else if (!chatProviderOptions.hidden) {
+      closeChatProviderOptions();
+      chatProviderButton.focus();
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest(".chat-model-picker")) closeChatModelOptions();
+    if (!event.target.closest(".chat-provider-picker")) closeChatProviderOptions();
+  });
+  chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
+  $("chat-voice-button").addEventListener("click", startChatVoice);
+  chatInput.addEventListener("input", () => { resizeChatInput(); updateChatStreamingState(); });
+  chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendChatMessage(); }
+  });
+  for (const button of document.querySelectorAll("[data-chat-prompt]")) {
+    button.addEventListener("click", () => { chatInput.value = button.dataset.chatPrompt; resizeChatInput(); sendChatMessage(); });
+  }
+
+  function applyChatUpdate(state) {
+    if (state.chatConfig) {
+      const wasCodexConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
+      chatConfig = { ...chatConfig, ...state.chatConfig };
+      syncChatConfig();
+      if (chatConnectionCheckPending) {
+        window.clearTimeout(chatConnectionTimer);
+        chatConnectionCheckPending = false;
+        chatCheckButton.disabled = false;
+        chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
+        chatNotice.textContent = chatConfig.accountConnected ? "Codex is connected to your ChatGPT account." : "Codex is not connected. Choose Connect account to sign in.";
+        chatNotice.classList.toggle("error", !chatConfig.accountConnected);
+      }
+      if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
+    }
+    if (typeof state.chatConnecting === "boolean") {
+      window.clearTimeout(chatConnectTimer);
+      chatConnectTimer = 0;
+      chatConnectButton.disabled = state.chatConnecting;
+      chatConnectButton.textContent = state.chatConnecting ? "Waiting for sign-in…" : "Connect account";
+      chatConnectButton.setAttribute("aria-busy", String(state.chatConnecting));
+    }
+    if (state.chatModels) {
+      setChatModelsLoading(false);
+      if (state.chatModels.provider === chatProviderInput.value) {
+        chatModels = Array.isArray(state.chatModels.models) ? state.chatModels.models : [];
+        chatModelsProvider = state.chatModels.provider;
+        if (chatProviderInput.value === "codex" && chatModels.length && !chatModels.some((model) => model.id === chatModelInput.value)) {
+          const recommended = chatModels.find((model) => model.default || model.featured) || chatModels[0];
+          chatModelInput.value = recommended.id;
+          chatConfig.model = recommended.id;
+          post("chatConfigure", { provider: "codex", baseUrl: chatBaseUrlInput.value, model: recommended.id, apiKey: "" });
+        } else if (!chatModelInput.value && chatModels.length) chatModelInput.value = chatModels[0].id;
+        renderChatModelOptions();
+        chatNotice.textContent = chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.";
+        chatNotice.classList.remove("error");
+      }
+    }
+    if (state.chatNotice) { chatNotice.textContent = state.chatNotice; chatNotice.classList.remove("error"); }
+    if (state.chatError) {
+      setChatModelsLoading(false);
+      if (!chatModelOptions.hidden && !chatStreaming) renderChatModelOptions();
+      window.clearTimeout(chatConnectTimer);
+      chatConnectTimer = 0;
+      chatConnectButton.disabled = false;
+      chatConnectButton.textContent = "Connect account";
+      chatConnectButton.setAttribute("aria-busy", "false");
+      chatNotice.textContent = state.chatError; chatNotice.classList.add("error");
+      const last = chatMessages[chatMessages.length - 1];
+      if (chatStreaming && last && last.role === "assistant" && !last.content) { last.content = state.chatError; last.error = true; }
+      if (chatStreaming) { renderChatMessages(); updateChatStreamingState(false); chatLiveStatus.textContent = ""; persistChat(); }
+    }
+    if (state.chatDelta) {
+      const last = chatMessages[chatMessages.length - 1];
+      if (last && last.role === "assistant") {
+        if (state.chatDelta.text) last.content += state.chatDelta.text;
+        if (state.chatDelta.status !== undefined) chatLiveStatus.textContent = state.chatDelta.status || "";
+        if (state.chatDelta.text && !chatRenderFrame) {
+          chatRenderFrame = requestAnimationFrame(() => { chatRenderFrame = 0; renderChatMessages(true); });
+        }
+      }
+      persistChat();
+    }
+    if (state.chatDone) { chatLiveStatus.textContent = ""; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
+    if (state.chatCancelled) { chatLiveStatus.textContent = "Response stopped"; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
+  }
+
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || typeof state.chatConnecting === "boolean")) {
+        applyChatUpdate(state);
+        return;
+      }
       // Media state message: {"media": {...}} — no rows, no re-render.
       if (state.media && typeof state.media === "object" && !Array.isArray(state.rows)) {
         mediaState = state.media;

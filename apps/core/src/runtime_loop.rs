@@ -1816,6 +1816,46 @@ impl RuntimeWorker {
             OverlayEvent::WhatsNewReady(json) => {
                 self.overlay.push_whats_new(json);
             }
+            OverlayEvent::ChatState => {
+                self.overlay.push_chat(
+                    serde_json::json!({ "chatConfig": crate::chat::public_config() }).to_string(),
+                );
+            }
+            OverlayEvent::ChatConfigure(raw) => {
+                let update = match crate::chat::configure(&raw) {
+                    Ok(config) => serde_json::json!({ "chatConfig": config, "chatNotice": "Provider settings saved securely." }),
+                    Err(error) => serde_json::json!({ "chatError": error }),
+                };
+                self.overlay.push_chat(update.to_string());
+            }
+            OverlayEvent::ChatSend(raw) => {
+                let overlay = self.overlay.clone();
+                crate::chat::start(raw, move |message| {
+                    overlay.push_chat(message.to_string());
+                });
+            }
+            OverlayEvent::ChatConnect(provider) => {
+                let overlay = self.overlay.clone();
+                crate::chat::connect(&provider, move |update| {
+                    overlay.push_chat(update.to_string());
+                });
+            }
+            OverlayEvent::ChatFetchModels(raw) => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-chat-model-list".into())
+                    .spawn(move || {
+                        let update = match crate::chat::fetch_models(&raw) {
+                            Ok(update) => update,
+                            Err(error) => serde_json::json!({ "chatError": error }),
+                        };
+                        overlay.push_chat(update.to_string());
+                    });
+            }
+            OverlayEvent::ChatCancel => {
+                crate::chat::cancel();
+                self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {
                     Ok(updated) => {

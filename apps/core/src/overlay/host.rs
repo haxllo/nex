@@ -109,7 +109,7 @@ use crate::overlay::model::Theme;
 
 const WINDOW_WIDTH: f64 = 700.0;
 const INITIAL_HEIGHT: f64 = 60.0;
-const MAX_HEIGHT: f64 = 530.0;
+const MAX_HEIGHT: f64 = 680.0;
 const FOCUS_GRACE_MS: u64 = 400;
 
 /// How long after a Show completes focus-loss is treated as a flap-pair
@@ -158,6 +158,8 @@ pub(crate) enum UiCommand {
     ApplyMediaData(String),
     /// Fetched What's New content JSON from the background fetch thread.
     ApplyWhatsNew(String),
+    /// Chat state and streamed response updates.
+    ChatData(String),
     /// Only the status text changed — send a lightweight update.
     ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -468,6 +470,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Fetched notes JSON — same fire-and-forget push; the
                     // network fetch ran on the runtime worker thread.
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &json);
+                        }
+                    }
+                }
+                UiCommand::ChatData(json) => {
+                    // Chat can complete a provider sign-in while focus is in
+                    // the Codex window. Keep its status update queued into
+                    // the warm WebView even if Nex is temporarily hidden.
+                    if ready {
                         if let Some(wv) = webview.as_ref() {
                             post_json(wv, &json);
                         }
@@ -1460,6 +1472,30 @@ fn handle_ipc(
         }
         OverlayMessage::WhatsNew(_) => {
             let _ = event_tx.send(OverlayEvent::WhatsNew);
+        }
+        OverlayMessage::ChatState(_) => {
+            let _ = event_tx.send(OverlayEvent::ChatState);
+        }
+        OverlayMessage::ChatConfigure(p) => {
+            if let Ok(raw) = serde_json::to_string(&p) {
+                let _ = event_tx.send(OverlayEvent::ChatConfigure(raw));
+            }
+        }
+        OverlayMessage::ChatFetchModels(p) => {
+            if let Ok(raw) = serde_json::to_string(&p) {
+                let _ = event_tx.send(OverlayEvent::ChatFetchModels(raw));
+            }
+        }
+        OverlayMessage::ChatSend(p) => {
+            if let Ok(raw) = serde_json::to_string(&p) {
+                let _ = event_tx.send(OverlayEvent::ChatSend(raw));
+            }
+        }
+        OverlayMessage::ChatConnect(p) => {
+            let _ = event_tx.send(OverlayEvent::ChatConnect(p.v));
+        }
+        OverlayMessage::ChatCancel(_) => {
+            let _ = event_tx.send(OverlayEvent::ChatCancel);
         }
     }
 }

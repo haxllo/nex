@@ -1634,6 +1634,7 @@
   function openChatView(fromMedia = false) {
     if (chatOpen) return;
     chatReturnToMedia = !!fromMedia;
+    if (whatsNewOpen) closeWhatsNew();
     if (mediaOpen) closeMediaView();
     topPower.closeMenu(); topPower.closeConfirm(); hideContextMenu();
     chatOpen = true;
@@ -2136,8 +2137,10 @@
       // What's New content: {"whatsNew": {"version","markdown"}} — renders
       // into the open view without touching search state.
       if (state.whatsNew && typeof state.whatsNew === "object" && !Array.isArray(state.rows)) {
+        // Stored even while closed: a close-then-reopen during the fetch
+        // must still render the late arrival instead of refetching.
         whatsNewContent = state.whatsNew;
-        renderWhatsNew();
+        if (whatsNewOpen) renderWhatsNew();
         return;
       }
 
@@ -2446,27 +2449,31 @@
 
   function openWhatsNew() {
     if (whatsNewOpen) return;
+    if (chatOpen) closeChatView(false);
     if (mediaOpen) closeMediaView();
     topPower.closeMenu();
     topPower.closeConfirm();
     hideContextMenu();
     whatsNewOpen = true;
-    whatsNewContent = null;
     panel.classList.add("whats-new-open");
+    document.getElementById("whats-new-view").scrollTop = 0;
+    // Fetch only without cached notes: a close-then-reopen while the
+    // first fetch is in flight must not spend a second fetch, and the
+    // late arrival renders via nex.apply below.
+    if (!whatsNewContent) {
+      post("whatsNew");
+      // The pending flag is spent locally — Rust confirms via snapshot.
+      whatsNewPending = null;
+      syncUpdateNotice();
+    }
     renderWhatsNew();
     postWhatsNewResize();
-    // Triggers the notes fetch; Rust marks this version seen on open, so
-    // the view shows exactly once per installed version.
-    post("whatsNew");
-    // The pending flag is spent locally — Rust confirms via snapshot.
-    whatsNewPending = null;
-    syncUpdateNotice();
   }
 
   function closeWhatsNew() {
     if (!whatsNewOpen) return;
     whatsNewOpen = false;
-    whatsNewContent = null;
+    // Cached notes stay: reopening renders instantly without refetching.
     panel.classList.remove("whats-new-open");
     postWhatsNewResize();
     input.focus();

@@ -648,7 +648,7 @@ fn stream_codex_native(
     ));
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(1))
+        .timeout_read(Duration::from_secs(30))
         .build();
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
     let mut input_items: Vec<Value> = request
@@ -700,7 +700,10 @@ fn stream_codex_native(
                 ));
                 format!("ChatGPT returned HTTP {code}.")
             }
-            ureq::Error::Transport(_) => {
+            ureq::Error::Transport(inner) => {
+                crate::runtime::log_info(&format!(
+                    "[nex][chat] codex native transport error: {inner:?}"
+                ));
                 "Could not reach ChatGPT. Check your connection.".to_string()
             }
         })?;

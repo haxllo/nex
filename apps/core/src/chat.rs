@@ -6,7 +6,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -322,10 +322,14 @@ fn fetch_codex_models_native() -> Result<Vec<Value>, String> {
     let url = format!("{}/models", crate::codex_auth::CODEX_BASE_URL);
     let response = codex_request(&agent, "GET", &url)?
         .call()
-        .map_err(|_| "Could not reach ChatGPT. Check your connection.".to_string())?;
-    if response.status() == 401 || response.status() == 403 {
-        return Err("ChatGPT session expired. Reconnect your account.".into());
-    }
+        .map_err(|e| match e {
+            ureq::Error::Status(code, response) => {
+                codex_http_error(code, response.into_string().unwrap_or_default())
+            }
+            ureq::Error::Transport(_) => {
+                "Could not reach ChatGPT. Check your connection.".to_string()
+            }
+        })?;
     if response.status() != 200 {
         return Err("ChatGPT did not return its model list.".into());
     }
@@ -619,6 +623,8 @@ fn stream_codex(
             // CLI still exists.
             if emitted == 0
                 && !native_error.contains("Reconnect")
+                && !native_error.contains("usage limit")
+                && !native_error.contains("message limit")
                 && !native_error.contains("Connect your ChatGPT")
                 && cli_available("codex")
             {
@@ -631,6 +637,68 @@ fn stream_codex(
             }
         }
     }
+}
+
+/// Friendly ChatGPT backend failures: quota/rate limits with reset time,
+/// expired sessions, over-long conversations, else the backend message.
+fn codex_http_error(code: u16, body: String) -> String {
+    if code == 401 || code == 403 {
+        return "ChatGPT session expired. Reconnect your account.".to_string();
+    }
+    let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let message = payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let lowered = format!("{body} {message}").to_lowercase();
+    if code == 429
+        || lowered.contains("rate_limit")
+        || lowered.contains("rate limit")
+        || lowered.contains("quota")
+        || lowered.contains("usage limit")
+        || lowered.contains("limit reached")
+    {
+        let mut out =
+            "ChatGPT usage limit reached. Wait a bit or check your plan usage.".to_string();
+        if let Some(when) = ["/error/resets_at", "/resets_at", "/error/reset_at", "/reset_at"]
+            .iter()
+            .filter_map(|path| payload.pointer(path).and_then(Value::as_i64))
+            .next()
+        {
+            out.push_str(&format!(" ({})", describe_reset(when)));
+        }
+        return out;
+    }
+    if lowered.contains("maximum context")
+        || lowered.contains("context length")
+        || lowered.contains("too many requests in this conversation")
+        || lowered.contains("conversation too long")
+        || lowered.contains("open a new chat")
+        || lowered.contains("new conversation")
+    {
+        return "This chat hit the message limit. Start a new conversation to continue.".to_string();
+    }
+    if !message.is_empty() && message.len() < 280 {
+        return format!("ChatGPT error: {message}");
+    }
+    format!("ChatGPT returned HTTP {code}.")
+}
+
+fn describe_reset(resets_at: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let delta = (resets_at - now).max(0);
+    if delta < 90 {
+        return "resets in under a minute".to_string();
+    }
+    let minutes = delta / 60;
+    if minutes < 90 {
+        return format!("resets in about {minutes}m");
+    }
+    format!("resets in about {}h", minutes / 60)
 }
 
 fn stream_codex_native(
@@ -685,20 +753,13 @@ fn stream_codex_native(
         .set("Accept", "text/event-stream")
         .send_json(body)
         .map_err(|e| match e {
-            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
-                "ChatGPT session expired. Reconnect your account.".to_string()
-            }
             ureq::Error::Status(code, response) => {
-                let detail = response
-                    .into_string()
-                    .unwrap_or_default()
-                    .chars()
-                    .take(240)
-                    .collect::<String>();
+                let body = response.into_string().unwrap_or_default();
                 crate::runtime::log_info(&format!(
-                    "[nex][chat] codex native HTTP {code}: {detail}"
+                    "[nex][chat] codex native HTTP {code}: {}",
+                    body.chars().take(240).collect::<String>()
                 ));
-                format!("ChatGPT returned HTTP {code}.")
+                codex_http_error(code, body)
             }
             ureq::Error::Transport(inner) => {
                 crate::runtime::log_info(&format!(
@@ -1059,4 +1120,34 @@ fn dpapi_decrypt(input: &[u8]) -> Option<Vec<u8>> {
     let result = unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() };
     unsafe { windows_sys::Win32::Foundation::LocalFree(output.pb_data as _) };
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_errors_name_reset_time() {
+        let message = codex_http_error(
+            429,
+            r#"{"error":{"message":"rate_limit_exceeded","resets_at":1999999999}}"#.into(),
+        );
+        assert!(message.contains("usage limit"), "{message}");
+        assert!(message.contains("resets"), "{message}");
+    }
+
+    #[test]
+    fn long_chats_suggest_a_fresh_conversation() {
+        let message = codex_http_error(
+            400,
+            r#"{"error":{"message":"This conversation has reached the maximum context length"}}"#.into(),
+        );
+        assert!(message.contains("new conversation"), "{message}");
+    }
+
+    #[test]
+    fn expired_sessions_ask_to_reconnect() {
+        assert!(codex_http_error(401, String::new()).contains("Reconnect"));
+        assert!(codex_http_error(500, String::new()).contains("HTTP 500"));
+    }
 }

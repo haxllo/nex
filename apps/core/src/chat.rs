@@ -651,7 +651,36 @@ fn stream_codex_native(
         .timeout_read(Duration::from_secs(1))
         .build();
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
-    let body = json!({"model":config.model,"input":prompt,"stream":true,"max_output_tokens":1024});
+    let mut input_items: Vec<Value> = request
+        .history
+        .iter()
+        .rev()
+        .take(24)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter(|turn| matches!(turn.role.as_str(), "user" | "assistant"))
+        .map(|turn| {
+            json!({
+                "type": "message",
+                "role": turn.role,
+                "content": [{"type": "input_text", "text": turn.content.chars().take(6000).collect::<String>()}],
+            })
+        })
+        .collect();
+    input_items.push(json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": request.message}],
+    }));
+    let body = json!({
+        "model": config.model,
+        "instructions": SYSTEM_PROMPT,
+        "input": input_items,
+        "stream": true,
+        "store": false,
+        "max_output_tokens": 1024,
+    });
     let response = codex_request(&agent, "POST", &url)?
         .set("Accept", "text/event-stream")
         .send_json(body)
@@ -874,8 +903,11 @@ fn spawn_line_reader(reader: impl Read + Send + 'static) -> std::sync::mpsc::Rec
     rx
 }
 
+const SYSTEM_PROMPT: &str = "You are Nex, a concise assistant inside the Nex launcher. Answer directly in plain text, no tools, no file access. Default to short answers under 120 words; expand only when asked. Match the user's language.";
+
 fn conversation_prompt(request: &SendRequest) -> String {
-    let mut prompt = String::from("You are Nex, a concise assistant inside the Nex launcher. Answer directly in plain text, no tools, no file access. Default to short answers under 120 words; expand only when asked. Match the user's language.\n\n");
+    let mut prompt = String::from(SYSTEM_PROMPT);
+    prompt.push_str("\n\n");
     for turn in request.history.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
         let role = if turn.role == "assistant" { "Assistant" } else { "User" };
         prompt.push_str(role);

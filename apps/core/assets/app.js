@@ -1954,6 +1954,28 @@
     }
   });
   chatModelSearch.addEventListener("input", renderChatModelOptions);
+  // Hover-select like result rows: the highlight follows the cursor.
+  function trackMenuHover(container) {
+    container.addEventListener("mousemove", (event) => {
+      const option = event.target.closest ? event.target.closest("button") : null;
+      if (!option || !container.contains(option)) return;
+      for (const item of container.querySelectorAll("button")) {
+        item.setAttribute("aria-selected", String(item === option));
+      }
+    }, { passive: true });
+  }
+  trackMenuHover(chatProviderOptions);
+  trackMenuHover(chatModelResults);
+  trackMenuHover(chatHistory);
+  // History scrollbar stays hidden until actually scrolled.
+  let chatHistoryScrollTimer = 0;
+  chatHistory.addEventListener("scroll", () => {
+    chatHistory.classList.add("scrolling");
+    window.clearTimeout(chatHistoryScrollTimer);
+    chatHistoryScrollTimer = window.setTimeout(() => {
+      chatHistory.classList.remove("scrolling");
+    }, 1200);
+  }, { passive: true });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {

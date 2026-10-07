@@ -1899,7 +1899,6 @@
     }, 8000);
   }
 
-  $("chat-open-button").addEventListener("click", () => openChatView(false));
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);

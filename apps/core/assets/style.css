@@ -1467,9 +1467,6 @@ html[data-theme="light"] #update-btn:hover {
 .chat-notice.error { color: #e89b92; }
 #chat-voice-entry { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; margin-left: 2px; border: 0; border-radius: 7px; background: transparent; color: var(--text-faint); cursor: pointer; }
 #chat-voice-entry:hover { background: var(--hover); color: var(--text); }
-.chat-open-button { min-width: 40px; height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; margin: 0 2px 0 auto; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
-.chat-open-button:hover { background: var(--hover); color: var(--text); }
-.chat-open-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 #chat-voice-button { width: 29px; height: 29px; flex-basis: 29px; }
 #chat-voice-button svg { width: 16px; height: 16px; }

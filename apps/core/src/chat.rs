@@ -653,12 +653,24 @@ fn stream_codex_native(
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
     let body = json!({"model":config.model,"input":prompt,"stream":true,"max_output_tokens":1024});
     let response = codex_request(&agent, "POST", &url)?
+        .set("Accept", "text/event-stream")
         .send_json(body)
         .map_err(|e| match e {
             ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
                 "ChatGPT session expired. Reconnect your account.".to_string()
             }
-            ureq::Error::Status(code, _) => format!("ChatGPT returned HTTP {code}."),
+            ureq::Error::Status(code, response) => {
+                let detail = response
+                    .into_string()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(240)
+                    .collect::<String>();
+                crate::runtime::log_info(&format!(
+                    "[nex][chat] codex native HTTP {code}: {detail}"
+                ));
+                format!("ChatGPT returned HTTP {code}.")
+            }
             ureq::Error::Transport(_) => {
                 "Could not reach ChatGPT. Check your connection.".to_string()
             }

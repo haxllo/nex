@@ -1614,7 +1614,7 @@
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
-      : (chatConfig.accountConnected ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the ChatGPT sign-in window.");
+      : (chatConfig.accountConnected ? "ChatGPT account connected. Sign-in is saved on this device." : "Connect your ChatGPT account through the ChatGPT sign-in window.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -1891,7 +1891,7 @@
       chatCheckButton.disabled = false;
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
-        ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
+        ? "ChatGPT account connected. Sign-in is saved on this device."
         : "Connect your ChatGPT account through the ChatGPT sign-in window.";
       chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
@@ -2050,7 +2050,7 @@
         chatConnectionCheckPending = false;
         chatCheckButton.disabled = false;
         chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
-        if (chatConfig.accountConnected) flashChatNotice("ChatGPT is connected to your ChatGPT account.");
+        if (chatConfig.accountConnected) flashChatNotice("ChatGPT account connected.");
         else { chatNotice.textContent = "ChatGPT is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
       if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);

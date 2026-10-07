@@ -337,9 +337,43 @@ fn read_callback_request(listener: &TcpListener) -> Option<(String, String)> {
             _ => {}
         }
     }
-    let body = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<html><body style=\"background:#1e1e1e;color:#f4f4f6;font-family:sans-serif;display:flex;height:90vh;align-items:center;justify-content:center\"><h2>Signed in. You can close this window and return to Nex.</h2></body></html>";
+    let body = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+        "<title>Signed in — Nex</title>",
+        "<style>",
+        "*{box-sizing:border-box;margin:0;padding:0}",
+        "body{min-height:100vh;display:flex;align-items:center;justify-content:center;",
+        "font-family:Inter,'Segoe UI',system-ui,sans-serif;color:#f4f4f6;",
+        "background:radial-gradient(120% 90% at 50% 0%,#2b3342 0%,#171a21 55%,#101216 100%)}",
+        ".card{width:min(400px,calc(100vw - 48px));padding:36px 32px 30px;border-radius:16px;text-align:center;",
+        "background:rgba(30,30,30,.55);border:1px solid rgba(255,255,255,.12);",
+        "box-shadow:0 24px 60px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.12);",
+        "backdrop-filter:blur(18px) saturate(1.15)}",
+        ".mark{display:flex;justify-content:center;align-items:flex-end;gap:5px;height:34px;margin-bottom:16px}",
+        ".mark span{width:6px;border-radius:4px;background:#6ea8fe}",
+        ".mark span:nth-child(1){height:14px;opacity:.45}",
+        ".mark span:nth-child(2){height:28px}",
+        ".mark span:nth-child(3){height:19px;opacity:.6}",
+        ".check{width:44px;height:44px;margin:0 auto 14px;border-radius:50%;display:flex;align-items:center;justify-content:center;",
+        "background:rgba(74,222,128,.14);border:1px solid rgba(74,222,128,.4)}",
+        ".check svg{width:22px;height:22px;fill:none;stroke:#4ade80;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}",
+        "h1{font-size:19px;font-weight:600;letter-spacing:-.02em;margin-bottom:8px}",
+        "p{font-size:13px;line-height:1.55;color:#aeb6c2;margin-bottom:22px}",
+        "button{min-height:38px;padding:0 22px;border:0;border-radius:9px;background:#6ea8fe;color:#fff;",
+        "font:600 13px Inter,'Segoe UI',system-ui,sans-serif;cursor:pointer}",
+        "button:hover{filter:brightness(1.08)}",
+        "</style></head><body><div class=\"card\">",
+        "<div class=\"mark\" aria-hidden=\"true\"><span></span><span></span><span></span></div>",
+        "<div class=\"check\"><svg viewBox=\"0 0 24 24\"><path d=\"M20 6 9 17l-5-5\"/></svg></div>",
+        "<h1>ChatGPT connected</h1>",
+        "<p>Signed in. Close this window and return to Nex to start chatting.</p>",
+        "<button type=\"button\" onclick=\"window.close()\">Close this window</button>",
+        "</div></body></html>",
+    );
     let mut stream = reader.into_inner();
-    let _ = stream.write_all(body);
+    let _ = stream.write_all(body.as_bytes());
     let _ = stream.flush();
     Some((code?, state?))
 }

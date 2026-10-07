@@ -1614,7 +1614,7 @@
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
-      : (chatConfig.accountConnected ? "ChatGPT account connected. Sign-in is saved on this device." : "Connect your ChatGPT account through the ChatGPT sign-in window.");
+      : (chatConfig.accountConnected ? "ChatGPT account connected. Sign-in is saved on this device." : "Not connected. Choose Connect account below to sign in with your browser.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -1892,7 +1892,7 @@
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
         ? "ChatGPT account connected. Sign-in is saved on this device."
-        : "Connect your ChatGPT account through the ChatGPT sign-in window.";
+        : "Not connected. Choose Connect account below to sign in with your browser.";
       chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
     }, 8000);

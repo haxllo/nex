@@ -1575,13 +1575,13 @@
   }
 
   function chatProviderName(provider) {
-    return provider === "codex" ? "Codex" : "OpenAI compatible";
+    return provider === "codex" ? "ChatGPT" : "OpenAI compatible";
   }
 
   function syncChatConfig() {
     const provider = chatConfig.provider || "openai-compatible";
     chatProviderInput.value = provider;
-    chatProviderChoice.textContent = provider === "codex" ? "Codex account" : "OpenAI-compatible API";
+    chatProviderChoice.textContent = provider === "codex" ? "ChatGPT account" : "OpenAI-compatible API";
     for (const option of chatProviderOptions.querySelectorAll("[data-chat-provider]")) {
       option.setAttribute("aria-selected", String(option.dataset.chatProvider === provider));
     }
@@ -1596,7 +1596,7 @@
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
-      : (chatConfig.accountConnected ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the Codex sign-in window.");
+      : (chatConfig.accountConnected ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the ChatGPT sign-in window.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -1767,7 +1767,7 @@
       empty.textContent = chatModels.length
         ? "No matching models. You can still enter a model ID."
         : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
-          ? "Connect your Codex account to load models."
+          ? "Connect your ChatGPT account to load models."
           : "Switch provider or save settings to load available models.");
       chatModelResults.append(empty);
       if (open) showChatModelOptions();
@@ -1808,7 +1808,7 @@
   function fetchChatModels(showMenu = true) {
     if (chatModelsLoading) return;
     if (chatProviderInput.value === "codex" && !chatConfig.accountConnected) {
-      chatNotice.textContent = "Connect your Codex account before loading models.";
+      chatNotice.textContent = "Connect your ChatGPT account before loading models.";
       chatNotice.classList.add("error");
       renderChatModelOptions(showMenu);
       return;
@@ -1850,8 +1850,8 @@
     chatConnectionCheckPending = true;
     chatCheckButton.disabled = true;
     chatCheckButton.textContent = "Checking…";
-    chatConnectionHint.textContent = "Checking the Codex sign-in status…";
-    chatNotice.textContent = "Checking your Codex account…";
+    chatConnectionHint.textContent = "Checking the ChatGPT sign-in status…";
+    chatNotice.textContent = "Checking your ChatGPT account…";
     chatNotice.classList.remove("error");
     post("chatState");
     window.clearTimeout(chatConnectionTimer);
@@ -1860,9 +1860,9 @@
       chatCheckButton.disabled = false;
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
-        ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
-        : "Connect your ChatGPT account through the Codex sign-in window.";
-      chatNotice.textContent = "Nex couldn’t verify Codex right now. Try checking again.";
+        ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
+        : "Connect your ChatGPT account through the ChatGPT sign-in window.";
+      chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
     }, 8000);
   }
@@ -1923,7 +1923,7 @@
       chatConnectButton.disabled = false;
       chatConnectButton.textContent = "Connect account";
       chatConnectButton.setAttribute("aria-busy", "false");
-      chatNotice.textContent = "Nex didn’t hear back from Codex. Check the sign-in window and try again.";
+      chatNotice.textContent = "Nex didn’t hear back from ChatGPT. Check the sign-in window and try again.";
       chatNotice.classList.add("error");
     }, 10000);
     saveChatProvider();
@@ -1939,7 +1939,7 @@
       chatDisconnectButton.disabled = false;
       chatDisconnectButton.textContent = "Log out";
       chatDisconnectButton.setAttribute("aria-busy", "false");
-      chatNotice.textContent = "Nex didn’t hear back from Codex. Try again.";
+      chatNotice.textContent = "Nex didn’t hear back from ChatGPT. Try again.";
       chatNotice.classList.add("error");
     }, 10000);
     post("chatDisconnect");
@@ -1989,8 +1989,8 @@
         chatConnectionCheckPending = false;
         chatCheckButton.disabled = false;
         chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
-        if (chatConfig.accountConnected) flashChatNotice("Codex is connected to your ChatGPT account.");
-        else { chatNotice.textContent = "Codex is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
+        if (chatConfig.accountConnected) flashChatNotice("ChatGPT is connected to your ChatGPT account.");
+        else { chatNotice.textContent = "ChatGPT is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
       if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
       if (chatConfig.provider === "openai-compatible" && chatConfig.configured && chatModelsProvider !== "openai-compatible" && !chatModelsLoading) fetchChatModels(false);

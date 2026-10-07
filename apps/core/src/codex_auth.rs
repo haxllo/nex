@@ -1,6 +1,6 @@
-//! Native Codex account auth speaking the official Codex OAuth protocol
+//! Native ChatGPT account auth speaking the official ChatGPT OAuth protocol
 //! (spec: vendored `third_party/codex`, openai/codex `rust-v0.160.1`).
-//! No CLI install required. Tokens live in the standard Codex home
+//! No CLI install required. Tokens live in the standard ChatGPT home
 //! (`~/.codex/auth.json`), so the CLI and Nex share one sign-in.
 
 #![cfg(target_os = "windows")]
@@ -221,7 +221,7 @@ pub(crate) fn logout() -> Result<bool, String> {
     match std::fs::remove_file(auth_file()) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(tokens.is_some()),
-        Err(e) => Err(format!("Could not clear Codex sign-in: {e}")),
+        Err(e) => Err(format!("Could not clear ChatGPT sign-in: {e}")),
     }
 }
 
@@ -235,7 +235,7 @@ pub(crate) fn start_login_server() -> Result<PendingLogin, String> {
                 .ok()
                 .map(|listener| (listener, *port))
         })
-        .ok_or_else(|| "Could not start Codex sign-in (local callback unavailable).".to_string())?;
+        .ok_or_else(|| "Could not start ChatGPT sign-in (local callback unavailable).".to_string())?;
     let verifier = random_b64url(64)?;
     let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
     let state = random_b64url(16)?;
@@ -319,7 +319,7 @@ pub(crate) fn wait_for_login(pending: PendingLogin, timeout: Duration) -> Result
     let _ = pending.listener.set_nonblocking(true);
     loop {
         if Instant::now() >= deadline {
-            return Err("Codex sign-in was not confirmed. Try again in a moment.".to_string());
+            return Err("ChatGPT sign-in was not confirmed. Try again in a moment.".to_string());
         }
         match read_callback_request(&pending.listener) {
             Some((code, state)) => {
@@ -344,16 +344,16 @@ fn complete_login(code: &str, verifier: &str, port: u16) -> Result<(), String> {
             ("redirect_uri", &redirect_uri),
             ("code_verifier", verifier),
         ])
-        .map_err(|_| "Codex sign-in exchange failed. Try again.".to_string())?;
+        .map_err(|_| "ChatGPT sign-in exchange failed. Try again.".to_string())?;
     if response.status() != 200 {
-        return Err("Codex sign-in was not confirmed. Try again in a moment.".to_string());
+        return Err("ChatGPT sign-in was not confirmed. Try again in a moment.".to_string());
     }
     let tokens: RefreshResponse = response
         .into_json()
-        .map_err(|_| "Codex sign-in returned an unreadable response.".to_string())?;
+        .map_err(|_| "ChatGPT sign-in returned an unreadable response.".to_string())?;
     let (id_token, access_token, refresh_token) = match (tokens.id_token, tokens.access_token, tokens.refresh_token) {
         (Some(id), Some(access), refresh) => (id, access, refresh.unwrap_or_default()),
-        _ => return Err("Codex sign-in returned incomplete credentials.".to_string()),
+        _ => return Err("ChatGPT sign-in returned incomplete credentials.".to_string()),
     };
     let account_id = jwt_payload(&id_token)
         .as_ref()
@@ -368,7 +368,7 @@ fn complete_login(code: &str, verifier: &str, port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Headers for Codex backend requests: bearer + account identity.
+/// Headers for ChatGPT backend requests: bearer + account identity.
 pub(crate) fn backend_headers(access_token: &str, account_id: Option<&str>) -> Vec<(String, String)> {
     let mut headers = vec![
         (

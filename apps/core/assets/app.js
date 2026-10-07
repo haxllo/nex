@@ -1639,7 +1639,15 @@
     chatOpen = true;
     chatView.setAttribute("aria-hidden", "false");
     panel.classList.add("chat-open");
-    if (!chatConversationId || !chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
+    if (!chatConversationId) {
+      // Reuse a fresh empty conversation instead of stacking a new one
+      // on every restart.
+      const recent = chatConversations.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (recent && recent.messages.length === 0) {
+        chatConversationId = recent.id;
+        chatMessages = [];
+      } else newChatConversation();
+    } else if (!chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
     renderChatMessages();
     post("chatState");
     resizeChatInput();

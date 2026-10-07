@@ -104,6 +104,17 @@ pub enum OverlayEvent {
     WhatsNew,
     /// Fetched What's New content JSON for the page.
     WhatsNewReady(String),
+    /// Chat provider settings were requested or saved.
+    ChatState,
+    ChatConfigure(String),
+    ChatFetchModels(String),
+    /// Send a user turn to the selected provider.
+    ChatSend(String),
+    ChatConnect(String),
+    ChatDisconnect,
+    ChatCancel,
+    /// Open a URL in the default browser (chat links; http/https only).
+    OpenExternal(String),
     /// Media transport controls from the media widget.
     MediaToggle,
     MediaNext,

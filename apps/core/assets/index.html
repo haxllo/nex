@@ -27,6 +27,9 @@
             placeholder="Search for apps, files and actions…"
           />
         </div>
+        <button type="button" id="chat-voice-entry" title="Open Chat by voice" aria-label="Open Chat by voice" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>
+        </button>
         <div id="power-wrap-top">
           <button type="button" id="power-btn-top" title="Power options" aria-label="Power options">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -101,6 +104,102 @@
         </div>
       </div>
 
+      <section id="chat-view" aria-label="Chat" aria-hidden="true">
+        <header class="chat-header">
+          <button type="button" id="chat-back" class="chat-icon-button" title="Back to search" aria-label="Back to search">
+            <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6M9 12h11"/></svg>
+          </button>
+          <div class="chat-title-wrap">
+            <div class="chat-title">Chat</div>
+            <button type="button" id="chat-model-button" class="chat-model-button" title="Provider and model settings">
+              <span id="chat-provider-label">OpenAI compatible</span><span aria-hidden="true">·</span><span id="chat-model-label">gpt-4o-mini</span><svg viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg>
+            </button>
+          </div>
+          <div class="chat-header-actions">
+            <button type="button" id="chat-history-button" class="chat-icon-button" title="Conversation history" aria-label="Conversation history">
+              <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5m4-1v5l3 2"/></svg>
+            </button>
+            <button type="button" id="chat-new-button" class="chat-icon-button" title="New conversation" aria-label="New conversation">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div id="chat-settings" class="chat-settings" hidden>
+          <div class="chat-settings-grid">
+            <label>Provider
+              <div class="chat-provider-picker">
+                <input id="chat-provider" type="hidden" value="openai-compatible" />
+                <button type="button" id="chat-provider-button" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-provider-options" aria-expanded="false">
+                  <span id="chat-provider-choice">OpenAI-compatible API</span>
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+                </button>
+                <div id="chat-provider-options" class="chat-provider-options" role="listbox" aria-label="Provider" hidden>
+                  <button type="button" class="chat-provider-option" role="option" data-chat-provider="openai-compatible">OpenAI-compatible API</button>
+                  <button type="button" class="chat-provider-option" role="option" data-chat-provider="codex">ChatGPT account</button>
+                </div>
+              </div>
+            </label>
+            <label class="chat-model-field">Model
+              <div class="chat-model-picker">
+                <input id="chat-model" type="text" maxlength="128" autocomplete="off" placeholder="Choose or enter a model" aria-controls="chat-model-options" />
+                <div id="chat-model-options" class="chat-model-options" hidden>
+                  <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
+                  <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>
+                </div>
+              </div>
+            </label>
+            <label id="chat-endpoint-field">Base URL
+              <input id="chat-base-url" type="url" maxlength="2048" autocomplete="url" placeholder="https://api.openai.com/v1" />
+            </label>
+            <label id="chat-key-field">API key
+              <input id="chat-api-key" type="password" maxlength="4096" autocomplete="off" placeholder="Saved securely on this device" />
+            </label>
+          </div>
+          <div class="chat-settings-actions">
+            <div id="chat-connection-hint" class="chat-connection-hint">Keys are encrypted for your Windows account and stay out of the page after saving.</div>
+            <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
+            <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
+            <button type="button" id="chat-disconnect-button" class="chat-secondary-button" hidden>Log out</button>
+            <button type="button" id="chat-save-button" class="chat-secondary-button">Save</button>
+          </div>
+        </div>
+
+        <div id="chat-history" class="chat-history" hidden></div>
+        <div id="chat-scroll" class="chat-scroll">
+          <div id="chat-empty" class="chat-empty">
+            <div class="chat-empty-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+            <div class="chat-empty-title">What’s on your mind?</div>
+            <div class="chat-empty-copy">Ask a question, work through an idea, or paste something you want to understand.</div>
+            <div class="chat-suggestions">
+              <button type="button" data-chat-prompt="Help me think through an idea">Think through an idea <span>↗</span></button>
+              <button type="button" data-chat-prompt="Explain this in plain language">Explain something clearly <span>↗</span></button>
+            </div>
+          </div>
+          <div id="chat-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
+          <div id="chat-live-status" class="chat-live-status" aria-live="polite"></div>
+        </div>
+
+        <div class="chat-composer-wrap">
+          <div id="chat-composer-shell" class="chat-composer-shell">
+            <textarea id="chat-input" rows="1" maxlength="16000" aria-label="Message Chat" placeholder="Message Nex…"></textarea>
+            <div class="chat-composer-tools">
+              <button type="button" id="chat-voice-button" class="chat-icon-button" title="Start voice input" aria-label="Start voice input" hidden>
+                <svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>
+              </button>
+              <button type="button" id="chat-send-button" class="chat-send-button" title="Send message" aria-label="Send message">
+                <svg class="chat-send-icon" viewBox="0 0 24 24"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+                <svg class="chat-stop-icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="chat-composer-footer">
+            <div id="chat-notice" class="chat-notice" role="status"></div>
+            <span class="chat-composer-hint"><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> new line</span>
+          </div>
+        </div>
+      </section>
+
       <div id="whats-new-view" aria-label="What's new">
         <div class="whats-new-eyebrow">What's new</div>
         <div class="whats-new-title" id="whats-new-title">Nex updated</div>
@@ -133,6 +232,9 @@
           <div class="hint hidden" id="hint-complete"><span class="kbd">tab</span><span class="lbl">Complete</span></div>
           <div class="hint"><span class="kbd">esc</span><span class="lbl">Close</span></div>
         </div>
+        <button type="button" id="chat-open-button" class="chat-open-button" title="Open Chat · Tab" aria-label="Open Chat">
+          <svg viewBox="0 0 24 24"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.9-3A7.5 7.5 0 1 1 20 11.5Z"/></svg><span>Chat</span>
+        </button>
         <button type="button" class="footer-settings" id="footer-settings-btn" title="Settings">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="8" cy="8" r="2.5"/>

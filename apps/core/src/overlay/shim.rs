@@ -553,6 +553,11 @@ impl NativeOverlayShell {
         self.post(UiCommand::ApplyWhatsNew(json));
     }
 
+    /// Push chat config and response deltas without rebuilding search state.
+    pub fn push_chat(&self, json: String) {
+        self.post(UiCommand::ChatData(json));
+    }
+
     pub fn set_hotkey_issue_active(&self, active: bool) {
         self.with_state(|s| s.hotkey_issue_active = active);
         self.post(UiCommand::Apply);

@@ -546,6 +546,30 @@ fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
         });
 }
 
+/// Opens an http(s) URL in the default browser. Anything else is ignored.
+fn open_url_in_browser(url: &str) {
+    let lower = url.trim().to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return;
+    }
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+    }
+}
+
 /// Fire a media transport command off the message-pump thread (WinRT calls
 /// can block), then request a fresh now-playing push so the media view
 /// updates immediately instead of waiting for the next periodic tick.
@@ -1815,6 +1839,59 @@ impl RuntimeWorker {
             }
             OverlayEvent::WhatsNewReady(json) => {
                 self.overlay.push_whats_new(json);
+            }
+            OverlayEvent::ChatState => {
+                self.overlay.push_chat(
+                    serde_json::json!({ "chatConfig": crate::chat::public_config() }).to_string(),
+                );
+            }
+            OverlayEvent::ChatConfigure(raw) => {
+                let update = match crate::chat::configure(&raw) {
+                    Ok(config) => serde_json::json!({ "chatConfig": config, "chatNotice": "Provider settings saved securely." }),
+                    Err(error) => serde_json::json!({ "chatError": error }),
+                };
+                self.overlay.push_chat(update.to_string());
+            }
+            OverlayEvent::ChatSend(raw) => {
+                let overlay = self.overlay.clone();
+                crate::chat::start(raw, move |message| {
+                    overlay.push_chat(message.to_string());
+                });
+            }
+            OverlayEvent::ChatConnect(provider) => {
+                let overlay = self.overlay.clone();
+                crate::chat::connect(&provider, move |update| {
+                    overlay.push_chat(update.to_string());
+                });
+            }
+            OverlayEvent::ChatDisconnect => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-chat-disconnect".into())
+                    .spawn(move || {
+                        crate::chat::disconnect(move |update| {
+                            overlay.push_chat(update.to_string());
+                        });
+                    });
+            }
+            OverlayEvent::ChatFetchModels(raw) => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-chat-model-list".into())
+                    .spawn(move || {
+                        let update = match crate::chat::fetch_models(&raw) {
+                            Ok(update) => update,
+                            Err(error) => serde_json::json!({ "chatError": error }),
+                        };
+                        overlay.push_chat(update.to_string());
+                    });
+            }
+            OverlayEvent::ChatCancel => {
+                crate::chat::cancel();
+                self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            }
+            OverlayEvent::OpenExternal(url) => {
+                open_url_in_browser(&url);
             }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {

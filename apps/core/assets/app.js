@@ -2024,6 +2024,13 @@
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
+  // Model links open in the default browser (WebView2 blocks target=_blank).
+  chatMessagesEl.addEventListener("click", (event) => {
+    const link = event.target.closest ? event.target.closest("a[href]") : null;
+    if (!link || !chatMessagesEl.contains(link)) return;
+    event.preventDefault();
+    post("openExternal", link.href);
+  });
   $("chat-voice-button").addEventListener("click", startChatVoice);
   chatInput.addEventListener("input", () => { resizeChatInput(); updateChatStreamingState(); });
   chatInput.addEventListener("keydown", (event) => {

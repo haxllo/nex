@@ -113,6 +113,8 @@ pub enum OverlayEvent {
     ChatConnect(String),
     ChatDisconnect,
     ChatCancel,
+    /// Open a URL in the default browser (chat links; http/https only).
+    OpenExternal(String),
     /// Media transport controls from the media widget.
     MediaToggle,
     MediaNext,

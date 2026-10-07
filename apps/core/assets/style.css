@@ -1426,7 +1426,8 @@ html[data-theme="light"] #update-btn:hover {
 .chat-message-content ul, .chat-message-content ol { margin: 4px 0 7px; padding-left: 22px; }
 .chat-message-content li { margin: 2px 0; }
 .chat-message-content blockquote { margin: 6px 0; padding: 2px 0 2px 11px; border-left: 2px solid var(--border-strong); color: var(--text-dim); }
-.chat-message-content a { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.chat-message-content a { color: var(--text); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--text-faint) 65%, transparent); text-underline-offset: 2px; cursor: pointer; }
+.chat-message-content a:hover { text-decoration-color: var(--text-dim); }
 .chat-message-content code { padding: 1px 4px; border-radius: 4px; background: var(--kbd-bg); font: 11px/1.5 Consolas, "Cascadia Code", monospace; }
 .chat-code-block { position: relative; margin: 7px 0; overflow: hidden; border-radius: 7px; background: rgba(0,0,0,0.17); box-shadow: 0 1px 0 rgba(255,255,255,0.07) inset; }
 [data-theme="light"] .chat-code-block { background: rgba(0,0,0,0.045); }

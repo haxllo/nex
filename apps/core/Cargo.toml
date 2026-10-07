@@ -28,6 +28,9 @@ toml = "0.8.19"
 url = "2.5.7"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 walkdir = "2.5.0"
+base64 = "0.22"
+sha2 = "0.10"
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com-sys = "0.38.2"

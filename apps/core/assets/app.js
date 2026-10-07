@@ -1362,7 +1362,7 @@
     chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     chatMessages = [];
     chatConversations.unshift({ id: chatConversationId, title: "New conversation", messages: [], updatedAt: Date.now(), provider: chatConfig.provider, model: chatConfig.model });
-    chatHistory.hidden = true;
+    setChatHistoryOpen(false);
     chatHistory.replaceChildren();
     renderChatMessages();
     updateChatStreamingState();
@@ -1395,8 +1395,19 @@
       const title = document.createElement("strong");
       title.textContent = conversation.title || "New conversation";
       const date = document.createElement("span");
+      date.className = "chat-date";
       date.textContent = new Date(conversation.updatedAt || Date.now()).toLocaleDateString();
-      button.append(title, date);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "chat-delete";
+      del.title = "Delete conversation";
+      del.setAttribute("aria-label", "Delete conversation");
+      del.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+      del.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteChatConversation(conversation.id);
+      });
+      button.append(title, date, del);
       button.addEventListener("click", () => {
         if (chatStreaming) post("chatCancel");
         chatConversationId = conversation.id;
@@ -1404,13 +1415,20 @@
         chatConfig.provider = conversation.provider || chatConfig.provider;
         chatConfig.model = conversation.model || chatConfig.model;
         chatModelInput.value = chatConfig.model;
-        chatHistory.hidden = true;
+        setChatHistoryOpen(false);
         renderChatMessages();
         updateChatStreamingState(false);
         chatInput.focus();
       });
       chatHistory.appendChild(button);
     }
+  }
+
+  function deleteChatConversation(id) {
+    chatConversations = chatConversations.filter((item) => item.id !== id);
+    if (id === chatConversationId) newChatConversation();
+    else persistChat();
+    renderChatHistory();
   }
 
   function appendChatInline(parent, value) {
@@ -1575,13 +1593,13 @@
   }
 
   function chatProviderName(provider) {
-    return provider === "codex" ? "Codex" : "OpenAI compatible";
+    return provider === "codex" ? "ChatGPT" : "OpenAI compatible";
   }
 
   function syncChatConfig() {
     const provider = chatConfig.provider || "openai-compatible";
     chatProviderInput.value = provider;
-    chatProviderChoice.textContent = provider === "codex" ? "Codex account" : "OpenAI-compatible API";
+    chatProviderChoice.textContent = provider === "codex" ? "ChatGPT account" : "OpenAI-compatible API";
     for (const option of chatProviderOptions.querySelectorAll("[data-chat-provider]")) {
       option.setAttribute("aria-selected", String(option.dataset.chatProvider === provider));
     }
@@ -1596,7 +1614,7 @@
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
-      : (chatConfig.accountConnected ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the Codex sign-in window.");
+      : (chatConfig.accountConnected ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the ChatGPT sign-in window.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -1604,8 +1622,13 @@
   function setChatSettingsOpen(open) {
     chatSettings.hidden = !open;
     panel.classList.toggle("chat-settings-open", open);
-    if (open) chatHistory.hidden = true;
+    if (open) setChatHistoryOpen(false);
     else { closeChatModelOptions(); closeChatProviderOptions(); }
+  }
+
+  function setChatHistoryOpen(open) {
+    chatHistory.hidden = !open;
+    panel.classList.toggle("chat-history-open", open);
   }
 
   function openChatView(fromMedia = false) {
@@ -1616,7 +1639,15 @@
     chatOpen = true;
     chatView.setAttribute("aria-hidden", "false");
     panel.classList.add("chat-open");
-    if (!chatConversationId || !chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
+    if (!chatConversationId) {
+      // Reuse a fresh empty conversation instead of stacking a new one
+      // on every restart.
+      const recent = chatConversations.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (recent && recent.messages.length === 0) {
+        chatConversationId = recent.id;
+        chatMessages = [];
+      } else newChatConversation();
+    } else if (!chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
     renderChatMessages();
     post("chatState");
     resizeChatInput();
@@ -1629,7 +1660,7 @@
     chatOpen = false;
     chatView.setAttribute("aria-hidden", "true");
     setChatSettingsOpen(false);
-    chatHistory.hidden = true;
+    setChatHistoryOpen(false);
     panel.classList.remove("chat-open");
     if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; }
     postChatResize();
@@ -1767,7 +1798,7 @@
       empty.textContent = chatModels.length
         ? "No matching models. You can still enter a model ID."
         : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
-          ? "Connect your Codex account to load models."
+          ? "Connect your ChatGPT account to load models."
           : "Switch provider or save settings to load available models.");
       chatModelResults.append(empty);
       if (open) showChatModelOptions();
@@ -1808,7 +1839,7 @@
   function fetchChatModels(showMenu = true) {
     if (chatModelsLoading) return;
     if (chatProviderInput.value === "codex" && !chatConfig.accountConnected) {
-      chatNotice.textContent = "Connect your Codex account before loading models.";
+      chatNotice.textContent = "Connect your ChatGPT account before loading models.";
       chatNotice.classList.add("error");
       renderChatModelOptions(showMenu);
       return;
@@ -1850,8 +1881,8 @@
     chatConnectionCheckPending = true;
     chatCheckButton.disabled = true;
     chatCheckButton.textContent = "Checking…";
-    chatConnectionHint.textContent = "Checking the Codex sign-in status…";
-    chatNotice.textContent = "Checking your Codex account…";
+    chatConnectionHint.textContent = "Checking the ChatGPT sign-in status…";
+    chatNotice.textContent = "Checking your ChatGPT account…";
     chatNotice.classList.remove("error");
     post("chatState");
     window.clearTimeout(chatConnectionTimer);
@@ -1860,9 +1891,9 @@
       chatCheckButton.disabled = false;
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
-        ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
-        : "Connect your ChatGPT account through the Codex sign-in window.";
-      chatNotice.textContent = "Nex couldn’t verify Codex right now. Try checking again.";
+        ? "ChatGPT is connected to your ChatGPT account. Your sign-in stays in the Codex CLI."
+        : "Connect your ChatGPT account through the ChatGPT sign-in window.";
+      chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
     }, 8000);
   }
@@ -1871,7 +1902,7 @@
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
-  $("chat-history-button").addEventListener("click", () => { renderChatHistory(); chatHistory.hidden = !chatHistory.hidden; });
+  $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
   $("chat-model-button").addEventListener("click", (event) => {
     event.currentTarget.blur();
     const open = chatSettings.hidden;
@@ -1923,7 +1954,7 @@
       chatConnectButton.disabled = false;
       chatConnectButton.textContent = "Connect account";
       chatConnectButton.setAttribute("aria-busy", "false");
-      chatNotice.textContent = "Nex didn’t hear back from Codex. Check the sign-in window and try again.";
+      chatNotice.textContent = "Nex didn’t hear back from ChatGPT. Check the sign-in window and try again.";
       chatNotice.classList.add("error");
     }, 10000);
     saveChatProvider();
@@ -1939,7 +1970,7 @@
       chatDisconnectButton.disabled = false;
       chatDisconnectButton.textContent = "Log out";
       chatDisconnectButton.setAttribute("aria-busy", "false");
-      chatNotice.textContent = "Nex didn’t hear back from Codex. Try again.";
+      chatNotice.textContent = "Nex didn’t hear back from ChatGPT. Try again.";
       chatNotice.classList.add("error");
     }, 10000);
     post("chatDisconnect");
@@ -1954,6 +1985,28 @@
     }
   });
   chatModelSearch.addEventListener("input", renderChatModelOptions);
+  // Hover-select like result rows: the highlight follows the cursor.
+  function trackMenuHover(container) {
+    container.addEventListener("mousemove", (event) => {
+      const option = event.target.closest ? event.target.closest("button") : null;
+      if (!option || !container.contains(option)) return;
+      for (const item of container.querySelectorAll("button")) {
+        item.setAttribute("aria-selected", String(item === option));
+      }
+    }, { passive: true });
+  }
+  trackMenuHover(chatProviderOptions);
+  trackMenuHover(chatModelResults);
+  trackMenuHover(chatHistory);
+  // History scrollbar stays hidden until actually scrolled.
+  let chatHistoryScrollTimer = 0;
+  chatHistory.addEventListener("scroll", () => {
+    chatHistory.classList.add("scrolling");
+    window.clearTimeout(chatHistoryScrollTimer);
+    chatHistoryScrollTimer = window.setTimeout(() => {
+      chatHistory.classList.remove("scrolling");
+    }, 1200);
+  }, { passive: true });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {
@@ -1968,8 +2021,16 @@
     if (!event.target.closest(".chat-model-picker")) closeChatModelOptions();
     if (!event.target.closest(".chat-provider-picker")) closeChatProviderOptions();
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
+    if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
+  // Model links open in the default browser (WebView2 blocks target=_blank).
+  chatMessagesEl.addEventListener("click", (event) => {
+    const link = event.target.closest ? event.target.closest("a[href]") : null;
+    if (!link || !chatMessagesEl.contains(link)) return;
+    event.preventDefault();
+    post("openExternal", link.href);
+  });
   $("chat-voice-button").addEventListener("click", startChatVoice);
   chatInput.addEventListener("input", () => { resizeChatInput(); updateChatStreamingState(); });
   chatInput.addEventListener("keydown", (event) => {
@@ -1989,8 +2050,8 @@
         chatConnectionCheckPending = false;
         chatCheckButton.disabled = false;
         chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
-        if (chatConfig.accountConnected) flashChatNotice("Codex is connected to your ChatGPT account.");
-        else { chatNotice.textContent = "Codex is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
+        if (chatConfig.accountConnected) flashChatNotice("ChatGPT is connected to your ChatGPT account.");
+        else { chatNotice.textContent = "ChatGPT is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
       if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
       if (chatConfig.provider === "openai-compatible" && chatConfig.configured && chatModelsProvider !== "openai-compatible" && !chatModelsLoading) fetchChatModels(false);

@@ -1500,6 +1500,9 @@ fn handle_ipc(
         OverlayMessage::ChatCancel(_) => {
             let _ = event_tx.send(OverlayEvent::ChatCancel);
         }
+        OverlayMessage::OpenExternal(p) => {
+            let _ = event_tx.send(OverlayEvent::OpenExternal(p.v));
+        }
     }
 }
 

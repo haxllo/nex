@@ -546,6 +546,30 @@ fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
         });
 }
 
+/// Opens an http(s) URL in the default browser. Anything else is ignored.
+fn open_url_in_browser(url: &str) {
+    let lower = url.trim().to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return;
+    }
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+    }
+}
+
 /// Fire a media transport command off the message-pump thread (WinRT calls
 /// can block), then request a fresh now-playing push so the media view
 /// updates immediately instead of waiting for the next periodic tick.
@@ -1865,6 +1889,9 @@ impl RuntimeWorker {
             OverlayEvent::ChatCancel => {
                 crate::chat::cancel();
                 self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            }
+            OverlayEvent::OpenExternal(url) => {
+                open_url_in_browser(&url);
             }
             OverlayEvent::SaveSettings(raw) => {
                 match crate::settings_snapshot::apply(&self.runtime_config, &raw) {

@@ -285,6 +285,8 @@ pub(crate) enum OverlayMessage {
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(NoPayload),
+    #[serde(rename = "openExternal")]
+    OpenExternal(TextPayload),
 }
 
 /// Settings-window IPC envelope. Deliberately separate from
@@ -353,6 +355,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConnect",
         "chatDisconnect",
         "chatCancel",
+        "openExternal",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
         return Err(IpcReject::UnknownType(tag));
@@ -397,6 +400,9 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::MediaSession(p) => {
             check_len(&p.v, 256, "media session key").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::OpenExternal(p) => {
+            check_len(&p.v, 2048, "external URL").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::ChatConfigure(p) | OverlayMessage::ChatFetchModels(p) => {
             check_len(&p.provider, 32, "chat provider").map_err(IpcReject::BadPayload)?;
@@ -640,6 +646,13 @@ mod tests {
             parse_overlay(r#"{"t":"chatDisconnect"}"#),
             Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
         );
+    }
+
+    #[test]
+    fn external_url_parses_and_rejects_overlong() {
+        assert!(parse_overlay(r#"{"t":"openExternal","v":"https://example.com/x"}"#).is_ok());
+        let big = format!(r#"{{"t":"openExternal","v":"https://example.com/{}"}}"#, "x".repeat(2048));
+        assert!(matches!(parse_overlay(&big), Err(IpcReject::BadPayload(_))));
     }
 
     #[test]

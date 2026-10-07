@@ -143,10 +143,6 @@
             <label class="chat-model-field">Model
               <div class="chat-model-picker">
                 <input id="chat-model" type="text" maxlength="128" autocomplete="off" placeholder="Choose or enter a model" aria-controls="chat-model-options" />
-                <button type="button" id="chat-model-menu-button" class="chat-model-menu-button" title="Browse available models" aria-label="Browse available models" aria-haspopup="listbox" aria-controls="chat-model-results" aria-expanded="false">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
-                </button>
-                <button type="button" id="chat-model-fetch" class="chat-model-fetch" title="Load models from this provider" aria-label="Load models from this provider">Load</button>
                 <div id="chat-model-options" class="chat-model-options" hidden>
                   <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
                   <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>
@@ -164,6 +160,7 @@
             <div id="chat-connection-hint" class="chat-connection-hint">Keys are encrypted for your Windows account and stay out of the page after saving.</div>
             <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
             <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
+            <button type="button" id="chat-disconnect-button" class="chat-secondary-button" hidden>Log out</button>
             <button type="button" id="chat-save-button" class="chat-secondary-button">Save</button>
           </div>
         </div>

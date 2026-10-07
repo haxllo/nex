@@ -1494,6 +1494,9 @@ fn handle_ipc(
         OverlayMessage::ChatConnect(p) => {
             let _ = event_tx.send(OverlayEvent::ChatConnect(p.v));
         }
+        OverlayMessage::ChatDisconnect(_) => {
+            let _ = event_tx.send(OverlayEvent::ChatDisconnect);
+        }
         OverlayMessage::ChatCancel(_) => {
             let _ = event_tx.send(OverlayEvent::ChatCancel);
         }

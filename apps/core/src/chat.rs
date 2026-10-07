@@ -168,6 +168,30 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
     }
 }
 
+pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
+    if !cli_available("codex") {
+        push(json!({"chatDisconnecting":false,"chatError":"Could not find the Codex CLI. Nothing to sign out."}));
+        return;
+    }
+    if !codex_authenticated() {
+        push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Codex is already signed out."}));
+        return;
+    }
+    push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of Codex…"}));
+    let signed_out = cli_command("codex", &["logout".into()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+        && !codex_authenticated();
+    if signed_out {
+        push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Codex account disconnected. Connect again any time."}));
+    } else {
+        push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of Codex. Try again in a moment."}));
+    }
+}
+
 pub(crate) fn fetch_models(raw: &str) -> Result<Value, String> {
     let mut request: ConfigureRequest = serde_json::from_str(raw)
         .map_err(|_| "Those provider settings could not be read.".to_string())?;

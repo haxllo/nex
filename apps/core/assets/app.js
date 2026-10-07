@@ -62,13 +62,12 @@
   const chatModelOptions = $("chat-model-options");
   const chatModelSearch = $("chat-model-search");
   const chatModelResults = $("chat-model-results");
-  const chatModelMenuButton = $("chat-model-menu-button");
-  const chatModelFetchButton = $("chat-model-fetch");
   const chatBaseUrlInput = $("chat-base-url");
   const chatApiKeyInput = $("chat-api-key");
   const chatEndpointField = $("chat-endpoint-field");
   const chatKeyField = $("chat-key-field");
   const chatConnectButton = $("chat-connect-button");
+  const chatDisconnectButton = $("chat-disconnect-button");
   const chatCheckButton = $("chat-check-button");
   const chatConnectionHint = $("chat-connection-hint");
   const chatHistory = $("chat-history");
@@ -83,6 +82,7 @@
   let chatModelsTimer = 0;
   let chatConnectionTimer = 0;
   let chatConnectTimer = 0;
+  let chatDisconnectTimer = 0;
   let chatConnectionCheckPending = false;
   let chatConversations = loadChatConversations();
   let chatConversationId = "";
@@ -1591,6 +1591,7 @@
     chatEndpointField.hidden = provider !== "openai-compatible";
     chatKeyField.hidden = provider !== "openai-compatible";
     chatConnectButton.hidden = provider !== "codex" || !!chatConfig.accountConnected;
+    chatDisconnectButton.hidden = provider !== "codex" || !chatConfig.accountConnected;
     chatCheckButton.hidden = provider !== "codex";
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
@@ -1598,6 +1599,13 @@
       : (chatConfig.accountConnected ? "Codex is connected to your ChatGPT account. Your sign-in stays in the Codex CLI." : "Connect your ChatGPT account through the Codex sign-in window.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
+  }
+
+  function setChatSettingsOpen(open) {
+    chatSettings.hidden = !open;
+    panel.classList.toggle("chat-settings-open", open);
+    if (open) chatHistory.hidden = true;
+    else { closeChatModelOptions(); closeChatProviderOptions(); }
   }
 
   function openChatView(fromMedia = false) {
@@ -1620,7 +1628,7 @@
     if (!chatOpen) return;
     chatOpen = false;
     chatView.setAttribute("aria-hidden", "true");
-    chatSettings.hidden = true;
+    setChatSettingsOpen(false);
     chatHistory.hidden = true;
     panel.classList.remove("chat-open");
     if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; }
@@ -1714,6 +1722,19 @@
     catch (_) { chatRecognition = null; chatView.classList.remove("is-listening"); chatNotice.textContent = "Voice input could not start. Check microphone access and try again."; chatNotice.classList.add("error"); }
   }
 
+  let chatNoticeTimer = 0;
+  // Transient notices clear themselves after a few seconds. The timer
+  // only clears its own text, so a newer notice is never wiped early.
+  // Errors use direct assignment and stay until replaced.
+  function flashChatNotice(text) {
+    window.clearTimeout(chatNoticeTimer);
+    chatNotice.textContent = text;
+    chatNotice.classList.remove("error");
+    chatNoticeTimer = window.setTimeout(() => {
+      if (chatNotice.textContent === text) chatNotice.textContent = "";
+    }, 3500);
+  }
+
   function saveChatProvider() {
     const payload = {
       provider: chatProviderInput.value,
@@ -1723,8 +1744,7 @@
     };
     post("chatConfigure", payload);
     chatApiKeyInput.value = "";
-    chatNotice.textContent = "Saving provider settings…";
-    chatNotice.classList.remove("error");
+    flashChatNotice("Saving provider settings…");
   }
 
   function renderChatModelOptions(open = !chatModelOptions.hidden) {
@@ -1744,7 +1764,11 @@
     if (!matches.length) {
       const empty = document.createElement("div");
       empty.className = "chat-model-empty";
-      empty.textContent = chatModels.length ? "No matching models. You can still enter a model ID." : "Load models to see what your account can use.";
+      empty.textContent = chatModels.length
+        ? "No matching models. You can still enter a model ID."
+        : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
+          ? "Connect your Codex account to load models."
+          : "Switch provider or save settings to load available models.");
       chatModelResults.append(empty);
       if (open) showChatModelOptions();
       return;
@@ -1770,19 +1794,10 @@
 
   function showChatModelOptions() {
     chatModelOptions.hidden = false;
-    chatModelMenuButton.setAttribute("aria-expanded", "true");
   }
 
   function closeChatModelOptions() {
     chatModelOptions.hidden = true;
-    chatModelMenuButton.setAttribute("aria-expanded", "false");
-  }
-
-  function toggleChatModelOptions() {
-    if (chatModelOptions.hidden) {
-      chatModelSearch.value = "";
-      renderChatModelOptions();
-    } else closeChatModelOptions();
   }
 
   function closeChatProviderOptions() {
@@ -1827,10 +1842,7 @@
     chatModelsLoading = loading;
     window.clearTimeout(chatModelsTimer);
     chatModelsTimer = 0;
-    chatModelFetchButton.disabled = loading;
     chatProviderInput.disabled = loading;
-    chatModelFetchButton.setAttribute("aria-busy", String(loading));
-    chatModelFetchButton.textContent = loading ? "Loading" : "Load";
   }
 
   function checkCodexConnection() {
@@ -1860,19 +1872,19 @@
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
   $("chat-history-button").addEventListener("click", () => { renderChatHistory(); chatHistory.hidden = !chatHistory.hidden; });
-  $("chat-model-button").addEventListener("click", () => {
-    chatSettings.hidden = !chatSettings.hidden;
-    if (!chatSettings.hidden) {
+  $("chat-model-button").addEventListener("click", (event) => {
+    event.currentTarget.blur();
+    const open = chatSettings.hidden;
+    setChatSettingsOpen(open);
+    if (open) {
       post("chatState");
       if (chatProviderInput.value === "codex" && chatConfig.accountConnected && !chatModels.length) fetchChatModels(false);
-    } else { closeChatModelOptions(); closeChatProviderOptions(); }
+    }
     postChatResize();
   });
   $("chat-save-button").addEventListener("click", () => {
     saveChatProvider();
-    chatSettings.hidden = true;
-    closeChatModelOptions();
-    closeChatProviderOptions();
+    setChatSettingsOpen(false);
     postChatResize();
   });
   chatProviderInput.addEventListener("change", () => {
@@ -1884,7 +1896,7 @@
       : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "gpt-4o-mini") : "gpt-4o-mini");
     chatConfig.provider = chatProviderInput.value;
     chatConfig.model = chatModelInput.value;
-    syncChatConfig(); postChatResize();
+    syncChatConfig(); fetchChatModels(false); postChatResize();
   });
   chatProviderButton.addEventListener("click", () => {
     const open = chatProviderOptions.hidden;
@@ -1917,23 +1929,36 @@
     saveChatProvider();
     post("chatConnect", chatProviderInput.value);
   });
+  chatDisconnectButton.addEventListener("click", () => {
+    if (chatDisconnectButton.disabled) return;
+    chatDisconnectButton.disabled = true;
+    chatDisconnectButton.textContent = "Logging out…";
+    chatDisconnectButton.setAttribute("aria-busy", "true");
+    window.clearTimeout(chatDisconnectTimer);
+    chatDisconnectTimer = window.setTimeout(() => {
+      chatDisconnectButton.disabled = false;
+      chatDisconnectButton.textContent = "Log out";
+      chatDisconnectButton.setAttribute("aria-busy", "false");
+      chatNotice.textContent = "Nex didn’t hear back from Codex. Try again.";
+      chatNotice.classList.add("error");
+    }, 10000);
+    post("chatDisconnect");
+  });
   chatCheckButton.addEventListener("click", () => {
     checkCodexConnection();
   });
-  chatModelFetchButton.addEventListener("click", fetchChatModels);
   chatModelInput.addEventListener("focus", () => {
     if (chatModelOptions.hidden) {
       chatModelSearch.value = "";
       renderChatModelOptions(true);
     }
   });
-  chatModelMenuButton.addEventListener("click", toggleChatModelOptions);
   chatModelSearch.addEventListener("input", renderChatModelOptions);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {
       closeChatModelOptions();
-      chatModelMenuButton.focus();
+      chatModelInput.focus();
     } else if (!chatProviderOptions.hidden) {
       closeChatProviderOptions();
       chatProviderButton.focus();
@@ -1942,6 +1967,7 @@
   document.addEventListener("pointerdown", (event) => {
     if (!event.target.closest(".chat-model-picker")) closeChatModelOptions();
     if (!event.target.closest(".chat-provider-picker")) closeChatProviderOptions();
+    if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
   $("chat-voice-button").addEventListener("click", startChatVoice);
@@ -1963,10 +1989,11 @@
         chatConnectionCheckPending = false;
         chatCheckButton.disabled = false;
         chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
-        chatNotice.textContent = chatConfig.accountConnected ? "Codex is connected to your ChatGPT account." : "Codex is not connected. Choose Connect account to sign in.";
-        chatNotice.classList.toggle("error", !chatConfig.accountConnected);
+        if (chatConfig.accountConnected) flashChatNotice("Codex is connected to your ChatGPT account.");
+        else { chatNotice.textContent = "Codex is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
       if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
+      if (chatConfig.provider === "openai-compatible" && chatConfig.configured && chatModelsProvider !== "openai-compatible" && !chatModelsLoading) fetchChatModels(false);
     }
     if (typeof state.chatConnecting === "boolean") {
       window.clearTimeout(chatConnectTimer);
@@ -1974,6 +2001,18 @@
       chatConnectButton.disabled = state.chatConnecting;
       chatConnectButton.textContent = state.chatConnecting ? "Waiting for sign-in…" : "Connect account";
       chatConnectButton.setAttribute("aria-busy", String(state.chatConnecting));
+    }
+    if (typeof state.chatDisconnecting === "boolean") {
+      window.clearTimeout(chatDisconnectTimer);
+      chatDisconnectTimer = 0;
+      chatDisconnectButton.disabled = state.chatDisconnecting;
+      chatDisconnectButton.textContent = state.chatDisconnecting ? "Logging out…" : "Log out";
+      chatDisconnectButton.setAttribute("aria-busy", String(state.chatDisconnecting));
+      if (!state.chatDisconnecting) {
+        chatConnectButton.disabled = false;
+        chatConnectButton.textContent = "Connect account";
+        chatConnectButton.setAttribute("aria-busy", "false");
+      }
     }
     if (state.chatModels) {
       setChatModelsLoading(false);
@@ -1987,11 +2026,10 @@
           post("chatConfigure", { provider: "codex", baseUrl: chatBaseUrlInput.value, model: recommended.id, apiKey: "" });
         } else if (!chatModelInput.value && chatModels.length) chatModelInput.value = chatModels[0].id;
         renderChatModelOptions();
-        chatNotice.textContent = chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.";
-        chatNotice.classList.remove("error");
+        flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
       }
     }
-    if (state.chatNotice) { chatNotice.textContent = state.chatNotice; chatNotice.classList.remove("error"); }
+    if (state.chatNotice) flashChatNotice(state.chatNotice);
     if (state.chatError) {
       setChatModelsLoading(false);
       if (!chatModelOptions.hidden && !chatStreaming) renderChatModelOptions();
@@ -2023,7 +2061,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || typeof state.chatConnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }
@@ -2175,6 +2213,8 @@
         needsPainted = true;
         lastH = 0; // fresh show cycle: trigger resize on first content paint
         scrollToInstant(0);
+        // Transient model-settings state must not survive hide/show.
+        setChatSettingsOpen(false);
       }
       render();
 

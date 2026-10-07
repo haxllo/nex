@@ -111,6 +111,7 @@ pub enum OverlayEvent {
     /// Send a user turn to the selected provider.
     ChatSend(String),
     ChatConnect(String),
+    ChatDisconnect,
     ChatCancel,
     /// Media transport controls from the media widget.
     MediaToggle,

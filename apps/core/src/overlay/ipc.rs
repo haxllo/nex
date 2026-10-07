@@ -281,6 +281,8 @@ pub(crate) enum OverlayMessage {
     ChatSend(ChatSendPayload),
     #[serde(rename = "chatConnect")]
     ChatConnect(TextPayload),
+    #[serde(rename = "chatDisconnect")]
+    ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(NoPayload),
 }
@@ -349,6 +351,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatFetchModels",
         "chatSend",
         "chatConnect",
+        "chatDisconnect",
         "chatCancel",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -629,6 +632,14 @@ mod tests {
             parse_overlay(r#"{"t":"mediaVolume","v":101}"#),
             Err(IpcReject::BadPayload(_))
         ));
+    }
+
+    #[test]
+    fn chat_disconnect_request_parses() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"chatDisconnect"}"#),
+            Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
+        );
     }
 
     #[test]

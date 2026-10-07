@@ -1840,6 +1840,16 @@ impl RuntimeWorker {
                     overlay.push_chat(update.to_string());
                 });
             }
+            OverlayEvent::ChatDisconnect => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-chat-disconnect".into())
+                    .spawn(move || {
+                        crate::chat::disconnect(move |update| {
+                            overlay.push_chat(update.to_string());
+                        });
+                    });
+            }
             OverlayEvent::ChatFetchModels(raw) => {
                 let overlay = self.overlay.clone();
                 let _ = std::thread::Builder::new()

@@ -1395,8 +1395,19 @@
       const title = document.createElement("strong");
       title.textContent = conversation.title || "New conversation";
       const date = document.createElement("span");
+      date.className = "chat-date";
       date.textContent = new Date(conversation.updatedAt || Date.now()).toLocaleDateString();
-      button.append(title, date);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "chat-delete";
+      del.title = "Delete conversation";
+      del.setAttribute("aria-label", "Delete conversation");
+      del.innerHTML = '<svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>';
+      del.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteChatConversation(conversation.id);
+      });
+      button.append(title, date, del);
       button.addEventListener("click", () => {
         if (chatStreaming) post("chatCancel");
         chatConversationId = conversation.id;
@@ -1411,6 +1422,13 @@
       });
       chatHistory.appendChild(button);
     }
+  }
+
+  function deleteChatConversation(id) {
+    chatConversations = chatConversations.filter((item) => item.id !== id);
+    if (id === chatConversationId) newChatConversation();
+    else persistChat();
+    renderChatHistory();
   }
 
   function appendChatInline(parent, value) {

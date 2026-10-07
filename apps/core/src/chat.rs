@@ -323,6 +323,10 @@ fn fetch_codex_models_native() -> Result<Vec<Value>, String> {
     let response = codex_request(&agent, "GET", &url)?
         .call()
         .map_err(|e| match e {
+            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+                crate::codex_auth::forget();
+                "ChatGPT session expired. Reconnect your account.".to_string()
+            }
             ureq::Error::Status(code, response) => {
                 codex_http_error(code, response.into_string().unwrap_or_default())
             }
@@ -753,6 +757,11 @@ fn stream_codex_native(
         .set("Accept", "text/event-stream")
         .send_json(body)
         .map_err(|e| match e {
+            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+                // Revoked server-side: drop local auth everywhere.
+                crate::codex_auth::forget();
+                "ChatGPT session expired. Reconnect your account.".to_string()
+            }
             ureq::Error::Status(code, response) => {
                 let body = response.into_string().unwrap_or_default();
                 crate::runtime::log_info(&format!(

@@ -61,6 +61,12 @@ fn auth_file() -> PathBuf {
     codex_home().join("auth.json")
 }
 
+/// Nex-owned token store. Primary source of truth; the CLI home above
+/// is only mirrored for interop (login once, both apps work).
+fn nex_auth_file() -> PathBuf {
+    crate::config::stable_app_data_dir().join("codex-auth.json")
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(12))
@@ -113,7 +119,17 @@ fn access_expired(access_token: &str) -> bool {
 }
 
 fn read_tokens() -> Option<StoredTokens> {
-    let bytes = std::fs::read(auth_file()).ok()?;
+    if let Some(tokens) = read_tokens_file(&nex_auth_file()) {
+        return Some(tokens);
+    }
+    // One-time import: a CLI sign-in is adopted into our store.
+    let tokens = read_tokens_file(&auth_file())?;
+    persist(&tokens);
+    Some(tokens)
+}
+
+fn read_tokens_file(path: &PathBuf) -> Option<StoredTokens> {
+    let bytes = std::fs::read(path).ok()?;
     let file: AuthFile = serde_json::from_slice(&bytes).ok()?;
     let tokens = file.tokens?;
     if tokens.access_token.is_empty() {
@@ -188,11 +204,24 @@ fn persist(tokens: &StoredTokens) {
         "tokens": tokens,
     });
     if let Ok(bytes) = serde_json::to_vec_pretty(&file) {
-        if let Some(parent) = auth_file().parent() {
+        let path = nex_auth_file();
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(auth_file(), bytes);
+        let _ = std::fs::write(&path, &bytes);
+        // Mirror for CLI interop; failures never block our store.
+        let mirror = auth_file();
+        if let Some(parent) = mirror.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&mirror, &bytes);
     }
+}
+
+/// Deletes both our store and the CLI mirror (revoked or signed out).
+pub(crate) fn forget() {
+    let _ = std::fs::remove_file(nex_auth_file());
+    let _ = std::fs::remove_file(auth_file());
 }
 
 /// Native sign-out: revoke refresh (else access), then delete `auth.json`.
@@ -218,11 +247,13 @@ pub(crate) fn logout() -> Result<bool, String> {
             .timeout(Duration::from_secs(10))
             .send_json(body);
     }
-    match std::fs::remove_file(auth_file()) {
+    match std::fs::remove_file(nex_auth_file()) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(tokens.is_some()),
         Err(e) => Err(format!("Could not clear ChatGPT sign-in: {e}")),
-    }
+    }?;
+    let _ = std::fs::remove_file(auth_file());
+    Ok(true)
 }
 
 /// Starts the ChatGPT OAuth flow: binds the localhost callback, builds

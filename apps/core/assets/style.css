@@ -1381,11 +1381,8 @@ html[data-theme="light"] #update-btn:hover {
 .chat-history.scrolling { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 .chat-history.scrolling::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
 .chat-history-item:hover, .chat-history-item[aria-selected="true"] { background: var(--hover); }
-.chat-history-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.chat-history-item.active:hover, .chat-history-item.active[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-/* One highlight at a time: while hovering elsewhere, the active tint steps aside. */
-.chat-history:hover .chat-history-item.active:not(:hover):not([aria-selected="true"]) { background: transparent; }
-.chat-history-item { width: 100%; min-height: 36px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.chat-history-item.active::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
+.chat-history-item { width: 100%; min-height: 36px; display: flex; position: relative; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .chat-history-item:hover, .chat-history-item.active { background: var(--hover); }
 .chat-history-item strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .chat-history-item .chat-date { flex: 0 0 auto; color: var(--text-faint); font-size: 11px; }

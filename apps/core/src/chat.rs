@@ -831,7 +831,7 @@ fn spawn_line_reader(reader: impl Read + Send + 'static) -> std::sync::mpsc::Rec
 }
 
 fn conversation_prompt(request: &SendRequest) -> String {
-    let mut prompt = String::from("Continue this conversation as a text assistant. Do not access files, run commands, or use tools.\n\n");
+    let mut prompt = String::from("You are Nex, a helpful AI assistant running inside the Nex app. Answer as Nex, never as any other assistant. Continue this conversation as a text assistant. Do not access files, run commands, or use tools.\n\n");
     for turn in request.history.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
         let role = if turn.role == "assistant" { "Assistant" } else { "User" };
         prompt.push_str(role);

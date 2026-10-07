@@ -279,6 +279,9 @@ fn open_browser(url: &str) {
 
 fn read_callback_request(listener: &TcpListener) -> Option<(String, String)> {
     let (stream, _) = listener.accept().ok()?;
+    // Accepted sockets inherit the listener's non-blocking mode on
+    // Windows — back to blocking so the request line actually reads.
+    let _ = stream.set_nonblocking(false);
     let _ = stream
         .set_read_timeout(Some(Duration::from_secs(10)));
     let mut reader = BufReader::new(stream);

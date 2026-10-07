@@ -123,8 +123,31 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
         push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatNotice":"Codex is already connected. Choose a model and start chatting."}));
         return;
     }
+    match crate::codex_auth::start_login_server() {
+        Ok(server) => {
+            push(json!({"chatConnecting":true,"chatNotice":"Codex sign-in opened in your browser. Nex will confirm the connection automatically."}));
+            let _ = std::thread::Builder::new()
+                .name("nex-codex-login-watch".into())
+                .spawn(move || {
+                    let deadline = Duration::from_secs(300);
+                    match crate::codex_auth::wait_for_login(server, deadline) {
+                        Ok(()) if codex_authenticated() => {
+                            push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatNotice":"Codex connected. Choose a model and start chatting."}));
+                        }
+                        _ => {
+                            push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatError":"Codex sign-in was not confirmed. Try again in a moment."}));
+                        }
+                    }
+                });
+            return;
+        }
+        Err(_) => {
+            // Native server unavailable (port blocked, etc.) — fall back
+            // to the CLI-owned sign-in window when the CLI exists.
+        }
+    }
     if !cli_available("codex") {
-        push(json!({"chatConnecting":false,"chatError":"Could not find the Codex CLI. Install it, sign in, and try again."}));
+        push(json!({"chatConnecting":false,"chatError":"Could not start Codex sign-in. Check your connection and try again."}));
         return;
     }
     let mut command = cli_command("codex", &["login".into()]);
@@ -175,6 +198,19 @@ pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
     }
     if !codex_authenticated() {
         push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Codex is already signed out."}));
+        return;
+    }
+    match crate::codex_auth::logout() {
+        Ok(_) if !codex_authenticated() => {
+            push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Codex account disconnected. Connect again any time."}));
+            return;
+        }
+        _ => {
+            // Native revoke failed — fall back to the CLI when present.
+        }
+    }
+    if !cli_available("codex") {
+        push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of Codex. Try again in a moment."}));
         return;
     }
     push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of Codex…"}));
@@ -248,6 +284,91 @@ fn fetch_compatible_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, 
 }
 
 fn fetch_codex_models() -> Result<Vec<Value>, String> {
+    match fetch_codex_models_native() {
+        Ok(models) => Ok(models),
+        Err(native_error) => {
+            if cli_available("codex") {
+                fetch_codex_models_cli()
+            } else {
+                Err(format!("{native_error} You can still enter a model ID manually."))
+            }
+        }
+    }
+}
+
+fn codex_request(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+) -> Result<ureq::Request, String> {
+    let Some((access, account)) = crate::codex_auth::fresh_tokens() else {
+        return Err("Connect your Codex account first.".into());
+    };
+    let mut request = match method {
+        "GET" => agent.get(url),
+        _ => agent.post(url),
+    };
+    for (name, value) in crate::codex_auth::backend_headers(&access, account.as_deref()) {
+        request = request.set(&name, &value);
+    }
+    Ok(request)
+}
+
+fn fetch_codex_models_native() -> Result<Vec<Value>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(12))
+        .timeout_read(Duration::from_secs(12))
+        .build();
+    let url = format!("{}/models", crate::codex_auth::CODEX_BASE_URL);
+    let response = codex_request(&agent, "GET", &url)?
+        .call()
+        .map_err(|_| "Could not reach Codex. Check your connection.".to_string())?;
+    if response.status() == 401 || response.status() == 403 {
+        return Err("Codex session expired. Reconnect your account.".into());
+    }
+    if response.status() != 200 {
+        return Err("Codex did not return its model list.".into());
+    }
+    let payload: Value = response
+        .into_json()
+        .map_err(|_| "Codex returned an unreadable model list.".to_string())?;
+    let mut models = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex returned an unreadable model list.".to_string())?
+        .iter()
+        .filter_map(|model| {
+            let id = model
+                .get("id")
+                .or_else(|| model.get("model"))
+                .or_else(|| model.get("name"))?
+                .as_str()?;
+            if id.is_empty() || id.len() > 128 {
+                return None;
+            }
+            let name = model
+                .get("displayName")
+                .or_else(|| model.get("display_name"))
+                .and_then(Value::as_str)
+                .unwrap_or(id);
+            let description = model
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("Available with your Codex account.");
+            let is_default = model
+                .get("isDefault")
+                .or_else(|| model.get("is_default"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(json!({"id":id,"name":name,"description":description,"default":is_default}))
+        })
+        .collect::<Vec<_>>();
+    sort_model_recommendations(&mut models);
+    models.truncate(80);
+    Ok(models)
+}
+
+fn fetch_codex_models_cli() -> Result<Vec<Value>, String> {
     if !cli_available("codex") {
         return Err("Codex CLI was not found. Install it and connect your account first.".into());
     }
@@ -342,10 +463,18 @@ fn sort_model_recommendations(models: &mut [Value]) {
 }
 
 fn codex_authenticated() -> bool {
-    if !cli_available("codex") { return false; }
-    cli_command("codex", &["login".into(), "status".into()])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status()
-        .map(|status| status.success()).unwrap_or(false)
+    // Native check first (no CLI needed); the CLI reads the same store,
+    // so fall back to it only when native storage is unreadable.
+    if crate::codex_auth::is_signed_in() {
+        return true;
+    }
+    cli_available("codex")
+        && cli_command("codex", &["login".into(), "status".into()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
 }
 
 pub(crate) fn cancel() {
@@ -472,6 +601,120 @@ fn stream_openai(
 }
 
 fn stream_codex(
+    config: &StoredConfig,
+    request: &SendRequest,
+    id: u64,
+    emit: &mut impl FnMut(&str, Option<&str>),
+) -> Result<(), String> {
+    let mut emitted = 0usize;
+    let mut counting_emit = |text: &str, status: Option<&str>| {
+        emitted += text.len();
+        emit(text, status);
+    };
+    match stream_codex_native(config, request, id, &mut counting_emit) {
+        Ok(()) => Ok(()),
+        Err(native_error) => {
+            // Auth failures mean the shared store is unusable — the CLI
+            // would fail the same way. Anything else falls back while the
+            // CLI still exists.
+            if emitted == 0
+                && !native_error.contains("Reconnect")
+                && !native_error.contains("Connect your Codex")
+                && cli_available("codex")
+            {
+                stream_codex_cli(config, request, id, emit)
+            } else {
+                Err(native_error)
+            }
+        }
+    }
+}
+
+fn stream_codex_native(
+    config: &StoredConfig,
+    request: &SendRequest,
+    id: u64,
+    emit: &mut impl FnMut(&str, Option<&str>),
+) -> Result<(), String> {
+    let prompt = conversation_prompt(request);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(1))
+        .build();
+    let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
+    let body = json!({"model":config.model,"input":prompt,"stream":true});
+    let response = codex_request(&agent, "POST", &url)?
+        .send_json(body)
+        .map_err(|e| match e {
+            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+                "Codex session expired. Reconnect your account.".to_string()
+            }
+            ureq::Error::Status(code, _) => format!("Codex returned HTTP {code}."),
+            ureq::Error::Transport(_) => {
+                "Could not reach Codex. Check your connection.".to_string()
+            }
+        })?;
+    let mut reader = BufReader::new(response.into_reader());
+    let mut line = String::new();
+    let mut event = String::new();
+    loop {
+        if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+            return Ok(());
+        }
+        line.clear();
+        let count = match reader.read_line(&mut line) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return Err("The Codex connection ended unexpectedly.".into()),
+        };
+        if count == 0 {
+            break;
+        }
+        let line = line.trim();
+        if let Some(kind) = line.strip_prefix("event:") {
+            event = kind.trim().to_string();
+            continue;
+        }
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            break;
+        }
+        let Ok(data) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if event == "response.output_text.delta" {
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                emit(delta, None);
+            }
+        } else if let Some(message) = data
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+        {
+            emit(message, None);
+        }
+        if let Some(error) = data
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                (event == "response.failed" || event == "error")
+                    .then(|| {
+                        data.get("message")
+                            .and_then(Value::as_str)
+                            .or_else(|| data.pointer("/response/error/message").and_then(Value::as_str))
+                    })
+                    .flatten()
+            })
+        {
+            return Err(format!("Codex error: {}", error.chars().take(280).collect::<String>()));
+        }
+    }
+    Ok(())
+}
+
+fn stream_codex_cli(
     config: &StoredConfig,
     request: &SendRequest,
     id: u64,

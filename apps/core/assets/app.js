@@ -1362,7 +1362,7 @@
     chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     chatMessages = [];
     chatConversations.unshift({ id: chatConversationId, title: "New conversation", messages: [], updatedAt: Date.now(), provider: chatConfig.provider, model: chatConfig.model });
-    chatHistory.hidden = true;
+    setChatHistoryOpen(false);
     chatHistory.replaceChildren();
     renderChatMessages();
     updateChatStreamingState();
@@ -1404,7 +1404,7 @@
         chatConfig.provider = conversation.provider || chatConfig.provider;
         chatConfig.model = conversation.model || chatConfig.model;
         chatModelInput.value = chatConfig.model;
-        chatHistory.hidden = true;
+        setChatHistoryOpen(false);
         renderChatMessages();
         updateChatStreamingState(false);
         chatInput.focus();
@@ -1604,8 +1604,13 @@
   function setChatSettingsOpen(open) {
     chatSettings.hidden = !open;
     panel.classList.toggle("chat-settings-open", open);
-    if (open) chatHistory.hidden = true;
+    if (open) setChatHistoryOpen(false);
     else { closeChatModelOptions(); closeChatProviderOptions(); }
+  }
+
+  function setChatHistoryOpen(open) {
+    chatHistory.hidden = !open;
+    panel.classList.toggle("chat-history-open", open);
   }
 
   function openChatView(fromMedia = false) {
@@ -1629,7 +1634,7 @@
     chatOpen = false;
     chatView.setAttribute("aria-hidden", "true");
     setChatSettingsOpen(false);
-    chatHistory.hidden = true;
+    setChatHistoryOpen(false);
     panel.classList.remove("chat-open");
     if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; }
     postChatResize();
@@ -1871,7 +1876,7 @@
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
-  $("chat-history-button").addEventListener("click", () => { renderChatHistory(); chatHistory.hidden = !chatHistory.hidden; });
+  $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
   $("chat-model-button").addEventListener("click", (event) => {
     event.currentTarget.blur();
     const open = chatSettings.hidden;
@@ -1990,6 +1995,7 @@
     if (!event.target.closest(".chat-model-picker")) closeChatModelOptions();
     if (!event.target.closest(".chat-provider-picker")) closeChatProviderOptions();
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
+    if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
   $("chat-voice-button").addEventListener("click", startChatVoice);

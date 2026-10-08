@@ -25,10 +25,13 @@ const APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// Chars of tool output / summary surfaced in step events.
 const STEP_DETAIL_CHARS: usize = 500;
 
-/// Minimal config snapshot: the loop only needs the model id.
+/// Minimal config snapshot: provider picks the transport, the rest feeds it.
 #[derive(Debug, Clone)]
 pub(crate) struct AgentConfig {
+    pub(crate) provider: String,
     pub(crate) model: String,
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
 }
 
 /// Parsed `function_call` output item.
@@ -107,6 +110,134 @@ pub(crate) fn tools_body() -> Value {
             })
             .collect(),
     )
+}
+
+/// Chat-completions `tools` array from the registry (function shape:
+/// `{"type":"function","function":{name,description,parameters}}`).
+pub(crate) fn chat_tools_body() -> Value {
+    Value::Array(
+        tools::registry()
+            .iter()
+            .map(|spec| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": spec.parameters,
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Incremental `choices[].delta.tool_calls[]` assembler. One call's chunks
+/// arrive split across SSE payloads; accumulate by index until the turn ends.
+#[derive(Debug, Default)]
+pub(crate) struct ToolCallParts {
+    slots: std::collections::BTreeMap<u64, ToolCallSlot>,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallSlot {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallParts {
+    /// Fold one SSE data payload's `delta.tool_calls[]` into the slots.
+    /// Unknown shapes are ignored; never panics.
+    pub(crate) fn feed(&mut self, data: &Value) {
+        let Some(calls) = data
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        for chunk in calls {
+            let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0);
+            let slot = self.slots.entry(index).or_default();
+            if slot.id.is_empty() {
+                if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+                    if !id.is_empty() {
+                        slot.id = id.to_string();
+                    }
+                }
+            }
+            if let Some(name) = chunk
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .or_else(|| chunk.get("name").and_then(Value::as_str))
+            {
+                slot.name.push_str(name);
+            }
+            if let Some(args) = chunk
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .or_else(|| chunk.get("arguments").and_then(Value::as_str))
+            {
+                slot.arguments.push_str(args);
+            }
+        }
+    }
+
+    /// Complete calls in index order; nameless slots are dropped.
+    pub(crate) fn finish(self) -> Vec<ToolCall> {
+        self.slots
+            .into_iter()
+            .filter_map(|(index, slot)| {
+                if slot.name.is_empty() {
+                    return None;
+                }
+                let arguments = if slot.arguments.trim().is_empty() {
+                    Value::Object(Default::default())
+                } else {
+                    serde_json::from_str(&slot.arguments)
+                        .unwrap_or(Value::Object(Default::default()))
+                };
+                Some(ToolCall {
+                    call_id: if slot.id.is_empty() {
+                        format!("call-{index}")
+                    } else {
+                        slot.id
+                    },
+                    name: slot.name,
+                    arguments,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Responses `function_call_output` item → chat `role:tool` message parts.
+/// Anything else → `None`. Never panics.
+pub(crate) fn tool_output_parts(item: &Value) -> Option<(&str, &str)> {
+    let obj = item.as_object()?;
+    if obj.get("type")?.as_str()? != "function_call_output" {
+        return None;
+    }
+    let id = obj.get("call_id").and_then(Value::as_str)?;
+    let output = obj.get("output").and_then(Value::as_str).unwrap_or("");
+    Some((id, output))
+}
+
+/// Assistant turn carrying tool calls, echoed back so the next
+/// chat-completions request accepts the `role:tool` results.
+fn assistant_calls_message(text: &str, calls: &[ToolCall]) -> Value {
+    json!({
+        "role": "assistant",
+        "content": text,
+        "tool_calls": calls.iter().map(|call| json!({
+            "id": call.call_id,
+            "type": "function",
+            "function": {
+                "name": call.name,
+                "arguments": serde_json::to_string(&call.arguments).unwrap_or_default(),
+            },
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn push_event(push: &mut impl FnMut(Value), event: AgentEvent) {
@@ -282,6 +413,53 @@ fn run_goal_live(
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
 ) {
+    match config.provider.as_str() {
+        "codex" => run_codex_goal(goal, config, cancel, push),
+        "openai-compatible" => run_openai_goal(goal, config, cancel, push),
+        _ => push_event(
+            push,
+            AgentEvent::done(
+                "Agent goals need the ChatGPT or an OpenAI-compatible provider. Choose one in settings, then try again.",
+            ),
+        ),
+    }
+}
+
+/// Shared approval gate: reads run free, writes/exec hold for a UI token.
+#[cfg(target_os = "windows")]
+fn approve_call(call: &ToolCall, push: &mut dyn FnMut(Value)) -> Approval {
+    if !tools::needs_approval(&call.name) {
+        return Approval::Auto;
+    }
+    let token = tools::issue_approval_token();
+    push_event(
+        &mut { push },
+        AgentEvent::approval(&call.call_id, &call.name, args_summary(call)),
+    );
+    let rx = approvals::request_approval(call.call_id.clone());
+    match rx.recv_timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) {
+        Ok(true) => Approval::Allow(token),
+        _ => Approval::Deny, // deny + timeout/disconnect default to deny
+    }
+}
+
+/// Shared dispatch: threads the approval token back into gated tools.
+#[cfg(target_os = "windows")]
+fn execute_call(call: &ToolCall, approval: Option<&str>) -> Result<String, String> {
+    let mut args = call.arguments.clone();
+    if let (Some(token), Some(obj)) = (approval, args.as_object_mut()) {
+        obj.insert("approval_token".into(), Value::String(token.to_string()));
+    }
+    tools::dispatch(&call.name, &args, approval)
+}
+
+#[cfg(target_os = "windows")]
+fn run_codex_goal(
+    goal: String,
+    config: AgentConfig,
+    cancel: Arc<AtomicBool>,
+    push: &mut impl FnMut(Value),
+) {
     let mut input = vec![json!({
         "type": "message",
         "role": "user",
@@ -292,27 +470,62 @@ fn run_goal_live(
     let mut transport = |items: &[Value], sink: &mut dyn FnMut(Value)| {
         stream_turn(&model, items, &cancel, sink)
     };
-    let mut approve = |call: &ToolCall, push: &mut dyn FnMut(Value)| -> Approval {
-        if !tools::needs_approval(&call.name) {
-            return Approval::Auto;
-        }
-        let token = tools::issue_approval_token();
+    drive_loop(
+        &mut input,
+        MAX_TURNS,
+        deadline,
+        &cancel,
+        &mut transport,
+        &mut approve_call,
+        &mut execute_call,
+        push,
+    );
+}
+
+/// OpenAI-compatible goal run: same turn loop, chat-completions transport.
+/// The loop's `input` only carries `function_call_output` items; the chat
+/// `messages` (with `role:tool` results) live in the transport closure.
+#[cfg(target_os = "windows")]
+fn run_openai_goal(
+    goal: String,
+    config: AgentConfig,
+    cancel: Arc<AtomicBool>,
+    push: &mut impl FnMut(Value),
+) {
+    if config.api_key.trim().is_empty() {
         push_event(
-            &mut { push },
-            AgentEvent::approval(&call.call_id, &call.name, args_summary(call)),
+            push,
+            AgentEvent::done(
+                "Add an API key for the OpenAI-compatible provider in settings, then try again.",
+            ),
         );
-        let rx = approvals::request_approval(call.call_id.clone());
-        match rx.recv_timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) {
-            Ok(true) => Approval::Allow(token),
-            _ => Approval::Deny, // deny + timeout/disconnect default to deny
+        return;
+    }
+    let mut input: Vec<Value> = Vec::new();
+    let mut messages = vec![json!({"role": "user", "content": goal})];
+    let mut consumed = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
+    let mut transport = |items: &[Value], sink: &mut dyn FnMut(Value)| {
+        for item in items.iter().skip(consumed) {
+            if let Some((id, output)) = tool_output_parts(item) {
+                messages.push(json!({"role": "tool", "tool_call_id": id, "content": output}));
+            }
         }
-    };
-    let mut execute = |call: &ToolCall, approval: Option<&str>| -> Result<String, String> {
-        let mut args = call.arguments.clone();
-        if let (Some(token), Some(obj)) = (approval, args.as_object_mut()) {
-            obj.insert("approval_token".into(), Value::String(token.to_string()));
+        consumed = items.len();
+        let turn = stream_openai_turn(
+            &config.model,
+            &config.base_url,
+            &config.api_key,
+            &messages,
+            &cancel,
+            sink,
+        )?;
+        if !turn.calls.is_empty() {
+            messages.push(assistant_calls_message(&turn.text, &turn.calls));
+        } else if !turn.text.trim().is_empty() {
+            messages.push(json!({"role": "assistant", "content": turn.text}));
         }
-        tools::dispatch(&call.name, &args, approval)
+        Ok(turn)
     };
     drive_loop(
         &mut input,
@@ -320,10 +533,95 @@ fn run_goal_live(
         deadline,
         &cancel,
         &mut transport,
-        &mut approve,
-        &mut execute,
+        &mut approve_call,
+        &mut execute_call,
         push,
     );
+}
+
+/// One live chat-completions turn with tools: mirrors `stream_openai` in
+/// `chat.rs` (same endpoint/auth/SSE shape) but sends the function `tools`
+/// array and accumulates `delta.tool_calls[]` chunks into full calls.
+/// Text deltas push `chatDelta` exactly like chat today.
+#[cfg(target_os = "windows")]
+fn stream_openai_turn(
+    model: &str,
+    base_url: &str,
+    api_key: &str,
+    messages: &[Value],
+    cancel: &AtomicBool,
+    push: &mut dyn FnMut(Value),
+) -> Result<TurnOutcome, String> {
+    use std::io::{BufRead, BufReader};
+
+    let mut outcome = TurnOutcome::default();
+    let mut calls = ToolCallParts::default();
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(30))
+        .build();
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        "tools": chat_tools_body(),
+    });
+    let response = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "text/event-stream")
+        .send_json(body)
+        .map_err(|e| match e {
+            ureq::Error::Status(code, response) => crate::chat::http_error(
+                code,
+                response.into_string().unwrap_or_default(),
+                api_key,
+            ),
+            ureq::Error::Transport(_) => {
+                "Could not reach the provider. Check the URL and your connection.".to_string()
+            }
+        })?;
+    let mut reader = BufReader::new(response.into_reader());
+    let mut line = String::new();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(outcome);
+        }
+        line.clear();
+        let count = match reader.read_line(&mut line) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => return Err("The provider connection ended unexpectedly.".into()),
+        };
+        if count == 0 {
+            break;
+        }
+        let Some(payload) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            break;
+        }
+        let Ok(data) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if let Some(text) = data
+            .pointer("/choices/0/delta/content")
+            .and_then(Value::as_str)
+        {
+            outcome.text.push_str(text);
+            push(json!({"chatDelta": {"text": text}}));
+        }
+        calls.feed(&data);
+        if let Some(message) = data.pointer("/error/message").and_then(Value::as_str) {
+            return Err(message.to_string());
+        }
+    }
+    outcome.calls = calls.finish();
+    Ok(outcome)
 }
 
 /// One live Responses turn with tools: mirrors `stream_codex_native` in
@@ -511,6 +809,67 @@ mod tests {
         assert_eq!(truncate_chars("abc", 5), "abc");
         let out = truncate_chars(&"x".repeat(10), 4);
         assert!(out.starts_with("xxxx") && out.contains("truncated"));
+    }
+
+    #[test]
+    fn chat_tools_body_uses_function_shape() {
+        let body = chat_tools_body();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), tools::registry().len());
+        for item in arr {
+            assert_eq!(item["type"], "function");
+            assert!(item["function"]["name"].is_string());
+            assert!(item["function"]["description"].is_string());
+            assert_eq!(item["function"]["parameters"]["type"], "object");
+        }
+    }
+
+    #[test]
+    fn chat_tool_calls_accumulate_across_chunks() {
+        let mut parts = ToolCallParts::default();
+        for raw in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"fs_li","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"st","arguments":"{\"path\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":"checking ","tool_calls":[{"index":0,"function":{"arguments":" \".\"}"}},{"index":1,"id":"call-2","type":"function","function":{"name":"fs_list","arguments":"{\"path\":\".\"}"}}]}}]}"#,
+        ] {
+            let data: Value = serde_json::from_str(raw).unwrap();
+            parts.feed(&data);
+        }
+        let calls = parts.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].call_id, "call-1");
+        assert_eq!(calls[0].name, "fs_list");
+        assert_eq!(calls[0].arguments, json!({"path": "."}));
+        assert_eq!(calls[1].call_id, "call-2");
+        assert_eq!(calls[1].name, "fs_list");
+    }
+
+    #[test]
+    fn chat_stream_without_calls_finishes_clean() {
+        let mut parts = ToolCallParts::default();
+        for raw in [
+            r#"{"choices":[{"delta":{"content":"All done."},"finish_reason":null}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            r#"{"unrelated":true}"#,
+        ] {
+            let data: Value = serde_json::from_str(raw).unwrap();
+            parts.feed(&data);
+        }
+        assert!(parts.finish().is_empty());
+    }
+
+    #[test]
+    fn function_output_converts_to_tool_message() {
+        let item = json!({"type": "function_call_output", "call_id": "c1", "output": "a\nb"});
+        assert_eq!(tool_output_parts(&item), Some(("c1", "a\nb")));
+        assert!(tool_output_parts(&json!({"type": "message"})).is_none());
+        assert!(tool_output_parts(&json!({"type": "function_call_output"})).is_none());
+    }
+
+    #[test]
+    fn openai_401_points_at_api_key() {
+        let message = crate::chat::http_error(401, String::new(), "secret");
+        assert!(message.contains("API key"), "{message}");
     }
 
     #[test]

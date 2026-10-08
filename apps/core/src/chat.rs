@@ -490,11 +490,17 @@ pub(crate) fn cancel() {
     ACTIVE_REQUEST.store(id.wrapping_add(1), Ordering::SeqCst);
 }
 
-/// Current (provider, model) snapshot for agent goals. Falls back to
-/// defaults when nothing is configured; the caller gates providers.
-pub(crate) fn agent_model() -> (String, String) {
+/// Current provider snapshot for agent goals: (provider, model, base_url,
+/// api_key). Falls back to defaults when nothing is configured; the caller
+/// gates providers.
+pub(crate) fn agent_backend() -> (String, String, String, String) {
     let config = load_config().unwrap_or_default();
-    (config.provider, config.model)
+    (
+        config.provider,
+        config.model,
+        config.base_url,
+        config.api_key,
+    )
 }
 
 pub(crate) fn start(raw: String, mut push: impl FnMut(Value) + Send + 'static) {
@@ -1065,7 +1071,7 @@ fn cli_command(program: &str, args: &[String]) -> Command {
     command
 }
 
-fn http_error(code: u16, body: String, secret: &str) -> String {
+pub(crate) fn http_error(code: u16, body: String, secret: &str) -> String {
     match code {
         401 | 403 => "Provider authentication failed. Check the saved API key or account connection.".into(),
         429 => "The provider is rate limiting requests. Wait a moment and try again.".into(),

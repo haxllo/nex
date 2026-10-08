@@ -1896,18 +1896,12 @@ impl RuntimeWorker {
                 let _ = std::thread::Builder::new()
                     .name("nex-agent-goal".into())
                     .spawn(move || {
-                        let (provider, model) = crate::chat::agent_model();
-                        if provider != "codex" {
-                            overlay.push_chat(
-                                serde_json::json!({ "t": "agentDone", "summary": "Agent goals need the ChatGPT provider. Switch chat to ChatGPT in settings, then try again." }).to_string(),
-                            );
-                            return;
-                        }
+                        let (provider, model, base_url, api_key) = crate::chat::agent_backend();
                         let cancel = Arc::new(AtomicBool::new(false));
                         crate::agent::r#loop::track_cancel(cancel.clone());
                         crate::agent::r#loop::run_goal(
                             goal,
-                            crate::agent::r#loop::AgentConfig { model },
+                            crate::agent::r#loop::AgentConfig { provider, model, base_url, api_key },
                             cancel,
                             move |value| overlay.push_chat(value.to_string()),
                         );

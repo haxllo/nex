@@ -1064,6 +1064,43 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let bare_win = crate::overlay::hotkey::is_bare_win_press_active();
                     let grace_ms = last_show.elapsed().as_millis() as u64;
                     let state_vis = state.lock().map(|s| s.visible).unwrap_or(false);
+                    // Single deferred-hide arm shared by every path below.
+                    // The 150ms thread re-checks live focus before sending
+                    // Escape, so late WebView2 flap-pairs and transient
+                    // toasts survive while genuine outside clicks still
+                    // hide (150ms later instead of instantly).
+                    let arm_deferred_hide = || {
+                        if deferred_hide_armed.swap(true, Ordering::SeqCst) {
+                            return;
+                        }
+                        let state_clone = state.clone();
+                        let tx_clone = event_tx.clone();
+                        let armed = deferred_hide_armed.clone();
+                        let epoch_clone = deferred_hide_epoch.clone();
+                        let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
+                        std::thread::Builder::new()
+                            .name("nex-deferred-hide".into())
+                            .spawn(move || {
+                                std::thread::sleep(Duration::from_millis(150));
+                                // If a new Show happened during the
+                                // sleep, the epoch will have advanced —
+                                // skip firing Escape.
+                                if epoch_clone.load(Ordering::SeqCst) != my_epoch {
+                                    armed.store(false, Ordering::SeqCst);
+                                    return;
+                                }
+                                if let Ok(s) = state_clone.lock() {
+                                    if s.visible
+                                        && !s.has_focus
+                                        && !crate::overlay::hotkey::is_bare_win_press_active()
+                                    {
+                                        let _ = tx_clone.send(OverlayEvent::Escape);
+                                    }
+                                }
+                                armed.store(false, Ordering::SeqCst);
+                            })
+                            .ok();
+                    };
                     if was_focused_val && !show_pending_val && !bare_win && grace_ms >= FOCUS_GRACE_MS && state_vis
                     {
                         // Focus bounced back to the previous foreground window
@@ -1101,44 +1138,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             // inside the quiescence window gets another
                             // re-assert attempt.
                             focus_reassert_used = false;
-                            // Arm the deferred-hide thread inline. The 150ms
-                            // window is enough for WebView2 to finish moving
-                            // focus into its input element and post a
-                            // Focused(true) back; if focus does NOT return
-                            // we treat it as a genuine dismissal.
-                            if !deferred_hide_armed.swap(true, Ordering::SeqCst) {
-                                let state_clone = state.clone();
-                                let tx_clone = event_tx.clone();
-                                let armed = deferred_hide_armed.clone();
-                                let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
-                                let epoch_clone = deferred_hide_epoch.clone();
-                                std::thread::Builder::new()
-                                    .name("nex-deferred-hide".into())
-                                    .spawn(move || {
-                                        std::thread::sleep(Duration::from_millis(150));
-                                        // If a new Show happened during the
-                                        // sleep, the epoch will have advanced —
-                                        // skip firing Escape.
-                                        if epoch_clone.load(Ordering::SeqCst) != my_epoch {
-                                            armed.store(false, Ordering::SeqCst);
-                                            return;
-                                        }
-                                        if let Ok(s) = state_clone.lock() {
-                                            if s.visible
-                                                && !s.has_focus
-                                                && !crate::overlay::hotkey::is_bare_win_press_active()
-                                            {
-                                                let _ = tx_clone.send(OverlayEvent::Escape);
-                                            }
-                                        }
-                                        armed.store(false, Ordering::SeqCst);
-                                    })
-                                    .ok();
-                            }
+                            arm_deferred_hide();
                             return;
                         } else {
                             crate::runtime::log_info(&format!(
-                                "[nex::debug] Focused(false): sending Escape (was_focused={} show_pending={} grace={}ms state_vis={})",
+                                "[nex::debug] Focused(false): deferring post-quiescence hide (was_focused={} show_pending={} grace={}ms state_vis={})",
                                 was_focused_val, show_pending_val, grace_ms, state_vis,
                             ));
                             // PROBE: name the window that stole focus.
@@ -1155,7 +1159,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     fg as isize, title
                                 ));
                             }
-                            let _ = event_tx.send(OverlayEvent::Escape);
+                            // No instant Escape here: past quiescence a late
+                            // WebView2 flap still looks identical to a real
+                            // dismissal at event time. The deferred check
+                            // below tells them apart.
+                            arm_deferred_hide();
                         }
                     } else {
                         crate::runtime::log_info(&format!(
@@ -1170,34 +1178,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // clicks; focus-flap at show (same-ms pairs in
                         // logs) re-focuses well within this window and
                         // cancels the hide.
-                        if state_vis && !deferred_hide_armed.swap(true, Ordering::SeqCst) {
-                            let state_clone = state.clone();
-                            let tx_clone = event_tx.clone();
-                            let armed = deferred_hide_armed.clone();
-                            let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
-                            let epoch_clone = deferred_hide_epoch.clone();
-                            std::thread::Builder::new()
-                                .name("nex-deferred-hide".into())
-                                .spawn(move || {
-                                    std::thread::sleep(Duration::from_millis(150));
-                                    // If a new Show happened during the
-                                    // sleep, the epoch will have advanced —
-                                    // skip firing Escape.
-                                    if epoch_clone.load(Ordering::SeqCst) != my_epoch {
-                                        armed.store(false, Ordering::SeqCst);
-                                        return;
-                                    }
-                                    if let Ok(s) = state_clone.lock() {
-                                        if s.visible
-                                            && !s.has_focus
-                                            && !crate::overlay::hotkey::is_bare_win_press_active()
-                                        {
-                                            let _ = tx_clone.send(OverlayEvent::Escape);
-                                        }
-                                    }
-                                    armed.store(false, Ordering::SeqCst);
-                                })
-                                .ok();
+                        if state_vis {
+                            arm_deferred_hide();
                         }
                     }
                 }

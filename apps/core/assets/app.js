@@ -849,6 +849,14 @@
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
+  // Holds the post-show reveal until first content paints (or 500ms),
+  // so the window never flashes its idle mid-state before results land.
+  let showRevealTimer = 0;
+  function fireShowReveal() {
+    showRevealTimer = 0;
+    needsPainted = true;
+    measure();
+  }
   function measure() {
     const h = Math.ceil(panel.getBoundingClientRect().height);
     // Shrink path: apply immediately. The WebView viewport is pinned at
@@ -2279,9 +2287,13 @@
       const isShow = state.showPending;
       if (isShow) {
         pendingShow = true;
-        needsPainted = true;
         lastH = 0; // fresh show cycle: trigger resize on first content paint
         scrollToInstant(0);
+        // Reveal waits for content (or the cap below) — never the idle
+        // mid-state. needsPainted is consumed by measure's paint path.
+        needsPainted = false;
+        window.clearTimeout(showRevealTimer);
+        showRevealTimer = window.setTimeout(fireShowReveal, 500);
         // Transient model-settings state must not survive hide/show.
         setChatSettingsOpen(false);
       }
@@ -2318,6 +2330,11 @@
       // first non-empty rows arrive after a show cycle.
       if (pendingShow && rows.length > 0) {
         pendingShow = false;
+        window.clearTimeout(showRevealTimer);
+        showRevealTimer = 0;
+        // First content painted: arm the reveal. The double-rAF queued
+        // by render()'s measure() above reads this flag at fire time.
+        needsPainted = true;
         scrollToInstant(0);
         requestAnimationFrame(() => { scrollToInstant(0); });
         // Scroll to top — selected item starts at index 0, already in view.

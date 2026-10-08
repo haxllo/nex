@@ -1744,16 +1744,13 @@
   }
 
   function runUserMessage(message) {
-    // Legacy "!" prefix still forces a goal; "!retry <id>" still resumes.
+    // Every message runs the agent loop; Chat mode just limits it to
+    // read-only tools plus answers. Legacy "!" prefix still stripped.
     const text = message.startsWith("!") ? message.slice(1).trim() : message;
     const retry = text.match(/^retry\s+(\S+)\s*$/i);
     if (retry) { startAgentGoal("", retry[1]); return; }
-    if (agentMode) {
-      if (!text) { chatInput.focus(); return; }
-      startAgentGoal(text);
-      return;
-    }
-    startChatRequest(message);
+    if (!text) { chatInput.focus(); return; }
+    startAgentGoal(text);
   }
 
   function startAgentGoal(goal, resumeRunId) {

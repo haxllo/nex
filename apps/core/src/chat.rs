@@ -578,7 +578,18 @@ fn stream_codex(
                 crate::runtime::log_info(&format!(
                     "[nex][chat] codex native failed ({native_error}), falling back to CLI"
                 ));
-                stream_codex_cli(config, request, id, emit)
+                emit("", Some("Trying alternate path…"));
+                match stream_codex_cli(config, request, id, emit) {
+                    Ok(()) => Ok(()),
+                    Err(fallback_error) => {
+                        let lower = fallback_error.to_lowercase();
+                        if lower.contains("401") || lower.contains("unauthorized") {
+                            Err("ChatGPT sign-in expired. Reconnect your account and try again.".to_string())
+                        } else {
+                            Err(fallback_error)
+                        }
+                    }
+                }
             } else {
                 Err(native_error)
             }

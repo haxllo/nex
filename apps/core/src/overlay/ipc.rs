@@ -216,6 +216,16 @@ pub(crate) struct IdPayload {
     pub call_id: String,
 }
 
+/// Goal post: `{t:"agentGoal", goal, resume_run_id?}`. Flat shape (the page
+/// spreads the object); `resume_run_id` re-runs a stored run's goal.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentGoalPayload {
+    pub goal: String,
+    #[serde(default)]
+    pub resume_run_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavePayload {
@@ -292,11 +302,13 @@ pub(crate) enum OverlayMessage {
     #[serde(rename = "chatCancel")]
     ChatCancel(NoPayload),
     #[serde(rename = "agentGoal")]
-    AgentGoal(TextPayload),
+    AgentGoal(AgentGoalPayload),
     #[serde(rename = "agentApprove")]
     AgentApprove(IdPayload),
     #[serde(rename = "agentDeny")]
     AgentDeny(IdPayload),
+    #[serde(rename = "agentLast")]
+    AgentLast(NoPayload),
     #[serde(rename = "openExternal")]
     OpenExternal(TextPayload),
 }
@@ -370,6 +382,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "agentGoal",
         "agentApprove",
         "agentDeny",
+        "agentLast",
         "openExternal",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -444,7 +457,10 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::AgentGoal(p) => {
-            check_len(&p.v, 16_000, "agent goal").map_err(IpcReject::BadPayload)?;
+            check_len(&p.goal, 16_000, "agent goal").map_err(IpcReject::BadPayload)?;
+            if let Some(resume) = p.resume_run_id.as_deref() {
+                check_len(resume, 64, "agent resume run id").map_err(IpcReject::BadPayload)?;
+            }
         }
         OverlayMessage::AgentApprove(p) | OverlayMessage::AgentDeny(p) => {
             check_len(&p.call_id, 64, "agent call id").map_err(IpcReject::BadPayload)?;
@@ -672,15 +688,40 @@ mod tests {
     #[test]
     fn agent_goal_parses_and_rejects_overlong() {
         assert_eq!(
-            parse_overlay(r#"{"t":"agentGoal","v":"list files in Documents"}"#),
-            Ok(OverlayMessage::AgentGoal(TextPayload {
-                v: "list files in Documents".into()
+            parse_overlay(r#"{"t":"agentGoal","goal":"list files in Documents"}"#),
+            Ok(OverlayMessage::AgentGoal(AgentGoalPayload {
+                goal: "list files in Documents".into(),
+                resume_run_id: None,
             }))
         );
-        let big = format!(r#"{{"t":"agentGoal","v":"{}"}}"#, "x".repeat(16_001));
+        assert_eq!(
+            parse_overlay(r#"{"t":"agentGoal","goal":"","resume_run_id":"abc-123"}"#),
+            Ok(OverlayMessage::AgentGoal(AgentGoalPayload {
+                goal: String::new(),
+                resume_run_id: Some("abc-123".into()),
+            }))
+        );
+        let big = format!(r#"{{"t":"agentGoal","goal":"{}"}}"#, "x".repeat(16_001));
         assert!(matches!(parse_overlay(&big), Err(IpcReject::BadPayload(_))));
+        let long = "x".repeat(65);
         assert!(matches!(
-            parse_overlay(r#"{"t":"agentGoal","v":"x","zzz":1}"#),
+            parse_overlay(&format!(r#"{{"t":"agentGoal","goal":"x","resume_run_id":"{long}"}}"#)),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(matches!(
+            parse_overlay(r#"{"t":"agentGoal","goal":"x","zzz":1}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
+    }
+
+    #[test]
+    fn agent_last_request_parses() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"agentLast"}"#),
+            Ok(OverlayMessage::AgentLast(NoPayload {}))
+        );
+        assert!(matches!(
+            parse_overlay(r#"{"t":"agentLast","zzz":1}"#),
             Err(IpcReject::BadPayload(_))
         ));
     }

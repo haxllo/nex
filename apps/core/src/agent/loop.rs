@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::approvals;
+use super::store;
 use super::tools;
 use super::AgentEvent;
 
@@ -386,42 +387,184 @@ pub(crate) fn cancel_current() {
     }
 }
 
-/// Entry point (Task 8 wires it to a worker thread; runs sync here).
-/// `cancel` mirrors the `ACTIVE_REQUEST` id pattern in `chat.rs` but as a
-/// shared flag so `chatCancel` can stop the loop between steps.
-pub(crate) fn run_goal(
+/// Fresh run id: ms timestamp + 48 bits from the approval nonce RNG.
+/// Reuses [`tools::issue_approval_token`] (no new deps).
+pub(crate) fn new_run_id() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let nonce = tools::issue_approval_token();
+    format!("{ms:x}-{}", &nonce[..12])
+}
+
+/// Compact read-only summary of a stored run's events for resume context.
+/// Tolerates foreign payload shapes; never panics.
+pub(crate) fn resume_context(events: &[(String, String)], cap_chars: usize) -> String {
+    let mut lines = Vec::with_capacity(events.len());
+    for (kind, payload) in events {
+        let value: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        let line = match kind.as_str() {
+            "agentStep" | "step" => {
+                let step = value
+                    .get("step")
+                    .and_then(Value::as_u64)
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let tool = value.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                let state = value.get("state").and_then(Value::as_str).unwrap_or("");
+                let detail = value.get("detail").and_then(Value::as_str).unwrap_or("");
+                format!("step {step} · {tool} · {state} — {}", truncate_chars(detail, 200))
+            }
+            "agentDone" | "done" => {
+                let summary = value.get("summary").and_then(Value::as_str).unwrap_or(payload);
+                format!("done: {}", truncate_chars(summary, 200))
+            }
+            _ => truncate_chars(payload, 200),
+        };
+        lines.push(line);
+    }
+    truncate_chars(&lines.join("\n"), cap_chars)
+}
+
+/// Goal run with optional `!retry` resume: stored events re-emit as
+/// read-only history, then the stored goal runs fresh under a new id.
+/// Store failures never fail the run (log + continue).
+pub(crate) fn run_goal_resuming(
     goal: String,
+    resume_run_id: Option<String>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     mut push: impl FnMut(Value) + Send + 'static,
 ) {
-    #[cfg(target_os = "windows")]
-    {
-        run_goal_live(goal, config, cancel, &mut push);
-    }
+    let store = match store::open() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            crate::runtime::log_info(&format!("[nex][agent] run store unavailable: {error}"));
+            None
+        }
+    };
+    run_goal_resuming_with(goal, resume_run_id, config, cancel, &mut push, store.as_ref());
+}
+
+fn run_goal_resuming_with(
+    goal: String,
+    resume_run_id: Option<String>,
+    config: AgentConfig,
+    cancel: Arc<AtomicBool>,
+    push: &mut impl FnMut(Value),
+    store: Option<&store::Store>,
+) {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (goal, config, cancel);
-        push_event(&mut push, AgentEvent::done("Agent goals need Windows."));
+        let _ = (goal, resume_run_id, config, cancel, store);
+        push_event(push, AgentEvent::done("Agent goals need Windows."));
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        run_goal_resuming_live(goal, resume_run_id, config, cancel, push, store);
+    }
+}
+
+/// Append one event to the store; failures log and never fail the run.
+#[cfg(target_os = "windows")]
+fn persist_event(store: Option<&store::Store>, run_id: &str, value: &Value) {
+    let Some(store) = store else { return };
+    let kind = value.get("t").and_then(Value::as_str).unwrap_or("event");
+    if kind != "agentStep" && kind != "agentDone" {
+        return;
+    }
+    if let Err(error) = store.append_event(run_id, kind, &value.to_string()) {
+        crate::runtime::log_info(&format!("[nex][agent] run store append failed: {error}"));
     }
 }
 
 #[cfg(target_os = "windows")]
-fn run_goal_live(
+fn run_goal_resuming_live(
     goal: String,
+    resume_run_id: Option<String>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
+    store: Option<&store::Store>,
 ) {
+    let mut goal = goal;
+    let mut history_note = String::new();
+    if let Some(resume_id) = resume_run_id.as_deref().map(str::trim) {
+        if !resume_id.is_empty() {
+            let loaded = store
+                .ok_or_else(|| "the run store is unavailable".to_string())
+                .and_then(|store| store.load_run(resume_id));
+            match loaded {
+                Ok((old_goal, _status, events)) => {
+                    for (_kind, payload) in &events {
+                        if let Ok(value) = serde_json::from_str::<Value>(payload) {
+                            push(value);
+                        }
+                    }
+                    if goal.trim().is_empty() {
+                        goal = old_goal;
+                    }
+                    history_note = resume_context(&events, 2000);
+                }
+                Err(_) => {
+                    push_event(push, AgentEvent::done(format!("Unknown run: {resume_id}")));
+                    return;
+                }
+            }
+        }
+    }
+    let run_id = new_run_id();
+    if let Some(store) = store {
+        if let Err(error) = store.create_run(&run_id, &goal) {
+            crate::runtime::log_info(&format!("[nex][agent] run store create failed: {error}"));
+        }
+    }
+    // Seam: wrap `push` so every step/done event carries the new run id
+    // (additive field the UI ignores except to display) and is persisted,
+    // without touching `drive_loop` or the transports.
+    let mut push_persist = |mut value: Value| {
+        if let Some(obj) = value.as_object_mut() {
+            let tag = obj.get("t").and_then(Value::as_str).unwrap_or("");
+            if tag == "agentStep" || tag == "agentDone" {
+                obj.insert("run_id".into(), Value::String(run_id.clone()));
+            }
+        }
+        persist_event(store, &run_id, &value);
+        push(value);
+    };
+    let started_detail = match resume_run_id.as_deref().map(str::trim) {
+        Some(resume_id) if !resume_id.is_empty() => format!("resumed from {resume_id}"),
+        _ => truncate_chars(goal.trim(), 120),
+    };
+    push_event(
+        &mut push_persist,
+        AgentEvent::step(0, "run", "started", started_detail).with_run_id(&run_id),
+    );
+    let model_goal = if history_note.trim().is_empty() {
+        goal.clone()
+    } else {
+        format!(
+            "{goal}\n\n[History from run {} — context only, do not re-execute it:]\n{history_note}",
+            resume_run_id.as_deref().unwrap_or("").trim(),
+        )
+    };
     match config.provider.as_str() {
-        "codex" => run_codex_goal(goal, config, cancel, push),
-        "openai-compatible" => run_openai_goal(goal, config, cancel, push),
+        "codex" => run_codex_goal(model_goal, config, cancel.clone(), &mut push_persist),
+        "openai-compatible" => run_openai_goal(model_goal, config, cancel.clone(), &mut push_persist),
         _ => push_event(
-            push,
+            &mut push_persist,
             AgentEvent::done(
                 "Agent goals need the ChatGPT or an OpenAI-compatible provider. Choose one in settings, then try again.",
             ),
         ),
+    }
+    if let Some(store) = store {
+        let status = if cancel.load(Ordering::SeqCst) { "cancelled" } else { "done" };
+        if let Err(error) = store.finish_run(&run_id, status) {
+            crate::runtime::log_info(&format!("[nex][agent] run store finish failed: {error}"));
+        }
     }
 }
 
@@ -987,6 +1130,59 @@ mod tests {
         );
         assert_eq!(pushed.last().unwrap()["t"], "agentDone");
         assert!(pushed.iter().any(|v| v.get("state") == Some(&json!("denied"))));
+    }
+
+    #[test]
+    fn new_run_ids_are_unique_and_nonempty() {
+        let a = new_run_id();
+        let b = new_run_id();
+        assert!(!a.is_empty() && a.contains('-'));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn resume_context_summarizes_stored_events() {
+        let events = vec![
+            ("agentStep".to_string(), r#"{"t":"agentStep","step":1,"tool":"fs_list","state":"done","detail":"a\nb"}"#.to_string()),
+            ("agentDone".to_string(), r#"{"t":"agentDone","summary":"All done."}"#.to_string()),
+            ("bogus".to_string(), "not json at all".to_string()),
+        ];
+        let context = resume_context(&events, 2000);
+        assert!(context.contains("fs_list"), "{context}");
+        assert!(context.contains("All done."), "{context}");
+        assert!(context.contains("not json at all"), "{context}");
+        let capped = resume_context(&events, 10);
+        assert!(capped.chars().count() <= 10 + "…[truncated]".len());
+    }
+
+    #[test]
+    fn unknown_resume_id_pushes_error_done_without_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store::open_at(&dir.path().join("agent-runs.sqlite3")).unwrap();
+        let config = AgentConfig {
+            provider: "codex".into(),
+            model: "m".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut pushed = Vec::new();
+        {
+            let mut push = |v: Value| pushed.push(v);
+            run_goal_resuming_with(
+                String::new(),
+                Some("nope".into()),
+                config,
+                cancel,
+                &mut push,
+                Some(&store),
+            );
+        }
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0]["t"], "agentDone");
+        assert!(pushed[0]["summary"].as_str().unwrap().contains("Unknown run"));
+        // No fresh run was created for the unknown id.
+        assert!(store.recent_runs(10).unwrap().is_empty());
     }
 
     #[test]

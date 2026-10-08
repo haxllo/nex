@@ -1891,7 +1891,7 @@ impl RuntimeWorker {
                 crate::agent::r#loop::cancel_current();
                 self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
             }
-            OverlayEvent::AgentGoal(goal) => {
+            OverlayEvent::AgentGoal { goal, resume_run_id } => {
                 let overlay = self.overlay.clone();
                 let _ = std::thread::Builder::new()
                     .name("nex-agent-goal".into())
@@ -1899,11 +1899,26 @@ impl RuntimeWorker {
                         let (provider, model, base_url, api_key) = crate::chat::agent_backend();
                         let cancel = Arc::new(AtomicBool::new(false));
                         crate::agent::r#loop::track_cancel(cancel.clone());
-                        crate::agent::r#loop::run_goal(
+                        crate::agent::r#loop::run_goal_resuming(
                             goal,
+                            resume_run_id,
                             crate::agent::r#loop::AgentConfig { provider, model, base_url, api_key },
                             cancel,
                             move |value| overlay.push_chat(value.to_string()),
+                        );
+                    });
+            }
+            OverlayEvent::AgentLast => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-agent-last".into())
+                    .spawn(move || {
+                        let runs = crate::agent::store::open()
+                            .ok()
+                            .and_then(|store| store.recent_runs(5).ok())
+                            .unwrap_or_default();
+                        overlay.push_chat(
+                            serde_json::json!({ "agentHistory": { "runs": runs } }).to_string(),
                         );
                     });
             }

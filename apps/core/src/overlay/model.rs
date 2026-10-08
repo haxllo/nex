@@ -114,7 +114,13 @@ pub enum OverlayEvent {
     ChatDisconnect,
     ChatCancel,
     /// A `!`-prefixed chat input routed to the agent loop as a goal.
-    AgentGoal(String),
+    /// `resume_run_id` re-runs a stored run's goal (`!retry <id>`).
+    AgentGoal {
+        goal: String,
+        resume_run_id: Option<String>,
+    },
+    /// Chat view opened on an empty thread: reply with recent run history.
+    AgentLast,
     /// User approved a pending tool call (id from `agentApproval`).
     AgentApprove(String),
     /// User denied a pending tool call.

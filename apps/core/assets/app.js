@@ -182,7 +182,7 @@
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "agentApprove", "agentDeny"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "agentGoal", "agentApprove", "agentDeny"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -1665,6 +1665,8 @@
     } else if (!chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
     renderChatMessages();
     post("chatState");
+    // Empty thread: show the last finished run (if any) with its retry id.
+    if (chatMessages.length === 0 && !chatMessagesEl.querySelector(".agent-step,.agent-done,.agent-card")) post("agentLast");
     resizeChatInput();
     postChatResize();
     chatInput.focus();
@@ -1712,17 +1714,19 @@
     if (!message) { chatInput.focus(); return; }
     chatInput.value = ""; resizeChatInput();
     if (message.startsWith("!")) {
-      const goal = message.slice(1).trim();
-      if (!goal) { chatInput.focus(); return; }
-      startAgentGoal(goal);
+      const rest = message.slice(1).trim();
+      if (!rest) { chatInput.focus(); return; }
+      const retry = rest.match(/^retry\s+(\S+)\s*$/i);
+      if (retry) { startAgentGoal("", retry[1]); return; }
+      startAgentGoal(rest);
       return;
     }
     startChatRequest(message);
   }
 
-  function startAgentGoal(goal) {
+  function startAgentGoal(goal, resumeRunId) {
     if (chatStreaming) post("chatCancel");
-    chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: "!" + goal });
+    chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: resumeRunId ? "!retry " + resumeRunId : "!" + goal });
     const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "" };
     chatMessages.push(assistant);
     saveChatTitle(); persistChat();
@@ -1730,7 +1734,7 @@
     chatLiveStatus.textContent = "Working…";
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("agentGoal", goal);
+    post("agentGoal", resumeRunId ? { goal: goal || "", resume_run_id: resumeRunId } : { goal });
     chatInput.focus(); postChatResize();
   }
 
@@ -2078,9 +2082,9 @@
     // Agent loop pushes raw AgentEvent JSON ({t:"agentStep"|...}) while
     // later turns use the wrapped chat shape ({agentStep:{...}}) — accept both.
     if (state && typeof state.t === "string" && state.t.slice(0, 5) === "agent") {
-      if (state.t === "agentStep") state = { agentStep: { step: state.step, tool: state.tool, state: state.state, detail: state.detail } };
+      if (state.t === "agentStep") state = { agentStep: { step: state.step, tool: state.tool, state: state.state, detail: state.detail, run_id: state.run_id } };
       else if (state.t === "agentApproval") state = { agentApproval: { call_id: state.call_id, tool: state.tool, args_summary: state.args_summary } };
-      else if (state.t === "agentDone") state = { agentDone: { summary: state.summary } };
+      else if (state.t === "agentDone") state = { agentDone: { summary: state.summary, run_id: state.run_id } };
     }
     if (state.chatConfig) {
       const wasCodexConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
@@ -2167,12 +2171,25 @@
       appendAgentNode(line);
     }
     if (state.agentDone) {
+      const d = typeof state.agentDone === "string" ? { summary: state.agentDone } : state.agentDone;
       const done = document.createElement("article");
       done.className = "agent-done";
-      done.textContent = typeof state.agentDone === "string" ? state.agentDone : (state.agentDone.summary || "Done");
+      done.textContent = (d.summary || "Done") + (d.run_id ? " · run " + d.run_id : "");
       appendAgentNode(done);
       chatLiveStatus.textContent = "";
       updateChatStreamingState(false);
+    }
+    if (state.agentHistory) {
+      // Late arrival: only render into a still-empty thread.
+      if (chatMessages.length === 0 && !chatMessagesEl.querySelector(".agent-step,.agent-done,.agent-card")) {
+        const runs = Array.isArray(state.agentHistory.runs) ? state.agentHistory.runs.slice(0, 5) : [];
+        for (const r of runs) {
+          const line = document.createElement("article");
+          line.className = "agent-step";
+          line.textContent = "run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80) + ' — type "!retry ' + r.id + '"';
+          appendAgentNode(line);
+        }
+      }
     }
   }
 
@@ -2231,7 +2248,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || state.agentApproval || state.agentStep || state.agentDone || state.t === "agentStep" || state.t === "agentApproval" || state.t === "agentDone" || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || state.agentApproval || state.agentStep || state.agentDone || state.agentHistory || state.t === "agentStep" || state.t === "agentApproval" || state.t === "agentDone" || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

@@ -1483,13 +1483,20 @@ fn handle_ipc(
             let _ = event_tx.send(OverlayEvent::ChatCancel);
         }
         OverlayMessage::AgentGoal(p) => {
-            let _ = event_tx.send(OverlayEvent::AgentGoal(p.v));
+            let resume = p.resume_run_id.filter(|id| !id.trim().is_empty());
+            let _ = event_tx.send(OverlayEvent::AgentGoal {
+                goal: p.goal,
+                resume_run_id: resume,
+            });
         }
         OverlayMessage::AgentApprove(p) => {
             let _ = event_tx.send(OverlayEvent::AgentApprove(p.call_id));
         }
         OverlayMessage::AgentDeny(p) => {
             let _ = event_tx.send(OverlayEvent::AgentDeny(p.call_id));
+        }
+        OverlayMessage::AgentLast(_) => {
+            let _ = event_tx.send(OverlayEvent::AgentLast);
         }
         OverlayMessage::OpenExternal(p) => {
             let _ = event_tx.send(OverlayEvent::OpenExternal(p.v));

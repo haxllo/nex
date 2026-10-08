@@ -15,6 +15,8 @@ pub(crate) enum AgentEvent {
         tool: String,
         state: String,
         detail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     #[serde(rename = "agentApproval")]
     Approval {
@@ -23,7 +25,11 @@ pub(crate) enum AgentEvent {
         args_summary: String,
     },
     #[serde(rename = "agentDone")]
-    Done { summary: String },
+    Done {
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
 }
 
 impl AgentEvent {
@@ -38,6 +44,7 @@ impl AgentEvent {
             tool: tool.into(),
             state: state.into(),
             detail: detail.into(),
+            run_id: None,
         }
     }
 
@@ -56,6 +63,33 @@ impl AgentEvent {
     pub(crate) fn done(summary: impl Into<String>) -> Self {
         Self::Done {
             summary: summary.into(),
+            run_id: None,
+        }
+    }
+
+    /// Attach the owning run id (additive: the UI ignores unknown fields,
+    /// and the field is skipped when unset so old shapes are unchanged).
+    pub(crate) fn with_run_id(self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        match self {
+            Self::Step {
+                step,
+                tool,
+                state,
+                detail,
+                ..
+            } => Self::Step {
+                step,
+                tool,
+                state,
+                detail,
+                run_id: Some(id),
+            },
+            Self::Approval { .. } => self,
+            Self::Done { summary, .. } => Self::Done {
+                summary,
+                run_id: Some(id),
+            },
         }
     }
 }
@@ -91,5 +125,19 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["t"], "agentDone");
         assert_eq!(v["summary"], "listed files");
+        // Additive run_id: absent by default so old shapes are unchanged.
+        assert!(v.get("run_id").is_none());
+    }
+
+    #[test]
+    fn run_id_attaches_to_step_and_done_only() {
+        let v = serde_json::to_value(AgentEvent::step(1, "fs_list", "done", "x").with_run_id("r1")).unwrap();
+        assert_eq!(v["run_id"], "r1");
+        assert_eq!(v["tool"], "fs_list");
+        let v = serde_json::to_value(AgentEvent::done("ok").with_run_id("r1")).unwrap();
+        assert_eq!(v["run_id"], "r1");
+        // Approval cards are transient: run_id is a no-op there.
+        let v = serde_json::to_value(AgentEvent::approval("c1", "shell_exec", "x").with_run_id("r1")).unwrap();
+        assert!(v.get("run_id").is_none());
     }
 }

@@ -7,6 +7,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
+use serde::Serialize;
+
+/// One finished-or-running goal for the `agentHistory` summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct RunSummary {
+    pub(crate) id: String,
+    pub(crate) goal: String,
+    pub(crate) status: String,
+    pub(crate) steps: i64,
+}
 
 /// SQLite-backed store for agent runs and their ordered events.
 pub(crate) struct Store {
@@ -153,6 +163,30 @@ impl Store {
             .map_err(|e| e.to_string())?;
         Ok((goal, status, events))
     }
+
+    /// Most recent runs, newest first, capped at `limit`.
+    pub(crate) fn recent_runs(&self, limit: u64) -> Result<Vec<RunSummary>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, goal, status, steps FROM agent_runs
+                 ORDER BY created_ms DESC, rowid DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let runs = stmt
+            .query_map(params![limit.min(25) as i64], |row| {
+                Ok(RunSummary {
+                    id: row.get(0)?,
+                    goal: row.get(1)?,
+                    status: row.get(2)?,
+                    steps: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(runs)
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +227,25 @@ mod tests {
         assert!(store.load_run("nope").is_err());
         assert!(store.finish_run("nope", "done").is_err());
         assert!(store.append_event("nope", "step", "{}").is_err());
+    }
+
+    #[test]
+    fn recent_runs_lists_newest_first_with_cap() {
+        let (_dir, store) = tmp_store();
+        for (id, goal) in [("run-1", "first"), ("run-2", "second"), ("run-3", "third")] {
+            store.create_run(id, goal).unwrap();
+            store.append_event(id, "step", "{}").unwrap();
+            store.finish_run(id, "done").unwrap();
+        }
+        let runs = store.recent_runs(2).unwrap();
+        assert_eq!(
+            runs,
+            vec![
+                RunSummary { id: "run-3".into(), goal: "third".into(), status: "done".into(), steps: 1 },
+                RunSummary { id: "run-2".into(), goal: "second".into(), status: "done".into(), steps: 1 },
+            ]
+        );
+        assert_eq!(store.recent_runs(10).unwrap().len(), 3);
     }
 
     #[test]

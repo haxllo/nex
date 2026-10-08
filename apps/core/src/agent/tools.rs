@@ -265,9 +265,48 @@ fn fs_list(path: &Path) -> Result<String, String> {
     Ok(names.join("\n"))
 }
 
-// TEMPORARY STUB (Task 4 wires the real index): filename substring scan under
-// the current directory. Recursive, skips symlinks, bounded traversal budget.
+// Real index first, stub fallback when the index is cold/unavailable.
+// Same tantivy query path the launcher uses (`TantivyIndex::search`,
+// the indexed half of `CoreService::search_with_filter_internal`);
+// opened on demand at the live index dir, never via workers or UI state.
 fn fs_search(query: &str) -> Result<String, String> {
+    if query.trim().is_empty() {
+        return Err("fs_search: missing required string arg 'query'".to_string());
+    }
+    if let Some(hits) = search_index(query) {
+        return Ok(hits.join("\n"));
+    }
+    stub_fs_search(query)
+}
+
+/// Index lookup returning `None` on ANY failure so the caller can fall
+/// back to the stub scan instead of hard-erroring on a cold index.
+fn search_index(query: &str) -> Option<Vec<String>> {
+    let dir = tantivy_dir()?;
+    search_index_at(query, &dir)
+}
+
+fn tantivy_dir() -> Option<PathBuf> {
+    let cfg = crate::config::load(None).unwrap_or_default();
+    let parent = cfg.index_db_path.parent()?;
+    Some(parent.join("index.tantivy"))
+}
+
+fn search_index_at(query: &str, dir: &Path) -> Option<Vec<String>> {
+    let idx = crate::tantivy_search::TantivyIndex::open(dir).ok()?;
+    let items = idx.search(query, SEARCH_CAP).ok()?;
+    Some(
+        items
+            .into_iter()
+            .map(|item| item.path.clone())
+            .take(SEARCH_CAP)
+            .collect(),
+    )
+}
+
+// STUB fallback (index cold/unavailable): filename substring scan under
+// the current directory. Recursive, skips symlinks, bounded traversal budget.
+fn stub_fs_search(query: &str) -> Result<String, String> {
     if query.trim().is_empty() {
         return Err("fs_search: missing required string arg 'query'".to_string());
     }
@@ -576,5 +615,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("non-http"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn index_query_returns_without_error() {
+        // Real machine index: may be empty/cold — assert only no-panic/no-error.
+        let _ = search_index("notepad");
+        let _ = search_index("zzz-argle-bargle-qqq");
+        if let Some(hits) = search_index("notepad") {
+            assert!(hits.len() <= SEARCH_CAP);
+        }
+    }
+
+    #[test]
+    fn broken_index_dir_returns_none_so_caller_falls_back() {
+        // A regular file as the index dir: create_dir_all fails → None.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(search_index_at("notepad", file.path()).is_none());
+    }
+
+    #[test]
+    fn stub_finds_unique_temp_file() {
+        // Temp dir inside cwd (the stub's scan root).
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let unique = format!("nex-agent-stub-{}.txt", std::process::id());
+        std::fs::write(dir.path().join(&unique), "x").unwrap();
+        let out = stub_fs_search(&unique).unwrap();
+        assert!(out.contains(&unique), "unexpected: {out}");
+    }
+
+    #[test]
+    fn fs_search_never_hard_errors_on_garbage_query() {
+        let out = dispatch("fs_search", &json!({ "query": "zzz-argle-bargle-qqq" }), None).unwrap();
+        assert!(out.lines().count() <= SEARCH_CAP);
     }
 }

@@ -15,6 +15,33 @@ pub(crate) struct ToolSpec {
     pub(crate) parameters: serde_json::Value,
 }
 
+/// True for tools that mutate the world or run code; the loop must hold a
+/// user approval token before dispatching them.
+pub(crate) fn needs_approval(name: &str) -> bool {
+    matches!(name, "shell_exec" | "app_open" | "url_open")
+}
+
+/// Issue a per-call approval nonce (32 hex chars) the loop hands to the UI
+/// and back into `dispatch` via `approval_token`.
+pub(crate) fn issue_approval_token() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Fallback: mix wall clock + pid when the OS RNG is unavailable.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let pid = std::process::id() as u128;
+        let mixed = nanos ^ ((pid << 64) | (nanos >> 64) ^ 0x9e3779b97f4a7c15);
+        bytes = mixed.to_le_bytes();
+    }
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 fn path_param(desc: &str, required: bool) -> serde_json::Value {
     let mut schema = serde_json::json!({
         "type": "object",
@@ -29,7 +56,7 @@ fn path_param(desc: &str, required: bool) -> serde_json::Value {
     schema
 }
 
-/// Read-only tool registry.
+/// Full tool registry: 3 read-only + 3 approval-gated.
 pub(crate) fn registry() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -54,10 +81,67 @@ pub(crate) fn registry() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
         },
+        ToolSpec {
+            name: "shell_exec",
+            description: "Run a shell command (20s timeout, no window). Requires user approval.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to run." }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "app_open",
+            description: "Open an app, file, or shell target via the OS shell. Requires user approval.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "App name, file path, or shell target to open." }
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "url_open",
+            description: "Open an http(s) URL in the default browser. Requires user approval.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "http(s) URL to open." }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
-pub(crate) fn dispatch(name: &str, args_json: &serde_json::Value) -> Result<String, String> {
+/// `approval` is the token the loop was issued for this call; read tools
+/// ignore it. Write tools compare it against `approval_token` in `args_json`.
+pub(crate) fn dispatch(
+    name: &str,
+    args_json: &serde_json::Value,
+    approval: Option<&str>,
+) -> Result<String, String> {
+    if needs_approval(name) {
+        let provided = args_json
+            .get("approval_token")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let ok = match approval {
+            Some(expected) => !expected.is_empty() && provided == expected,
+            None => false,
+        };
+        if !ok {
+            return Err(format!(
+                "approval-required: '{name}' needs user approval before it can run"
+            ));
+        }
+    }
     match name {
         "fs_read" => {
             let path = args_json
@@ -79,6 +163,27 @@ pub(crate) fn dispatch(name: &str, args_json: &serde_json::Value) -> Result<Stri
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "fs_search: missing required string arg 'query'".to_string())?;
             fs_search(query)
+        }
+        "shell_exec" => {
+            let command = args_json
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "shell_exec: missing required string arg 'command'".to_string())?;
+            shell_exec(command)
+        }
+        "app_open" => {
+            let target = args_json
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "app_open: missing required string arg 'target'".to_string())?;
+            app_open(target)
+        }
+        "url_open" => {
+            let url = args_json
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "url_open: missing required string arg 'url'".to_string())?;
+            url_open(url)
         }
         other => Err(format!("unknown tool: {other}")),
     }
@@ -209,6 +314,119 @@ fn fs_search(query: &str) -> Result<String, String> {
     Ok(hits.join("\n"))
 }
 
+/// Run `command` via the system shell: hidden window, 20s timeout,
+/// stdout+stderr combined capped at [`OUTPUT_CAP_CHARS`].
+fn shell_exec(command: &str) -> Result<String, String> {
+    if command.trim().is_empty() {
+        return Err("shell_exec: missing required string arg 'command'".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    fn make_cmd(command: &str) -> std::process::Command {
+        use std::os::windows::process::CommandExt as _;
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(command);
+        // CREATE_NO_WINDOW: no console flash over the overlay.
+        cmd.creation_flags(0x08000000);
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    fn make_cmd(command: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+    let mut child = make_cmd(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("shell_exec: spawn failed: {e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // Drain pipes on a thread so a chatty child can't block on a full pipe
+    // while the main thread enforces the timeout.
+    let out_handle = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        if let Some(mut p) = stdout {
+            let _ = p.read_to_end(&mut buf);
+        }
+        if let Some(mut p) = stderr {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let timeout = std::time::Duration::from_secs(20);
+    let start = std::time::Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| format!("shell_exec: wait failed: {e}"))?
+        {
+            Some(status) => {
+                let raw = out_handle.join().unwrap_or_default();
+                let mut text = String::from_utf8_lossy(&raw).into_owned();
+                if !status.success() {
+                    text = format!("[exit {}]\n{text}", status.code().unwrap_or(-1));
+                }
+                return Ok(truncate_chars(&text));
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("shell_exec: timed out after 20s".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Open an app/file/shell target. Reuses the launcher's own opener.
+fn app_open(target: &str) -> Result<String, String> {
+    if target.trim().is_empty() {
+        return Err("app_open: missing required string arg 'target'".to_string());
+    }
+    crate::action_executor::launch_open_target(target)
+        .map(|_| format!("opened {target}"))
+        .map_err(|e| format!("app_open: '{target}': {e}"))
+}
+
+/// Open an http(s) URL in the default browser. Mirrors the ShellExecuteW
+/// pattern of `open_url_in_browser` in `runtime_loop.rs`.
+fn url_open(url: &str) -> Result<String, String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err(format!("url_open: rejected non-http(s) URL: '{url}'"));
+    }
+    open_url_shell(url.trim());
+    Ok(format!("opened {url}"))
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_shell(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_url_shell(_url: &str) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,20 +434,33 @@ mod tests {
 
     #[test]
     fn unknown_tool_errors() {
-        let err = dispatch("nope", &json!({})).unwrap_err();
+        let err = dispatch("nope", &json!({}), None).unwrap_err();
         assert!(err.contains("unknown tool"), "unexpected: {err}");
     }
 
     #[test]
-    fn registry_lists_three_read_tools() {
+    fn registry_lists_all_six_tools() {
         let names: Vec<_> = registry().iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["fs_read", "fs_list", "fs_search"]);
+        assert_eq!(
+            names,
+            vec![
+                "fs_read",
+                "fs_list",
+                "fs_search",
+                "shell_exec",
+                "app_open",
+                "url_open"
+            ]
+        );
+        for spec in registry() {
+            assert_eq!(spec.parameters["type"], "object");
+        }
     }
 
     #[test]
     fn traversal_rejected() {
         // Relative escape: rejected (missing or outside roots — either way Err).
-        assert!(dispatch("fs_read", &json!({ "path": "../../secret" })).is_err());
+        assert!(dispatch("fs_read", &json!({ "path": "../../secret" }), None).is_err());
         // Absolute path outside all roots: must hit the traversal guard itself.
         let root = std::env::current_dir()
             .ok()
@@ -238,6 +469,7 @@ mod tests {
             let err = dispatch(
                 "fs_read",
                 &json!({ "path": root.to_string_lossy() }),
+                None,
             )
             .unwrap_err();
             assert!(
@@ -256,6 +488,7 @@ mod tests {
         let out = dispatch(
             "fs_read",
             &json!({ "path": tmp.path().to_string_lossy() }),
+            None,
         )
         .unwrap();
         assert!(out.starts_with(&"x".repeat(OUTPUT_CAP_CHARS)));
@@ -273,8 +506,75 @@ mod tests {
         let out = dispatch(
             "fs_list",
             &json!({ "path": dir.path().to_string_lossy() }),
+            None,
         )
         .unwrap();
         assert_eq!(out.lines().count(), LIST_CAP);
+    }
+
+    #[test]
+    fn needs_approval_flags_only_write_tools() {
+        for name in ["fs_read", "fs_list", "fs_search"] {
+            assert!(!needs_approval(name), "{name} should be approval-free");
+        }
+        for name in ["shell_exec", "app_open", "url_open"] {
+            assert!(needs_approval(name), "{name} should need approval");
+        }
+        assert!(!needs_approval("nope"));
+    }
+
+    #[test]
+    fn approval_tokens_are_32_hex_and_unique() {
+        let a = issue_approval_token();
+        let b = issue_approval_token();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn shell_exec_without_token_errors_with_prefix() {
+        let err = dispatch("shell_exec", &json!({ "command": "echo hi" }), None).unwrap_err();
+        assert!(err.starts_with("approval-required:"), "unexpected: {err}");
+        // Wrong token is the same as no token.
+        let err = dispatch(
+            "shell_exec",
+            &json!({ "command": "echo hi", "approval_token": "wrong" }),
+            Some("right"),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("approval-required:"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn shell_exec_with_token_runs_echo() {
+        let tok = issue_approval_token();
+        let out = dispatch(
+            "shell_exec",
+            &json!({ "command": "echo hi", "approval_token": &tok }),
+            Some(&tok),
+        )
+        .unwrap();
+        assert!(out.contains("hi"), "unexpected: {out}");
+    }
+
+    #[test]
+    fn open_tools_without_token_error() {
+        let err = dispatch("app_open", &json!({ "target": "notepad" }), None).unwrap_err();
+        assert!(err.starts_with("approval-required:"), "unexpected: {err}");
+        let err = dispatch("url_open", &json!({ "url": "https://example.com" }), None).unwrap_err();
+        assert!(err.starts_with("approval-required:"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn url_open_rejects_non_http_even_with_token() {
+        let tok = issue_approval_token();
+        let err = dispatch(
+            "url_open",
+            &json!({ "url": "file:///etc/passwd", "approval_token": &tok }),
+            Some(&tok),
+        )
+        .unwrap_err();
+        assert!(err.contains("non-http"), "unexpected: {err}");
     }
 }

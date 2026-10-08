@@ -1,5 +1,6 @@
 pub mod action_executor;
 pub mod action_registry;
+pub(crate) mod agent;
 pub(crate) mod bookmarks;
 pub(crate) mod calculator;
 #[cfg(target_os = "windows")]

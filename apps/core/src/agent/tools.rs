@@ -6,6 +6,20 @@ pub(crate) const OUTPUT_CAP_CHARS: usize = 4000;
 pub(crate) const LIST_CAP: usize = 100;
 /// Max hits returned by `fs_search`.
 pub(crate) const SEARCH_CAP: usize = 20;
+/// Max paths returned by `fs_glob`.
+pub(crate) const GLOB_CAP: usize = 50;
+/// Max matches returned by `fs_grep`.
+pub(crate) const GREP_CAP: usize = 30;
+/// Max walkdir entries visited per `fs_glob` call before stopping.
+pub(crate) const GLOB_VISIT_BUDGET: usize = 50_000;
+/// Max file entries visited per `fs_grep` call before stopping.
+pub(crate) const GREP_FILE_BUDGET: usize = 50_000;
+/// Files larger than this are skipped by `fs_grep`.
+pub(crate) const GREP_MAX_BYTES: u64 = 1024 * 1024;
+/// Leading bytes sniffed for NULs to skip binary files in `fs_grep`.
+pub(crate) const GREP_SNIFF_BYTES: usize = 8192;
+/// Max chars of matched line text kept per `fs_grep` hit.
+pub(crate) const GREP_LINE_CHARS: usize = 200;
 
 /// Tool declaration, shaped for later Responses `tools` use.
 #[derive(Debug, Clone)]
@@ -56,7 +70,7 @@ fn path_param(desc: &str, required: bool) -> serde_json::Value {
     schema
 }
 
-/// Full tool registry: 4 read-only + 3 approval-gated.
+/// Full tool registry: 6 read-only + 3 approval-gated.
 pub(crate) fn registry() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -71,13 +85,40 @@ pub(crate) fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "fs_search",
-            description: "Find files by filename substring under the current directory. Capped at 20 hits.",
+            description: "Search the launcher app index (installed apps and launched items) by filename substring. Does NOT search the filesystem on disk: use fs_glob to find files/dirs by name, fs_grep for file contents. Capped at 20 hits.",
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Filename substring to match (case-insensitive)." }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "fs_glob",
+            description: "Find files/dirs by name on disk: glob pattern (*, ?, **) matched recursively under root (default home, supports ~/env vars). One absolute path per line. Capped at 50 hits.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob pattern: '*' any run within a segment, '?' one char, '**' crosses directories. No separator matches against the file name only." },
+                    "root": { "type": "string", "description": "Directory to search under (default: home directory)." }
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "fs_grep",
+            description: "Find file contents on disk: case-insensitive substring search under root (default home), optional file_pattern glob filter (e.g. *.toml). Substring only, no regex. Skips files over 1MB and binary files. Hits as path:line: text. Capped at 30 matches.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Case-insensitive substring to find in file lines (no regex)." },
+                    "root": { "type": "string", "description": "Directory to search under (default: home directory)." },
+                    "file_pattern": { "type": "string", "description": "Optional glob filter for file names (e.g. *.toml)." }
+                },
+                "required": ["pattern"],
                 "additionalProperties": false
             }),
         },
@@ -172,6 +213,25 @@ pub(crate) fn dispatch(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "fs_search: missing required string arg 'query'".to_string())?;
             fs_search(query)
+        }
+        "fs_glob" => {
+            let pattern = args_json
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "fs_glob: missing required string arg 'pattern'".to_string())?;
+            let root = args_json.get("root").and_then(serde_json::Value::as_str);
+            fs_glob(pattern, root)
+        }
+        "fs_grep" => {
+            let pattern = args_json
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "fs_grep: missing required string arg 'pattern'".to_string())?;
+            let root = args_json.get("root").and_then(serde_json::Value::as_str);
+            let file_pattern = args_json
+                .get("file_pattern")
+                .and_then(serde_json::Value::as_str);
+            fs_grep(pattern, root, file_pattern)
         }
         "shell_exec" => {
             let command = args_json
@@ -473,6 +533,179 @@ fn stub_fs_search(query: &str) -> Result<String, String> {
     Ok(hits.join("\n"))
 }
 
+/// Resolve an optional search `root` the same way `fs_read` resolves
+/// paths: `~`/env expanded, relative joins home, must exist inside the
+/// allowed roots. `None`/empty defaults to home. Invalid roots Err.
+fn resolve_root(root: Option<&str>) -> Result<PathBuf, String> {
+    let raw = match root {
+        Some(r) if !r.trim().is_empty() => r.to_string(),
+        _ => home_dir().to_string_lossy().into_owned(),
+    };
+    resolve_within_roots(Path::new(&raw))
+}
+
+/// `*` any run within a segment, `?` one char (both already lowercased).
+fn segment_match(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            mark = ti;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Segment-wise match where a `**` segment crosses directories.
+/// All matching is case-insensitive (both sides lowered by the caller).
+fn path_match(pat: &[String], path: &[String]) -> bool {
+    if pat.is_empty() {
+        return path.is_empty();
+    }
+    if pat[0] == "**" {
+        return (0..=path.len()).any(|i| path_match(&pat[1..], &path[i..]));
+    }
+    if path.is_empty() || !segment_match(&pat[0], &path[0]) {
+        return false;
+    }
+    path_match(&pat[1..], &path[1..])
+}
+
+/// Match `pattern` against a walk entry: no separator matches the file
+/// name only, else the `/`-separated path relative to the search root.
+fn glob_match(pattern: &str, rel: &str, file_name: &str) -> bool {
+    let pat = pattern.replace('\\', "/");
+    if !pat.contains('/') {
+        return segment_match(&pat.to_lowercase(), &file_name.to_lowercase());
+    }
+    let psegs: Vec<String> = pat
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+    let rsegs: Vec<String> = rel
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+    path_match(&psegs, &rsegs)
+}
+
+/// Recursive filename match under `root` (default home). Skips nothing
+/// (hidden dirs included), never follows symlinks. One path per line.
+fn fs_glob(pattern: &str, root: Option<&str>) -> Result<String, String> {
+    if pattern.trim().is_empty() {
+        return Err("fs_glob: missing required string arg 'pattern'".to_string());
+    }
+    let base = resolve_root(root)?;
+    let mut hits = Vec::new();
+    let mut visited: usize = 0;
+    for entry in walkdir::WalkDir::new(&base).follow_links(false) {
+        visited += 1;
+        if visited > GLOB_VISIT_BUDGET || hits.len() >= GLOB_CAP {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        if entry.file_type().is_symlink() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(&base)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if rel.is_empty() {
+            continue; // the root itself
+        }
+        if glob_match(pattern, &rel, &entry.file_name().to_string_lossy()) {
+            hits.push(entry.path().display().to_string());
+        }
+    }
+    hits.sort();
+    hits.truncate(GLOB_CAP);
+    Ok(hits.join("\n"))
+}
+
+/// Line-oriented case-insensitive substring search under `root` (default
+/// home). Substring only, no regex. Skips files >1MB and binary-looking
+/// content (NUL in the first 8KB). Hits as `path:line: text`.
+fn fs_grep(
+    pattern: &str,
+    root: Option<&str>,
+    file_pattern: Option<&str>,
+) -> Result<String, String> {
+    if pattern.trim().is_empty() {
+        return Err("fs_grep: missing required string arg 'pattern'".to_string());
+    }
+    let base = resolve_root(root)?;
+    let needle = pattern.to_lowercase();
+    let filter = file_pattern.filter(|f| !f.trim().is_empty());
+    let mut out = Vec::new();
+    let mut files_seen: usize = 0;
+    'walk: for entry in walkdir::WalkDir::new(&base).follow_links(false) {
+        let Ok(entry) = entry else { continue };
+        let ft = entry.file_type();
+        if ft.is_symlink() || !ft.is_file() {
+            continue;
+        }
+        files_seen += 1;
+        if files_seen > GREP_FILE_BUDGET || out.len() >= GREP_CAP {
+            break;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if let Some(fp) = filter {
+            let rel = entry
+                .path()
+                .strip_prefix(&base)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if !glob_match(fp, &rel, &name) {
+                continue;
+            }
+        }
+        if entry.metadata().map(|m| m.len() > GREP_MAX_BYTES).unwrap_or(false) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
+        if bytes.len() as u64 > GREP_MAX_BYTES {
+            continue;
+        }
+        if bytes[..bytes.len().min(GREP_SNIFF_BYTES)].contains(&0) {
+            continue;
+        }
+        // ponytail: whole file read + lowercased per line; streaming reader if >1MB cap ever raised
+        let text = String::from_utf8_lossy(&bytes);
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&needle) {
+                let short: String = line.chars().take(GREP_LINE_CHARS).collect();
+                out.push(format!("{}:{}: {}", entry.path().display(), i + 1, short));
+                if out.len() >= GREP_CAP {
+                    break 'walk;
+                }
+            }
+        }
+    }
+    out.sort();
+    out.truncate(GREP_CAP);
+    Ok(out.join("\n"))
+}
+
 /// Run `command` via the system shell: hidden window, 20s timeout,
 /// stdout+stderr combined capped at [`OUTPUT_CAP_CHARS`].
 fn home_dir() -> std::path::PathBuf {
@@ -636,6 +869,8 @@ mod tests {
                 "fs_read",
                 "fs_list",
                 "fs_search",
+                "fs_glob",
+                "fs_grep",
                 "app_info",
                 "shell_exec",
                 "app_open",
@@ -705,7 +940,7 @@ mod tests {
 
     #[test]
     fn needs_approval_flags_only_write_tools() {
-        for name in ["fs_read", "fs_list", "fs_search"] {
+        for name in ["fs_read", "fs_list", "fs_search", "fs_glob", "fs_grep"] {
             assert!(!needs_approval(name), "{name} should be approval-free");
         }
         for name in ["shell_exec", "app_open", "url_open"] {
@@ -907,5 +1142,116 @@ mod tests {
     fn fs_search_never_hard_errors_on_garbage_query() {
         let out = dispatch("fs_search", &json!({ "query": "zzz-argle-bargle-qqq" }), None).unwrap();
         assert!(out.lines().count() <= SEARCH_CAP);
+    }
+
+    #[test]
+    fn glob_finds_uniquely_named_nested_file() {
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
+        let nested = dir.path().join("sub").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let unique = format!("nex-agent-glob-{}-{}.txt", std::process::id(), "nested");
+        std::fs::write(nested.join(&unique), "x").unwrap();
+        // Bare pattern matches the file name at any depth.
+        let out = dispatch(
+            "fs_glob",
+            &json!({ "pattern": unique, "root": dir.path().to_string_lossy() }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains(&unique), "unexpected: {out}");
+        // Separator pattern matches the relative path across directories.
+        let out = dispatch(
+            "fs_glob",
+            &json!({ "pattern": format!("**/{unique}"), "root": dir.path().to_string_lossy() }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains(&unique), "unexpected: {out}");
+    }
+
+    #[test]
+    fn glob_respects_result_cap() {
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
+        for i in 0..(GLOB_CAP + 20) {
+            std::fs::write(dir.path().join(format!("cap-{i:03}.txt")), "x").unwrap();
+        }
+        let out = dispatch(
+            "fs_glob",
+            &json!({ "pattern": "cap-*.txt", "root": dir.path().to_string_lossy() }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.lines().count(), GLOB_CAP);
+    }
+
+    #[test]
+    fn grep_finds_unique_string_with_line_number() {
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
+        let unique = format!("nex-agent-grep-{}-needle", std::process::id());
+        std::fs::write(
+            dir.path().join("hay.txt"),
+            format!("first line\nsecond {unique} here\nthird line\n"),
+        )
+        .unwrap();
+        let out = dispatch(
+            "fs_grep",
+            &json!({ "pattern": unique, "root": dir.path().to_string_lossy() }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains(":2:"), "unexpected: {out}");
+        assert!(out.contains("hay.txt"), "unexpected: {out}");
+        // file_pattern filter keeps matching files, drops the rest.
+        let out = dispatch(
+            "fs_grep",
+            &json!({ "pattern": unique, "root": dir.path().to_string_lossy(), "file_pattern": "*.txt" }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains(":2:"), "unexpected: {out}");
+        let out = dispatch(
+            "fs_grep",
+            &json!({ "pattern": unique, "root": dir.path().to_string_lossy(), "file_pattern": "*.toml" }),
+            None,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "unexpected: {out}");
+    }
+
+    #[test]
+    fn grep_skips_files_over_1mb() {
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
+        let unique = format!("nex-agent-grepbig-{}-needle", std::process::id());
+        let mut big = vec![b'x'; (GREP_MAX_BYTES + 1024) as usize];
+        let needle = unique.as_bytes();
+        big[..needle.len()].copy_from_slice(needle);
+        std::fs::write(dir.path().join("big.txt"), big).unwrap();
+        std::fs::write(dir.path().join("small.txt"), format!("has {unique}\n")).unwrap();
+        let out = dispatch(
+            "fs_grep",
+            &json!({ "pattern": unique, "root": dir.path().to_string_lossy() }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("small.txt"), "unexpected: {out}");
+        assert!(!out.contains("big.txt"), "unexpected: {out}");
+    }
+
+    #[test]
+    fn glob_and_grep_reject_invalid_root() {
+        assert!(dispatch(
+            "fs_glob",
+            &json!({ "pattern": "*.txt", "root": "nex-no-such-dir-xyz" }),
+            None,
+        )
+        .is_err());
+        assert!(dispatch(
+            "fs_grep",
+            &json!({ "pattern": "x", "root": "nex-no-such-dir-xyz" }),
+            None,
+        )
+        .is_err());
+        assert!(dispatch("fs_glob", &json!({ "pattern": "" }), None).is_err());
+        assert!(dispatch("fs_grep", &json!({ "pattern": "  " }), None).is_err());
     }
 }

@@ -1452,6 +1452,7 @@ html[data-theme="light"] #update-btn:hover {
 .agent-decided { padding: 0 11px 9px; color: var(--text-faint); font-size: 10px; }
 .agent-decided[hidden] { display: none; }
 .agent-step { color: var(--text-faint); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-step.agent-history { border: 1px dashed var(--border-strong); border-radius: 6px; padding: 4px 8px; }
 .agent-done { color: var(--text-dim); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .chat-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
 .chat-table { border-collapse: collapse; font-size: 11px; }

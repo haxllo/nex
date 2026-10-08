@@ -83,7 +83,7 @@ pub(crate) fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "shell_exec",
-            description: "Run a shell command (20s timeout, no window). Requires user approval.",
+            description: "Run a shell command in the user's home directory (20s timeout, no window). Use cmd.exe syntax. Requires user approval.",
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -355,10 +355,35 @@ fn stub_fs_search(query: &str) -> Result<String, String> {
 
 /// Run `command` via the system shell: hidden window, 20s timeout,
 /// stdout+stderr combined capped at [`OUTPUT_CAP_CHARS`].
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Expand a leading `~/`, `~\`, or bare `~` (quoted or not) to the home
+/// directory — cmd.exe does not expand tilde itself.
+fn expand_home(command: &str) -> String {
+    let home = home_dir().to_string_lossy().into_owned();
+    let sep = std::path::MAIN_SEPARATOR;
+    for prefix in ["~/", "~\\", "\"~/", "\"~\\", "'~/", "'~\\"] {
+        if let Some(rest) = command.strip_prefix(prefix) {
+            let quote = if prefix.starts_with(['"', '\'']) { &prefix[..1] } else { "" };
+            return format!("{quote}{home}{sep}{rest}");
+        }
+    }
+    if command == "~" || command == "\"~\"" || command == "'~'" {
+        return home;
+    }
+    command.to_string()
+}
+
 fn shell_exec(command: &str) -> Result<String, String> {
     if command.trim().is_empty() {
         return Err("shell_exec: missing required string arg 'command'".to_string());
     }
+    let command = expand_home(command);
     #[cfg(target_os = "windows")]
     fn make_cmd(command: &str) -> std::process::Command {
         use std::os::windows::process::CommandExt as _;
@@ -366,6 +391,8 @@ fn shell_exec(command: &str) -> Result<String, String> {
         cmd.arg("/C").arg(command);
         // CREATE_NO_WINDOW: no console flash over the overlay.
         cmd.creation_flags(0x08000000);
+        // Predictable start point: the user's home directory.
+        cmd.current_dir(home_dir());
         cmd
     }
     #[cfg(not(target_os = "windows"))]
@@ -374,7 +401,7 @@ fn shell_exec(command: &str) -> Result<String, String> {
         cmd.arg("-c").arg(command);
         cmd
     }
-    let mut child = make_cmd(command)
+    let mut child = make_cmd(&command)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -595,6 +622,33 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("hi"), "unexpected: {out}");
+    }
+
+    #[test]
+    fn home_expansion_covers_quoted_forms() {
+        let home = home_dir().to_string_lossy().into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(expand_home("~/a"), format!("{home}{sep}a"));
+        assert_eq!(expand_home("~\\a"), format!("{home}{sep}a"));
+        assert_eq!(expand_home("\"~/a\""), format!("\"{home}{sep}a\""));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("echo ~ thereafter"), "echo ~ thereafter");
+    }
+
+    #[test]
+    fn shell_exec_starts_in_home_dir() {
+        let tok = issue_approval_token();
+        let out = dispatch(
+            "shell_exec",
+            &json!({ "command": "cd", "approval_token": &tok }),
+            Some(&tok),
+        )
+        .unwrap();
+        let expected = home_dir().to_string_lossy().into_owned();
+        assert!(
+            out.trim_end().eq_ignore_ascii_case(&expected),
+            "cwd {out} != home {expected}"
+        );
     }
 
     #[test]

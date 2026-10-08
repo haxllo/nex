@@ -88,6 +88,7 @@
   let chatConversationId = "";
   let chatMessages = [];
   let chatRenderFrame = 0;
+  let chatStepSeq = 0;
   let chatStreamMessageId = "";
   let chatStreamOffset = 0;
   let chatRecognition = null;
@@ -1548,6 +1549,14 @@
       chatStreamOffset = 0;
       chatMessagesEl.replaceChildren();
       for (const message of chatMessages) {
+        if (message.role === "step") {
+          const article = document.createElement("article");
+          article.className = "agent-" + (message.kind === "done" ? "done" : "step");
+          article.dataset.messageId = message.id;
+          article.textContent = message.content;
+          chatMessagesEl.appendChild(article);
+          continue;
+        }
         const article = document.createElement("article");
         article.className = "chat-message " + (message.role === "user" ? "user" : "assistant") + (message.error ? " error" : "");
         article.dataset.messageId = message.id;
@@ -1940,6 +1949,25 @@
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
+  $("chat-transcript-button").addEventListener("click", async () => {
+    const lines = [];
+    for (const message of chatMessages) {
+      if (message.role === "user") lines.push("You: " + message.content);
+      else if (message.role === "assistant") lines.push("Nex: " + message.content);
+      else if (message.role === "step") lines.push("• " + message.content);
+    }
+    try {
+      await navigator.clipboard.writeText(lines.join("\n\n"));
+      chatNotice.textContent = "Transcript copied to clipboard.";
+      chatNotice.classList.remove("error");
+      window.setTimeout(() => {
+        if (chatNotice.textContent === "Transcript copied to clipboard.") chatNotice.textContent = "";
+      }, 1500);
+    } catch (_) {
+      chatNotice.textContent = "Copy unavailable in this view.";
+      chatNotice.classList.add("error");
+    }
+  });
   $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
   $("chat-model-button").addEventListener("click", (event) => {
     event.currentTarget.blur();
@@ -2165,16 +2193,22 @@
     if (state.agentApproval) renderAgentApproval(state.agentApproval);
     if (state.agentStep) {
       const s = state.agentStep;
+      const text = "step " + (s.step ?? "?") + " · " + (s.tool || "tool") + " · " + (s.state || "") + (s.detail ? " — " + s.detail : "");
+      chatMessages.push({ id: "s-" + (chatStepSeq++).toString(36), role: "step", kind: "step", content: text });
+      persistChat();
       const line = document.createElement("article");
       line.className = "agent-step";
-      line.textContent = "step " + (s.step ?? "?") + " · " + (s.tool || "tool") + " · " + (s.state || "") + (s.detail ? " — " + s.detail : "");
+      line.textContent = text;
       appendAgentNode(line);
     }
     if (state.agentDone) {
       const d = typeof state.agentDone === "string" ? { summary: state.agentDone } : state.agentDone;
+      const text = (d.summary || "Done") + (d.run_id ? " · run " + d.run_id : "");
+      chatMessages.push({ id: "s-" + (chatStepSeq++).toString(36), role: "step", kind: "done", content: text });
+      persistChat();
       const done = document.createElement("article");
       done.className = "agent-done";
-      done.textContent = (d.summary || "Done") + (d.run_id ? " · run " + d.run_id : "");
+      done.textContent = text;
       appendAgentNode(done);
       chatLiveStatus.textContent = "";
       updateChatStreamingState(false);
@@ -2185,8 +2219,8 @@
         const runs = Array.isArray(state.agentHistory.runs) ? state.agentHistory.runs.slice(0, 5) : [];
         for (const r of runs) {
           const line = document.createElement("article");
-          line.className = "agent-step";
-          line.textContent = "run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80) + ' — type "!retry ' + r.id + '"';
+          line.className = "agent-step agent-history";
+          line.textContent = "Previous run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80) + ' — type "!retry ' + r.id + '"';
           appendAgentNode(line);
         }
       }

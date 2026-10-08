@@ -1579,6 +1579,14 @@
           }
           article.appendChild(actions);
         }
+        if (message.role === "user" && message.content && !message.error) {
+          const actions = document.createElement("div"); actions.className = "chat-message-actions";
+          const rerun = document.createElement("button"); rerun.type = "button"; rerun.textContent = "Rerun"; rerun.title = "Run this message again";
+          rerun.disabled = chatStreaming;
+          rerun.addEventListener("click", () => runUserMessage(message.content));
+          actions.appendChild(rerun);
+          article.appendChild(actions);
+        }
       }
     } else {
       const message = chatMessages[chatMessages.length - 1];
@@ -1722,6 +1730,11 @@
     const message = chatInput.value.trim();
     if (!message) { chatInput.focus(); return; }
     chatInput.value = ""; resizeChatInput();
+    runUserMessage(message);
+  }
+
+  // Rerun affordance under each sent message: same thread, fresh attempt.
+  function runUserMessage(message) {
     if (message.startsWith("!")) {
       const rest = message.slice(1).trim();
       if (!rest) { chatInput.focus(); return; }
@@ -2220,7 +2233,7 @@
         for (const r of runs) {
           const line = document.createElement("article");
           line.className = "agent-step agent-history";
-          line.textContent = "Previous run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80) + ' — type "!retry ' + r.id + '"';
+          line.textContent = "Previous run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80);
           appendAgentNode(line);
         }
       }

@@ -1420,6 +1420,7 @@ html[data-theme="light"] #update-btn:hover {
 .chat-message-actions button { min-height: 28px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
 .chat-message-actions button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .chat-message-actions button:disabled { opacity: .45; cursor: default; }
+.chat-message.user .chat-message-actions { justify-content: flex-end; }
 .chat-message-content > :first-child { margin-top: 0; }
 .chat-message-content > :last-child { margin-bottom: 0; }
 .chat-message-content.chat-streaming-text { white-space: pre-wrap; overflow-wrap: anywhere; }

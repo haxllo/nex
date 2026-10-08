@@ -1002,10 +1002,12 @@ fn isolated_work_dir() -> Result<std::path::PathBuf, String> {
 fn cli_available(program: &str) -> bool {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         Command::new("where.exe")
             .arg(program)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .creation_flags(0x08000000)
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
@@ -1025,11 +1027,13 @@ fn cli_available(program: &str) -> bool {
 fn kill_provider_tree(child: &mut std::process::Child) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let pid = child.id().to_string();
         let _ = Command::new("taskkill.exe")
             .args(["/PID", &pid, "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .creation_flags(0x08000000)
             .status();
     }
     let _ = child.kill();
@@ -1043,6 +1047,14 @@ fn cli_command(program: &str, args: &[String]) -> Command {
         .args(["-NoLogo", "-NoProfile", "-Command", script])
         .env("NEX_CHAT_CLI", program)
         .env("NEX_CHAT_ARGS", serde_json::to_string(args).unwrap_or_else(|_| "[]".into()));
+    // Hidden by default: a visible console steals foreground and the
+    // overlay hides itself. Callers needing a visible window (interactive
+    // `codex login`) override flags after this returns.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     command
 }
 

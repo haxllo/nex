@@ -1366,6 +1366,9 @@
     chatHistory.replaceChildren();
     renderChatMessages();
     updateChatStreamingState();
+    chatLiveStatus.textContent = "";
+    chatNotice.textContent = "";
+    chatNotice.classList.remove("error");
     persistChat();
     chatInput.focus();
     resizeChatInput();
@@ -1418,6 +1421,9 @@
         setChatHistoryOpen(false);
         renderChatMessages();
         updateChatStreamingState(false);
+        chatLiveStatus.textContent = "";
+        chatNotice.textContent = "";
+        chatNotice.classList.remove("error");
         chatInput.focus();
       });
       chatHistory.appendChild(button);

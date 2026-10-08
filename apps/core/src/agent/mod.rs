@@ -1,6 +1,8 @@
 use serde::Serialize;
 
 pub(crate) mod approvals;
+#[allow(dead_code)] // Task 8 wires run_goal into runtime_loop.
+pub(crate) mod r#loop;
 pub(crate) mod tools;
 
 /// Step/approval/done events streamed to the chat view as JSON.

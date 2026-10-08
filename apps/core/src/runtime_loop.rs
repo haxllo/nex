@@ -1890,6 +1890,12 @@ impl RuntimeWorker {
                 crate::chat::cancel();
                 self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
             }
+            OverlayEvent::AgentApprove(id) => {
+                let _ = crate::agent::approvals::resolve_approval(&id, true);
+            }
+            OverlayEvent::AgentDeny(id) => {
+                let _ = crate::agent::approvals::resolve_approval(&id, false);
+            }
             OverlayEvent::OpenExternal(url) => {
                 open_url_in_browser(&url);
             }

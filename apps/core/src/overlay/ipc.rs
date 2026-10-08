@@ -210,6 +210,12 @@ pub(crate) struct ContextPayload {
     pub v: ContextInner,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdPayload {
+    pub call_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavePayload {
@@ -285,6 +291,10 @@ pub(crate) enum OverlayMessage {
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(NoPayload),
+    #[serde(rename = "agentApprove")]
+    AgentApprove(IdPayload),
+    #[serde(rename = "agentDeny")]
+    AgentDeny(IdPayload),
     #[serde(rename = "openExternal")]
     OpenExternal(TextPayload),
 }
@@ -355,6 +365,8 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConnect",
         "chatDisconnect",
         "chatCancel",
+        "agentApprove",
+        "agentDeny",
         "openExternal",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -427,6 +439,9 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::ChatConnect(p) => {
             check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::AgentApprove(p) | OverlayMessage::AgentDeny(p) => {
+            check_len(&p.call_id, 64, "agent call id").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::Pin(p) | OverlayMessage::Unpin(p) => {
             check_len(&p.v, MAX_TITLE_CHARS, "pin target").map_err(IpcReject::BadPayload)?;
@@ -646,6 +661,36 @@ mod tests {
             parse_overlay(r#"{"t":"chatDisconnect"}"#),
             Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
         );
+    }
+
+    #[test]
+    fn agent_approve_deny_parse_and_reject_overlong_id() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"agentApprove","call_id":"abc-123"}"#),
+            Ok(OverlayMessage::AgentApprove(IdPayload {
+                call_id: "abc-123".into()
+            }))
+        );
+        assert_eq!(
+            parse_overlay(r#"{"t":"agentDeny","call_id":"abc-123"}"#),
+            Ok(OverlayMessage::AgentDeny(IdPayload {
+                call_id: "abc-123".into()
+            }))
+        );
+        let long = "x".repeat(65);
+        assert!(matches!(
+            parse_overlay(&format!(r#"{{"t":"agentApprove","call_id":"{long}"}}"#)),
+            Err(IpcReject::BadPayload(_))
+        ));
+        assert!(matches!(
+            parse_overlay(&format!(r#"{{"t":"agentDeny","call_id":"{long}"}}"#)),
+            Err(IpcReject::BadPayload(_))
+        ));
+        // Unknown fields rejected.
+        assert!(matches!(
+            parse_overlay(r#"{"t":"agentApprove","call_id":"a","zzz":1}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 
     #[test]

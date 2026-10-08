@@ -1482,6 +1482,12 @@ fn handle_ipc(
         OverlayMessage::ChatCancel(_) => {
             let _ = event_tx.send(OverlayEvent::ChatCancel);
         }
+        OverlayMessage::AgentApprove(p) => {
+            let _ = event_tx.send(OverlayEvent::AgentApprove(p.call_id));
+        }
+        OverlayMessage::AgentDeny(p) => {
+            let _ = event_tx.send(OverlayEvent::AgentDeny(p.call_id));
+        }
         OverlayMessage::OpenExternal(p) => {
             let _ = event_tx.send(OverlayEvent::OpenExternal(p.v));
         }

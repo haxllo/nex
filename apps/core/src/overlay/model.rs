@@ -113,6 +113,10 @@ pub enum OverlayEvent {
     ChatConnect(String),
     ChatDisconnect,
     ChatCancel,
+    /// User approved a pending tool call (id from `agentApproval`).
+    AgentApprove(String),
+    /// User denied a pending tool call.
+    AgentDeny(String),
     /// Open a URL in the default browser (chat links; http/https only).
     OpenExternal(String),
     /// Media transport controls from the media widget.

@@ -141,90 +141,29 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
                 });
             return;
         }
-        Err(_) => {
-            // Native server unavailable (port blocked, etc.) — fall back
-            // to the CLI-owned sign-in window when the CLI exists.
+        Err(error) => {
+            // No CLI fallback: stores are independent, so a CLI sign-in
+            // would land in the other app's account, not ours.
+            push(json!({"chatConnecting":false,"chatError":format!("Could not start ChatGPT sign-in: {error}")}));
+            return;
         }
-    }
-    if !cli_available("codex") {
-        push(json!({"chatConnecting":false,"chatError":"Could not start ChatGPT sign-in. Check your connection and try again."}));
-        return;
-    }
-    let mut command = cli_command("codex", &["login".into()]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE: let the provider own its sign-in.
-    }
-    match command.spawn() {
-        Ok(mut child) => {
-            push(json!({"chatConnecting":true,"chatNotice":"Finish ChatGPT sign-in in its window. Nex will confirm the connection automatically."}));
-            let _ = std::thread::Builder::new()
-                .name("nex-codex-login-watch".into())
-                .spawn(move || {
-                    let deadline = std::time::Instant::now() + Duration::from_secs(300);
-                    let mut child_finished_at = None;
-                    loop {
-                        if codex_authenticated() {
-                            push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatNotice":"ChatGPT connected. Choose a model and start chatting."}));
-                            break;
-                        }
-                        if child_finished_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
-                            // Some CLI versions hand the browser callback off
-                            // before their launcher process exits. Give the
-                            // credential store time to reflect that callback.
-                            child_finished_at = Some(std::time::Instant::now());
-                        }
-                        if child_finished_at.is_some_and(|finished| finished.elapsed() >= Duration::from_secs(30)) {
-                            push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatError":"ChatGPT sign-in was not confirmed. Check the ChatGPT window and try again."}));
-                            break;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            push(json!({"chatConnecting":false,"chatNotice":"Nex hasn’t seen ChatGPT finish signing in yet. Use Check connection when you return."}));
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_secs(2));
-                    }
-                });
-        }
-        Err(_) => push(json!({"chatConnecting":false,"chatError":"Could not start ChatGPT sign-in. Check that the Codex CLI is installed."})),
     }
 }
 
 pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
-    if !cli_available("codex") {
-        push(json!({"chatDisconnecting":false,"chatError":"Could not find the Codex CLI. Nothing to sign out."}));
-        return;
-    }
     if !codex_authenticated() {
         push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT is already signed out."}));
         return;
     }
+    // Native only: the CLI holds a different account now, so its logout
+    // must never run from here.
     match crate::codex_auth::logout() {
         Ok(_) if !codex_authenticated() => {
             push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT account disconnected. Connect again any time."}));
-            return;
         }
         _ => {
-            // Native revoke failed — fall back to the CLI when present.
+            push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of ChatGPT. Try again in a moment."}));
         }
-    }
-    if !cli_available("codex") {
-        push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of ChatGPT. Try again in a moment."}));
-        return;
-    }
-    push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of ChatGPT…"}));
-    let signed_out = cli_command("codex", &["logout".into()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-        && !codex_authenticated();
-    if signed_out {
-        push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT account disconnected. Connect again any time."}));
-    } else {
-        push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of ChatGPT. Try again in a moment."}));
     }
 }
 
@@ -471,18 +410,9 @@ fn sort_model_recommendations(models: &mut [Value]) {
 }
 
 fn codex_authenticated() -> bool {
-    // Native check first (no CLI needed); the CLI reads the same store,
-    // so fall back to it only when native storage is unreadable.
-    if crate::codex_auth::is_signed_in() {
-        return true;
-    }
-    cli_available("codex")
-        && cli_command("codex", &["login".into(), "status".into()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+    // Nex store only. The CLI holds a different account now, so its
+    // status must never stand in for ours.
+    crate::codex_auth::is_signed_in()
 }
 
 pub(crate) fn cancel() {

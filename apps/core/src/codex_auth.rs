@@ -1,7 +1,7 @@
 //! Native ChatGPT account auth speaking the official ChatGPT OAuth protocol
 //! (spec: vendored `third_party/codex`, openai/codex `rust-v0.160.1`).
-//! No CLI install required. Tokens live in the standard ChatGPT home
-//! (`~/.codex/auth.json`), so the CLI and Nex share one sign-in.
+//! No CLI install required. Nex keeps its own token store, independent
+//! of any CLI sign-in, so each app can use a different account.
 
 #![cfg(target_os = "windows")]
 
@@ -49,20 +49,7 @@ struct StoredTokens {
     account_id: Option<String>,
 }
 
-fn codex_home() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
-}
-
-fn auth_file() -> PathBuf {
-    codex_home().join("auth.json")
-}
-
-/// Nex-owned token store. Primary source of truth; the CLI home above
-/// is only mirrored for interop (login once, both apps work).
+/// Nex-owned token store. Fully independent of any CLI sign-in.
 fn nex_auth_file() -> PathBuf {
     crate::config::stable_app_data_dir().join("codex-auth.json")
 }
@@ -119,13 +106,7 @@ fn access_expired(access_token: &str) -> bool {
 }
 
 fn read_tokens() -> Option<StoredTokens> {
-    if let Some(tokens) = read_tokens_file(&nex_auth_file()) {
-        return Some(tokens);
-    }
-    // One-time import: a CLI sign-in is adopted into our store.
-    let tokens = read_tokens_file(&auth_file())?;
-    persist(&tokens);
-    Some(tokens)
+    read_tokens_file(&nex_auth_file())
 }
 
 fn read_tokens_file(path: &PathBuf) -> Option<StoredTokens> {
@@ -209,19 +190,12 @@ fn persist(tokens: &StoredTokens) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&path, &bytes);
-        // Mirror for CLI interop; failures never block our store.
-        let mirror = auth_file();
-        if let Some(parent) = mirror.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&mirror, &bytes);
     }
 }
 
-/// Deletes both our store and the CLI mirror (revoked or signed out).
+/// Deletes our store (revoked or signed out). Other apps untouched.
 pub(crate) fn forget() {
     let _ = std::fs::remove_file(nex_auth_file());
-    let _ = std::fs::remove_file(auth_file());
 }
 
 /// Native sign-out: revoke refresh (else access), then delete `auth.json`.
@@ -251,9 +225,7 @@ pub(crate) fn logout() -> Result<bool, String> {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(tokens.is_some()),
         Err(e) => Err(format!("Could not clear ChatGPT sign-in: {e}")),
-    }?;
-    let _ = std::fs::remove_file(auth_file());
-    Ok(true)
+    }
 }
 
 /// Starts the ChatGPT OAuth flow: binds the localhost callback, builds

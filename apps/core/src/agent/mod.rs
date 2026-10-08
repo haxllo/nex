@@ -2,6 +2,7 @@ use serde::Serialize;
 
 pub(crate) mod approvals;
 pub(crate) mod r#loop;
+pub(crate) mod store;
 pub(crate) mod tools;
 
 /// Step/approval/done events streamed to the chat view as JSON.

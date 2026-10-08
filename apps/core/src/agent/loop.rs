@@ -234,6 +234,27 @@ pub(crate) fn drive_loop(
     );
 }
 
+/// Cancel flag of the latest goal run, so `chatCancel` stops the loop
+/// between steps. Set per run by the runtime worker thread.
+static CURRENT_RUN: std::sync::Mutex<Option<Arc<AtomicBool>>> =
+    std::sync::Mutex::new(None);
+
+/// Remember `flag` as the run [`cancel_current`] stops.
+pub(crate) fn track_cancel(flag: Arc<AtomicBool>) {
+    if let Ok(mut current) = CURRENT_RUN.lock() {
+        *current = Some(flag);
+    }
+}
+
+/// Flip the latest run's cancel flag (shared with `chatCancel`).
+pub(crate) fn cancel_current() {
+    if let Ok(current) = CURRENT_RUN.lock() {
+        if let Some(flag) = current.as_ref() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Entry point (Task 8 wires it to a worker thread; runs sync here).
 /// `cancel` mirrors the `ACTIVE_REQUEST` id pattern in `chat.rs` but as a
 /// shared flag so `chatCancel` can stop the loop between steps.

@@ -291,6 +291,8 @@ pub(crate) enum OverlayMessage {
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(NoPayload),
+    #[serde(rename = "agentGoal")]
+    AgentGoal(TextPayload),
     #[serde(rename = "agentApprove")]
     AgentApprove(IdPayload),
     #[serde(rename = "agentDeny")]
@@ -365,6 +367,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConnect",
         "chatDisconnect",
         "chatCancel",
+        "agentGoal",
         "agentApprove",
         "agentDeny",
         "openExternal",
@@ -439,6 +442,9 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::ChatConnect(p) => {
             check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::AgentGoal(p) => {
+            check_len(&p.v, 16_000, "agent goal").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::AgentApprove(p) | OverlayMessage::AgentDeny(p) => {
             check_len(&p.call_id, 64, "agent call id").map_err(IpcReject::BadPayload)?;
@@ -661,6 +667,22 @@ mod tests {
             parse_overlay(r#"{"t":"chatDisconnect"}"#),
             Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
         );
+    }
+
+    #[test]
+    fn agent_goal_parses_and_rejects_overlong() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"agentGoal","v":"list files in Documents"}"#),
+            Ok(OverlayMessage::AgentGoal(TextPayload {
+                v: "list files in Documents".into()
+            }))
+        );
+        let big = format!(r#"{{"t":"agentGoal","v":"{}"}}"#, "x".repeat(16_001));
+        assert!(matches!(parse_overlay(&big), Err(IpcReject::BadPayload(_))));
+        assert!(matches!(
+            parse_overlay(r#"{"t":"agentGoal","v":"x","zzz":1}"#),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 
     #[test]

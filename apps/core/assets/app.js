@@ -1711,7 +1711,27 @@
     const message = chatInput.value.trim();
     if (!message) { chatInput.focus(); return; }
     chatInput.value = ""; resizeChatInput();
+    if (message.startsWith("!")) {
+      const goal = message.slice(1).trim();
+      if (!goal) { chatInput.focus(); return; }
+      startAgentGoal(goal);
+      return;
+    }
     startChatRequest(message);
+  }
+
+  function startAgentGoal(goal) {
+    if (chatStreaming) post("chatCancel");
+    chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: "!" + goal });
+    const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "" };
+    chatMessages.push(assistant);
+    saveChatTitle(); persistChat();
+    renderChatMessages();
+    chatLiveStatus.textContent = "Working…";
+    chatNotice.textContent = ""; chatNotice.classList.remove("error");
+    updateChatStreamingState(true);
+    post("agentGoal", goal);
+    chatInput.focus(); postChatResize();
   }
 
   function regenerateChatResponse(messageId) {

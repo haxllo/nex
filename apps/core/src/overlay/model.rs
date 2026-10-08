@@ -113,6 +113,8 @@ pub enum OverlayEvent {
     ChatConnect(String),
     ChatDisconnect,
     ChatCancel,
+    /// A `!`-prefixed chat input routed to the agent loop as a goal.
+    AgentGoal(String),
     /// User approved a pending tool call (id from `agentApproval`).
     AgentApprove(String),
     /// User denied a pending tool call.

@@ -490,6 +490,13 @@ pub(crate) fn cancel() {
     ACTIVE_REQUEST.store(id.wrapping_add(1), Ordering::SeqCst);
 }
 
+/// Current (provider, model) snapshot for agent goals. Falls back to
+/// defaults when nothing is configured; the caller gates providers.
+pub(crate) fn agent_model() -> (String, String) {
+    let config = load_config().unwrap_or_default();
+    (config.provider, config.model)
+}
+
 pub(crate) fn start(raw: String, mut push: impl FnMut(Value) + Send + 'static) {
     let id = REQUEST_ID.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     ACTIVE_REQUEST.store(id, Ordering::SeqCst);

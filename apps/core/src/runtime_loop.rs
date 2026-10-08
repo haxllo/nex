@@ -1888,7 +1888,30 @@ impl RuntimeWorker {
             }
             OverlayEvent::ChatCancel => {
                 crate::chat::cancel();
+                crate::agent::r#loop::cancel_current();
                 self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            }
+            OverlayEvent::AgentGoal(goal) => {
+                let overlay = self.overlay.clone();
+                let _ = std::thread::Builder::new()
+                    .name("nex-agent-goal".into())
+                    .spawn(move || {
+                        let (provider, model) = crate::chat::agent_model();
+                        if provider != "codex" {
+                            overlay.push_chat(
+                                serde_json::json!({ "t": "agentDone", "summary": "Agent goals need the ChatGPT provider. Switch chat to ChatGPT in settings, then try again." }).to_string(),
+                            );
+                            return;
+                        }
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        crate::agent::r#loop::track_cancel(cancel.clone());
+                        crate::agent::r#loop::run_goal(
+                            goal,
+                            crate::agent::r#loop::AgentConfig { model },
+                            cancel,
+                            move |value| overlay.push_chat(value.to_string()),
+                        );
+                    });
             }
             OverlayEvent::AgentApprove(id) => {
                 let _ = crate::agent::approvals::resolve_approval(&id, true);

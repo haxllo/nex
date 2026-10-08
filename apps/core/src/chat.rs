@@ -687,17 +687,20 @@ fn stream_codex_native(
         .rev()
         .filter(|turn| matches!(turn.role.as_str(), "user" | "assistant"))
         .map(|turn| {
+            // The backend validates content parts per role: user turns
+            // take input_* parts, assistant turns take output_* parts.
+            let part = if turn.role == "assistant" { "output_text" } else { "input_text" };
             json!({
                 "type": "message",
                 "role": turn.role,
-                "content": [{"type": "output_text", "text": turn.content.chars().take(6000).collect::<String>()}],
+                "content": [{"type": part, "text": turn.content.chars().take(6000).collect::<String>()}],
             })
         })
         .collect();
     input_items.push(json!({
         "type": "message",
         "role": "user",
-        "content": [{"type": "output_text", "text": request.message}],
+        "content": [{"type": "input_text", "text": request.message}],
     }));
     let body = json!({
         "model": config.model,

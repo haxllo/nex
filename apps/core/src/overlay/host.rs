@@ -1488,10 +1488,19 @@ fn handle_ipc(
             let agent = p.is_agent_mode();
             let resume = p.resume_run_id.filter(|id| !id.trim().is_empty());
             let mode = agent.then(|| "agent".to_string());
+            let context = p
+                .context
+                .into_iter()
+                .map(|t| crate::agent::r#loop::ContextTurn {
+                    role: t.role,
+                    content: t.content,
+                })
+                .collect();
             let _ = event_tx.send(OverlayEvent::AgentGoal {
                 goal: p.goal,
                 resume_run_id: resume,
                 mode,
+                context,
             });
         }
         OverlayMessage::AgentApprove(p) => {

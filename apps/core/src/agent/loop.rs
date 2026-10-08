@@ -27,7 +27,82 @@ const APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// Chars of tool output / summary surfaced in step events.
 const STEP_DETAIL_CHARS: usize = 500;
 
-const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only.";
+const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only. After destructive actions verify with a read/list before reporting success; never claim unchecked results.";
+
+/// One prior chat turn threaded into a goal run as context (user/assistant only).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextTurn {
+    pub(crate) role: String,
+    pub(crate) content: String,
+}
+
+/// Max prior turns threaded into a goal run (plan: last 6, truncate never reject).
+pub(crate) const CONTEXT_MAX_TURNS: usize = 6;
+/// Max chars per context turn (matches the JS slice budget).
+pub(crate) const CONTEXT_MAX_CHARS: usize = 1500;
+
+/// Validate thread context: drop turns whose role is not user/assistant,
+/// truncate each content to [`CONTEXT_MAX_CHARS`] chars, keep the last
+/// [`CONTEXT_MAX_TURNS`]. Truncates, never rejects. Never panics.
+pub(crate) fn sanitize_context(turns: Vec<ContextTurn>) -> Vec<ContextTurn> {
+    let mut out = Vec::with_capacity(turns.len());
+    for mut turn in turns {
+        if turn.role != "user" && turn.role != "assistant" {
+            continue;
+        }
+        if turn.content.chars().count() > CONTEXT_MAX_CHARS {
+            turn.content = turn.content.chars().take(CONTEXT_MAX_CHARS).collect();
+        }
+        out.push(turn);
+    }
+    if out.len() > CONTEXT_MAX_TURNS {
+        out.drain(..out.len() - CONTEXT_MAX_TURNS);
+    }
+    out
+}
+
+/// Codex (Responses) seed input: sanitized context first in order, then the
+/// goal. Part types are role-correct (user→input_text, assistant→output_text);
+/// the backend 400s on the wrong part type for a role.
+pub(crate) fn codex_input_items(goal: &str, context: &[ContextTurn]) -> Vec<Value> {
+    let clean = sanitize_context(context.to_vec());
+    let mut input = Vec::with_capacity(clean.len() + 1);
+    for turn in &clean {
+        if turn.role == "assistant" {
+            input.push(json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": turn.content }],
+            }));
+        } else {
+            input.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": turn.content }],
+            }));
+        }
+    }
+    input.push(json!({
+        "type": "message",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": goal }],
+    }));
+    input
+}
+
+/// OpenAI-compatible seed messages: system + sanitized context in order +
+/// goal, all as `{role, content}`.
+pub(crate) fn openai_messages(goal: &str, context: &[ContextTurn]) -> Vec<Value> {
+    let clean = sanitize_context(context.to_vec());
+    let mut messages = Vec::with_capacity(clean.len() + 2);
+    messages.push(json!({"role": "system", "content": AGENT_INSTRUCTIONS}));
+    for turn in &clean {
+        messages.push(json!({"role": turn.role, "content": turn.content}));
+    }
+    messages.push(json!({"role": "user", "content": goal}));
+    messages
+}
 
 /// Minimal config snapshot: provider picks the transport, the rest feeds it.
 /// `full_tools` is true iff the goal runs in Agent mode (full tools with
@@ -477,6 +552,7 @@ pub(crate) fn resume_context(events: &[(String, String)], cap_chars: usize) -> S
 pub(crate) fn run_goal_resuming(
     goal: String,
     resume_run_id: Option<String>,
+    context: Vec<ContextTurn>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     mut push: impl FnMut(Value) + Send + 'static,
@@ -488,12 +564,13 @@ pub(crate) fn run_goal_resuming(
             None
         }
     };
-    run_goal_resuming_with(goal, resume_run_id, config, cancel, &mut push, store.as_ref());
+    run_goal_resuming_with(goal, resume_run_id, context, config, cancel, &mut push, store.as_ref());
 }
 
 fn run_goal_resuming_with(
     goal: String,
     resume_run_id: Option<String>,
+    context: Vec<ContextTurn>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
@@ -501,13 +578,13 @@ fn run_goal_resuming_with(
 ) {
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (goal, resume_run_id, config, cancel, store);
+        let _ = (goal, resume_run_id, context, config, cancel, store);
         push_event(push, AgentEvent::done("Agent goals need Windows."));
         return;
     }
     #[cfg(target_os = "windows")]
     {
-        run_goal_resuming_live(goal, resume_run_id, config, cancel, push, store);
+        run_goal_resuming_live(goal, resume_run_id, context, config, cancel, push, store);
     }
 }
 
@@ -528,6 +605,7 @@ fn persist_event(store: Option<&store::Store>, run_id: &str, value: &Value) {
 fn run_goal_resuming_live(
     goal: String,
     resume_run_id: Option<String>,
+    context: Vec<ContextTurn>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
@@ -595,8 +673,8 @@ fn run_goal_resuming_live(
         )
     };
     match config.provider.as_str() {
-        "codex" => run_codex_goal(model_goal, config, cancel.clone(), &mut push_persist),
-        "openai-compatible" => run_openai_goal(model_goal, config, cancel.clone(), &mut push_persist),
+        "codex" => run_codex_goal(model_goal, context, config, cancel.clone(), &mut push_persist),
+        "openai-compatible" => run_openai_goal(model_goal, context, config, cancel.clone(), &mut push_persist),
         _ => push_event(
             &mut push_persist,
             AgentEvent::done(
@@ -681,15 +759,12 @@ fn execute_call(call: &ToolCall, approval: Option<&str>, full: bool) -> Result<S
 #[cfg(target_os = "windows")]
 fn run_codex_goal(
     goal: String,
+    context: Vec<ContextTurn>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
 ) {
-    let mut input = vec![json!({
-        "type": "message",
-        "role": "user",
-        "content": [{ "type": "input_text", "text": goal }],
-    })];
+    let mut input = codex_input_items(&goal, &context);
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
     let model = config.model.clone();
     let full = config.full_tools;
@@ -720,6 +795,7 @@ fn run_codex_goal(
 #[cfg(target_os = "windows")]
 fn run_openai_goal(
     goal: String,
+    context: Vec<ContextTurn>,
     config: AgentConfig,
     cancel: Arc<AtomicBool>,
     push: &mut impl FnMut(Value),
@@ -734,10 +810,7 @@ fn run_openai_goal(
         return;
     }
     let mut input: Vec<Value> = Vec::new();
-    let mut messages = vec![
-        json!({"role": "system", "content": AGENT_INSTRUCTIONS}),
-        json!({"role": "user", "content": goal}),
-    ];
+    let mut messages = openai_messages(&goal, &context);
     let mut consumed = 0usize;
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
     let full = config.full_tools;
@@ -1377,6 +1450,7 @@ mod tests {
             run_goal_resuming_with(
                 String::new(),
                 Some("nope".into()),
+                Vec::new(),
                 config,
                 cancel,
                 &mut push,
@@ -1642,5 +1716,65 @@ mod tests {
         // Full mode keeps the existing approval gate unchanged.
         let err = execute_call(&call, None, true).unwrap_err();
         assert!(err.starts_with("approval-required:"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn sanitize_context_filters_roles_truncates_and_caps() {
+        let mut turns = vec![
+            ContextTurn { role: "system".into(), content: "drop me".into() },
+            ContextTurn { role: "user".into(), content: "u1".into() },
+            ContextTurn { role: "assistant".into(), content: "a1".into() },
+            ContextTurn { role: "step".into(), content: "drop me".into() },
+            ContextTurn { role: "user".into(), content: "x".repeat(2000) },
+        ];
+        for i in 0..8 {
+            turns.push(ContextTurn { role: "user".into(), content: format!("extra-{i}") });
+        }
+        let clean = sanitize_context(turns);
+        assert_eq!(clean.len(), CONTEXT_MAX_TURNS);
+        assert!(clean.iter().all(|t| t.role == "user" || t.role == "assistant"));
+        assert!(clean.iter().all(|t| t.content.chars().count() <= CONTEXT_MAX_CHARS));
+        // Last 6 win: the overlong "xxx" turn fell off the front.
+        assert_eq!(clean.last().unwrap().content, "extra-7");
+        assert!(!clean.iter().any(|t| t.content.starts_with("xxx")));
+    }
+
+    #[test]
+    fn codex_context_lands_first_with_role_correct_parts() {
+        let context = vec![
+            ContextTurn { role: "user".into(), content: "delete the cowork dir".into() },
+            ContextTurn { role: "assistant".into(), content: "which dir?".into() },
+            ContextTurn { role: "system".into(), content: "drop me".into() },
+        ];
+        let input = codex_input_items("then delete WorkBuddy AI in there", &context);
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "delete the cowork dir");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["content"][0]["type"], "output_text");
+        assert_eq!(input[2]["content"][0]["text"], "then delete WorkBuddy AI in there");
+    }
+
+    #[test]
+    fn openai_context_lands_first_as_role_content() {
+        let context = vec![
+            ContextTurn { role: "user".into(), content: "first".into() },
+            ContextTurn { role: "assistant".into(), content: "second".into() },
+        ];
+        let messages = openai_messages("goal", &context);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1], json!({"role": "user", "content": "first"}));
+        assert_eq!(messages[2], json!({"role": "assistant", "content": "second"}));
+        assert_eq!(messages[3], json!({"role": "user", "content": "goal"}));
+    }
+
+    #[test]
+    fn verify_before_claim_instruction_present() {
+        assert!(
+            AGENT_INSTRUCTIONS.contains("verify with a read/list before reporting success"),
+            "missing verify-before-claim: {AGENT_INSTRUCTIONS}"
+        );
     }
 }

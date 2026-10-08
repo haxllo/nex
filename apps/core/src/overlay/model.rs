@@ -116,11 +116,13 @@ pub enum OverlayEvent {
     /// A `!`-prefixed chat input routed to the agent loop as a goal.
     /// `resume_run_id` re-runs a stored run's goal (`!retry <id>`).
     /// `mode` is `"chat"` (read-only, default) or `"agent"` (full tools);
-    /// absent or unknown modes run as chat.
+    /// absent or unknown modes run as chat. `context` carries up to 6
+    /// prior user/assistant turns for thread continuity.
     AgentGoal {
         goal: String,
         resume_run_id: Option<String>,
         mode: Option<String>,
+        context: Vec<crate::agent::r#loop::ContextTurn>,
     },
     /// Chat view opened on an empty thread: reply with recent run history.
     AgentLast,

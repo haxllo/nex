@@ -210,13 +210,111 @@ fn allowed_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Resolve `path` (relative to cwd) and refuse anything escaping the allowed roots.
+/// Expand `%NAME%`, `$NAME`/`${NAME}`, and a leading `~` in fs paths.
+/// Unknown vars stay literal; never fails.
+pub(crate) fn expand_env_vars(input: &str) -> String {
+    let mut s: String = input.to_string();
+    if s == "~" {
+        return home_dir().to_string_lossy().into_owned();
+    }
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
+        let home = home_dir().to_string_lossy().into_owned();
+        return format!("{home}{}{rest}", std::path::MAIN_SEPARATOR);
+    }
+    s = expand_percent_vars(&s);
+    s = expand_dollar_vars(&s);
+    s
+}
+
+fn expand_percent_vars(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let Some(end) = bytes[i + 1..].iter().position(|&b| b == b'%') {
+                let name = &s[i + 1..i + 1 + end];
+                if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    if let Ok(val) = std::env::var(name) {
+                        out.push_str(&val);
+                    } else {
+                        out.push_str(&s[i..i + 1 + end + 1]);
+                    }
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+            out.push('%');
+            i += 1;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn expand_dollar_vars(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            if bytes.get(i + 1) == Some(&b'{') {
+                if let Some(rel) = bytes[i + 2..].iter().position(|&b| b == b'}') {
+                    let name = &s[i + 2..i + 2 + rel];
+                    if !name.is_empty()
+                        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    {
+                        if let Ok(val) = std::env::var(name) {
+                            out.push_str(&val);
+                        } else {
+                            out.push_str(&s[i..i + 2 + rel + 1]);
+                        }
+                        i += 2 + rel + 1;
+                        continue;
+                    }
+                }
+                out.push('$');
+                i += 1;
+            } else {
+                let mut j = i + 1;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if j == i + 1 {
+                    out.push('$');
+                    i += 1;
+                } else {
+                    let name = &s[i + 1..j];
+                    if let Ok(val) = std::env::var(name) {
+                        out.push_str(&val);
+                    } else {
+                        out.push_str(&s[i..j]);
+                    }
+                    i = j;
+                }
+            }
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Resolve `path` against the home directory (env vars + `~` expanded
+/// first) and refuse anything escaping the allowed roots.
 fn resolve_within_roots(path: &Path) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("cannot determine cwd: {e}"))?;
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
+    let expanded = expand_env_vars(&path.to_string_lossy());
+    let expanded_path = PathBuf::from(&expanded);
+    let joined = if expanded_path.is_absolute() {
+        expanded_path
     } else {
-        cwd.join(path)
+        home_dir().join(&expanded_path)
     };
     let canon = std::fs::canonicalize(&joined)
         .map_err(|e| format!("cannot resolve '{}': {e}", joined.display()))?;
@@ -224,7 +322,7 @@ fn resolve_within_roots(path: &Path) -> Result<PathBuf, String> {
         Ok(canon)
     } else {
         Err(format!(
-            "path '{}' escapes allowed roots (current dir + home)",
+            "path '{}' escapes allowed roots (home and working directory)",
             joined.display()
         ))
     }
@@ -550,8 +648,9 @@ mod tests {
 
     #[test]
     fn read_truncates_at_4000_chars() {
-        // Temp file inside cwd so it stays within the allowed roots.
-        let mut tmp = tempfile::NamedTempFile::new_in(".").unwrap();
+        // Temp file inside the home dir so it stays within the allowed roots
+        // (relative fs paths resolve against home).
+        let mut tmp = tempfile::NamedTempFile::new_in(home_dir()).unwrap();
         use std::io::Write as _;
         write!(tmp, "{}", "x".repeat(6000)).unwrap();
         let out = dispatch(
@@ -567,8 +666,8 @@ mod tests {
 
     #[test]
     fn list_caps_at_100_entries() {
-        // Temp dir inside cwd so it stays within the allowed roots.
-        let dir = tempfile::tempdir_in(".").unwrap();
+        // Temp dir inside home so it stays within the allowed roots.
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
         for i in 0..120 {
             std::fs::write(dir.path().join(format!("f{i:03}.txt")), "x").unwrap();
         }
@@ -625,6 +724,59 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("hi"), "unexpected: {out}");
+    }
+
+    #[test]
+    fn env_vars_expand_percent_dollar_and_tilde() {
+        let key = "NEX_TEST_EXPAND_PATH_VAR";
+        unsafe { std::env::set_var(key, "C:\\nex-test-target") };
+        assert_eq!(
+            expand_env_vars(&format!("%{key}%\\sub")),
+            "C:\\nex-test-target\\sub"
+        );
+        assert_eq!(
+            expand_env_vars(&format!("${key}/sub")),
+            "C:\\nex-test-target/sub"
+        );
+        assert_eq!(
+            expand_env_vars(&format!("${{{key}}}/sub")),
+            "C:\\nex-test-target/sub"
+        );
+        unsafe { std::env::remove_var(key) };
+        // Unknown vars stay literal.
+        assert_eq!(expand_env_vars("%NEX_NO_SUCH_VAR_XYZ%"), "%NEX_NO_SUCH_VAR_XYZ%");
+        // Leading ~ resolves inside home.
+        let home = home_dir().to_string_lossy().into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(expand_env_vars("~"), home);
+        assert_eq!(expand_env_vars("~/docs"), format!("{home}{sep}docs"));
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_home() {
+        // Unique file directly under home; a bare filename (relative) must find it.
+        let unique = format!("nex-agent-reltest-{}-{}.txt", std::process::id(), "homejoin");
+        let abs = home_dir().join(&unique);
+        std::fs::write(&abs, "home-relative-ok").unwrap();
+        let out = dispatch("fs_read", &json!({ "path": unique }), None).unwrap();
+        assert!(out.contains("home-relative-ok"), "unexpected: {out}");
+        let _ = std::fs::remove_file(&abs);
+    }
+
+    #[test]
+    fn percent_var_path_resolves_end_to_end() {
+        let key = "NEX_TEST_FS_EXPAND_VAR";
+        let dir = tempfile::tempdir_in(home_dir()).unwrap();
+        unsafe { std::env::set_var(key, dir.path().to_string_lossy().into_owned()) };
+        std::fs::write(dir.path().join("via-var.txt"), "var-ok").unwrap();
+        let out = dispatch(
+            "fs_read",
+            &json!({ "path": format!("%{key}%/via-var.txt") }),
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("var-ok"), "unexpected: {out}");
+        unsafe { std::env::remove_var(key) };
     }
 
     #[test]

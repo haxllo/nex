@@ -216,10 +216,20 @@ pub(crate) struct IdPayload {
     pub call_id: String,
 }
 
-/// Goal post: `{t:"agentGoal", goal, resume_run_id?, mode?}`. Flat shape
+/// One prior chat turn threaded into an agent goal as context.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// Goal post: `{t:"agentGoal", goal, resume_run_id?, mode?, context?}`. Flat shape
 /// (the page spreads the object); `resume_run_id` re-runs a stored run's
 /// goal; `mode` is `"chat"` (read-only, default) or `"agent"` (full tools
 /// with approval gates). Absent or unknown modes default to chat.
+/// `context` carries up to 6 prior user/assistant turns (validated
+/// downstream: truncate, never reject).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentGoalPayload {
@@ -228,6 +238,8 @@ pub(crate) struct AgentGoalPayload {
     pub resume_run_id: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub context: Vec<ContextTurn>,
 }
 
 impl AgentGoalPayload {
@@ -705,6 +717,7 @@ mod tests {
                 goal: "list files in Documents".into(),
                 resume_run_id: None,
                 mode: None,
+                context: Vec::new(),
             }))
         );
         assert_eq!(
@@ -713,6 +726,7 @@ mod tests {
                 goal: String::new(),
                 resume_run_id: Some("abc-123".into()),
                 mode: None,
+                context: Vec::new(),
             }))
         );
         let big = format!(r#"{{"t":"agentGoal","goal":"{}"}}"#, "x".repeat(16_001));
@@ -754,6 +768,46 @@ mod tests {
             panic!("expected agentGoal");
         };
         assert!(!p.is_agent_mode());
+    }
+
+    #[test]
+    fn agent_goal_context_defaults_empty_and_parses() {
+        // Absent context → empty vec, never an error.
+        let msg = parse_overlay(r#"{"t":"agentGoal","goal":"x"}"#).unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert!(p.context.is_empty());
+        // Context turns parse in order; unknown inner fields rejected.
+        let msg = parse_overlay(
+            r#"{"t":"agentGoal","goal":"y","context":[{"role":"user","content":"delete the cowork dir"},{"role":"assistant","content":"which dir?"}]}"#,
+        )
+        .unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert_eq!(
+            p.context,
+            vec![
+                ContextTurn { role: "user".into(), content: "delete the cowork dir".into() },
+                ContextTurn { role: "assistant".into(), content: "which dir?".into() },
+            ]
+        );
+        // Foreign roles still parse here (loop sanitizes, never rejects).
+        let msg = parse_overlay(
+            r#"{"t":"agentGoal","goal":"y","context":[{"role":"system","content":"s"}]}"#,
+        )
+        .unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert_eq!(p.context.len(), 1);
+        assert!(matches!(
+            parse_overlay(
+                r#"{"t":"agentGoal","goal":"y","context":[{"role":"user","content":"x","zzz":1}]}"#
+            ),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 
     #[test]

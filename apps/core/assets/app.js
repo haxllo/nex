@@ -1789,7 +1789,10 @@
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
     const mode = agentMode ? "agent" : "chat";
-    post("agentGoal", resumeRunId ? { goal: goal || "", resume_run_id: resumeRunId, mode } : { goal, mode });
+    // Prior thread turns for continuity: last 6 user/assistant turns before
+    // the just-pushed placeholders, each sliced to 1500 chars.
+    const context = chatMessages.slice(0, -2).filter((m) => (m.role === "user" || m.role === "assistant") && !m.error && typeof m.content === "string" && m.content.trim()).slice(-6).map((m) => ({ role: m.role, content: m.content.slice(0, 1500) }));
+    post("agentGoal", resumeRunId ? { goal: goal || "", resume_run_id: resumeRunId, mode, context } : { goal, mode, context });
     chatInput.focus(); postChatResize();
   }
 

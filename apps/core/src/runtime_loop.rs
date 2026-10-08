@@ -1891,7 +1891,7 @@ impl RuntimeWorker {
                 crate::agent::r#loop::cancel_current();
                 self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
             }
-            OverlayEvent::AgentGoal { goal, resume_run_id, mode } => {
+            OverlayEvent::AgentGoal { goal, resume_run_id, mode, context } => {
                 let overlay = self.overlay.clone();
                 let full_tools = matches!(mode.as_deref(), Some("agent"));
                 let _ = std::thread::Builder::new()
@@ -1903,6 +1903,7 @@ impl RuntimeWorker {
                         crate::agent::r#loop::run_goal_resuming(
                             goal,
                             resume_run_id,
+                            context,
                             crate::agent::r#loop::AgentConfig { provider, model, base_url, api_key, full_tools },
                             cancel,
                             move |value| overlay.push_chat(value.to_string()),

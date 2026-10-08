@@ -30,12 +30,15 @@ const STEP_DETAIL_CHARS: usize = 500;
 const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only.";
 
 /// Minimal config snapshot: provider picks the transport, the rest feeds it.
+/// `full_tools` is true iff the goal runs in Agent mode (full tools with
+/// approval gates); false is Chat mode (read-only tools).
 #[derive(Debug, Clone)]
 pub(crate) struct AgentConfig {
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
+    pub(crate) full_tools: bool,
 }
 
 /// Parsed `function_call` output item.
@@ -109,10 +112,13 @@ pub(crate) fn truncate_chars(s: &str, cap: usize) -> String {
 }
 
 /// Responses `tools` array from the registry (function shape).
-pub(crate) fn tools_body() -> Value {
+/// `full == false` (Chat mode) filters out `needs_approval` tools, leaving
+/// exactly the read-only set.
+pub(crate) fn tools_body(full: bool) -> Value {
     Value::Array(
         tools::registry()
             .iter()
+            .filter(|spec| full || !tools::needs_approval(spec.name))
             .map(|spec| {
                 json!({
                     "type": "function",
@@ -127,10 +133,13 @@ pub(crate) fn tools_body() -> Value {
 
 /// Chat-completions `tools` array from the registry (function shape:
 /// `{"type":"function","function":{name,description,parameters}}`).
-pub(crate) fn chat_tools_body() -> Value {
+/// `full == false` (Chat mode) filters out `needs_approval` tools, leaving
+/// exactly the read-only set.
+pub(crate) fn chat_tools_body(full: bool) -> Value {
     Value::Array(
         tools::registry()
             .iter()
+            .filter(|spec| full || !tools::needs_approval(spec.name))
             .map(|spec| {
                 json!({
                     "type": "function",
@@ -604,6 +613,33 @@ fn run_goal_resuming_live(
 }
 
 /// Shared approval gate: reads run free, writes/exec hold for a UI token.
+/// Chat mode (`full == false`) never runs write tools: deny with an
+/// agent-only note (drive_loop then closes the run as on any denial).
+#[cfg(target_os = "windows")]
+fn approve_for_mode(
+    call: &ToolCall,
+    push: &mut dyn FnMut(Value),
+    full: bool,
+) -> Approval {
+    if tools::needs_approval(&call.name) && !full {
+        push_event(
+            &mut { push },
+            AgentEvent::step(
+                0,
+                &call.name,
+                "denied",
+                format!(
+                    "'{}' is agent-only — switch to Agent mode to run it.",
+                    call.name
+                ),
+            ),
+        );
+        return Approval::Deny;
+    }
+    approve_call(call, push)
+}
+
+/// Shared approval gate: reads run free, writes/exec hold for a UI token.
 #[cfg(target_os = "windows")]
 fn approve_call(call: &ToolCall, push: &mut dyn FnMut(Value)) -> Approval {
     if !tools::needs_approval(&call.name) {
@@ -624,8 +660,17 @@ fn approve_call(call: &ToolCall, push: &mut dyn FnMut(Value)) -> Approval {
 }
 
 /// Shared dispatch: threads the approval token back into gated tools.
+/// Backstop: write tools never run in Chat mode, even if a model emits a
+/// call the filtered `tools` array did not advertise (the approval gate
+/// above runs first; this keeps the invariant at the dispatch layer).
 #[cfg(target_os = "windows")]
-fn execute_call(call: &ToolCall, approval: Option<&str>) -> Result<String, String> {
+fn execute_call(call: &ToolCall, approval: Option<&str>, full: bool) -> Result<String, String> {
+    if tools::needs_approval(&call.name) && !full {
+        return Err(format!(
+            "'{}' is only available in Agent mode",
+            call.name
+        ));
+    }
     let mut args = call.arguments.clone();
     if let (Some(token), Some(obj)) = (approval, args.as_object_mut()) {
         obj.insert("approval_token".into(), Value::String(token.to_string()));
@@ -647,8 +692,15 @@ fn run_codex_goal(
     })];
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
     let model = config.model.clone();
+    let full = config.full_tools;
     let mut transport = |items: &[Value], sink: &mut dyn FnMut(Value)| {
-        stream_turn(&model, items, &cancel, sink)
+        stream_turn(&model, items, &cancel, sink, full)
+    };
+    let mut approve = |call: &ToolCall, push: &mut dyn FnMut(Value)| -> Approval {
+        approve_for_mode(call, push, full)
+    };
+    let mut execute = |call: &ToolCall, approval: Option<&str>| -> Result<String, String> {
+        execute_call(call, approval, full)
     };
     drive_loop(
         &mut input,
@@ -656,8 +708,8 @@ fn run_codex_goal(
         deadline,
         &cancel,
         &mut transport,
-        &mut approve_call,
-        &mut execute_call,
+        &mut approve,
+        &mut execute,
         push,
     );
 }
@@ -688,6 +740,7 @@ fn run_openai_goal(
     ];
     let mut consumed = 0usize;
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
+    let full = config.full_tools;
     let mut transport = |items: &[Value], sink: &mut dyn FnMut(Value)| {
         for item in items.iter().skip(consumed) {
             if let Some((id, output)) = tool_output_parts(item) {
@@ -702,6 +755,7 @@ fn run_openai_goal(
             &messages,
             &cancel,
             sink,
+            full,
         )?;
         if !turn.calls.is_empty() {
             messages.push(assistant_calls_message(&turn.text, &turn.calls));
@@ -710,14 +764,20 @@ fn run_openai_goal(
         }
         Ok(turn)
     };
+    let mut approve = |call: &ToolCall, push: &mut dyn FnMut(Value)| -> Approval {
+        approve_for_mode(call, push, full)
+    };
+    let mut execute = |call: &ToolCall, approval: Option<&str>| -> Result<String, String> {
+        execute_call(call, approval, full)
+    };
     drive_loop(
         &mut input,
         MAX_TURNS,
         deadline,
         &cancel,
         &mut transport,
-        &mut approve_call,
-        &mut execute_call,
+        &mut approve,
+        &mut execute,
         push,
     );
 }
@@ -734,6 +794,7 @@ fn stream_openai_turn(
     messages: &[Value],
     cancel: &AtomicBool,
     push: &mut dyn FnMut(Value),
+    full: bool,
 ) -> Result<TurnOutcome, String> {
     use std::io::{BufRead, BufReader};
 
@@ -748,7 +809,7 @@ fn stream_openai_turn(
         "model": model,
         "messages": messages,
         "stream": true,
-        "tools": chat_tools_body(),
+        "tools": chat_tools_body(full),
     });
     let response = agent
         .post(&url)
@@ -816,6 +877,7 @@ fn stream_turn(
     input: &[Value],
     cancel: &AtomicBool,
     push: &mut dyn FnMut(Value),
+    full: bool,
 ) -> Result<TurnOutcome, String> {
     use std::io::{BufRead, BufReader};
 
@@ -829,7 +891,7 @@ fn stream_turn(
         "model": model,
         "instructions": AGENT_INSTRUCTIONS,
         "input": input,
-        "tools": tools_body(),
+        "tools": tools_body(full),
         "stream": true,
         "store": false,
         "max_output_tokens": 1024,
@@ -1072,7 +1134,7 @@ mod tests {
 
     #[test]
     fn chat_tools_body_uses_function_shape() {
-        let body = chat_tools_body();
+        let body = chat_tools_body(true);
         let arr = body.as_array().unwrap();
         assert_eq!(arr.len(), tools::registry().len());
         for item in arr {
@@ -1133,13 +1195,35 @@ mod tests {
 
     #[test]
     fn tools_body_matches_registry() {
-        let body = tools_body();
+        let body = tools_body(true);
         let arr = body.as_array().unwrap();
         assert_eq!(arr.len(), tools::registry().len());
         for item in arr {
             assert_eq!(item["type"], "function");
             assert!(item["name"].is_string());
             assert_eq!(item["parameters"]["type"], "object");
+        }
+    }
+
+    #[test]
+    fn readonly_bodies_exclude_gated_tools() {
+        for body in [tools_body(false), chat_tools_body(false)] {
+            let names: Vec<&str> = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    item.get("name")
+                        .or_else(|| item.pointer("/function/name"))
+                        .and_then(Value::as_str)
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(names, vec!["fs_read", "fs_list", "fs_search"]);
+        }
+        for gated in ["shell_exec", "app_open", "url_open"] {
+            let body = serde_json::to_string(&tools_body(false)).unwrap();
+            assert!(!body.contains(gated), "chat body leaks {gated}");
         }
     }
 
@@ -1280,6 +1364,7 @@ mod tests {
             model: "m".into(),
             base_url: String::new(),
             api_key: String::new(),
+            full_tools: false,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let mut pushed = Vec::new();
@@ -1492,5 +1577,66 @@ mod tests {
         let fc = &input[0];
         assert_eq!(fc["name"], "fs_list");
         assert_eq!(fc["arguments"], "{\"path\":\".\"}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn chat_mode_write_denied_with_agent_only_note() {
+        let call = ToolCall {
+            call_id: "c1".into(),
+            name: "shell_exec".into(),
+            arguments: json!({"command": "echo hi"}),
+        };
+        let mut pushed = Vec::new();
+        {
+            let mut push = |v: Value| pushed.push(v);
+            assert!(matches!(
+                approve_for_mode(&call, &mut push, false),
+                Approval::Deny
+            ));
+        }
+        let note = pushed
+            .iter()
+            .find(|v| v.get("t") == Some(&json!("agentStep")))
+            .expect("chat denial pushes an agent-only step");
+        let detail = note["detail"].as_str().unwrap_or("");
+        assert!(detail.contains("agent-only"), "unexpected: {detail}");
+        assert!(detail.contains("Agent mode"), "unexpected: {detail}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn chat_mode_read_tools_unaffected() {
+        let call = ToolCall {
+            call_id: "c1".into(),
+            name: "fs_list".into(),
+            arguments: json!({"path": "."}),
+        };
+        let mut pushed = Vec::new();
+        {
+            let mut push = |v: Value| pushed.push(v);
+            assert!(matches!(
+                approve_for_mode(&call, &mut push, false),
+                Approval::Auto
+            ));
+        }
+        assert!(pushed.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn execute_backstop_rejects_write_in_chat_mode() {
+        let call = ToolCall {
+            call_id: "c1".into(),
+            name: "shell_exec".into(),
+            arguments: json!({"command": "echo hi"}),
+        };
+        let tok = tools::issue_approval_token();
+        // Even a valid token cannot run a write tool in Chat mode.
+        let err = execute_call(&call, Some(&tok), false).unwrap_err();
+        assert!(err.contains("Agent mode"), "unexpected: {err}");
+        // Full mode keeps the existing approval gate unchanged.
+        let err = execute_call(&call, None, true).unwrap_err();
+        assert!(err.starts_with("approval-required:"), "unexpected: {err}");
     }
 }

@@ -115,9 +115,12 @@ pub enum OverlayEvent {
     ChatCancel,
     /// A `!`-prefixed chat input routed to the agent loop as a goal.
     /// `resume_run_id` re-runs a stored run's goal (`!retry <id>`).
+    /// `mode` is `"chat"` (read-only, default) or `"agent"` (full tools);
+    /// absent or unknown modes run as chat.
     AgentGoal {
         goal: String,
         resume_run_id: Option<String>,
+        mode: Option<String>,
     },
     /// Chat view opened on an empty thread: reply with recent run history.
     AgentLast,

@@ -1483,10 +1483,15 @@ fn handle_ipc(
             let _ = event_tx.send(OverlayEvent::ChatCancel);
         }
         OverlayMessage::AgentGoal(p) => {
+            // Normalize through the payload predicate: absent or unknown
+            // modes arrive downstream as chat (`None`).
+            let agent = p.is_agent_mode();
             let resume = p.resume_run_id.filter(|id| !id.trim().is_empty());
+            let mode = agent.then(|| "agent".to_string());
             let _ = event_tx.send(OverlayEvent::AgentGoal {
                 goal: p.goal,
                 resume_run_id: resume,
+                mode,
             });
         }
         OverlayMessage::AgentApprove(p) => {

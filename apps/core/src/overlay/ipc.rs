@@ -216,14 +216,26 @@ pub(crate) struct IdPayload {
     pub call_id: String,
 }
 
-/// Goal post: `{t:"agentGoal", goal, resume_run_id?}`. Flat shape (the page
-/// spreads the object); `resume_run_id` re-runs a stored run's goal.
+/// Goal post: `{t:"agentGoal", goal, resume_run_id?, mode?}`. Flat shape
+/// (the page spreads the object); `resume_run_id` re-runs a stored run's
+/// goal; `mode` is `"chat"` (read-only, default) or `"agent"` (full tools
+/// with approval gates). Absent or unknown modes default to chat.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentGoalPayload {
     pub goal: String,
     #[serde(default)]
     pub resume_run_id: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl AgentGoalPayload {
+    /// True iff the goal runs with full tools. Any absent or unknown mode
+    /// is chat — never an error.
+    pub(crate) fn is_agent_mode(&self) -> bool {
+        matches!(self.mode.as_deref(), Some("agent"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -692,6 +704,7 @@ mod tests {
             Ok(OverlayMessage::AgentGoal(AgentGoalPayload {
                 goal: "list files in Documents".into(),
                 resume_run_id: None,
+                mode: None,
             }))
         );
         assert_eq!(
@@ -699,6 +712,7 @@ mod tests {
             Ok(OverlayMessage::AgentGoal(AgentGoalPayload {
                 goal: String::new(),
                 resume_run_id: Some("abc-123".into()),
+                mode: None,
             }))
         );
         let big = format!(r#"{{"t":"agentGoal","goal":"{}"}}"#, "x".repeat(16_001));
@@ -712,6 +726,34 @@ mod tests {
             parse_overlay(r#"{"t":"agentGoal","goal":"x","zzz":1}"#),
             Err(IpcReject::BadPayload(_))
         ));
+    }
+
+    #[test]
+    fn agent_goal_mode_defaults_to_chat() {
+        // Absent mode → chat.
+        let msg = parse_overlay(r#"{"t":"agentGoal","goal":"x"}"#).unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert!(!p.is_agent_mode());
+        // Explicit agent mode.
+        let msg = parse_overlay(r#"{"t":"agentGoal","goal":"x","mode":"agent"}"#).unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert!(p.is_agent_mode());
+        // Explicit chat mode.
+        let msg = parse_overlay(r#"{"t":"agentGoal","goal":"x","mode":"chat"}"#).unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert!(!p.is_agent_mode());
+        // Unknown mode string → chat default, never an error.
+        let msg = parse_overlay(r#"{"t":"agentGoal","goal":"x","mode":"turbo"}"#).unwrap();
+        let OverlayMessage::AgentGoal(p) = msg else {
+            panic!("expected agentGoal");
+        };
+        assert!(!p.is_agent_mode());
     }
 
     #[test]

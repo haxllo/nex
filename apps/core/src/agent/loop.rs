@@ -6,6 +6,7 @@
 //! `function_call_output`, repeat. Stops at 12 turns / 60s wall / cancel /
 //! model finish without calls. Never panics; all failures become `agentDone`.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +27,8 @@ const APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// Chars of tool output / summary surfaced in step events.
 const STEP_DETAIL_CHARS: usize = 500;
 
+const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only.";
+
 /// Minimal config snapshot: provider picks the transport, the rest feeds it.
 #[derive(Debug, Clone)]
 pub(crate) struct AgentConfig {
@@ -41,6 +44,15 @@ pub(crate) struct ToolCall {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: Value,
+}
+
+/// In-progress streamed call, keyed by the backend's item id until
+/// `function_call_arguments.done` completes it.
+#[derive(Debug, Default)]
+struct CallAccum {
+    call_id: String,
+    name: String,
+    args: String,
 }
 
 /// One model turn: streamed text plus any function calls.
@@ -263,7 +275,7 @@ fn args_summary(call: &ToolCall) -> String {
 pub(crate) fn drive_loop(
     input: &mut Vec<Value>,
     max_turns: u64,
-    deadline: Instant,
+    mut deadline: Instant,
     cancel: &AtomicBool,
     transport: &mut impl FnMut(&[Value], &mut dyn FnMut(Value)) -> Result<TurnOutcome, String>,
     approve: &mut impl FnMut(&ToolCall, &mut dyn FnMut(Value)) -> Approval,
@@ -313,7 +325,12 @@ pub(crate) fn drive_loop(
                 &mut push_ref,
                 AgentEvent::step(step, &call.name, "running", args_summary(call)),
             );
-            let token: Option<String> = match approve(call, &mut push_ref) {
+            // Approval waits on human time — it must not consume the run
+            // budget, or slow answers read as run timeouts.
+            let approve_start = Instant::now();
+            let approval = approve(call, &mut push_ref);
+            deadline += approve_start.elapsed();
+            let token: Option<String> = match approval {
                 Approval::Auto => None,
                 Approval::Allow(token) => Some(token),
                 Approval::Deny => {
@@ -323,7 +340,10 @@ pub(crate) fn drive_loop(
                     );
                     push_event(
                         &mut push_ref,
-                        AgentEvent::done(format!("Stopped: '{}' was not approved.", call.name)),
+                        AgentEvent::done(format!(
+                            "Stopped: '{}' was not approved (denied or no answer within 120s).",
+                            call.name
+                        )),
                     );
                     return;
                 }
@@ -575,11 +595,13 @@ fn approve_call(call: &ToolCall, push: &mut dyn FnMut(Value)) -> Approval {
         return Approval::Auto;
     }
     let token = tools::issue_approval_token();
+    // Register the waiter BEFORE the card renders: a decision can never
+    // land on an unknown id, even if the UI answers instantly.
+    let rx = approvals::request_approval(call.call_id.clone());
     push_event(
         &mut { push },
         AgentEvent::approval(&call.call_id, &call.name, args_summary(call)),
     );
-    let rx = approvals::request_approval(call.call_id.clone());
     match rx.recv_timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS)) {
         Ok(true) => Approval::Allow(token),
         _ => Approval::Deny, // deny + timeout/disconnect default to deny
@@ -645,7 +667,10 @@ fn run_openai_goal(
         return;
     }
     let mut input: Vec<Value> = Vec::new();
-    let mut messages = vec![json!({"role": "user", "content": goal})];
+    let mut messages = vec![
+        json!({"role": "system", "content": AGENT_INSTRUCTIONS}),
+        json!({"role": "user", "content": goal}),
+    ];
     let mut consumed = 0usize;
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
     let mut transport = |items: &[Value], sink: &mut dyn FnMut(Value)| {
@@ -787,7 +812,7 @@ fn stream_turn(
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
     let body = json!({
         "model": model,
-        "instructions": "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short.",
+        "instructions": AGENT_INSTRUCTIONS,
         "input": input,
         "tools": tools_body(),
         "stream": true,
@@ -816,6 +841,10 @@ fn stream_turn(
     let mut reader = BufReader::new(response.into_reader());
     let mut line = String::new();
     let mut event = String::new();
+    // Streaming calls assemble here; completed ids are remembered so the
+    // later full-item echoes (`output_item.done`, `response.completed`)
+    // never double-collect the same call.
+    let mut stream_accum = StreamAccum::default();
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Ok(outcome);
@@ -851,37 +880,109 @@ fn stream_turn(
             }
             continue;
         }
-        if event == "response.output_item.done" || event == "response.completed" {
-            let before = outcome.calls.len();
-            find_function_calls(&data, &mut outcome.calls);
-            if outcome.calls.len() == before {
-                crate::runtime::log_info(&format!(
-                    "[nex][agent] ignored output item shape: {}",
-                    truncate_chars(payload, 200)
-                ));
-            }
-            continue;
-        }
-        if data
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .is_some()
-        {
-            let message = data
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
+        if let Some(message) = data.pointer("/error/message").and_then(Value::as_str) {
             return Err(format!(
                 "ChatGPT error: {}",
                 truncate_chars(message, 280)
             ));
         }
-        crate::runtime::log_info(&format!(
-            "[nex][agent] ignored SSE shape '{event}': {}",
-            truncate_chars(payload, 200)
-        ));
+        fold_sse_event(&event, &data, &mut stream_accum, &mut outcome.calls);
     }
     Ok(outcome)
+}
+
+/// Per-turn streaming fold state: assembles delta-streamed function calls.
+#[derive(Debug, Default)]
+struct StreamAccum {
+    pending: HashMap<String, CallAccum>,
+    seen: HashSet<String>,
+}
+
+/// Fold one SSE event into collected calls. Pure: drives the exact
+/// sequence backends emit (`output_item.added` → argument deltas →
+/// `function_call_arguments.done`, plus full-item echoes). Unknown shapes
+/// are skipped silently.
+fn fold_sse_event(event: &str, data: &Value, acc: &mut StreamAccum, calls: &mut Vec<ToolCall>) {
+    if event == "response.output_item.added" {
+        // Seed for the argument deltas that follow: the added item
+        // carries the stable item id plus call_id/name.
+        if let Some(item) = data.get("item") {
+            let is_call = item.get("type").and_then(Value::as_str) == Some("function_call");
+            if is_call {
+                if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(item_id);
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    acc.pending.entry(item_id.to_string()).or_insert(CallAccum {
+                        call_id: call_id.to_string(),
+                        name: name.to_string(),
+                        args: String::new(),
+                    });
+                }
+            }
+        }
+        return;
+    }
+    if event == "response.function_call_arguments.delta" {
+        if let (Some(item_id), Some(delta)) = (
+            data.get("item_id").and_then(Value::as_str),
+            data.get("delta").and_then(Value::as_str),
+        ) {
+            if let Some(entry) = acc.pending.get_mut(item_id) {
+                entry.args.push_str(delta);
+            }
+        }
+        return;
+    }
+    if event == "response.function_call_arguments.done" {
+        let item_id = data.get("item_id").and_then(Value::as_str).unwrap_or("");
+        let entry = acc.pending.remove(item_id).or_else(|| {
+            // Done without prior deltas: synthesize from the event.
+            let args = data
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if args.is_empty() {
+                return None;
+            }
+            Some(CallAccum {
+                call_id: data
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(item_id)
+                    .to_string(),
+                name: data.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                args,
+            })
+        });
+        if let Some(entry) = entry {
+            if !entry.call_id.is_empty()
+                && !entry.name.is_empty()
+                && acc.seen.insert(entry.call_id.clone())
+            {
+                let arguments = serde_json::from_str(&entry.args)
+                    .unwrap_or(Value::Object(Default::default()));
+                calls.push(ToolCall {
+                    call_id: entry.call_id,
+                    name: entry.name,
+                    arguments,
+                });
+            }
+        }
+        return;
+    }
+    if event == "response.output_item.done" || event == "response.completed" {
+        let mut found = Vec::new();
+        find_function_calls(data, &mut found);
+        for call in found {
+            if acc.seen.insert(call.call_id.clone()) {
+                calls.push(call);
+            }
+        }
+    }
 }
 
 /// Tolerantly collect every `{"type":"function_call",…}` object in an SSE
@@ -1212,5 +1313,113 @@ mod tests {
         );
         assert_eq!(calls, 0);
         assert_eq!(pushed.last().unwrap()["summary"], "Cancelled.");
+    }
+
+    fn feed(acc: &mut StreamAccum, calls: &mut Vec<ToolCall>, event: &str, payload: Value) {
+        fold_sse_event(event, &payload, acc, calls);
+    }
+
+    #[test]
+    fn streamed_deltas_assemble_into_one_call() {
+        // Replays the live wire shape: added → argument deltas → done.
+        let mut acc = StreamAccum::default();
+        let mut calls = Vec::new();
+        feed(
+            &mut acc,
+            &mut calls,
+            "response.output_item.added",
+            json!({"item": {"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "shell_exec"}}),
+        );
+        for chunk in ["{\"", "command", "\":\"", "mkdir x", "\"}"] {
+            feed(
+                &mut acc,
+                &mut calls,
+                "response.function_call_arguments.delta",
+                json!({"item_id": "fc-1", "delta": chunk}),
+            );
+        }
+        assert!(calls.is_empty());
+        feed(
+            &mut acc,
+            &mut calls,
+            "response.function_call_arguments.done",
+            json!({"item_id": "fc-1", "arguments": "{\"command\":\"mkdir x\"}"}),
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, "call-1");
+        assert_eq!(calls[0].name, "shell_exec");
+        assert_eq!(calls[0].arguments, json!({"command": "mkdir x"}));
+    }
+
+    #[test]
+    fn full_item_echo_after_streaming_does_not_duplicate() {
+        let mut acc = StreamAccum::default();
+        let mut calls = Vec::new();
+        feed(
+            &mut acc,
+            &mut calls,
+            "response.output_item.added",
+            json!({"item": {"type": "function_call", "id": "fc-9", "call_id": "call-9", "name": "fs_list"}}),
+        );
+        feed(
+            &mut acc,
+            &mut calls,
+            "response.function_call_arguments.done",
+            json!({"item_id": "fc-9", "arguments": "{\"path\":\".\"}"}),
+        );
+        assert_eq!(calls.len(), 1);
+        // Late full-item echo of the same call.
+        feed(
+            &mut acc,
+            &mut calls,
+            "response.output_item.done",
+            json!({"item": {"type": "function_call", "id": "fc-9", "call_id": "call-9", "name": "fs_list", "arguments": "{\"path\":\".\"}"}}),
+        );
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn approval_wait_does_not_consume_run_budget() {
+        // approve() blocks 300ms; the run budget is 200ms. Without the
+        // deadline extension the loop would stop before executing.
+        let mut input = Vec::new();
+        let cancel = AtomicBool::new(false);
+        let mut turns = 0u32;
+        let mut transport = |_items: &[Value], _sink: &mut dyn FnMut(Value)| {
+            turns += 1;
+            if turns > 2 {
+                return Ok(TurnOutcome { text: "finished".into(), calls: Vec::new() });
+            }
+            Ok(TurnOutcome {
+                text: String::new(),
+                calls: vec![ToolCall {
+                    call_id: "c-budget".into(),
+                    name: "fs_list".into(),
+                    arguments: json!({"path": "."}),
+                }],
+            })
+        };
+        let mut approve =
+            |_call: &ToolCall, _push: &mut dyn FnMut(Value)| -> Approval {
+                std::thread::sleep(Duration::from_millis(300));
+                Approval::Auto
+            };
+        let mut execute =
+            |_call: &ToolCall, _approval: Option<&str>| -> Result<String, String> { Ok("ok".into()) };
+        let mut pushed = Vec::new();
+        let mut push = |v: Value| pushed.push(v);
+        drive_loop(
+            &mut input,
+            12,
+            Instant::now() + Duration::from_millis(200),
+            &cancel,
+            &mut transport,
+            &mut approve,
+            &mut execute,
+            &mut push,
+        );
+        // Second turn runs only if the deadline survived the 300ms wait.
+        assert!(turns >= 2, "approval wait consumed the run budget");
+        assert!(pushed.iter().any(|v| v.get("state").and_then(Value::as_str) == Some("done")));
     }
 }

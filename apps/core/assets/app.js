@@ -89,6 +89,32 @@
   let chatMessages = [];
   let chatRenderFrame = 0;
   let chatStepSeq = 0;
+  // Live step lines keyed so a running line morphs into its terminal
+  // state instead of appending a second line (one line per call).
+  const agentStepLive = new Map();
+  function buildAgentStepLine(text) {
+    const line = document.createElement("article");
+    line.className = "agent-step";
+    if (text.length > 160) {
+      const head = document.createElement("span");
+      head.textContent = text.slice(0, 160) + "… ";
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "agent-expand";
+      toggle.textContent = "more";
+      const full = document.createElement("span");
+      full.hidden = true;
+      full.textContent = text.slice(160);
+      toggle.addEventListener("click", () => {
+        full.hidden = !full.hidden;
+        toggle.textContent = full.hidden ? "more" : "less";
+      });
+      line.append(head, toggle, full);
+    } else {
+      line.textContent = text;
+    }
+    return line;
+  }
   let chatStreamMessageId = "";
   let chatStreamOffset = 0;
   let chatRecognition = null;
@@ -1550,11 +1576,10 @@
       chatMessagesEl.replaceChildren();
       for (const message of chatMessages) {
         if (message.role === "step") {
-          const article = document.createElement("article");
-          article.className = "agent-" + (message.kind === "done" ? "done" : "step");
-          article.dataset.messageId = message.id;
-          article.textContent = message.content;
-          chatMessagesEl.appendChild(article);
+          const built = buildAgentStepLine(message.content);
+          built.dataset.messageId = message.id;
+          if (message.kind === "done") built.classList.replace("agent-step", "agent-done");
+          chatMessagesEl.appendChild(built);
           continue;
         }
         const article = document.createElement("article");
@@ -2227,12 +2252,23 @@
     if (state.agentStep) {
       const s = state.agentStep;
       const text = "step " + (s.step ?? "?") + " · " + (s.tool || "tool") + " · " + (s.state || "") + (s.detail ? " — " + s.detail : "");
-      chatMessages.push({ id: "s-" + (chatStepSeq++).toString(36), role: "step", kind: "step", content: text });
-      persistChat();
-      const line = document.createElement("article");
-      line.className = "agent-step";
-      line.textContent = text;
-      appendAgentNode(line);
+      const key = (s.step ?? "?") + "·" + (s.tool || "tool");
+      const terminal = s.state !== "running";
+      let line = agentStepLive.get(key);
+      if (!line) {
+        line = buildAgentStepLine(text);
+        agentStepLive.set(key, line);
+        appendAgentNode(line);
+      } else {
+        const fresh = buildAgentStepLine(text);
+        line.replaceChildren(...fresh.childNodes);
+        line.className = fresh.className;
+      }
+      if (terminal) {
+        agentStepLive.delete(key);
+        chatMessages.push({ id: "s-" + (chatStepSeq++).toString(36), role: "step", kind: "step", content: text });
+        persistChat();
+      }
     }
     if (state.agentDone) {
       const d = typeof state.agentDone === "string" ? { summary: state.agentDone } : state.agentDone;

@@ -1370,7 +1370,7 @@ html[data-theme="light"] #update-btn:hover {
 .chat-model-picker > #chat-model:focus { border: 0; box-shadow: none; }
 .chat-model-options { max-height: 225px; overflow: hidden; }
 .chat-model-search { height: 30px !important; margin-bottom: 4px; border: 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--bg-opaque) 30%, transparent) !important; box-shadow: none !important; font-size: 12px !important; }
-.chat-model-results { max-height: 188px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+.chat-model-results { max-height: 188px; overflow-y: auto; padding-bottom: 4px; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 .chat-model-results::-webkit-scrollbar { width: 8px; }
 .chat-model-results::-webkit-scrollbar-track { background: transparent; }
 .chat-model-results::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }

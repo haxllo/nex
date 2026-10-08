@@ -908,7 +908,11 @@ fn stream_turn(
         .send_json(body)
         .map_err(|e| match e {
             ureq::Error::Status(code, response) => {
-                response.into_string().unwrap_or_default();
+                let body = response.into_string().unwrap_or_default();
+                crate::runtime::log_info(&format!(
+                    "[nex][agent] HTTP {code}: {}",
+                    body.chars().take(400).collect::<String>()
+                ));
                 format!("ChatGPT returned HTTP {code}.")
             }
             ureq::Error::Transport(_) => {

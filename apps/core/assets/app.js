@@ -182,7 +182,7 @@
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "agentApprove", "agentDeny"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -2055,6 +2055,13 @@
   }
 
   function applyChatUpdate(state) {
+    // Agent loop pushes raw AgentEvent JSON ({t:"agentStep"|...}) while
+    // later turns use the wrapped chat shape ({agentStep:{...}}) — accept both.
+    if (state && typeof state.t === "string" && state.t.slice(0, 5) === "agent") {
+      if (state.t === "agentStep") state = { agentStep: { step: state.step, tool: state.tool, state: state.state, detail: state.detail } };
+      else if (state.t === "agentApproval") state = { agentApproval: { call_id: state.call_id, tool: state.tool, args_summary: state.args_summary } };
+      else if (state.t === "agentDone") state = { agentDone: { summary: state.summary } };
+    }
     if (state.chatConfig) {
       const wasCodexConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
       chatConfig = { ...chatConfig, ...state.chatConfig };
@@ -2131,12 +2138,80 @@
     }
     if (state.chatDone) { chatLiveStatus.textContent = ""; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
     if (state.chatCancelled) { chatLiveStatus.textContent = "Response stopped"; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
+    if (state.agentApproval) renderAgentApproval(state.agentApproval);
+    if (state.agentStep) {
+      const s = state.agentStep;
+      const line = document.createElement("article");
+      line.className = "agent-step";
+      line.textContent = "step " + (s.step ?? "?") + " · " + (s.tool || "tool") + " · " + (s.state || "") + (s.detail ? " — " + s.detail : "");
+      appendAgentNode(line);
+    }
+    if (state.agentDone) {
+      const done = document.createElement("article");
+      done.className = "agent-done";
+      done.textContent = typeof state.agentDone === "string" ? state.agentDone : (state.agentDone.summary || "Done");
+      appendAgentNode(done);
+      chatLiveStatus.textContent = "";
+      updateChatStreamingState(false);
+    }
+  }
+
+  // Agent nodes live outside chatMessages (never re-rendered or persisted).
+  function appendAgentNode(node) {
+    const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
+    chatEmpty.hidden = true;
+    chatMessagesEl.appendChild(node);
+    if (atBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  function renderAgentApproval(payload) {
+    const data = payload && typeof payload === "object" ? payload : {};
+    const callId = String(data.call_id || data.callId || "");
+    if (!callId || chatMessagesEl.querySelector('[data-agent-call="' + CSS.escape(callId) + '"]')) return;
+    const card = document.createElement("article");
+    card.className = "agent-card";
+    card.dataset.agentCall = callId;
+    const head = document.createElement("div");
+    head.className = "agent-card-head";
+    const tool = document.createElement("span");
+    tool.className = "agent-tool";
+    tool.textContent = String(data.tool || "tool");
+    const actions = document.createElement("div");
+    actions.className = "agent-actions";
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "agent-approve";
+    approve.textContent = "Approve";
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "agent-deny";
+    deny.textContent = "Deny";
+    const decided = document.createElement("div");
+    decided.className = "agent-decided";
+    decided.hidden = true;
+    const settle = (ok) => {
+      approve.disabled = true;
+      deny.disabled = true;
+      post(ok ? "agentApprove" : "agentDeny", { call_id: callId });
+      decided.textContent = ok ? "Approved" : "Denied";
+      decided.hidden = false;
+      card.dataset.decided = ok ? "approved" : "denied";
+    };
+    approve.addEventListener("click", () => settle(true));
+    deny.addEventListener("click", () => settle(false));
+    actions.append(approve, deny);
+    head.append(tool, actions);
+    const args = document.createElement("div");
+    args.className = "agent-args";
+    args.textContent = String(data.args_summary || data.argsSummary || "");
+    card.append(head, args, decided);
+    appendAgentNode(card);
   }
 
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || state.agentApproval || state.agentStep || state.agentDone || state.t === "agentStep" || state.t === "agentApproval" || state.t === "agentDone" || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

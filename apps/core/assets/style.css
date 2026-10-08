@@ -1438,6 +1438,21 @@ html[data-theme="light"] #update-btn:hover {
 .chat-code-header button { min-width: 40px; min-height: 25px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
 .chat-code-header button:hover { background: var(--hover); color: var(--text); }
 .chat-code-block pre { max-height: 280px; overflow: auto; margin: 0; padding: 1px 11px 11px; font: 11px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre; }
+/* Agent approval card + step lines: same tokens as .chat-code-block (7px radius, faint border, 11px type). */
+.agent-card { margin: 7px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: rgba(0,0,0,0.17); box-shadow: 0 1px 0 rgba(255,255,255,0.07) inset; font-size: 11px; line-height: 1.55; }
+[data-theme="light"] .agent-card { background: rgba(0,0,0,0.045); }
+.agent-card-head { min-height: 29px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 9px; color: var(--text-faint); font-size: 10px; }
+.agent-tool { min-width: 0; overflow: hidden; color: var(--text-dim); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.agent-args { padding: 0 11px 8px; color: var(--text-dim); font: 11px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-args:empty { display: none; }
+.agent-actions { flex: 0 0 auto; display: flex; gap: 6px; }
+.agent-approve, .agent-deny { min-width: 52px; min-height: 25px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--text-dim); font: 10px var(--font); cursor: pointer; }
+.agent-approve:hover:not(:disabled), .agent-deny:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.agent-approve:disabled, .agent-deny:disabled { opacity: .45; cursor: default; }
+.agent-decided { padding: 0 11px 9px; color: var(--text-faint); font-size: 10px; }
+.agent-decided[hidden] { display: none; }
+.agent-step { color: var(--text-faint); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-done { color: var(--text-dim); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .chat-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
 .chat-table { border-collapse: collapse; font-size: 11px; }
 .chat-table th, .chat-table td { min-width: 70px; padding: 5px 8px; border-bottom: 1px solid var(--divider); text-align: left; }

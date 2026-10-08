@@ -56,7 +56,7 @@ fn path_param(desc: &str, required: bool) -> serde_json::Value {
     schema
 }
 
-/// Full tool registry: 3 read-only + 3 approval-gated.
+/// Full tool registry: 4 read-only + 3 approval-gated.
 pub(crate) fn registry() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -78,6 +78,15 @@ pub(crate) fn registry() -> Vec<ToolSpec> {
                     "query": { "type": "string", "description": "Filename substring to match (case-insensitive)." }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "app_info",
+            description: "Resolved environment facts: home directory, Nex app-data directory, working directory, OS, shell. Call this before guessing locations.",
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
                 "additionalProperties": false
             }),
         },
@@ -185,8 +194,21 @@ pub(crate) fn dispatch(
                 .ok_or_else(|| "url_open: missing required string arg 'url'".to_string())?;
             url_open(url)
         }
+        "app_info" => Ok(app_info()),
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// Resolved environment facts so the model never guesses locations.
+fn app_info() -> String {
+    let info = serde_json::json!({
+        "home": home_dir().to_string_lossy(),
+        "app_data": crate::config::stable_app_data_dir().to_string_lossy(),
+        "working_dir": std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        "os": std::env::consts::OS,
+        "shell": "cmd.exe",
+    });
+    serde_json::to_string(&info).unwrap_or_default()
 }
 
 /// Allowed read roots: current dir + user's home.
@@ -606,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_all_six_tools() {
+    fn registry_lists_all_tools() {
         let names: Vec<_> = registry().iter().map(|t| t.name).collect();
         assert_eq!(
             names,
@@ -614,6 +636,7 @@ mod tests {
                 "fs_read",
                 "fs_list",
                 "fs_search",
+                "app_info",
                 "shell_exec",
                 "app_open",
                 "url_open"
@@ -807,8 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn quoted_paths_survive_cmd_quoting() {
-        // Regression: cmd.exe mangled inner quotes, so quoted absolute
+    fn quoted_paths_survive_cmd_quoting() {        // Regression: cmd.exe mangled inner quotes, so quoted absolute
         // paths failed with a syntax error. Needs Windows cmd.
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("a b");
@@ -821,6 +843,17 @@ mod tests {
         )
         .unwrap();
         assert!(target.is_dir(), "quoted mkdir failed");
+    }
+
+    #[test]
+    fn app_info_reports_resolved_paths() {
+        let out = dispatch("app_info", &serde_json::json!({}), None).unwrap();
+        let info: serde_json::Value = serde_json::from_str(&out).unwrap();
+        for key in ["home", "app_data", "working_dir", "os", "shell"] {
+            let value = info.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+            assert!(!value.is_empty(), "app_info missing {key}");
+        }
+        assert!(!info["home"].as_str().unwrap_or("").contains('%'));
     }
 
     #[test]

@@ -27,7 +27,7 @@ const APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// Chars of tool output / summary surfaced in step events.
 const STEP_DETAIL_CHARS: usize = 500;
 
-const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only. After destructive actions verify with a read/list before reporting success; never claim unchecked results.";
+const AGENT_INSTRUCTIONS: &str = "You are Nex, a concise assistant inside the Nex launcher. Use the provided tools to complete the user's goal step by step. Keep text replies short. You run on Windows: for shell commands use cmd.exe syntax (mkdir, dir, del, copy, &&), %USERPROFILE% for the home directory, and powershell -NoProfile -Command for anything advanced. Never use Unix tools (touch, ls, rm, cat). Prefer the file tools for file work; shell_exec is for commands only. After destructive actions verify with a read/list before reporting success; never claim unchecked results. Present resolved paths to the user, never raw %VAR%, $VAR, or ~/.";
 
 /// One prior chat turn threaded into a goal run as context (user/assistant only).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1296,7 +1296,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            assert_eq!(names, vec!["fs_read", "fs_list", "fs_search"]);
+            assert_eq!(names, vec!["fs_read", "fs_list", "fs_search", "app_info"]);
         }
         for gated in ["shell_exec", "app_open", "url_open"] {
             let body = serde_json::to_string(&tools_body(false)).unwrap();

@@ -1682,8 +1682,6 @@
     } else if (!chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
     renderChatMessages();
     post("chatState");
-    // Empty thread: show the last finished run (if any) with its retry id.
-    if (chatMessages.length === 0 && !chatMessagesEl.querySelector(".agent-step,.agent-done,.agent-card")) post("agentLast");
     resizeChatInput();
     postChatResize();
     chatInput.focus();
@@ -2226,21 +2224,10 @@
       chatLiveStatus.textContent = "";
       updateChatStreamingState(false);
     }
-    if (state.agentHistory) {
-      // Late arrival: only render into a still-empty thread.
-      if (chatMessages.length === 0 && !chatMessagesEl.querySelector(".agent-step,.agent-done,.agent-card")) {
-        const runs = Array.isArray(state.agentHistory.runs) ? state.agentHistory.runs.slice(0, 5) : [];
-        for (const r of runs) {
-          const line = document.createElement("article");
-          line.className = "agent-step agent-history";
-          line.textContent = "Previous run " + r.id + " · " + r.status + " · " + r.steps + " steps — " + String(r.goal || "").slice(0, 80);
-          appendAgentNode(line);
-        }
-      }
-    }
   }
 
-  // Agent nodes live outside chatMessages (never re-rendered or persisted).
+  // Step/done lines persist via chatMessages; approval cards and
+  // history lines stay ephemeral.
   function appendAgentNode(node) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = true;
@@ -2295,7 +2282,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || state.agentApproval || state.agentStep || state.agentDone || state.agentHistory || state.t === "agentStep" || state.t === "agentApproval" || state.t === "agentDone" || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || state.agentApproval || state.agentStep || state.agentDone || state.t === "agentStep" || state.t === "agentApproval" || state.t === "agentDone" || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

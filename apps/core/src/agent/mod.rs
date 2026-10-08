@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+pub(crate) mod tools;
+
 /// Step/approval/done events streamed to the chat view as JSON.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "t")]

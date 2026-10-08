@@ -388,7 +388,10 @@ fn shell_exec(command: &str) -> Result<String, String> {
     fn make_cmd(command: &str) -> std::process::Command {
         use std::os::windows::process::CommandExt as _;
         let mut cmd = std::process::Command::new("cmd.exe");
-        cmd.arg("/C").arg(command);
+        // /S keeps inner quotes intact; raw_arg passes the command
+        // through verbatim because Rust's automatic quoting would escape
+        // inner quotes in a way cmd.exe cannot parse.
+        cmd.arg("/S").arg("/C").raw_arg(command);
         // CREATE_NO_WINDOW: no console flash over the overlay.
         cmd.creation_flags(0x08000000);
         // Predictable start point: the user's home directory.
@@ -649,6 +652,23 @@ mod tests {
             out.trim_end().eq_ignore_ascii_case(&expected),
             "cwd {out} != home {expected}"
         );
+    }
+
+    #[test]
+    fn quoted_paths_survive_cmd_quoting() {
+        // Regression: cmd.exe mangled inner quotes, so quoted absolute
+        // paths failed with a syntax error. Needs Windows cmd.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a b");
+        let command = format!("mkdir \"{}\"", target.display());
+        let tok = issue_approval_token();
+        dispatch(
+            "shell_exec",
+            &serde_json::json!({ "command": command, "approval_token": &tok }),
+            Some(&tok),
+        )
+        .unwrap();
+        assert!(target.is_dir(), "quoted mkdir failed");
     }
 
     #[test]

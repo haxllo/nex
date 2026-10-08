@@ -360,6 +360,15 @@ pub(crate) fn drive_loop(
                             if detail.is_empty() { "(empty)".to_string() } else { detail },
                         ),
                     );
+                    // Record the call itself: the next turn's input must
+                    // contain the assistant's function_call item or the
+                    // backend rejects the orphaned function_call_output.
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    }));
                     input.push(json!({
                         "type": "function_call_output",
                         "call_id": call.call_id,
@@ -369,6 +378,12 @@ pub(crate) fn drive_loop(
                 Err(error) => {
                     let detail = truncate_chars(&error, STEP_DETAIL_CHARS);
                     push_event(&mut push_ref, AgentEvent::step(step, &call.name, "error", detail));
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.call_id,
+                        "name": call.name,
+                        "arguments": serde_json::to_string(&call.arguments).unwrap_or_default(),
+                    }));
                     input.push(json!({
                         "type": "function_call_output",
                         "call_id": call.call_id,
@@ -1164,8 +1179,8 @@ mod tests {
         let done = pushed.iter().rev().find(|v| v.get("t") == Some(&json!("agentDone")));
         let summary = done.unwrap()["summary"].as_str().unwrap();
         assert!(summary.contains("3 steps"), "unexpected: {summary}");
-        // 1 seed + 3 outputs fed back into context.
-        assert_eq!(input.len(), 4);
+        // 1 seed + 3 × (function_call record + output) fed back into context.
+        assert_eq!(input.len(), 7);
     }
 
     #[test]
@@ -1421,5 +1436,61 @@ mod tests {
         // Second turn runs only if the deadline survived the 300ms wait.
         assert!(turns >= 2, "approval wait consumed the run budget");
         assert!(pushed.iter().any(|v| v.get("state").and_then(Value::as_str) == Some("done")));
+    }
+
+    #[test]
+    fn executed_calls_leave_paired_records_for_next_turn() {
+        // The backend rejects orphaned function_call_output: every executed
+        // call must leave its function_call item ahead of the output.
+        let mut input = Vec::new();
+        let cancel = AtomicBool::new(false);
+        let mut transport = |items: &[Value], _sink: &mut dyn FnMut(Value)| {
+            if items.len() > 1 {
+                return Ok(TurnOutcome { text: "finished".into(), calls: Vec::new() });
+            }
+            Ok(TurnOutcome {
+                text: String::new(),
+                calls: vec![ToolCall {
+                    call_id: "c-pair".into(),
+                    name: "fs_list".into(),
+                    arguments: json!({"path": "."}),
+                }],
+            })
+        };
+        let mut approve =
+            |_call: &ToolCall, _push: &mut dyn FnMut(Value)| -> Approval { Approval::Auto };
+        let mut execute =
+            |_call: &ToolCall, _approval: Option<&str>| -> Result<String, String> { Ok("ok".into()) };
+        let mut pushed = Vec::new();
+        let mut push = |v: Value| pushed.push(v);
+        drive_loop(
+            &mut input,
+            12,
+            Instant::now() + Duration::from_secs(30),
+            &cancel,
+            &mut transport,
+            &mut approve,
+            &mut execute,
+            &mut push,
+        );
+        let kinds: Vec<(&str, &str)> = input
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    item.get("type")?.as_str()?,
+                    item.get("call_id")?.as_str()?,
+                ))
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("function_call", "c-pair"),
+                ("function_call_output", "c-pair"),
+            ]
+        );
+        let fc = &input[0];
+        assert_eq!(fc["name"], "fs_list");
+        assert_eq!(fc["arguments"], "{\"path\":\".\"}");
     }
 }

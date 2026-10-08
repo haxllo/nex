@@ -95,7 +95,25 @@
   function buildAgentStepLine(text) {
     const line = document.createElement("article");
     line.className = "agent-step";
-    if (text.length > 160) {
+    const lines = text.split("\n");
+    // Long listings collapse to the first rows; full text stays in the
+    // persisted message so transcripts and copy keep everything.
+    if (lines.length > 6) {
+      const head = document.createElement("span");
+      head.textContent = lines.slice(0, 5).join("\n") + "\n… " + (lines.length - 5) + " more lines ";
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "agent-expand";
+      toggle.textContent = "expand";
+      const full = document.createElement("span");
+      full.hidden = true;
+      full.textContent = lines.slice(5).join("\n");
+      toggle.addEventListener("click", () => {
+        full.hidden = !full.hidden;
+        toggle.textContent = full.hidden ? "expand" : "collapse";
+      });
+      line.append(head, toggle, full);
+    } else if (text.length > 160) {
       const head = document.createElement("span");
       head.textContent = text.slice(0, 160) + "… ";
       const toggle = document.createElement("button");
@@ -2275,7 +2293,7 @@
     }
     if (state.agentDone) {
       const d = typeof state.agentDone === "string" ? { summary: state.agentDone } : state.agentDone;
-      const text = (d.summary || "Done") + (d.run_id ? " · run " + d.run_id : "");
+      const text = (d.summary || "Done");
       chatMessages.push({ id: "s-" + (chatStepSeq++).toString(36), role: "step", kind: "done", content: text });
       persistChat();
       const done = document.createElement("article");

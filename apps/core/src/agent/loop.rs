@@ -186,6 +186,19 @@ pub(crate) fn truncate_chars(s: &str, cap: usize) -> String {
     out
 }
 
+/// Word-boundary truncation for final answers: never cuts mid-word.
+pub(crate) fn truncate_words(s: &str, cap: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= cap {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(cap).collect();
+    match head.rfind([' ', '\n', '\t']) {
+        Some(idx) => format!("{}…", head[..idx].trim_end()),
+        None => format!("{}…", head),
+    }
+}
+
 /// Responses `tools` array from the registry (function shape).
 /// `full == false` (Chat mode) filters out `needs_approval` tools, leaving
 /// exactly the read-only set.
@@ -395,7 +408,7 @@ pub(crate) fn drive_loop(
             let summary = if turn.text.trim().is_empty() {
                 "Done.".to_string()
             } else {
-                truncate_chars(turn.text.trim(), 240)
+                truncate_words(&turn.text, 1200)
             };
             push_event(&mut push_ref, AgentEvent::done(summary));
             return;
@@ -1207,6 +1220,14 @@ mod tests {
         assert_eq!(truncate_chars("abc", 5), "abc");
         let out = truncate_chars(&"x".repeat(10), 4);
         assert!(out.starts_with("xxxx") && out.contains("truncated"));
+    }
+
+    #[test]
+    fn truncation_words_never_cuts_mid_word() {
+        assert_eq!(truncate_words("short answer", 50), "short answer");
+        let out = truncate_words("alpha beta gamma delta", 12);
+        assert!(!out.contains("gam"), "cut mid-word: {out}");
+        assert!(out.ends_with("…"), "missing ellipsis: {out}");
     }
 
     #[test]

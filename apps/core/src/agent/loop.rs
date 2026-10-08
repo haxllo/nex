@@ -688,7 +688,7 @@ fn run_codex_goal(
     let mut input = vec![json!({
         "type": "message",
         "role": "user",
-        "content": [{ "type": "input_text", "text": goal }],
+        "content": [{ "type": "output_text", "text": goal }],
     })];
     let deadline = Instant::now() + Duration::from_secs(WALL_CLOCK_SECS);
     let model = config.model.clone();

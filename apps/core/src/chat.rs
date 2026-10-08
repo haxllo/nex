@@ -690,14 +690,14 @@ fn stream_codex_native(
             json!({
                 "type": "message",
                 "role": turn.role,
-                "content": [{"type": "input_text", "text": turn.content.chars().take(6000).collect::<String>()}],
+                "content": [{"type": "output_text", "text": turn.content.chars().take(6000).collect::<String>()}],
             })
         })
         .collect();
     input_items.push(json!({
         "type": "message",
         "role": "user",
-        "content": [{"type": "input_text", "text": request.message}],
+        "content": [{"type": "output_text", "text": request.message}],
     }));
     let body = json!({
         "model": config.model,

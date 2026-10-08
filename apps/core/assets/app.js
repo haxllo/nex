@@ -1732,13 +1732,25 @@
   }
 
   // Rerun affordance under each sent message: same thread, fresh attempt.
+  // Chat/Agent mode: Chat answers with read-only tools, Agent runs
+  // the full tool loop. Persisted across restarts, Chat by default.
+  const CHAT_MODE_KEY = "nex.chat.mode.v1";
+  let agentMode = false;
+  try { agentMode = localStorage.getItem(CHAT_MODE_KEY) === "agent"; } catch (_) {}
+  function syncChatMode() {
+    $("chat-mode-chat").setAttribute("aria-selected", String(!agentMode));
+    $("chat-mode-agent").setAttribute("aria-selected", String(agentMode));
+    chatInput.placeholder = agentMode ? "Give me a task…" : "Ask anything…";
+  }
+
   function runUserMessage(message) {
-    if (message.startsWith("!")) {
-      const rest = message.slice(1).trim();
-      if (!rest) { chatInput.focus(); return; }
-      const retry = rest.match(/^retry\s+(\S+)\s*$/i);
-      if (retry) { startAgentGoal("", retry[1]); return; }
-      startAgentGoal(rest);
+    // Legacy "!" prefix still forces a goal; "!retry <id>" still resumes.
+    const text = message.startsWith("!") ? message.slice(1).trim() : message;
+    const retry = text.match(/^retry\s+(\S+)\s*$/i);
+    if (retry) { startAgentGoal("", retry[1]); return; }
+    if (agentMode) {
+      if (!text) { chatInput.focus(); return; }
+      startAgentGoal(text);
       return;
     }
     startChatRequest(message);
@@ -1746,7 +1758,7 @@
 
   function startAgentGoal(goal, resumeRunId) {
     if (chatStreaming) post("chatCancel");
-    chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: resumeRunId ? "!retry " + resumeRunId : "!" + goal });
+    chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: resumeRunId ? "!retry " + resumeRunId : goal });
     const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "" };
     chatMessages.push(assistant);
     saveChatTitle(); persistChat();
@@ -1754,7 +1766,8 @@
     chatLiveStatus.textContent = "Working…";
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("agentGoal", resumeRunId ? { goal: goal || "", resume_run_id: resumeRunId } : { goal });
+    const mode = agentMode ? "agent" : "chat";
+    post("agentGoal", resumeRunId ? { goal: goal || "", resume_run_id: resumeRunId, mode } : { goal, mode });
     chatInput.focus(); postChatResize();
   }
 
@@ -1960,8 +1973,20 @@
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
-  $("chat-transcript-button").addEventListener("click", async () => {
-    const lines = [];
+  $("chat-mode-chat").addEventListener("click", () => {
+    agentMode = false;
+    try { localStorage.setItem(CHAT_MODE_KEY, "chat"); } catch (_) {}
+    syncChatMode();
+    chatInput.focus();
+  });
+  $("chat-mode-agent").addEventListener("click", () => {
+    agentMode = true;
+    try { localStorage.setItem(CHAT_MODE_KEY, "agent"); } catch (_) {}
+    syncChatMode();
+    chatInput.focus();
+  });
+  syncChatMode();
+  $("chat-transcript-button").addEventListener("click", async () => {    const lines = [];
     for (const message of chatMessages) {
       if (message.role === "user") lines.push("You: " + message.content);
       else if (message.role === "assistant") lines.push("Nex: " + message.content);

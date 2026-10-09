@@ -502,8 +502,12 @@ pub(crate) fn run_windows_runtime(
     // so we must not hold the RwLock guard while joining — deadlock.
     #[cfg(target_os = "windows")]
     let _watcher_handle = service.read().ok().and_then(|g| g.take_file_watchers());
-    // _watcher_handle is dropped here (joins watcher threads) after
-    // the RwLock read guard has been released.
+    #[cfg(target_os = "windows")]
+    let _application_watcher_handle = service
+        .read()
+        .ok()
+        .and_then(|g| g.take_application_watchers());
+    // Watcher handles are dropped here, after their service locks are released.
 
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).
@@ -1555,6 +1559,7 @@ impl RuntimeWorker {
                 if let Err(error) = svc.start_file_watchers(&self.service) {
                     log_warn(&format!("[nex] directory_watcher start failed: {error}"));
                 }
+                svc.start_application_watchers(&self.service);
             }
         } else {
             // Service lock is held by a worker. The config reloader,
@@ -1886,9 +1891,16 @@ impl RuntimeWorker {
                         overlay.push_chat(update.to_string());
                     });
             }
-            OverlayEvent::ChatCancel => {
-                crate::chat::cancel();
-                self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            OverlayEvent::ChatCancel(request_id) => {
+                if crate::chat::cancel(&request_id) {
+                    self.overlay.push_chat(
+                        serde_json::json!({
+                            "chatCancelled": true,
+                            "requestId": request_id
+                        })
+                        .to_string(),
+                    );
+                }
             }
             OverlayEvent::OpenExternal(url) => {
                 open_url_in_browser(&url);

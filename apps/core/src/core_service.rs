@@ -147,6 +147,8 @@ pub struct CoreService {
     indexing_cycle_count: AtomicU64,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
+    #[cfg(target_os = "windows")]
+    application_watchers: Mutex<Option<crate::application_watcher::ApplicationWatcherHandle>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +233,8 @@ impl CoreService {
             indexing_cycle_count: AtomicU64::new(0),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            application_watchers: Mutex::new(None),
         })
     }
 
@@ -266,6 +270,7 @@ impl CoreService {
         #[cfg(target_os = "windows")]
         {
             self.stop_file_watchers();
+            self.stop_application_watchers();
         }
         Ok(())
     }
@@ -597,18 +602,28 @@ impl CoreService {
     }
 
     pub fn rebuild_index_with_report(&self) -> Result<IndexRefreshReport, ServiceError> {
-        self.rebuild_index_internal(false)
+        self.rebuild_index_internal(false, None)
     }
 
     pub fn rebuild_index_incremental_with_report(
         &self,
     ) -> Result<IndexRefreshReport, ServiceError> {
-        self.rebuild_index_internal(true)
+        self.rebuild_index_internal(true, None)
+    }
+
+    /// Reconcile app launch surfaces without walking configured file roots.
+    /// Native application notifications call this path to bypass provider stamps.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn rebuild_application_index_with_report(
+        &self,
+    ) -> Result<IndexRefreshReport, ServiceError> {
+        self.rebuild_index_internal(false, Some("start-menu-apps"))
     }
 
     fn rebuild_index_internal(
         &self,
         incremental_mode: bool,
+        provider_name: Option<&str>,
     ) -> Result<IndexRefreshReport, ServiceError> {
         let cycle_start = Instant::now();
         let memory_before = self_measure_memory();
@@ -652,6 +667,9 @@ impl CoreService {
         let config_snapshot = self.config_snapshot();
 
         for provider in providers_guard.iter() {
+            if provider_name.is_some_and(|name| provider.provider_name() != name) {
+                continue;
+            }
             let started = Instant::now();
             let provider_name = provider.provider_name().to_string();
             let is_filesystem = provider_name == "filesystem";
@@ -948,6 +966,48 @@ impl CoreService {
         ));
         *slot = Some(handle);
         Ok(())
+    }
+
+    /// Start the watcher for Start Menu, Desktop, and application registry changes.
+    #[cfg(target_os = "windows")]
+    pub fn start_application_watchers(
+        &self,
+        service_arc: &Arc<RwLock<CoreService>>,
+    ) {
+        let mut slot = self
+            .application_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return;
+        }
+
+        let handle = crate::application_watcher::ApplicationWatcherHandle::start(Arc::clone(service_arc));
+        crate::runtime::log_info(&format!(
+            "[nex] app discovery watcher: started on {} directories and {} registry keys",
+            handle.active_directories(),
+            handle.active_registry_keys()
+        ));
+        *slot = Some(handle);
+    }
+
+    /// Stop application-source watchers and their refresh worker.
+    #[cfg(target_os = "windows")]
+    pub fn stop_application_watchers(&self) {
+        if let Some(handle) = self.take_application_watchers() {
+            drop(handle);
+            crate::runtime::log_info("[nex] app discovery watcher: stopped");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_application_watchers(
+        &self,
+    ) -> Option<crate::application_watcher::ApplicationWatcherHandle> {
+        self.application_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
     }
 
     /// Stop and join the per-root file watcher consumers. Safe to call

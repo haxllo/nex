@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,16 @@ use serde_json::{json, Value};
 const CONFIG_MAGIC: &[u8] = b"NEXCHAT1";
 static REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_REQUEST: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_CLIENT_REQUEST_ID: Mutex<Option<String>> = Mutex::new(None);
+const HISTORY_CONTEXT_BUDGET_CHARS: usize = 24_000;
+type ChatUpdateSink = Arc<Mutex<Box<dyn FnMut(Value) + Send>>>;
+
+fn push_chat_update(sink: &ChatUpdateSink, update: Value) {
+    let mut push = sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (*push)(update);
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +48,8 @@ pub(crate) struct ConfigureRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SendRequest {
+    #[serde(default)]
+    pub request_id: String,
     pub message: String,
     #[serde(default)]
     pub history: Vec<ChatTurn>,
@@ -192,14 +205,11 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
 }
 
 pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
-    if !cli_available("codex") {
-        push(json!({"chatDisconnecting":false,"chatError":"Could not find the Codex CLI. Nothing to sign out."}));
-        return;
-    }
     if !codex_authenticated() {
         push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT is already signed out."}));
         return;
     }
+    push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of ChatGPT…"}));
     match crate::codex_auth::logout() {
         Ok(_) if !codex_authenticated() => {
             push(json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT account disconnected. Connect again any time."}));
@@ -213,7 +223,6 @@ pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
         push(json!({"chatDisconnecting":false,"chatError":"Could not sign out of ChatGPT. Try again in a moment."}));
         return;
     }
-    push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of ChatGPT…"}));
     let signed_out = cli_command("codex", &["logout".into()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -392,7 +401,13 @@ fn fetch_codex_models_cli() -> Result<Vec<Value>, String> {
         .map_err(|_| "Could not start ChatGPT to load its available models.".to_string())?;
     let mut stdin = child.stdin.take().ok_or("ChatGPT did not open its model channel.")?;
     let stdout = child.stdout.take().ok_or("ChatGPT did not open its model channel.")?;
-    let lines = spawn_line_reader(stdout);
+    let lines = match spawn_line_reader(stdout) {
+        Ok(lines) => lines,
+        Err(_) => {
+            kill_provider_tree(&mut child);
+            return Err("Could not start reading ChatGPT's available models.".into());
+        }
+    };
     let init = json!({"method":"initialize","id":1,"params":{"clientInfo":{"name":"nex","title":"Nex","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}});
     writeln!(stdin, "{init}").map_err(|_| "Could not initialize the ChatGPT model channel.".to_string())?;
     let init_deadline = std::time::Instant::now() + Duration::from_secs(8);
@@ -485,37 +500,142 @@ fn codex_authenticated() -> bool {
             .unwrap_or(false)
 }
 
-pub(crate) fn cancel() {
-    let id = ACTIVE_REQUEST.load(Ordering::SeqCst);
-    ACTIVE_REQUEST.store(id.wrapping_add(1), Ordering::SeqCst);
+fn cancel_matches(request_id: &str, active_request_id: Option<&str>) -> bool {
+    !request_id.is_empty() && active_request_id == Some(request_id)
 }
 
-pub(crate) fn start(raw: String, mut push: impl FnMut(Value) + Send + 'static) {
+pub(crate) fn cancel(request_id: &str) -> bool {
+    let mut active_request_id = ACTIVE_CLIENT_REQUEST_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !cancel_matches(request_id, active_request_id.as_deref()) {
+        return false;
+    }
+    let id = ACTIVE_REQUEST.load(Ordering::SeqCst);
+    ACTIVE_REQUEST.store(id.wrapping_add(1), Ordering::SeqCst);
+    *active_request_id = None;
+    true
+}
+
+fn request_id_from_raw(raw: &str) -> Option<String> {
+    let id = serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get("requestId")?
+        .as_str()?
+        .to_string();
+    (!id.is_empty() && id.chars().count() <= 128).then_some(id)
+}
+
+fn request_update(request_id: Option<&str>, key: &str, value: Value) -> Value {
+    let mut update = serde_json::Map::new();
+    if let Some(request_id) = request_id.filter(|id| !id.is_empty()) {
+        update.insert("requestId".into(), json!(request_id));
+    }
+    update.insert(key.into(), value);
+    Value::Object(update)
+}
+
+fn openai_stream_is_complete(payload: &str) -> bool {
+    payload == "[DONE]"
+}
+
+fn codex_native_stream_is_complete(event: &str, data: &Value) -> bool {
+    event == "response.completed"
+        && data.get("type").and_then(Value::as_str) == Some("response.completed")
+        && data.pointer("/response/status").and_then(Value::as_str) == Some("completed")
+}
+
+fn codex_cli_turn_is_complete(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("turn.completed")
+}
+
+fn read_stream_line(
+    reader: &mut impl BufRead,
+    pending: &mut String,
+) -> std::io::Result<Option<String>> {
+    let count = reader.read_line(pending)?;
+    if count == 0 && pending.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(std::mem::take(pending)))
+}
+
+fn clear_active_request(id: u64, request_id: Option<&str>) {
+    let mut active_request_id = ACTIVE_CLIENT_REQUEST_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) == id
+        && active_request_id.as_deref() == request_id
+    {
+        *active_request_id = None;
+    }
+}
+
+pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
+    let push: ChatUpdateSink = Arc::new(Mutex::new(Box::new(push)));
+    let request_id = request_id_from_raw(&raw);
     let id = REQUEST_ID.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-    ACTIVE_REQUEST.store(id, Ordering::SeqCst);
+    {
+        let mut active_request_id = ACTIVE_CLIENT_REQUEST_ID
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active_request_id = request_id.clone();
+        ACTIVE_REQUEST.store(id, Ordering::SeqCst);
+    }
     let request: SendRequest = match serde_json::from_str(&raw) {
         Ok(value) => value,
         Err(_) => {
-            push(json!({"chatError":"That message could not be sent."}));
+            push_chat_update(&push, request_update(
+                request_id.as_deref(),
+                "chatError",
+                json!("That message could not be sent."),
+            ));
+            clear_active_request(id, request_id.as_deref());
             return;
         }
     };
     if request.message.trim().is_empty() {
+        clear_active_request(id, request_id.as_deref());
         return;
     }
+    let request_id = if request.request_id.is_empty() {
+        request_id
+    } else {
+        Some(request.request_id.clone())
+    };
+    let failed_request_id = request_id.clone();
+    let worker_push = Arc::clone(&push);
     let spawned = std::thread::Builder::new()
         .name("nex-chat-response".into())
         .spawn(move || {
+            if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+                return;
+            }
             let config = match load_config() {
                 Ok(config) => config,
                 Err(error) => {
-                    push(json!({"chatError":error}));
+                    if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
+                        push_chat_update(&worker_push, request_update(
+                            request_id.as_deref(),
+                            "chatError",
+                            json!(error),
+                        ));
+                    }
+                    clear_active_request(id, request_id.as_deref());
                     return;
                 }
             };
+            if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+                clear_active_request(id, request_id.as_deref());
+                return;
+            }
             let mut emit = |text: &str, status: Option<&str>| {
                 if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
-                    push(json!({"chatDelta":{"text":text,"status":status}}));
+                    push_chat_update(&worker_push, request_update(
+                        request_id.as_deref(),
+                        "chatDelta",
+                        json!({"text":text,"status":status}),
+                    ));
                 }
             };
             let result = match config.provider.as_str() {
@@ -525,13 +645,33 @@ pub(crate) fn start(raw: String, mut push: impl FnMut(Value) + Send + 'static) {
             };
             if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
                 match result {
-                    Ok(()) => push(json!({"chatDone":true})),
-                    Err(error) => push(json!({"chatError":error})),
+                    Ok(()) => push_chat_update(&worker_push, request_update(
+                        request_id.as_deref(),
+                        "chatDone",
+                        json!(true),
+                    )),
+                    Err(error) => push_chat_update(&worker_push, request_update(
+                        request_id.as_deref(),
+                        "chatError",
+                        json!(error),
+                    )),
                 }
             }
+            clear_active_request(id, request_id.as_deref());
         });
     if let Err(error) = spawned {
         crate::logging::warn(&format!("[nex][chat] could not start response worker: {error}"));
+        if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
+            push_chat_update(
+                &push,
+                request_update(
+                    failed_request_id.as_deref(),
+                    "chatError",
+                    json!("Nex could not start the response. Please try again."),
+                ),
+            );
+        }
+        clear_active_request(id, failed_request_id.as_deref());
     }
 }
 
@@ -541,11 +681,15 @@ fn stream_openai(
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<(), String> {
-    let mut messages = Vec::with_capacity(request.history.len().min(24) + 1);
-    for turn in request.history.iter().rev().take(24).collect::<Vec<_>>().into_iter().rev() {
-        if matches!(turn.role.as_str(), "user" | "assistant") {
-            messages.push(json!({"role":turn.role,"content":turn.content}));
-        }
+    let history = bounded_history(
+        &request.history,
+        24,
+        HISTORY_CONTEXT_BUDGET_CHARS,
+    );
+    let mut messages = Vec::with_capacity(history.len() + 2);
+    messages.push(json!({"role":"system","content":SYSTEM_PROMPT}));
+    for turn in history {
+        messages.push(json!({"role":turn.role,"content":turn.content}));
     }
     messages.push(json!({"role":"user","content":request.message}));
     let body = json!({"model":config.model,"messages":messages,"stream":true});
@@ -554,6 +698,9 @@ fn stream_openai(
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(1))
         .build();
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        return Ok(());
+    }
     let response = match agent
         .post(&endpoint)
         .set("Authorization", &format!("Bearer {}", config.api_key))
@@ -571,25 +718,31 @@ fn stream_openai(
     };
 
     let mut reader = BufReader::new(response.into_reader());
-    let mut line = String::new();
+    let mut pending_line = String::new();
+    let mut finished = false;
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             return Ok(());
         }
-        line.clear();
-        let count = match reader.read_line(&mut line) {
-            Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+        let line = match read_stream_line(&mut reader, &mut pending_line) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
             Err(_) => return Err("The provider connection ended unexpectedly.".into()),
         };
-        if count == 0 {
-            break;
-        }
         let Some(payload) = line.trim().strip_prefix("data:") else {
             continue;
         };
         let payload = payload.trim();
-        if payload == "[DONE]" {
+        if openai_stream_is_complete(payload) {
+            finished = true;
             break;
         }
         let Ok(event) = serde_json::from_str::<Value>(payload) else {
@@ -605,7 +758,11 @@ fn stream_openai(
             return Err(error.to_string());
         }
     }
-    Ok(())
+    if finished {
+        Ok(())
+    } else {
+        Err("The provider connection ended before the response was complete.".into())
+    }
 }
 
 fn stream_codex(
@@ -625,7 +782,8 @@ fn stream_codex(
             // Auth failures mean the shared store is unusable — the CLI
             // would fail the same way. Anything else falls back while the
             // CLI still exists.
-            if emitted == 0
+            if ACTIVE_REQUEST.load(Ordering::SeqCst) == id
+                && emitted == 0
                 && !native_error.contains("Reconnect")
                 && !native_error.contains("usage limit")
                 && !native_error.contains("message limit")
@@ -723,20 +881,17 @@ fn stream_codex_native(
         .timeout_read(Duration::from_secs(30))
         .build();
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
-    let mut input_items: Vec<Value> = request
-        .history
-        .iter()
-        .rev()
-        .take(24)
-        .collect::<Vec<_>>()
+    let mut input_items: Vec<Value> = bounded_history(
+        &request.history,
+        24,
+        HISTORY_CONTEXT_BUDGET_CHARS,
+    )
         .into_iter()
-        .rev()
-        .filter(|turn| matches!(turn.role.as_str(), "user" | "assistant"))
         .map(|turn| {
             json!({
                 "type": "message",
                 "role": turn.role,
-                "content": [{"type": "input_text", "text": turn.content.chars().take(6000).collect::<String>()}],
+                "content": [{"type": "input_text", "text": turn.content}],
             })
         })
         .collect();
@@ -753,6 +908,9 @@ fn stream_codex_native(
         "store": false,
         "max_output_tokens": 1024,
     });
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        return Ok(());
+    }
     let response = codex_request(&agent, "POST", &url)?
         .set("Accept", "text/event-stream")
         .send_json(body)
@@ -782,22 +940,27 @@ fn stream_codex_native(
         "[nex][chat] codex native connected in {}ms",
         started.elapsed().as_millis()
     ));
-    let mut line = String::new();
+    let mut pending_line = String::new();
     let mut event = String::new();
     let mut first_token_logged = false;
+    let mut finished = false;
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             return Ok(());
         }
-        line.clear();
-        let count = match reader.read_line(&mut line) {
-            Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => continue,
+        let line = match read_stream_line(&mut reader, &mut pending_line) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue;
+            }
             Err(_) => return Err("The ChatGPT connection ended unexpectedly.".into()),
         };
-        if count == 0 {
-            break;
-        }
         let line = line.trim();
         if let Some(kind) = line.strip_prefix("event:") {
             event = kind.trim().to_string();
@@ -808,11 +971,24 @@ fn stream_codex_native(
         };
         let payload = payload.trim();
         if payload == "[DONE]" {
+            finished = true;
             break;
         }
         let Ok(data) = serde_json::from_str::<Value>(payload) else {
+            if event == "response.completed" {
+                return Err("ChatGPT returned an invalid completion event.".into());
+            }
             continue;
         };
+        if event == "response.incomplete" {
+            let reason = data
+                .pointer("/response/incomplete_details/reason")
+                .and_then(Value::as_str);
+            return Err(match reason {
+                Some(reason) => format!("ChatGPT response was incomplete: {reason}"),
+                None => "ChatGPT returned an incomplete response.".into(),
+            });
+        }
         if event == "response.output_text.delta" {
             if let Some(delta) = data.get("delta").and_then(Value::as_str) {
                 if !first_token_logged && !delta.is_empty() {
@@ -852,6 +1028,15 @@ fn stream_codex_native(
         {
             return Err(format!("ChatGPT error: {}", error.chars().take(280).collect::<String>()));
         }
+        if event == "response.completed" && codex_native_stream_is_complete(&event, &data) {
+            finished = true;
+            break;
+        } else if event == "response.completed" {
+            return Err("ChatGPT returned an invalid completion event.".into());
+        }
+    }
+    if !finished {
+        return Err("The ChatGPT connection ended before the response was complete.".into());
     }
     crate::runtime::log_info(&format!(
         "[nex][chat] codex native done in {}ms",
@@ -866,6 +1051,9 @@ fn stream_codex_cli(
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<(), String> {
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        return Ok(());
+    }
     let prompt = conversation_prompt(request);
     let work_dir = isolated_work_dir()?;
     if !cli_available("codex") {
@@ -876,6 +1064,9 @@ fn stream_codex_cli(
         "--skip-git-repo-check".into(), "--cd".into(),
         work_dir.to_string_lossy().into_owned(), "--model".into(), config.model.clone(), "-".into(),
     ];
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        return Ok(());
+    }
     let mut child = cli_command("codex", &args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -883,6 +1074,10 @@ fn stream_codex_cli(
         .current_dir(&work_dir)
         .spawn()
         .map_err(|_| "Codex CLI was not found. Install it and connect your account first.".to_string())?;
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        kill_provider_tree(&mut child);
+        return Ok(());
+    }
     if let Some(mut stdin) = child.stdin.take() {
         if stdin.write_all(prompt.as_bytes()).is_err() {
             kill_provider_tree(&mut child);
@@ -891,11 +1086,24 @@ fn stream_codex_cli(
     }
     let stdout = child.stdout.take().ok_or("ChatGPT did not open its response stream.")?;
     let stderr = child.stderr.take().ok_or("ChatGPT did not open its error stream.")?;
-    let lines = spawn_line_reader(stdout);
-    let errors = spawn_line_reader(stderr);
+    let lines = match spawn_line_reader(stdout) {
+        Ok(lines) => lines,
+        Err(_) => {
+            kill_provider_tree(&mut child);
+            return Err("Could not start reading the ChatGPT response.".into());
+        }
+    };
+    let errors = match spawn_line_reader(stderr) {
+        Ok(errors) => errors,
+        Err(_) => {
+            kill_provider_tree(&mut child);
+            return Err("Could not start reading the ChatGPT response.".into());
+        }
+    };
     let mut full_text = String::new();
     let mut provider_error = String::new();
     let mut stderr_detail = String::new();
+    let mut turn_completed = false;
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             kill_provider_tree(&mut child);
@@ -910,6 +1118,9 @@ fn stream_codex_cli(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+        if codex_cli_turn_is_complete(&event) {
+            turn_completed = true;
+        }
         if let Some(message) = event.get("message").and_then(Value::as_str)
             .or_else(|| event.pointer("/error/message").and_then(Value::as_str))
         {
@@ -940,12 +1151,14 @@ fn stream_codex_cli(
     while let Ok(line) = errors.try_recv() {
         append_error_detail(&mut stderr_detail, &line);
     }
-    if status.success() && provider_error.is_empty() {
+    if status.success() && provider_error.is_empty() && turn_completed {
         Ok(())
     } else if !provider_error.is_empty() {
         Err(format!("ChatGPT error: {}", provider_error.chars().take(280).collect::<String>()))
     } else if !stderr_detail.is_empty() {
         Err(format!("ChatGPT error: {}", stderr_detail.chars().take(280).collect::<String>()))
+    } else if !turn_completed {
+        Err("The ChatGPT CLI ended before the response was complete.".into())
     } else {
         Err("ChatGPT could not complete this response. Check its connection and selected model.".into())
     }
@@ -959,9 +1172,11 @@ fn append_error_detail(target: &mut String, detail: &str) {
     while target.len() > 512 { target.pop(); }
 }
 
-fn spawn_line_reader(reader: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
+fn spawn_line_reader(
+    reader: impl Read + Send + 'static,
+) -> std::io::Result<std::sync::mpsc::Receiver<String>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("nex-chat-provider-stream".into())
         .spawn(move || {
             for line in BufReader::new(reader).lines() {
@@ -972,20 +1187,48 @@ fn spawn_line_reader(reader: impl Read + Send + 'static) -> std::sync::mpsc::Rec
                     _ => break,
                 }
             }
-        });
-    rx
+        })?;
+    Ok(rx)
 }
 
-const SYSTEM_PROMPT: &str = "You are Nex, a concise assistant inside the Nex launcher. Answer directly in plain text, no tools, no file access. Default to short answers under 120 words; expand only when asked. Match the user's language.";
+const SYSTEM_PROMPT: &str = "You are Nex, a concise assistant inside the Nex launcher. Use only this conversation and actual tool results as evidence. Never imply you inspected the user's Windows environment or files, browsed the live web, or verified a claim unless supplied tool results show that you did; never invent citations. Distinguish facts from assumptions, and ask for task-relevant details instead of inferring private data. Default to short answers under 120 words; expand only when asked. Match the user's language.";
+
+fn bounded_history(history: &[ChatTurn], max_turns: usize, max_chars: usize) -> Vec<ChatTurn> {
+    let mut remaining = max_chars;
+    let mut selected = Vec::new();
+    for turn in history.iter().rev() {
+        if selected.len() >= max_turns || remaining == 0 {
+            break;
+        }
+        if !matches!(turn.role.as_str(), "user" | "assistant") {
+            continue;
+        }
+        let content = turn.content.chars().take(remaining).collect::<String>();
+        if content.is_empty() {
+            continue;
+        }
+        remaining = remaining.saturating_sub(content.chars().count());
+        selected.push(ChatTurn {
+            role: turn.role.clone(),
+            content,
+        });
+    }
+    selected.reverse();
+    selected
+}
 
 fn conversation_prompt(request: &SendRequest) -> String {
     let mut prompt = String::from(SYSTEM_PROMPT);
     prompt.push_str("\n\n");
-    for turn in request.history.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
+    for turn in bounded_history(
+        &request.history,
+        12,
+        HISTORY_CONTEXT_BUDGET_CHARS,
+    ) {
         let role = if turn.role == "assistant" { "Assistant" } else { "User" };
         prompt.push_str(role);
         prompt.push_str(":\n");
-        prompt.push_str(&turn.content.chars().take(6000).collect::<String>());
+        prompt.push_str(&turn.content);
         prompt.push_str("\n\n");
     }
     prompt.push_str("User:\n");
@@ -1146,6 +1389,107 @@ fn dpapi_decrypt(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_only_matches_the_active_request() {
+        assert!(cancel_matches("request-1", Some("request-1")));
+        assert!(!cancel_matches("", Some("request-1")));
+        assert!(!cancel_matches("request-0", Some("request-1")));
+        assert!(!cancel_matches("request-1", None));
+    }
+
+    #[test]
+    fn request_ids_are_rejected_when_empty_or_overlong() {
+        assert_eq!(request_id_from_raw(r#"{"requestId":""}"#), None);
+        let valid = "r".repeat(128);
+        assert_eq!(
+            request_id_from_raw(&format!(r#"{{"requestId":"{valid}"}}"#)),
+            Some(valid)
+        );
+        let too_long = "r".repeat(129);
+        assert_eq!(
+            request_id_from_raw(&format!(r#"{{"requestId":"{too_long}"}}"#)),
+            None
+        );
+    }
+
+    #[test]
+    fn bounded_history_keeps_recent_supported_turns_in_order() {
+        let history = vec![
+            ChatTurn { role: "user".into(), content: "older".into() },
+            ChatTurn { role: "system".into(), content: "ignored".into() },
+            ChatTurn { role: "assistant".into(), content: "answer".into() },
+            ChatTurn { role: "user".into(), content: "followup".into() },
+        ];
+        let bounded = bounded_history(&history, 2, 14);
+        assert_eq!(bounded.len(), 2);
+        assert_eq!(bounded[0].role, "assistant");
+        assert_eq!(bounded[0].content, "answer");
+        assert_eq!(bounded[1].role, "user");
+        assert_eq!(bounded[1].content, "followup");
+    }
+
+    #[test]
+    fn streams_require_their_provider_completion_event() {
+        assert!(openai_stream_is_complete("[DONE]"));
+        assert!(!openai_stream_is_complete(""));
+        assert!(codex_native_stream_is_complete(
+            "response.completed",
+            &json!({"type":"response.completed","response":{"status":"completed"}})
+        ));
+        assert!(!codex_native_stream_is_complete(
+            "response.completed",
+            &json!({"type":"response.completed","response":{"status":"in_progress"}})
+        ));
+        assert!(!codex_native_stream_is_complete("response.completed", &json!({})));
+        assert!(!codex_native_stream_is_complete(
+            "response.incomplete",
+            &json!({"type":"response.incomplete","response":{"status":"incomplete"}})
+        ));
+        assert!(codex_cli_turn_is_complete(&json!({"type":"turn.completed"})));
+        assert!(!codex_cli_turn_is_complete(&json!({"type":"item.completed"})));
+    }
+
+    #[test]
+    fn stream_line_reader_preserves_partial_lines_across_timeouts() {
+        use std::collections::VecDeque;
+
+        struct TimeoutReader {
+            chunks: VecDeque<std::io::Result<&'static [u8]>>,
+        }
+
+        impl Read for TimeoutReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let Some(chunk) = self.chunks.pop_front() else {
+                    return Ok(0);
+                };
+                let chunk = chunk?;
+                assert!(chunk.len() <= buffer.len());
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                Ok(chunk.len())
+            }
+        }
+
+        let source = TimeoutReader {
+            chunks: VecDeque::from([
+                Ok(&b"data: [DO"[..]),
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                Ok(&b"NE]\n"[..]),
+            ]),
+        };
+        let mut reader = BufReader::new(source);
+        let mut pending = String::new();
+        assert!(matches!(
+            read_stream_line(&mut reader, &mut pending),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+        assert_eq!(pending, "data: [DO");
+        assert_eq!(
+            read_stream_line(&mut reader, &mut pending).unwrap().as_deref(),
+            Some("data: [DONE]\n")
+        );
+        assert!(pending.is_empty());
+    }
 
     #[test]
     fn quota_errors_name_reset_time() {

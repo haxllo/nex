@@ -175,7 +175,7 @@ pub struct StartMenuAppDiscoveryProvider {
 impl Default for StartMenuAppDiscoveryProvider {
     fn default() -> Self {
         Self {
-            roots: default_start_menu_roots(),
+            roots: application_shortcut_roots(),
         }
     }
 }
@@ -215,6 +215,9 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
             if let Ok(system_apps) = discover_start_apps(&uninstall_publishers) {
                 items.extend(system_apps);
             }
+            if let Ok(registered_apps) = discover_registered_app_paths() {
+                items.extend(registered_apps);
+            }
             items.extend(crate::settings_catalog::settings_page_items());
             Ok(dedupe_apps_by_title(items))
         }
@@ -223,7 +226,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "9";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "10";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -850,7 +853,7 @@ fn normalize_path_for_compare(path: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn default_start_menu_roots() -> Vec<PathBuf> {
+pub(crate) fn application_shortcut_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
     if let Ok(program_data) = std::env::var("ProgramData") {
@@ -873,11 +876,20 @@ fn default_start_menu_roots() -> Vec<PathBuf> {
         );
     }
 
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        roots.push(PathBuf::from(profile).join("Desktop"));
+    }
+    if let Ok(public) = std::env::var("PUBLIC") {
+        roots.push(PathBuf::from(public).join("Desktop"));
+    }
+
+    roots.sort();
+    roots.dedup();
     roots
 }
 
 #[cfg(not(target_os = "windows"))]
-fn default_start_menu_roots() -> Vec<PathBuf> {
+pub(crate) fn application_shortcut_roots() -> Vec<PathBuf> {
     Vec::new()
 }
 
@@ -1067,6 +1079,97 @@ fn discover_start_menu_root(
     }
 
     Ok(items)
+}
+
+#[cfg(target_os = "windows")]
+fn discover_registered_app_paths() -> Result<Vec<SearchItem>, ProviderError> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$roots = @(
+  'HKCU:SoftwareMicrosoftWindowsCurrentVersionApp Paths',
+  'HKLM:SoftwareMicrosoftWindowsCurrentVersionApp Paths',
+  'HKLM:SoftwareWOW6432NodeMicrosoftWindowsCurrentVersionApp Paths'
+)
+foreach ($root in $roots) {
+  Get-ChildItem -LiteralPath $root | ForEach-Object {
+    $target = [string]$_.GetValue('')
+    if (-not [string]::IsNullOrWhiteSpace($target)) {
+      "{0}{1}{2}{1}{3}" -f $root, [char]9, $_.PSChildName, $target.Trim()
+    }
+  }
+}
+"#;
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| ProviderError::new(format!("App Paths query failed: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ProviderError::new("App Paths query failed"));
+    }
+
+    let mut items = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(3, '\t');
+        let (Some(root), Some(name), Some(command)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Some(path) = registered_command_target(command) else {
+            continue;
+        };
+        if !Path::new(&path).is_file() {
+            continue;
+        }
+
+        let title = name
+            .trim()
+            .strip_suffix(".exe")
+            .unwrap_or(name.trim())
+            .trim();
+        if title.is_empty() {
+            continue;
+        }
+        let id = format!(
+            "app-registry:{}:{}",
+            root.to_ascii_lowercase(),
+            normalize_id_path(name)
+        );
+        items.push(SearchItem::new(&id, "app", title, &path));
+    }
+    Ok(items)
+}
+
+#[cfg(target_os = "windows")]
+fn registered_command_target(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let target = if let Some(rest) = command.strip_prefix('"') {
+        rest.split_once('"').map(|(path, _)| path).unwrap_or(rest)
+    } else if let Some(end) = command.to_ascii_lowercase().find(".exe") {
+        &command[..end + 4]
+    } else {
+        command.split_whitespace().next().unwrap_or_default()
+    };
+    let target = target.trim();
+    (!target.is_empty()).then(|| target.to_string())
 }
 
 #[cfg(target_os = "windows")]

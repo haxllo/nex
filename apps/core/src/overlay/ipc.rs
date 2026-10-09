@@ -311,6 +311,8 @@ pub(crate) enum OverlayMessage {
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(ChatCancelPayload),
+    #[serde(rename = "chatPickFiles")]
+    ChatPickFiles(NoPayload),
     #[serde(rename = "openExternal")]
     OpenExternal(TextPayload),
 }
@@ -381,6 +383,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConnect",
         "chatDisconnect",
         "chatCancel",
+        "chatPickFiles",
         "openExternal",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -710,6 +713,14 @@ mod tests {
         assert_eq!(
             parse_overlay(r#"{"t":"chatDisconnect"}"#),
             Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
+        );
+    }
+
+    #[test]
+    fn chat_file_picker_request_parses() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"chatPickFiles"}"#),
+            Ok(OverlayMessage::ChatPickFiles(NoPayload {}))
         );
     }
 

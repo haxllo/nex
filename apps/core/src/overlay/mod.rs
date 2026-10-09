@@ -26,6 +26,8 @@
 #[cfg(target_os = "windows")]
 pub(crate) mod host;
 #[cfg(target_os = "windows")]
+pub(crate) mod file_picker;
+#[cfg(target_os = "windows")]
 pub(crate) mod ipc;
 #[cfg(target_os = "windows")]
 pub(crate) mod hotkey;

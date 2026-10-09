@@ -1656,8 +1656,8 @@
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
       : (chatConfig.accountConnected
-        ? "Nex is connected to ChatGPT. Sign-in is DPAPI-encrypted in Nex's app data; separate Codex CLI credentials are unchanged."
-        : "Connect your ChatGPT account to Nex in your browser. This is separate from any Codex CLI sign-in; reconnect if you used an older Nex version.");
+        ? "Nex is connected to ChatGPT. Your sign-in is stored securely in Nex's app data."
+        : "Connect your ChatGPT account to Nex in your browser. If you're reconnecting after an app update, sign in again.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -2126,7 +2126,7 @@
     chatProviderInput.disabled = loading;
   }
 
-  function checkCodexConnection() {
+  function checkChatGPTConnection() {
     if (chatConnectionCheckPending) return;
     chatConnectionCheckPending = true;
     chatCheckButton.disabled = true;
@@ -2141,8 +2141,8 @@
       chatCheckButton.disabled = false;
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
-        ? "Nex is connected to ChatGPT. Sign-in is encrypted in Nex's app data; separate Codex CLI credentials are unchanged."
-        : "Connect your ChatGPT account to Nex in your browser. This is separate from any Codex CLI sign-in; reconnect if you used an older Nex version.";
+        ? "Nex is connected to ChatGPT. Your sign-in is stored securely in Nex's app data."
+        : "Connect your ChatGPT account to Nex in your browser. If you're reconnecting after an app update, sign in again.";
       chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
     }, 8000);
@@ -2225,7 +2225,7 @@
     post("chatDisconnect");
   });
   chatCheckButton.addEventListener("click", () => {
-    checkCodexConnection();
+    checkChatGPTConnection();
   });
   chatModelInput.addEventListener("focus", () => {
     if (chatModelOptions.hidden) {
@@ -2302,7 +2302,7 @@
     const hasRequestId = Object.prototype.hasOwnProperty.call(state, "requestId");
     let requestMatches = matchesActiveChatRequest(state);
     if (state.chatConfig) {
-      const wasCodexConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
+      const wasChatGPTConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
       chatConfig = { ...chatConfig, ...state.chatConfig };
       syncChatConfig();
       if (chatConnectionCheckPending) {
@@ -2313,7 +2313,7 @@
         if (chatConfig.accountConnected) flashChatNotice("ChatGPT account connected to Nex.");
         else { chatNotice.textContent = "ChatGPT is not connected to Nex. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
-      if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
+      if (!wasChatGPTConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
       if (chatConfig.provider === "openai-compatible" && chatConfig.configured && chatModelsProvider !== "openai-compatible" && !chatModelsLoading) fetchChatModels(false);
     }
     if (typeof state.chatConnecting === "boolean") {

@@ -329,6 +329,12 @@ fn parse_chatgpt_model_list(payload: &Value) -> Result<Vec<Value>, String> {
     let mut models = entries
         .iter()
         .filter_map(|model| {
+            if matches!(
+                model.get("visibility").and_then(Value::as_str),
+                Some("hide" | "none")
+            ) {
+                return None;
+            }
             let id = model
                 .get("slug")
                 .or_else(|| model.get("id"))
@@ -1184,13 +1190,27 @@ mod tests {
     }
 
     #[test]
-    fn parses_codex_models_catalog() {
+    fn parses_codex_models_catalog_without_hidden_entries() {
         let payload = json!({
-            "models": [{
-                "slug": "gpt-6-luna",
-                "display_name": "GPT-6 Luna",
-                "description": "Reasoning model"
-            }]
+            "models": [
+                {
+                    "slug": "gpt-6-luna",
+                    "display_name": "GPT-6 Luna",
+                    "description": "Reasoning model",
+                    "visibility": "list"
+                },
+                {
+                    "slug": "gpt-reserve",
+                    "display_name": "GPT Reserve",
+                    "visibility": "hide"
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "visibility": "hide"
+                },
+                {"slug": "unlisted", "visibility": "none"}
+            ]
         });
 
         let models = parse_chatgpt_model_list(&payload).unwrap();

@@ -1,13 +1,12 @@
-//! Native ChatGPT account auth speaking the official ChatGPT OAuth protocol
-//! (spec: vendored `third_party/codex`, openai/codex `rust-v0.160.1`).
-//! No CLI install required. Tokens live in the standard ChatGPT home
-//! (`~/.codex/auth.json`), so the CLI and Nex share one sign-in.
+//! Native ChatGPT OAuth for Nex. Credentials are stored only in Nex-owned
+//! DPAPI-protected storage and are never imported from or mirrored to the CLI.
 
 #![cfg(target_os = "windows")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -16,28 +15,23 @@ use sha2::{Digest, Sha256};
 
 const ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const SCOPE: &str =
-    "openid profile email offline_access api.connectors.read api.connectors.invoke";
+const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CALLBACK_PORTS: [u16; 2] = [1455, 1457];
+const AUTH_FILE_MARKER: &[u8] = b"NEXCHATGPT1";
+static AUTH_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// ChatGPT-plan inference base (Responses wire API).
 pub(crate) const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Pending browser sign-in: callback listener is already bound so a
-/// bind failure surfaces immediately (caller falls back to the CLI).
+/// bind failure surfaces immediately.
 pub(crate) struct PendingLogin {
     listener: TcpListener,
     port: u16,
     verifier: String,
     state: String,
     deadline: Instant,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthFile {
-    #[serde(default)]
-    tokens: Option<StoredTokens>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -49,22 +43,22 @@ struct StoredTokens {
     account_id: Option<String>,
 }
 
-fn codex_home() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex")
-}
-
-fn auth_file() -> PathBuf {
-    codex_home().join("auth.json")
-}
-
-/// Nex-owned token store. Primary source of truth; the CLI home above
-/// is only mirrored for interop (login once, both apps work).
+/// Encrypted Nex-only token store.
 fn nex_auth_file() -> PathBuf {
-    crate::config::stable_app_data_dir().join("codex-auth.json")
+    nex_auth_file_at(&crate::config::stable_app_data_dir())
+}
+
+/// Prior Nex copy of shared credentials; it is discarded rather than reused.
+fn legacy_nex_auth_file() -> PathBuf {
+    legacy_nex_auth_file_at(&crate::config::stable_app_data_dir())
+}
+
+fn nex_auth_file_at(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("chatgpt-auth.dpapi")
+}
+
+fn legacy_nex_auth_file_at(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("codex-auth.json")
 }
 
 fn agent() -> ureq::Agent {
@@ -118,36 +112,39 @@ fn access_expired(access_token: &str) -> bool {
     expired
 }
 
-fn read_tokens() -> Option<StoredTokens> {
-    if let Some(tokens) = read_tokens_file(&nex_auth_file()) {
-        return Some(tokens);
-    }
-    // One-time import: a CLI sign-in is adopted into our store.
-    let tokens = read_tokens_file(&auth_file())?;
-    persist(&tokens);
-    Some(tokens)
+fn read_tokens() -> Result<Option<StoredTokens>, String> {
+    read_tokens_at(&crate::config::stable_app_data_dir())
 }
 
-fn read_tokens_file(path: &PathBuf) -> Option<StoredTokens> {
-    let bytes = std::fs::read(path).ok()?;
-    let file: AuthFile = serde_json::from_slice(&bytes).ok()?;
-    let tokens = file.tokens?;
-    if tokens.access_token.is_empty() {
-        return None;
-    }
-    Some(tokens)
+fn read_tokens_at(app_data_dir: &Path) -> Result<Option<StoredTokens>, String> {
+    let tokens = std::fs::read(nex_auth_file_at(app_data_dir))
+        .ok()
+        .and_then(|protected| crate::secure_storage::unprotect(&protected, AUTH_FILE_MARKER))
+        .and_then(|plaintext| serde_json::from_slice::<StoredTokens>(&plaintext).ok())
+        .filter(|tokens| !tokens.access_token.is_empty());
+    // Older versions mirrored the same refresh token to the Codex CLI. Reusing
+    // it could rotate or invalidate that separate sign-in, so require Nex login.
+    discard_legacy_auth_at(&legacy_nex_auth_file_at(app_data_dir))?;
+    Ok(tokens)
 }
 
 /// Fresh ChatGPT-plan credentials: stored tokens, refreshing first when
 /// the access token is expired. Returns `(access_token, account_id)`.
-pub(crate) fn fresh_tokens() -> Option<(String, Option<String>)> {
-    let mut tokens = read_tokens()?;
+pub(crate) fn fresh_tokens() -> Result<Option<(String, Option<String>)>, String> {
+    let Some(mut tokens) = read_tokens()? else {
+        return Ok(None);
+    };
     if access_expired(&tokens.access_token) {
         if tokens.refresh_token.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let refreshed = refresh(&tokens.refresh_token)?;
-        tokens.access_token = refreshed.access_token.filter(|s| !s.is_empty())?;
+        let Some(refreshed) = refresh(&tokens.refresh_token) else {
+            return Ok(None);
+        };
+        let Some(access_token) = refreshed.access_token.filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        tokens.access_token = access_token;
         if let Some(rt) = refreshed.refresh_token.filter(|s| !s.is_empty()) {
             tokens.refresh_token = rt;
         }
@@ -158,7 +155,7 @@ pub(crate) fn fresh_tokens() -> Option<(String, Option<String>)> {
                 .map(str::to_string);
             tokens.id_token = id;
         }
-        persist(&tokens);
+        persist(&tokens)?;
     }
     if tokens.account_id.is_none() {
         tokens.account_id = jwt_payload(&tokens.id_token)
@@ -166,11 +163,11 @@ pub(crate) fn fresh_tokens() -> Option<(String, Option<String>)> {
             .and_then(|p| claim(p, &["https://api.openai.com/auth", "chatgpt_account_id"]))
             .map(str::to_string);
     }
-    Some((tokens.access_token, tokens.account_id))
+    Ok(Some((tokens.access_token, tokens.account_id)))
 }
 
 pub(crate) fn is_signed_in() -> bool {
-    read_tokens().is_some()
+    matches!(read_tokens(), Ok(Some(_)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,62 +195,107 @@ fn refresh(refresh_token: &str) -> Option<RefreshResponse> {
         .ok()
 }
 
-fn persist(tokens: &StoredTokens) {
-    let file = serde_json::json!({
-        "auth_mode": "chatgpt",
-        "tokens": tokens,
-    });
-    if let Ok(bytes) = serde_json::to_vec_pretty(&file) {
-        let path = nex_auth_file();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, &bytes);
-        // Mirror for CLI interop; failures never block our store.
-        let mirror = auth_file();
-        if let Some(parent) = mirror.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&mirror, &bytes);
+fn persist(tokens: &StoredTokens) -> Result<(), String> {
+    let plaintext = serde_json::to_vec(tokens)
+        .map_err(|_| "Could not securely store the Nex ChatGPT sign-in.".to_string())?;
+    let protected = crate::secure_storage::protect(&plaintext, AUTH_FILE_MARKER)
+        .ok_or_else(|| "Could not securely store the Nex ChatGPT sign-in.".to_string())?;
+    let app_data_dir = crate::config::stable_app_data_dir();
+    persist_protected_at(
+        &nex_auth_file_at(&app_data_dir),
+        &legacy_nex_auth_file_at(&app_data_dir),
+        &protected,
+    )
+}
+
+fn persist_protected_at(path: &Path, legacy_path: &Path, protected: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|_| "Could not securely store the Nex ChatGPT sign-in.".to_string())?;
+    }
+    discard_legacy_auth_at(legacy_path)?;
+    atomic_write(path, protected)
+        .map_err(|_| "Could not securely store the Nex ChatGPT sign-in.".to_string())?;
+    Ok(())
+}
+
+fn discard_legacy_auth_at(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("Could not remove the previous Nex ChatGPT sign-in.".to_string()),
     }
 }
 
-/// Deletes both our store and the CLI mirror (revoked or signed out).
-pub(crate) fn forget() {
-    let _ = std::fs::remove_file(nex_auth_file());
-    let _ = std::fs::remove_file(auth_file());
+fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    atomic_write_with_replace(path, contents, |from, to| std::fs::rename(from, to))
 }
 
-/// Native sign-out: revoke refresh (else access), then delete `auth.json`.
+fn atomic_write_with_replace(
+    path: &Path,
+    contents: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (temporary_path, mut file) = loop {
+        let suffix = AUTH_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temporary_name = path.as_os_str().to_os_string();
+        temporary_name.push(format!(".{}.{}.tmp", std::process::id(), suffix));
+        let temporary_path = PathBuf::from(temporary_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => break (temporary_path, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+
+    let write_result = file.write_all(contents).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    if let Err(error) = replace(&temporary_path, path) {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn clear_nex_auth() -> Result<(), String> {
+    clear_nex_auth_at(&crate::config::stable_app_data_dir())
+}
+
+fn clear_nex_auth_at(app_data_dir: &Path) -> Result<(), String> {
+    for path in [
+        nex_auth_file_at(app_data_dir),
+        legacy_nex_auth_file_at(app_data_dir),
+    ] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("Could not clear the Nex ChatGPT sign-in.".to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Clears only Nex-owned credentials; separate Codex CLI sign-in is untouched.
+pub(crate) fn forget() -> Result<(), String> {
+    clear_nex_auth()
+}
+
+/// Signs Nex out locally without revoking tokens that may also belong to the CLI.
 pub(crate) fn logout() -> Result<bool, String> {
-    let tokens = read_tokens();
-    if let Some(tokens) = &tokens {
-        let (token, kind, with_client) = if !tokens.refresh_token.is_empty() {
-            (tokens.refresh_token.as_str(), "refresh_token", true)
-        } else {
-            (tokens.access_token.as_str(), "access_token", false)
-        };
-        let mut body = serde_json::json!({
-            "token": token,
-            "token_type_hint": kind,
-        });
-        if with_client {
-            body["client_id"] = serde_json::Value::String(CLIENT_ID.to_string());
-        }
-        // Best effort: local auth is removed even if revoke fails.
-        let _ = agent()
-            .post(&format!("{ISSUER}/oauth/revoke"))
-            .set("Content-Type", "application/json")
-            .timeout(Duration::from_secs(10))
-            .send_json(body);
-    }
-    match std::fs::remove_file(nex_auth_file()) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(tokens.is_some()),
-        Err(e) => Err(format!("Could not clear ChatGPT sign-in: {e}")),
-    }?;
-    let _ = std::fs::remove_file(auth_file());
-    Ok(true)
+    let was_signed_in = matches!(read_tokens(), Ok(Some(_)));
+    clear_nex_auth()?;
+    Ok(was_signed_in)
 }
 
 /// Starts the ChatGPT OAuth flow: binds the localhost callback, builds
@@ -266,7 +308,9 @@ pub(crate) fn start_login_server() -> Result<PendingLogin, String> {
                 .ok()
                 .map(|listener| (listener, *port))
         })
-        .ok_or_else(|| "Could not start ChatGPT sign-in (local callback unavailable).".to_string())?;
+        .ok_or_else(|| {
+            "Could not start ChatGPT sign-in (local callback unavailable).".to_string()
+        })?;
     let verifier = random_b64url(64)?;
     let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
     let state = random_b64url(16)?;
@@ -283,8 +327,8 @@ pub(crate) fn start_login_server() -> Result<PendingLogin, String> {
 }
 
 fn authorize_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
-    let mut url = url::Url::parse(&format!("{ISSUER}/oauth/authorize"))
-        .expect("codex authorize endpoint");
+    let mut url =
+        url::Url::parse(&format!("{ISSUER}/oauth/authorize")).expect("codex authorize endpoint");
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", CLIENT_ID)
@@ -313,8 +357,7 @@ fn read_callback_request(listener: &TcpListener) -> Option<(String, String)> {
     // Accepted sockets inherit the listener's non-blocking mode on
     // Windows — back to blocking so the request line actually reads.
     let _ = stream.set_nonblocking(false);
-    let _ = stream
-        .set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).ok()?;
@@ -367,8 +410,8 @@ fn read_callback_request(listener: &TcpListener) -> Option<(String, String)> {
         "</style></head><body><div class=\"card\">",
         "<div class=\"mark\" aria-hidden=\"true\"><span></span><span></span><span></span></div>",
         "<div class=\"check\"><svg viewBox=\"0 0 24 24\"><path d=\"M20 6 9 17l-5-5\"/></svg></div>",
-        "<h1>ChatGPT connected</h1>",
-        "<p>Signed in. Close this window and return to Nex to start chatting.</p>",
+        "<h1>ChatGPT connected to Nex</h1>",
+        "<p>This Nex sign-in is separate from any Codex CLI sign-in. Close this window and return to Nex.</p>",
         "<button type=\"button\" onclick=\"window.close()\">Close this window</button>",
         "</div></body></html>",
     );
@@ -416,10 +459,11 @@ fn complete_login(code: &str, verifier: &str, port: u16) -> Result<(), String> {
     let tokens: RefreshResponse = response
         .into_json()
         .map_err(|_| "ChatGPT sign-in returned an unreadable response.".to_string())?;
-    let (id_token, access_token, refresh_token) = match (tokens.id_token, tokens.access_token, tokens.refresh_token) {
-        (Some(id), Some(access), refresh) => (id, access, refresh.unwrap_or_default()),
-        _ => return Err("ChatGPT sign-in returned incomplete credentials.".to_string()),
-    };
+    let (id_token, access_token, refresh_token) =
+        match (tokens.id_token, tokens.access_token, tokens.refresh_token) {
+            (Some(id), Some(access), refresh) => (id, access, refresh.unwrap_or_default()),
+            _ => return Err("ChatGPT sign-in returned incomplete credentials.".to_string()),
+        };
     let account_id = jwt_payload(&id_token)
         .as_ref()
         .and_then(|p| claim(p, &["https://api.openai.com/auth", "chatgpt_account_id"]))
@@ -429,12 +473,15 @@ fn complete_login(code: &str, verifier: &str, port: u16) -> Result<(), String> {
         access_token,
         refresh_token,
         account_id,
-    });
+    })?;
     Ok(())
 }
 
 /// Headers for ChatGPT backend requests: bearer + account identity.
-pub(crate) fn backend_headers(access_token: &str, account_id: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn backend_headers(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Vec<(String, String)> {
     let mut headers = vec![
         (
             "Authorization".to_string(),
@@ -469,7 +516,10 @@ mod tests {
         }));
         let payload = jwt_payload(&jwt).expect("payload parses");
         assert_eq!(
-            claim(&payload, &["https://api.openai.com/auth", "chatgpt_account_id"]),
+            claim(
+                &payload,
+                &["https://api.openai.com/auth", "chatgpt_account_id"]
+            ),
             Some("acc-123")
         );
         assert!(!access_expired(&jwt));
@@ -501,9 +551,101 @@ mod tests {
     #[test]
     fn backend_headers_carry_bearer_and_account() {
         let headers = backend_headers("tok", Some("acc-1"));
-        assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer tok"));
-        assert!(headers.iter().any(|(k, v)| k == "chatgpt-account-id" && v == "acc-1"));
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "Bearer tok")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "chatgpt-account-id" && v == "acc-1")
+        );
         let bare = backend_headers("tok", None);
         assert_eq!(bare.len(), 2);
+    }
+
+    #[test]
+    fn upgrade_discards_legacy_nex_auth_without_importing_cli_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_data = temp.path().join("Nex");
+        let cli_auth = temp.path().join(".codex").join("auth.json");
+        std::fs::create_dir_all(&app_data).unwrap();
+        std::fs::create_dir_all(cli_auth.parent().unwrap()).unwrap();
+        std::fs::write(
+            legacy_nex_auth_file_at(&app_data),
+            br#"{"refresh_token":"legacy-token"}"#,
+        )
+        .unwrap();
+        std::fs::write(&cli_auth, b"separate CLI credentials").unwrap();
+
+        assert!(read_tokens_at(&app_data).unwrap().is_none());
+        assert!(!legacy_nex_auth_file_at(&app_data).exists());
+        assert!(!nex_auth_file_at(&app_data).exists());
+        assert_eq!(
+            std::fs::read(cli_auth).unwrap(),
+            b"separate CLI credentials"
+        );
+    }
+
+    #[test]
+    fn signing_out_removes_only_nex_owned_auth_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_data = temp.path().join("Nex");
+        let cli_auth = temp.path().join(".codex").join("auth.json");
+        std::fs::create_dir_all(&app_data).unwrap();
+        std::fs::create_dir_all(cli_auth.parent().unwrap()).unwrap();
+        let current_auth = nex_auth_file_at(&app_data);
+        let legacy_auth = legacy_nex_auth_file_at(&app_data);
+        std::fs::write(&current_auth, b"DPAPI-protected credentials").unwrap();
+        std::fs::write(&legacy_auth, b"legacy Nex credentials").unwrap();
+        std::fs::write(&cli_auth, b"separate CLI credentials").unwrap();
+
+        clear_nex_auth_at(&app_data).unwrap();
+
+        assert!(!current_auth.exists());
+        assert!(!legacy_auth.exists());
+        assert_eq!(
+            std::fs::read(cli_auth).unwrap(),
+            b"separate CLI credentials"
+        );
+    }
+
+    #[test]
+    fn failed_token_replacement_preserves_existing_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let auth_file = temp.path().join("chatgpt-auth.dpapi");
+        std::fs::write(&auth_file, b"previous protected credentials").unwrap();
+
+        let result = atomic_write_with_replace(&auth_file, b"rotated credentials", |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "forced replacement failure",
+            ))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&auth_file).unwrap(),
+            b"previous protected credentials"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+
+        atomic_write(&auth_file, b"rotated credentials").unwrap();
+        assert_eq!(std::fs::read(&auth_file).unwrap(), b"rotated credentials");
+    }
+
+    #[test]
+    fn legacy_cleanup_failure_is_reported_before_credentials_are_used_or_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_data = temp.path().join("Nex");
+        let legacy_auth = legacy_nex_auth_file_at(&app_data);
+        std::fs::create_dir_all(&legacy_auth).unwrap();
+        let current_auth = nex_auth_file_at(&app_data);
+
+        assert!(read_tokens_at(&app_data).is_err());
+        assert!(persist_protected_at(&current_auth, &legacy_auth, b"protected").is_err());
+        assert!(clear_nex_auth_at(&app_data).is_err());
+        assert!(!current_auth.exists());
+        assert!(legacy_auth.is_dir());
     }
 }

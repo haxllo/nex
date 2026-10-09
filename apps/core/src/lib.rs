@@ -9,10 +9,10 @@ pub mod clipboard_history;
 #[cfg(target_os = "windows")]
 pub(crate) mod codex_auth;
 pub mod config;
-pub mod contract;
-pub mod core_service;
 #[cfg(target_os = "windows")]
 pub(crate) mod console_signal;
+pub mod contract;
+pub mod core_service;
 pub mod discovery;
 #[cfg(target_os = "windows")]
 pub(crate) mod everything_bridge;
@@ -20,14 +20,16 @@ pub(crate) mod everything_bridge;
 pub(crate) mod file_watcher;
 #[cfg(target_os = "windows")]
 pub(crate) mod file_watcher_consumer;
+pub(crate) mod hot_prefix;
 pub mod hotkey;
 pub mod hotkey_runtime;
-pub(crate) mod hot_prefix;
 pub mod index_store;
 pub mod logging;
 #[cfg(target_os = "windows")]
 pub(crate) mod media;
 pub mod model;
+#[cfg(target_os = "windows")]
+pub(crate) mod overlay;
 pub mod overlay_state;
 pub mod plugin_sdk;
 #[cfg(target_os = "windows")]
@@ -48,17 +50,17 @@ pub(crate) mod runtime_process;
 pub(crate) mod runtime_search_session;
 pub mod search;
 pub(crate) mod search_worker;
+#[cfg(target_os = "windows")]
+pub(crate) mod secure_storage;
 pub mod settings;
 pub mod settings_catalog;
+pub(crate) mod settings_snapshot;
 pub mod startup;
 pub(crate) mod tantivy_search;
 pub mod transport;
 pub mod uninstall_registry;
 pub mod updater;
 pub mod whats_new;
-#[cfg(target_os = "windows")]
-pub(crate) mod overlay;
-pub(crate) mod settings_snapshot;
 
 /// Max settings-save IPC body (bytes). Mirrors the overlay IPC cap so the
 /// settings path enforces the same bound on non-Windows test builds.

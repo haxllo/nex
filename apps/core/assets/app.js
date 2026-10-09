@@ -51,6 +51,11 @@
   const chatEmpty = $("chat-empty");
   const chatInput = $("chat-input");
   const chatSendButton = $("chat-send-button");
+  const chatAttachButton = $("chat-attach-button");
+  const chatFileInput = $("chat-file-input");
+  const chatPcInfoButton = $("chat-pc-info-button");
+  const chatContextSelection = $("chat-context-selection");
+  const chatContextNote = $("chat-context-note");
   const chatNotice = $("chat-notice");
   const chatLiveStatus = $("chat-live-status");
   const chatSettings = $("chat-settings");
@@ -76,6 +81,10 @@
   let chatReturnToMedia = false;
   let chatStreaming = false;
   let chatActiveRequest = null;
+  let chatSelectedFiles = [];
+  let chatIncludePcInfo = false;
+  let chatFilesLoading = false;
+  let chatContextSelectionEpoch = 0;
   let chatConfig = { provider: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", configured: false, accountConnected: false };
   let chatModels = [];
   let chatModelsProvider = "";
@@ -1367,6 +1376,7 @@
 
   function newChatConversation() {
     invalidateChatRequest();
+    clearChatContextSelection();
     chatStreaming = false;
     chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     chatMessages = [];
@@ -1422,6 +1432,7 @@
       button.append(title, date, del);
       button.addEventListener("click", () => {
         invalidateChatRequest();
+        clearChatContextSelection();
         chatConversationId = conversation.id;
         chatMessages = conversation.messages.slice(-100);
         chatConfig.provider = conversation.provider || chatConfig.provider;
@@ -1558,7 +1569,14 @@
         article.dataset.messageId = message.id;
         const content = document.createElement("div"); content.className = "chat-message-content";
         renderChatMarkdown(content, message.content);
-        article.appendChild(content); chatMessagesEl.appendChild(article);
+        article.appendChild(content);
+        if (Array.isArray(message.localContext) && message.localContext.length) {
+          const context = document.createElement("div");
+          context.className = "chat-message-context";
+          context.textContent = "Context shared: " + message.localContext.join(" · ");
+          article.appendChild(context);
+        }
+        chatMessagesEl.appendChild(article);
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
           const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy response";
@@ -1568,10 +1586,14 @@
           });
           actions.appendChild(copy);
           if (message.id === chatMessages.filter((item) => item.role === "assistant").slice(-1)[0]?.id) {
-            const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.title = "Try another response";
-            regenerate.disabled = chatStreaming;
-            regenerate.addEventListener("click", () => regenerateChatResponse(message.id));
-            actions.appendChild(regenerate);
+            const messageIndex = chatMessages.findIndex((item) => item.id === message.id);
+            const precedingUser = chatMessages.slice(0, messageIndex).reverse().find((item) => item.role === "user");
+            if (!precedingUser?.localContext?.length) {
+              const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.title = "Try another response";
+              regenerate.disabled = chatStreaming;
+              regenerate.addEventListener("click", () => regenerateChatResponse(message.id));
+              actions.appendChild(regenerate);
+            }
           }
           article.appendChild(actions);
         }
@@ -1633,7 +1655,9 @@
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
     chatConnectionHint.textContent = provider === "openai-compatible"
       ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
-      : (chatConfig.accountConnected ? "ChatGPT account connected. Sign-in is saved on this device." : "Not connected. Choose Connect account below to sign in with your browser.");
+      : (chatConfig.accountConnected
+        ? "Nex is connected to ChatGPT. Sign-in is DPAPI-encrypted in Nex's app data; separate Codex CLI credentials are unchanged."
+        : "Connect your ChatGPT account to Nex in your browser. This is separate from any Codex CLI sign-in; reconnect if you used an older Nex version.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
   }
@@ -1709,20 +1733,24 @@
   const CHAT_HISTORY_MAX_TURNS = 24;
   const CHAT_HISTORY_TURN_MAX_CHARS = 6000;
   const CHAT_HISTORY_MAX_BYTES = 40_000;
+  const CHAT_ATTACHMENT_MAX_FILES = 3;
+  const CHAT_ATTACHMENT_MAX_BYTES = 12 * 1024;
+  const CHAT_ATTACHMENTS_MAX_BYTES = 20 * 1024;
+  const CHAT_ATTACHMENT_EXTENSIONS = new Set(["txt", "md", "csv", "json", "json5", "log", "xml", "toml", "ini", "yaml", "yml", "rs", "py", "js", "ts", "tsx", "jsx", "html", "css", "ps1", "bat", "cmd", "sh", "sql"]);
   const chatTextEncoder = new TextEncoder();
   const chatTextDecoder = new TextDecoder();
 
-  function chatSendPayloadFits(message, requestId, history) {
-    const payload = { t: "chatSend", requestId, message, history };
+  function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false) {
+    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo };
     return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
   }
 
-  function chatMessageFits(message, requestId) {
+  function chatMessageFits(message, requestId, attachments, includePcInfo) {
     return Array.from(message).length <= CHAT_MESSAGE_MAX_CHARS
-      && chatSendPayloadFits(message, requestId, []);
+      && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo);
   }
 
-  function buildChatHistory(turns, message, requestId) {
+  function buildChatHistory(turns, message, requestId, attachments, includePcInfo) {
     const candidates = turns.filter((turn) => !turn.error
       && !(turn.role === "assistant" && turn.incomplete)
       && (turn.role === "user" || turn.role === "assistant"))
@@ -1735,11 +1763,112 @@
       const content = chatTextDecoder.decode(encodedContent);
       if (totalBytes + encodedContent.length > CHAT_HISTORY_MAX_BYTES) break;
       const nextHistory = [{ role: turn.role, content }, ...history];
-      if (!chatSendPayloadFits(message, requestId, nextHistory)) break;
+      if (!chatSendPayloadFits(message, requestId, nextHistory, attachments, includePcInfo)) break;
       history.unshift({ role: turn.role, content });
       totalBytes += encodedContent.length;
     }
     return history;
+  }
+
+  function renderChatContextSelection() {
+    chatContextSelection.replaceChildren();
+    const addChip = (label, remove) => {
+      const chip = document.createElement("div");
+      chip.className = "chat-context-chip";
+      const text = document.createElement("span");
+      text.textContent = label;
+      chip.appendChild(text);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "×";
+      button.setAttribute("aria-label", "Remove " + label);
+      button.addEventListener("click", remove);
+      chip.appendChild(button);
+      chatContextSelection.appendChild(chip);
+    };
+    chatSelectedFiles.forEach((file, index) => addChip(file.name, () => {
+      chatSelectedFiles.splice(index, 1);
+      renderChatContextSelection();
+    }));
+    if (chatIncludePcInfo) addChip("PC basics", () => {
+      chatIncludePcInfo = false;
+      renderChatContextSelection();
+    });
+    const hasContext = chatSelectedFiles.length > 0 || chatIncludePcInfo;
+    chatContextSelection.hidden = !hasContext;
+    chatContextNote.hidden = !hasContext;
+    chatPcInfoButton.setAttribute("aria-pressed", String(chatIncludePcInfo));
+    chatInput.placeholder = chatSelectedFiles.length ? "Ask about selected files…" : "Message Nex…";
+    postChatResize();
+  }
+
+  function clearChatContextSelection() {
+    chatContextSelectionEpoch++;
+    chatFilesLoading = false;
+    chatSelectedFiles = [];
+    chatIncludePcInfo = false;
+    chatAttachButton.disabled = false;
+    chatFileInput.disabled = false;
+    renderChatContextSelection();
+  }
+
+  async function readSelectedChatFiles(fileList) {
+    const selectionEpoch = chatContextSelectionEpoch;
+    chatFilesLoading = true;
+    chatAttachButton.disabled = true;
+    chatFileInput.disabled = true;
+    try {
+      for (const file of Array.from(fileList || [])) {
+        if (selectionEpoch !== chatContextSelectionEpoch) return;
+        if (chatSelectedFiles.length >= CHAT_ATTACHMENT_MAX_FILES) {
+          flashChatNotice("Attach up to three text files per message.");
+          break;
+        }
+        const extension = file.name.split(".").pop().toLowerCase();
+        if (!CHAT_ATTACHMENT_EXTENSIONS.has(extension)) {
+          flashChatNotice("Choose a supported text file (such as TXT, MD, JSON, or code).");
+          continue;
+        }
+        if (file.size > CHAT_ATTACHMENT_MAX_BYTES) {
+          flashChatNotice(`${file.name} is over the 12 KB per-file limit.`);
+          continue;
+        }
+        const currentBytes = chatSelectedFiles.reduce((total, item) => total + item.bytes, 0);
+        if (currentBytes + file.size > CHAT_ATTACHMENTS_MAX_BYTES) {
+          flashChatNotice("Selected text files are over the 20 KB total limit.");
+          continue;
+        }
+        try {
+          const content = await file.text();
+          if (selectionEpoch !== chatContextSelectionEpoch) return;
+          const bytes = chatTextEncoder.encode(content).length;
+          if (content.includes("\0") || bytes > CHAT_ATTACHMENT_MAX_BYTES) {
+            flashChatNotice(`${file.name} does not look like a supported text file.`);
+            continue;
+          }
+          const decodedTotalBytes = chatSelectedFiles.reduce((total, item) => total + item.bytes, 0) + bytes;
+          if (decodedTotalBytes > CHAT_ATTACHMENTS_MAX_BYTES) {
+            flashChatNotice("Selected text files are over the 20 KB total limit.");
+            continue;
+          }
+          const name = file.name.replace(/[\\/\u0000-\u001f\u007f]/g, "_").slice(0, 128);
+          if (!name) {
+            flashChatNotice("Could not use that file name.");
+            continue;
+          }
+          chatSelectedFiles.push({ name, content, bytes });
+        } catch (_) {
+          flashChatNotice(`Could not read ${file.name}.`);
+        }
+      }
+    } finally {
+      if (selectionEpoch === chatContextSelectionEpoch) {
+        chatFilesLoading = false;
+        chatAttachButton.disabled = false;
+        chatFileInput.disabled = false;
+        renderChatContextSelection();
+      }
+    }
   }
 
   function invalidateChatRequest() {
@@ -1769,23 +1898,41 @@
   function startChatRequest(message, reuseUserTurn = false) {
     const request = { requestId: createChatRequestId() };
     const historyTurns = reuseUserTurn ? chatMessages.slice(0, -1) : chatMessages;
-    if (!chatMessageFits(message, request.requestId)) {
-      chatNotice.textContent = "This message is too large to send. Shorten it and try again.";
+    if (chatFilesLoading) {
+      flashChatNotice("Wait for the selected files to finish loading.");
+      return false;
+    }
+    const attachments = reuseUserTurn ? [] : chatSelectedFiles.map(({ name, content }) => ({ name, content }));
+    const includePcInfo = !reuseUserTurn && chatIncludePcInfo;
+    if (!chatMessageFits(message, request.requestId, attachments, includePcInfo)) {
+      chatNotice.textContent = "This message and selected context exceed the chat size limit. Remove a file or shorten the message.";
       chatNotice.classList.add("error");
       return false;
     }
-    const history = buildChatHistory(historyTurns, message, request.requestId);
+    const history = buildChatHistory(historyTurns, message, request.requestId, attachments, includePcInfo);
     invalidateChatRequest();
     chatActiveRequest = request;
-    if (!reuseUserTurn) chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: message });
+    if (!reuseUserTurn) {
+      const localContext = [
+        ...attachments.map((attachment) => attachment.name),
+        ...(includePcInfo ? ["PC basics"] : []),
+      ];
+      chatMessages.push({
+        id: "m-" + Date.now() + "-u",
+        role: "user",
+        content: message,
+        ...(localContext.length ? { localContext } : {}),
+      });
+    }
     const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "", incomplete: true };
     chatMessages.push(assistant);
+    if (!reuseUserTurn) clearChatContextSelection();
     saveChatTitle(); persistChat();
     renderChatMessages();
     chatLiveStatus.textContent = "Thinking…";
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("chatSend", { ...request, message, history });
+    post("chatSend", { ...request, message, history, attachments, includePcInfo });
     chatInput.focus(); postChatResize();
     return true;
   }
@@ -1994,8 +2141,8 @@
       chatCheckButton.disabled = false;
       chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
       chatConnectionHint.textContent = chatConfig.accountConnected
-        ? "ChatGPT account connected. Sign-in is saved on this device."
-        : "Not connected. Choose Connect account below to sign in with your browser.";
+        ? "Nex is connected to ChatGPT. Sign-in is encrypted in Nex's app data; separate Codex CLI credentials are unchanged."
+        : "Connect your ChatGPT account to Nex in your browser. This is separate from any Codex CLI sign-in; reconnect if you used an older Nex version.";
       chatNotice.textContent = "Nex couldn’t verify ChatGPT right now. Try checking again.";
       chatNotice.classList.add("error");
     }, 8000);
@@ -2125,6 +2272,15 @@
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
+  chatAttachButton.addEventListener("click", () => chatFileInput.click());
+  chatFileInput.addEventListener("change", () => {
+    void readSelectedChatFiles(chatFileInput.files);
+    chatFileInput.value = "";
+  });
+  chatPcInfoButton.addEventListener("click", () => {
+    chatIncludePcInfo = !chatIncludePcInfo;
+    renderChatContextSelection();
+  });
   chatSendButton.addEventListener("click", () => chatStreaming ? stopChatRequest() : sendChatMessage());
   // Model links open in the default browser (WebView2 blocks target=_blank).
   chatMessagesEl.addEventListener("click", (event) => {
@@ -2154,8 +2310,8 @@
         chatConnectionCheckPending = false;
         chatCheckButton.disabled = false;
         chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
-        if (chatConfig.accountConnected) flashChatNotice("ChatGPT account connected.");
-        else { chatNotice.textContent = "ChatGPT is not connected. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
+        if (chatConfig.accountConnected) flashChatNotice("ChatGPT account connected to Nex.");
+        else { chatNotice.textContent = "ChatGPT is not connected to Nex. Choose Connect account to sign in."; chatNotice.classList.add("error"); }
       }
       if (!wasCodexConnected && chatConfig.provider === "codex" && chatConfig.accountConnected && !chatSettings.hidden) fetchChatModels(false);
       if (chatConfig.provider === "openai-compatible" && chatConfig.configured && chatModelsProvider !== "openai-compatible" && !chatModelsLoading) fetchChatModels(false);

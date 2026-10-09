@@ -157,7 +157,7 @@
             </label>
           </div>
           <div class="chat-settings-actions">
-            <div id="chat-connection-hint" class="chat-connection-hint">Keys are encrypted for your Windows account and stay out of the page after saving.</div>
+            <div id="chat-connection-hint" class="chat-connection-hint">ChatGPT sign-in is stored encrypted for Nex only; it does not use or change your Codex CLI sign-in.</div>
             <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
             <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
             <button type="button" id="chat-disconnect-button" class="chat-secondary-button" hidden>Log out</button>
@@ -181,9 +181,18 @@
         </div>
 
         <div class="chat-composer-wrap">
+          <div id="chat-context-selection" class="chat-context-selection" role="group" aria-label="Selected local context" hidden></div>
+          <div id="chat-context-note" class="chat-context-note" hidden>Your next message sends selected file names and contents, optional PC facts, and recent chat history to your configured provider. Chat text, replies, and file names are stored in local conversation history on this device—not file contents. Replies may quote supplied context; those quotes can be sent again in later chat history. PC facts are Windows version/build, Nex build architecture, available logical processor count, and RAM—not usernames, IDs, running apps, or file scans.</div>
           <div id="chat-composer-shell" class="chat-composer-shell">
             <textarea id="chat-input" rows="1" maxlength="16000" aria-label="Message Chat" placeholder="Message Nex…"></textarea>
             <div class="chat-composer-tools">
+              <input id="chat-file-input" type="file" multiple hidden accept=".txt,.md,.csv,.json,.json5,.log,.xml,.toml,.ini,.yaml,.yml,.rs,.py,.js,.ts,.tsx,.jsx,.html,.css,.ps1,.bat,.cmd,.sh,.sql" aria-label="Choose text files to share" />
+              <button type="button" id="chat-attach-button" class="chat-icon-button" title="Attach up to 3 small text files for your next message" aria-label="Attach text files">
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <button type="button" id="chat-pc-info-button" class="chat-icon-button" title="Include basic Windows facts with your next message" aria-label="Include basic PC facts" aria-pressed="false">
+                <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
+              </button>
               <button type="button" id="chat-voice-button" class="chat-icon-button" title="Start voice input" aria-label="Start voice input" hidden>
                 <svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>
               </button>

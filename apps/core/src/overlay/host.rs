@@ -504,6 +504,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         0
                     };
                     if owner != 0 {
+                        deferred_hide_armed.store(false, Ordering::SeqCst);
+                        deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
                         let picker_proxy = proxy.clone();
                         let spawn = std::thread::Builder::new()
                             .name("nex-chat-file-picker".into())
@@ -1158,6 +1160,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
                         .unwrap_or(false);
                     if picker_active {
+                        deferred_hide_armed.store(false, Ordering::SeqCst);
+                        deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
                         crate::runtime::log_info(
                             "[nex] overlay focus loss ignored while native chat file picker is active",
                         );
@@ -1190,7 +1194,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 // sleep, the epoch will have advanced —
                                 // skip firing Escape.
                                 if epoch_clone.load(Ordering::SeqCst) != my_epoch {
-                                    armed.store(false, Ordering::SeqCst);
                                     return;
                                 }
                                 if let Ok(s) = state_clone.lock() {

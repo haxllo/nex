@@ -294,6 +294,14 @@ impl NativeOverlayShell {
             .unwrap_or(false)
     }
 
+    pub fn is_chat_file_picker_active(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+            .unwrap_or(false)
+    }
+
     /// Pending post-update version with unseen notes, if any.
     pub fn whats_new_pending(&self) -> Option<String> {
         self.inner

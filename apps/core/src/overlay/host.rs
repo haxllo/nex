@@ -160,6 +160,12 @@ pub(crate) enum UiCommand {
     ApplyWhatsNew(String),
     /// Chat state and streamed response updates.
     ChatData(String),
+    /// Open a native, owner-modal picker on a COM STA worker thread.
+    OpenChatFilePicker,
+    /// The native picker has closed, so normal focus-loss handling can resume.
+    ChatFilePickerClosed,
+    /// Files selected by the native picker, already bounded and read as text.
+    ChatFilesPicked(Option<Result<Vec<super::file_picker::SelectedChatFile>, String>>),
     /// Only the status text changed — send a lightweight update.
     ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -482,6 +488,104 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if ready {
                         if let Some(wv) = webview.as_ref() {
                             post_json(wv, &json);
+                        }
+                    }
+                }
+                UiCommand::OpenChatFilePicker => {
+                    let owner = if let Ok(mut s) = state.lock() {
+                        if s.visible && !s.chat_file_picker_pending {
+                            s.chat_file_picker_open = true;
+                            s.chat_file_picker_pending = true;
+                            s.hwnd
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    if owner != 0 {
+                        let picker_proxy = proxy.clone();
+                        let spawn = std::thread::Builder::new()
+                            .name("nex-chat-file-picker".into())
+                            .spawn(move || {
+                                let paths = super::file_picker::show_chat_file_dialog(owner);
+                                try_send_ui(&picker_proxy, UiCommand::ChatFilePickerClosed);
+                                match paths {
+                                    Ok(Some(paths)) => {
+                                        let files = super::file_picker::read_chat_files(paths);
+                                        try_send_ui(
+                                            &picker_proxy,
+                                            UiCommand::ChatFilesPicked(Some(files)),
+                                        );
+                                    }
+                                    Ok(None) => try_send_ui(
+                                        &picker_proxy,
+                                        UiCommand::ChatFilesPicked(None),
+                                    ),
+                                    Err(error) => try_send_ui(
+                                        &picker_proxy,
+                                        UiCommand::ChatFilesPicked(Some(Err(error))),
+                                    ),
+                                }
+                            });
+                        if spawn.is_err() {
+                            if let Ok(mut s) = state.lock() {
+                                s.chat_file_picker_open = false;
+                                s.chat_file_picker_pending = false;
+                            }
+                            try_send_ui(
+                                &proxy,
+                                UiCommand::ChatFilesPicked(Some(Err(
+                                    "Nex couldn't start the Windows file picker.".into(),
+                                ))),
+                            );
+                        }
+                    }
+                }
+                UiCommand::ChatFilePickerClosed => {
+                    if let Ok(mut s) = state.lock() {
+                        s.chat_file_picker_open = false;
+                    }
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, r#"{"chatPickerLoading":true}"#);
+                        }
+                    }
+                    let state_after_picker = state.clone();
+                    let tx_after_picker = event_tx.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("nex-chat-picker-focus-check".into())
+                        .spawn(move || {
+                            std::thread::sleep(Duration::from_millis(150));
+                            if let Ok(s) = state_after_picker.lock() {
+                                if s.visible
+                                    && !s.has_focus
+                                    && !s.chat_file_picker_open
+                                    && !crate::overlay::hotkey::is_bare_win_press_active()
+                                {
+                                    let _ = tx_after_picker.send(OverlayEvent::Escape);
+                                }
+                            }
+                        });
+                }
+                UiCommand::ChatFilesPicked(result) => {
+                    if let Ok(mut s) = state.lock() {
+                        s.chat_file_picker_pending = false;
+                    }
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            let update = match result {
+                                Some(Ok(files)) => serde_json::json!({
+                                    "chatPickerLoading": false,
+                                    "chatFilesSelected": files
+                                }),
+                                Some(Err(error)) => serde_json::json!({
+                                    "chatPickerLoading": false,
+                                    "chatPickerError": error
+                                }),
+                                None => serde_json::json!({ "chatPickerLoading": false }),
+                            };
+                            post_json(wv, &update.to_string());
                         }
                     }
                 }
@@ -1059,6 +1163,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = true;
                 }
                 if !focused {
+                    let picker_open = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open)
+                        .unwrap_or(false);
+                    if picker_open {
+                        crate::runtime::log_info(
+                            "[nex] overlay focus loss ignored while native chat file picker is open",
+                        );
+                        return;
+                    }
                     let was_focused_val = was_focused;
                     let show_pending_val = show_pending;
                     let bare_win = crate::overlay::hotkey::is_bare_win_press_active();
@@ -1481,6 +1595,9 @@ fn handle_ipc(
         }
         OverlayMessage::ChatCancel(p) => {
             let _ = event_tx.send(OverlayEvent::ChatCancel(p.request_id));
+        }
+        OverlayMessage::ChatPickFiles(_) => {
+            try_send_ui(proxy, UiCommand::OpenChatFilePicker);
         }
         OverlayMessage::OpenExternal(p) => {
             let _ = event_tx.send(OverlayEvent::OpenExternal(p.v));

@@ -52,7 +52,7 @@
   const chatInput = $("chat-input");
   const chatSendButton = $("chat-send-button");
   const chatAttachButton = $("chat-attach-button");
-  const chatFileInput = $("chat-file-input");
+  const chatMenuScrim = $("chat-menu-scrim");
   const chatPcInfoButton = $("chat-pc-info-button");
   const chatContextSelection = $("chat-context-selection");
   const chatContextNote = $("chat-context-note");
@@ -85,7 +85,7 @@
   let chatIncludePcInfo = false;
   let chatFilesLoading = false;
   let chatContextSelectionEpoch = 0;
-  let chatConfig = { provider: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", configured: false, accountConnected: false };
+  let chatConfig = { provider: "codex", baseUrl: "https://api.openai.com/v1", model: "gpt-6-luna", configured: false, accountConnected: false };
   let chatModels = [];
   let chatModelsProvider = "";
   let chatModelsLoading = false;
@@ -1638,14 +1638,14 @@
   }
 
   function syncChatConfig() {
-    const provider = chatConfig.provider || "openai-compatible";
+    const provider = chatConfig.provider || "codex";
     chatProviderInput.value = provider;
     chatProviderChoice.textContent = provider === "codex" ? "ChatGPT account" : "OpenAI-compatible API";
     for (const option of chatProviderOptions.querySelectorAll("[data-chat-provider]")) {
       option.setAttribute("aria-selected", String(option.dataset.chatProvider === provider));
     }
     chatProviderButton.setAttribute("aria-expanded", String(!chatProviderOptions.hidden));
-    chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "") : "gpt-4o-mini");
+    chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "gpt-4o-mini");
     chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
     chatEndpointField.hidden = provider !== "openai-compatible";
     chatKeyField.hidden = provider !== "openai-compatible";
@@ -1667,11 +1667,13 @@
     panel.classList.toggle("chat-settings-open", open);
     if (open) setChatHistoryOpen(false);
     else { closeChatModelOptions(); closeChatProviderOptions(); }
+    chatMenuScrim.hidden = chatSettings.hidden && chatHistory.hidden;
   }
 
   function setChatHistoryOpen(open) {
     chatHistory.hidden = !open;
     panel.classList.toggle("chat-history-open", open);
+    chatMenuScrim.hidden = chatSettings.hidden && chatHistory.hidden;
   }
 
   function openChatView(fromMedia = false) {
@@ -1808,7 +1810,6 @@
     chatSelectedFiles = [];
     chatIncludePcInfo = false;
     chatAttachButton.disabled = false;
-    chatFileInput.disabled = false;
     renderChatContextSelection();
   }
 
@@ -1816,7 +1817,6 @@
     const selectionEpoch = chatContextSelectionEpoch;
     chatFilesLoading = true;
     chatAttachButton.disabled = true;
-    chatFileInput.disabled = true;
     try {
       for (const file of Array.from(fileList || [])) {
         if (selectionEpoch !== chatContextSelectionEpoch) return;
@@ -1865,7 +1865,6 @@
       if (selectionEpoch === chatContextSelectionEpoch) {
         chatFilesLoading = false;
         chatAttachButton.disabled = false;
-        chatFileInput.disabled = false;
         renderChatContextSelection();
       }
     }
@@ -2264,6 +2263,10 @@
     } else if (!chatProviderOptions.hidden) {
       closeChatProviderOptions();
       chatProviderButton.focus();
+    } else if (!chatSettings.hidden) {
+      setChatSettingsOpen(false);
+    } else if (!chatHistory.hidden) {
+      setChatHistoryOpen(false);
     }
   });
   document.addEventListener("pointerdown", (event) => {
@@ -2272,11 +2275,7 @@
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
-  chatAttachButton.addEventListener("click", () => chatFileInput.click());
-  chatFileInput.addEventListener("change", () => {
-    void readSelectedChatFiles(chatFileInput.files);
-    chatFileInput.value = "";
-  });
+  chatAttachButton.addEventListener("click", () => post("chatPickFiles"));
   chatPcInfoButton.addEventListener("click", () => {
     chatIncludePcInfo = !chatIncludePcInfo;
     renderChatContextSelection();
@@ -2301,6 +2300,16 @@
   function applyChatUpdate(state) {
     const hasRequestId = Object.prototype.hasOwnProperty.call(state, "requestId");
     let requestMatches = matchesActiveChatRequest(state);
+    if (typeof state.chatPickerLoading === "boolean") {
+      chatAttachButton.disabled = state.chatPickerLoading || chatFilesLoading;
+    }
+    if (Array.isArray(state.chatFilesSelected)) {
+      const files = state.chatFilesSelected.map((file) => {
+        if (!file || typeof file.name !== "string" || typeof file.content !== "string") return null;
+        return { name: file.name, size: chatTextEncoder.encode(file.content).length, text: async () => file.content };
+      }).filter(Boolean);
+      if (files.length) void readSelectedChatFiles(files);
+    }
     if (state.chatConfig) {
       const wasChatGPTConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
       chatConfig = { ...chatConfig, ...state.chatConfig };
@@ -2351,6 +2360,7 @@
       }
     }
     if (state.chatNotice) flashChatNotice(state.chatNotice);
+    if (state.chatPickerError) flashChatNotice(state.chatPickerError);
     if (state.chatError && (!hasRequestId || requestMatches)) {
       setChatModelsLoading(false);
       if (!chatModelOptions.hidden && !chatStreaming) renderChatModelOptions();
@@ -2408,7 +2418,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatCancelled || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatPickerError || state.chatPickerLoading !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

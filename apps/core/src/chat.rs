@@ -77,9 +77,9 @@ struct StoredConfig {
 impl Default for StoredConfig {
     fn default() -> Self {
         Self {
-            provider: "openai-compatible".into(),
+            provider: "codex".into(),
             base_url: "https://api.openai.com/v1".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-6-luna".into(),
             api_key: String::new(),
         }
     }
@@ -1175,6 +1175,13 @@ fn dpapi_decrypt(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_install_defaults_to_chatgpt_account() {
+        let config = StoredConfig::default();
+        assert_eq!(config.provider, "codex");
+        assert_eq!(config.model, "gpt-6-luna");
+    }
 
     #[test]
     fn chatgpt_model_url_includes_client_version() {

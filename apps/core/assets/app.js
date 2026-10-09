@@ -75,6 +75,7 @@
   let chatOpen = false;
   let chatReturnToMedia = false;
   let chatStreaming = false;
+  let chatActiveRequest = null;
   let chatConfig = { provider: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", configured: false, accountConnected: false };
   let chatModels = [];
   let chatModelsProvider = "";
@@ -182,7 +183,7 @@
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -1365,7 +1366,7 @@
   }
 
   function newChatConversation() {
-    if (chatStreaming) post("chatCancel");
+    invalidateChatRequest();
     chatStreaming = false;
     chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     chatMessages = [];
@@ -1420,7 +1421,7 @@
       });
       button.append(title, date, del);
       button.addEventListener("click", () => {
-        if (chatStreaming) post("chatCancel");
+        invalidateChatRequest();
         chatConversationId = conversation.id;
         chatMessages = conversation.messages.slice(-100);
         chatConfig.provider = conversation.provider || chatConfig.provider;
@@ -1544,6 +1545,10 @@
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
     if (!streamOnly) {
+      if (chatRenderFrame) {
+        cancelAnimationFrame(chatRenderFrame);
+        chatRenderFrame = 0;
+      }
       chatStreamMessageId = "";
       chatStreamOffset = 0;
       chatMessagesEl.replaceChildren();
@@ -1692,26 +1697,108 @@
     chatSendButton.disabled = !chatStreaming && !chatInput.value.trim();
   }
 
+  function createChatRequestId() {
+    const cryptoApi = window.crypto;
+    if (typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  const CHAT_IPC_MAX_BYTES = 64 * 1024;
+  const CHAT_MESSAGE_MAX_CHARS = 16_000;
+  const CHAT_HISTORY_MAX_TURNS = 24;
+  const CHAT_HISTORY_TURN_MAX_CHARS = 6000;
+  const CHAT_HISTORY_MAX_BYTES = 40_000;
+  const chatTextEncoder = new TextEncoder();
+  const chatTextDecoder = new TextDecoder();
+
+  function chatSendPayloadFits(message, requestId, history) {
+    const payload = { t: "chatSend", requestId, message, history };
+    return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
+  }
+
+  function chatMessageFits(message, requestId) {
+    return Array.from(message).length <= CHAT_MESSAGE_MAX_CHARS
+      && chatSendPayloadFits(message, requestId, []);
+  }
+
+  function buildChatHistory(turns, message, requestId) {
+    const candidates = turns.filter((turn) => !turn.error
+      && !(turn.role === "assistant" && turn.incomplete)
+      && (turn.role === "user" || turn.role === "assistant"))
+      .slice(-CHAT_HISTORY_MAX_TURNS);
+    const history = [];
+    let totalBytes = 0;
+    for (let index = candidates.length - 1; index >= 0; index--) {
+      const turn = candidates[index];
+      const encodedContent = chatTextEncoder.encode(Array.from(turn.content).slice(0, CHAT_HISTORY_TURN_MAX_CHARS).join(""));
+      const content = chatTextDecoder.decode(encodedContent);
+      if (totalBytes + encodedContent.length > CHAT_HISTORY_MAX_BYTES) break;
+      const nextHistory = [{ role: turn.role, content }, ...history];
+      if (!chatSendPayloadFits(message, requestId, nextHistory)) break;
+      history.unshift({ role: turn.role, content });
+      totalBytes += encodedContent.length;
+    }
+    return history;
+  }
+
+  function invalidateChatRequest() {
+    const request = chatActiveRequest;
+    chatActiveRequest = null;
+    if (chatRenderFrame) {
+      cancelAnimationFrame(chatRenderFrame);
+      chatRenderFrame = 0;
+    }
+    if (request) post("chatCancel", { requestId: request.requestId });
+  }
+
+  function matchesActiveChatRequest(state) {
+    const active = chatActiveRequest;
+    return !!active && typeof state.requestId === "string" && state.requestId === active.requestId
+      && (state.conversationId === undefined || state.conversationId === active.conversationId);
+  }
+
+  function stopChatRequest() {
+    invalidateChatRequest();
+    chatLiveStatus.textContent = "Response stopped";
+    updateChatStreamingState(false);
+    renderChatMessages();
+    persistChat();
+  }
+
   function startChatRequest(message, reuseUserTurn = false) {
-    if (chatStreaming) post("chatCancel");
+    const request = { requestId: createChatRequestId() };
+    const historyTurns = reuseUserTurn ? chatMessages.slice(0, -1) : chatMessages;
+    if (!chatMessageFits(message, request.requestId)) {
+      chatNotice.textContent = "This message is too large to send. Shorten it and try again.";
+      chatNotice.classList.add("error");
+      return false;
+    }
+    const history = buildChatHistory(historyTurns, message, request.requestId);
+    invalidateChatRequest();
+    chatActiveRequest = request;
     if (!reuseUserTurn) chatMessages.push({ id: "m-" + Date.now() + "-u", role: "user", content: message });
-    const history = chatMessages.slice(0, reuseUserTurn ? -1 : undefined).filter((turn) => !turn.error && (turn.role === "user" || turn.role === "assistant")).slice(-24).map((turn) => ({ role: turn.role, content: turn.content.slice(0, 6000) }));
-    const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "" };
+    const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "", incomplete: true };
     chatMessages.push(assistant);
     saveChatTitle(); persistChat();
     renderChatMessages();
     chatLiveStatus.textContent = "Thinking…";
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("chatSend", { message, history });
+    post("chatSend", { ...request, message, history });
     chatInput.focus(); postChatResize();
+    return true;
   }
 
   function sendChatMessage() {
     const message = chatInput.value.trim();
     if (!message) { chatInput.focus(); return; }
     chatInput.value = ""; resizeChatInput();
-    startChatRequest(message);
+    if (!startChatRequest(message)) {
+      chatInput.value = message;
+      resizeChatInput();
+      chatInput.focus();
+    }
   }
 
   function regenerateChatResponse(messageId) {
@@ -1721,8 +1808,9 @@
     const previousUser = chatMessages.slice(0, assistantIndex).reverse().find((message) => message.role === "user");
     if (!previousUser) return;
     const userIndex = chatMessages.findIndex((message) => message.id === previousUser.id);
+    const previousMessages = chatMessages;
     chatMessages = chatMessages.slice(0, userIndex + 1);
-    startChatRequest(previousUser.content, true);
+    if (!startChatRequest(previousUser.content, true)) chatMessages = previousMessages;
   }
 
   function startChatVoice() {
@@ -2037,7 +2125,7 @@
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
-  chatSendButton.addEventListener("click", () => chatStreaming ? post("chatCancel") : sendChatMessage());
+  chatSendButton.addEventListener("click", () => chatStreaming ? stopChatRequest() : sendChatMessage());
   // Model links open in the default browser (WebView2 blocks target=_blank).
   chatMessagesEl.addEventListener("click", (event) => {
     const link = event.target.closest ? event.target.closest("a[href]") : null;
@@ -2055,6 +2143,8 @@
   }
 
   function applyChatUpdate(state) {
+    const hasRequestId = Object.prototype.hasOwnProperty.call(state, "requestId");
+    let requestMatches = matchesActiveChatRequest(state);
     if (state.chatConfig) {
       const wasCodexConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
       chatConfig = { ...chatConfig, ...state.chatConfig };
@@ -2105,7 +2195,7 @@
       }
     }
     if (state.chatNotice) flashChatNotice(state.chatNotice);
-    if (state.chatError) {
+    if (state.chatError && (!hasRequestId || requestMatches)) {
       setChatModelsLoading(false);
       if (!chatModelOptions.hidden && !chatStreaming) renderChatModelOptions();
       window.clearTimeout(chatConnectTimer);
@@ -2114,23 +2204,49 @@
       chatConnectButton.textContent = "Connect account";
       chatConnectButton.setAttribute("aria-busy", "false");
       chatNotice.textContent = state.chatError; chatNotice.classList.add("error");
-      const last = chatMessages[chatMessages.length - 1];
-      if (chatStreaming && last && last.role === "assistant" && !last.content) { last.content = state.chatError; last.error = true; }
-      if (chatStreaming) { renderChatMessages(); updateChatStreamingState(false); chatLiveStatus.textContent = ""; persistChat(); }
+      if (requestMatches) {
+        chatActiveRequest = null;
+        requestMatches = false;
+        const last = chatMessages[chatMessages.length - 1];
+        if (last && last.role === "assistant" && !last.content) { last.content = state.chatError; last.error = true; }
+        chatLiveStatus.textContent = "";
+        updateChatStreamingState(false);
+        renderChatMessages();
+        persistChat();
+      }
     }
-    if (state.chatDelta) {
+    if (state.chatDelta && requestMatches) {
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") {
         if (state.chatDelta.text) last.content += state.chatDelta.text;
         if (state.chatDelta.status !== undefined) chatLiveStatus.textContent = state.chatDelta.status || "";
         if (state.chatDelta.text && !chatRenderFrame) {
-          chatRenderFrame = requestAnimationFrame(() => { chatRenderFrame = 0; renderChatMessages(true); });
+          const request = chatActiveRequest;
+          chatRenderFrame = requestAnimationFrame(() => {
+            chatRenderFrame = 0;
+            if (request === chatActiveRequest) renderChatMessages(true);
+          });
         }
       }
       persistChat();
     }
-    if (state.chatDone) { chatLiveStatus.textContent = ""; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
-    if (state.chatCancelled) { chatLiveStatus.textContent = "Response stopped"; updateChatStreamingState(false); renderChatMessages(); persistChat(); }
+    if (state.chatDone && requestMatches) {
+      const last = chatMessages[chatMessages.length - 1];
+      if (last && last.role === "assistant") delete last.incomplete;
+      chatActiveRequest = null;
+      requestMatches = false;
+      chatLiveStatus.textContent = "";
+      updateChatStreamingState(false);
+      renderChatMessages();
+      persistChat();
+    }
+    if (state.chatCancelled && requestMatches) {
+      chatActiveRequest = null;
+      chatLiveStatus.textContent = "Response stopped";
+      updateChatStreamingState(false);
+      renderChatMessages();
+      persistChat();
+    }
   }
 
   // ── Rust → JS bridge ─────────────────────────────────────

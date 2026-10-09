@@ -1886,9 +1886,16 @@ impl RuntimeWorker {
                         overlay.push_chat(update.to_string());
                     });
             }
-            OverlayEvent::ChatCancel => {
-                crate::chat::cancel();
-                self.overlay.push_chat(serde_json::json!({ "chatCancelled": true }).to_string());
+            OverlayEvent::ChatCancel(request_id) => {
+                if crate::chat::cancel(&request_id) {
+                    self.overlay.push_chat(
+                        serde_json::json!({
+                            "chatCancelled": true,
+                            "requestId": request_id
+                        })
+                        .to_string(),
+                    );
+                }
             }
             OverlayEvent::OpenExternal(url) => {
                 open_url_in_browser(&url);

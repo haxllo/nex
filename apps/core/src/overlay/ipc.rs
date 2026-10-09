@@ -28,6 +28,8 @@ pub(crate) const MAX_TITLE_CHARS: usize = 1024;
 pub(crate) const MAX_PATH_CHARS: usize = 32_768;
 /// Longest accepted bookmark URL (characters).
 pub(crate) const MAX_URL_CHARS: usize = 8192;
+/// Longest accepted chat request ID.
+pub(crate) const MAX_CHAT_REQUEST_ID_CHARS: usize = 128;
 /// Largest accepted row index for submit/select. Real lists hold at most
 /// ~100 rows; this leaves wide headroom while keeping the `as usize`
 /// cast at the call site loss-free on both 32- and 64-bit targets.
@@ -140,9 +142,18 @@ pub(crate) struct ChatTurnPayload {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ChatSendPayload {
+    #[serde(default)]
+    pub request_id: String,
     pub message: String,
     #[serde(default)]
     pub history: Vec<ChatTurnPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ChatCancelPayload {
+    #[serde(default)]
+    pub request_id: String,
 }
 
 /// Resize payload: `{t:"resize", v:{v:h, immediate:bool}}` (current) or
@@ -284,7 +295,7 @@ pub(crate) enum OverlayMessage {
     #[serde(rename = "chatDisconnect")]
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
-    ChatCancel(NoPayload),
+    ChatCancel(ChatCancelPayload),
     #[serde(rename = "openExternal")]
     OpenExternal(TextPayload),
 }
@@ -411,6 +422,12 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             check_len(&p.api_key, 4096, "chat API key").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::ChatSend(p) => {
+            check_len(
+                &p.request_id,
+                MAX_CHAT_REQUEST_ID_CHARS,
+                "chat request ID",
+            )
+            .map_err(IpcReject::BadPayload)?;
             check_len(&p.message, 16_000, "chat message").map_err(IpcReject::BadPayload)?;
             if p.history.len() > 24 {
                 return Err(IpcReject::BadPayload("chat history exceeds 24 turns".into()));
@@ -424,6 +441,14 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             if total > 40_000 {
                 return Err(IpcReject::BadPayload("chat history is too large".into()));
             }
+        }
+        OverlayMessage::ChatCancel(p) => {
+            check_len(
+                &p.request_id,
+                MAX_CHAT_REQUEST_ID_CHARS,
+                "chat request ID",
+            )
+            .map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::ChatConnect(p) => {
             check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
@@ -646,6 +671,23 @@ mod tests {
             parse_overlay(r#"{"t":"chatDisconnect"}"#),
             Ok(OverlayMessage::ChatDisconnect(NoPayload {}))
         );
+    }
+
+    #[test]
+    fn chat_request_ids_parse_and_are_bounded() {
+        assert!(parse_overlay(
+            r#"{"t":"chatSend","requestId":"req-1","message":"hello","history":[]}"#
+        )
+        .is_ok());
+        assert!(parse_overlay(r#"{"t":"chatCancel","requestId":"req-1"}"#).is_ok());
+        assert!(parse_overlay(r#"{"t":"chatCancel"}"#).is_ok());
+        let too_long = "x".repeat(MAX_CHAT_REQUEST_ID_CHARS + 1);
+        assert!(matches!(
+            parse_overlay(&format!(
+                r#"{{"t":"chatCancel","requestId":"{too_long}"}}"#
+            )),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 
     #[test]

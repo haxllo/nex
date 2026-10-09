@@ -317,14 +317,21 @@ fn fetch_chatgpt_models_native() -> Result<Vec<Value>, String> {
     let payload: Value = response
         .into_json()
         .map_err(|_| "ChatGPT returned an unreadable model list.".to_string())?;
-    let mut models = payload
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "ChatGPT returned an unreadable model list.".to_string())?
+    parse_chatgpt_model_list(&payload)
+}
+
+fn parse_chatgpt_model_list(payload: &Value) -> Result<Vec<Value>, String> {
+    let entries = payload
+        .as_array()
+        .or_else(|| payload.get("models").and_then(Value::as_array))
+        .or_else(|| payload.get("data").and_then(Value::as_array))
+        .ok_or_else(|| "ChatGPT returned an unreadable model list.".to_string())?;
+    let mut models = entries
         .iter()
         .filter_map(|model| {
             let id = model
-                .get("id")
+                .get("slug")
+                .or_else(|| model.get("id"))
                 .or_else(|| model.get("model"))
                 .or_else(|| model.get("name"))?
                 .as_str()?;
@@ -341,7 +348,8 @@ fn fetch_chatgpt_models_native() -> Result<Vec<Value>, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("Available with your ChatGPT account.");
             let is_default = model
-                .get("isDefault")
+                .get("default")
+                .or_else(|| model.get("isDefault"))
                 .or_else(|| model.get("is_default"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
@@ -1173,6 +1181,33 @@ mod tests {
                 .as_deref(),
             Some(CHATGPT_MODELS_CLIENT_VERSION)
         );
+    }
+
+    #[test]
+    fn parses_codex_models_catalog() {
+        let payload = json!({
+            "models": [{
+                "slug": "gpt-6-luna",
+                "display_name": "GPT-6 Luna",
+                "description": "Reasoning model"
+            }]
+        });
+
+        let models = parse_chatgpt_model_list(&payload).unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "gpt-6-luna");
+        assert_eq!(models[0]["name"], "GPT-6 Luna");
+    }
+
+    #[test]
+    fn parses_legacy_openai_style_chatgpt_catalog() {
+        let payload = json!({"data": [{"id": "gpt-5", "name": "GPT-5"}]});
+
+        let models = parse_chatgpt_model_list(&payload).unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "gpt-5");
     }
 
     #[test]

@@ -87,7 +87,7 @@ impl Default for StoredConfig {
 
 pub(crate) fn public_config() -> Value {
     let config = load_config().unwrap_or_default();
-    let account_connected = config.provider == "codex" && codex_authenticated();
+    let account_connected = config.provider == "codex" && chatgpt_authenticated();
     json!({
         "provider": config.provider,
         "baseUrl": config.base_url,
@@ -142,7 +142,7 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
         push(json!({"chatConnecting":false,"chatError":"Choose ChatGPT to connect an account."}));
         return;
     }
-    if codex_authenticated() {
+    if chatgpt_authenticated() {
         push(
             json!({"chatConnecting":false,"chatConfig":public_config(),"chatNotice":"ChatGPT is already connected. Choose a model and start chatting."}),
         );
@@ -157,15 +157,13 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
             return;
         }
     };
-    push(
-        json!({"chatConnecting":true,"chatNotice":"ChatGPT sign-in opened in your browser. This connects Nex only; your Codex CLI sign-in is unchanged."}),
-    );
+    push(json!({"chatConnecting":true,"chatNotice":"ChatGPT sign-in opened in your browser."}));
     let _ = std::thread::Builder::new()
-        .name("nex-codex-login-watch".into())
+        .name("nex-chatgpt-login-watch".into())
         .spawn(move || {
             let deadline = Duration::from_secs(300);
             match crate::codex_auth::wait_for_login(server, deadline) {
-                Ok(()) if codex_authenticated() => {
+                Ok(()) if chatgpt_authenticated() => {
                     push(json!({"chatConnecting":false,"chatConfig":public_config(),"chatNotice":"ChatGPT connected to Nex. Choose a model and start chatting."}));
                 }
                 _ => {
@@ -176,7 +174,7 @@ pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'stat
 }
 
 pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
-    if !codex_authenticated() {
+    if !chatgpt_authenticated() {
         push(
             json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"ChatGPT is already signed out."}),
         );
@@ -184,9 +182,9 @@ pub(crate) fn disconnect(mut push: impl FnMut(Value) + Send + 'static) {
     }
     push(json!({"chatDisconnecting":true,"chatNotice":"Signing out of ChatGPT…"}));
     match crate::codex_auth::logout() {
-        Ok(_) if !codex_authenticated() => {
+        Ok(_) if !chatgpt_authenticated() => {
             push(
-                json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Nex's ChatGPT connection was removed. Any separate Codex CLI sign-in is unchanged."}),
+                json!({"chatDisconnecting":false,"chatConfig":public_config(),"chatModels":{"provider":"codex","models":[]},"chatNotice":"Nex's ChatGPT connection was removed."}),
             );
         }
         _ => {
@@ -202,7 +200,7 @@ pub(crate) fn fetch_models(raw: &str) -> Result<Value, String> {
         .map_err(|_| "Those provider settings could not be read.".to_string())?;
     request.provider = request.provider.trim().to_ascii_lowercase();
     let models = match request.provider.as_str() {
-        "codex" => fetch_codex_models()?,
+        "codex" => fetch_chatgpt_models()?,
         "openai-compatible" => {
             if request.api_key.trim().is_empty() {
                 request.api_key = load_config().unwrap_or_default().api_key;
@@ -262,11 +260,11 @@ fn fetch_compatible_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, 
     Ok(models)
 }
 
-fn fetch_codex_models() -> Result<Vec<Value>, String> {
-    fetch_codex_models_native()
+fn fetch_chatgpt_models() -> Result<Vec<Value>, String> {
+    fetch_chatgpt_models_native()
 }
 
-fn codex_request(agent: &ureq::Agent, method: &str, url: &str) -> Result<ureq::Request, String> {
+fn chatgpt_request(agent: &ureq::Agent, method: &str, url: &str) -> Result<ureq::Request, String> {
     let Some((access, account)) = crate::codex_auth::fresh_tokens()? else {
         return Err("Connect your ChatGPT account first.".into());
     };
@@ -280,13 +278,24 @@ fn codex_request(agent: &ureq::Agent, method: &str, url: &str) -> Result<ureq::R
     Ok(request)
 }
 
-fn fetch_codex_models_native() -> Result<Vec<Value>, String> {
+// The model catalog uses this version to filter models by client compatibility.
+const CHATGPT_MODELS_CLIENT_VERSION: &str = "0.162.0";
+
+fn chatgpt_models_url() -> String {
+    let mut url = url::Url::parse(&format!("{}/models", crate::codex_auth::CODEX_BASE_URL))
+        .expect("valid ChatGPT model endpoint");
+    url.query_pairs_mut()
+        .append_pair("client_version", CHATGPT_MODELS_CLIENT_VERSION);
+    url.to_string()
+}
+
+fn fetch_chatgpt_models_native() -> Result<Vec<Value>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(12))
         .timeout_read(Duration::from_secs(12))
         .build();
-    let url = format!("{}/models", crate::codex_auth::CODEX_BASE_URL);
-    let response = codex_request(&agent, "GET", &url)?
+    let url = chatgpt_models_url();
+    let response = chatgpt_request(&agent, "GET", &url)?
         .call()
         .map_err(|e| match e {
             ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
@@ -296,7 +305,7 @@ fn fetch_codex_models_native() -> Result<Vec<Value>, String> {
                 }
             }
             ureq::Error::Status(code, response) => {
-                codex_http_error(code, response.into_string().unwrap_or_default())
+                chatgpt_http_error(code, response.into_string().unwrap_or_default())
             }
             ureq::Error::Transport(_) => {
                 "Could not reach ChatGPT. Check your connection.".to_string()
@@ -391,7 +400,7 @@ fn sort_model_recommendations(models: &mut [Value]) {
     }
 }
 
-fn codex_authenticated() -> bool {
+fn chatgpt_authenticated() -> bool {
     crate::codex_auth::is_signed_in()
 }
 
@@ -434,7 +443,7 @@ fn openai_stream_is_complete(payload: &str) -> bool {
     payload == "[DONE]"
 }
 
-fn codex_native_stream_is_complete(event: &str, data: &Value) -> bool {
+fn chatgpt_stream_is_complete(event: &str, data: &Value) -> bool {
     event == "response.completed"
         && data.get("type").and_then(Value::as_str) == Some("response.completed")
         && data.pointer("/response/status").and_then(Value::as_str) == Some("completed")
@@ -534,7 +543,7 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
             };
             let result = match config.provider.as_str() {
                 "openai-compatible" => stream_openai(&config, &request, id, &mut emit),
-                "codex" => stream_codex(&config, &request, id, &mut emit),
+                "codex" => stream_chatgpt(&config, &request, id, &mut emit),
                 _ => Err("Choose a chat provider in settings.".into()),
             };
             if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
@@ -660,18 +669,18 @@ fn stream_openai(
     }
 }
 
-fn stream_codex(
+fn stream_chatgpt(
     config: &StoredConfig,
     request: &SendRequest,
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
 ) -> Result<(), String> {
-    stream_codex_native(config, request, id, emit)
+    stream_chatgpt_native(config, request, id, emit)
 }
 
 /// Friendly ChatGPT backend failures: quota/rate limits with reset time,
 /// expired sessions, over-long conversations, else the backend message.
-fn codex_http_error(code: u16, body: String) -> String {
+fn chatgpt_http_error(code: u16, body: String) -> String {
     if code == 401 || code == 403 {
         return "ChatGPT session expired. Reconnect your account.".to_string();
     }
@@ -737,7 +746,7 @@ fn describe_reset(resets_at: i64) -> String {
     format!("resets in about {}h", minutes / 60)
 }
 
-fn stream_codex_native(
+fn stream_chatgpt_native(
     config: &StoredConfig,
     request: &SendRequest,
     id: u64,
@@ -746,7 +755,7 @@ fn stream_codex_native(
     let prompt = conversation_prompt(request);
     let started = Instant::now();
     crate::runtime::log_info(&format!(
-        "[nex][chat] codex native start model={} prompt_chars={}",
+        "[nex][chat] ChatGPT account start model={} prompt_chars={}",
         config.model,
         prompt.chars().count()
     ));
@@ -782,7 +791,7 @@ fn stream_codex_native(
     if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
         return Ok(());
     }
-    let response = codex_request(&agent, "POST", &url)?
+    let response = chatgpt_request(&agent, "POST", &url)?
         .set("Accept", "text/event-stream")
         .send_json(body)
         .map_err(|e| match e {
@@ -795,19 +804,19 @@ fn stream_codex_native(
             }
             ureq::Error::Status(code, response) => {
                 let body = response.into_string().unwrap_or_default();
-                crate::runtime::log_info(&format!("[nex][chat] codex native HTTP {code}"));
-                codex_http_error(code, body)
+                crate::runtime::log_info(&format!("[nex][chat] ChatGPT account HTTP {code}"));
+                chatgpt_http_error(code, body)
             }
             ureq::Error::Transport(inner) => {
                 crate::runtime::log_info(&format!(
-                    "[nex][chat] codex native transport error: {inner:?}"
+                    "[nex][chat] ChatGPT account transport error: {inner:?}"
                 ));
                 "Could not reach ChatGPT. Check your connection.".to_string()
             }
         })?;
     let mut reader = BufReader::new(response.into_reader());
     crate::runtime::log_info(&format!(
-        "[nex][chat] codex native connected in {}ms",
+        "[nex][chat] ChatGPT account connected in {}ms",
         started.elapsed().as_millis()
     ));
     let mut pending_line = String::new();
@@ -864,7 +873,7 @@ fn stream_codex_native(
                 if !first_token_logged && !delta.is_empty() {
                     first_token_logged = true;
                     crate::runtime::log_info(&format!(
-                        "[nex][chat] codex native first token in {}ms",
+                        "[nex][chat] ChatGPT account first token in {}ms",
                         started.elapsed().as_millis()
                     ));
                 }
@@ -877,7 +886,7 @@ fn stream_codex_native(
             if !first_token_logged && !message.is_empty() {
                 first_token_logged = true;
                 crate::runtime::log_info(&format!(
-                    "[nex][chat] codex native first token in {}ms",
+                    "[nex][chat] ChatGPT account first token in {}ms",
                     started.elapsed().as_millis()
                 ));
             }
@@ -902,7 +911,7 @@ fn stream_codex_native(
                 error.chars().take(280).collect::<String>()
             ));
         }
-        if event == "response.completed" && codex_native_stream_is_complete(&event, &data) {
+        if event == "response.completed" && chatgpt_stream_is_complete(&event, &data) {
             finished = true;
             break;
         } else if event == "response.completed" {
@@ -913,7 +922,7 @@ fn stream_codex_native(
         return Err("The ChatGPT connection ended before the response was complete.".into());
     }
     crate::runtime::log_info(&format!(
-        "[nex][chat] codex native done in {}ms",
+        "[nex][chat] ChatGPT account done in {}ms",
         started.elapsed().as_millis()
     ));
     Ok(())
@@ -1154,6 +1163,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chatgpt_model_url_includes_client_version() {
+        let url = url::Url::parse(&chatgpt_models_url()).unwrap();
+        assert_eq!(url.path(), "/backend-api/codex/models");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(name, _)| name == "client_version")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some(CHATGPT_MODELS_CLIENT_VERSION)
+        );
+    }
+
+    #[test]
     fn cancellation_only_matches_the_active_request() {
         assert!(cancel_matches("request-1", Some("request-1")));
         assert!(!cancel_matches("", Some("request-1")));
@@ -1254,19 +1276,19 @@ mod tests {
     fn streams_require_their_provider_completion_event() {
         assert!(openai_stream_is_complete("[DONE]"));
         assert!(!openai_stream_is_complete(""));
-        assert!(codex_native_stream_is_complete(
+        assert!(chatgpt_stream_is_complete(
             "response.completed",
             &json!({"type":"response.completed","response":{"status":"completed"}})
         ));
-        assert!(!codex_native_stream_is_complete(
+        assert!(!chatgpt_stream_is_complete(
             "response.completed",
             &json!({"type":"response.completed","response":{"status":"in_progress"}})
         ));
-        assert!(!codex_native_stream_is_complete(
+        assert!(!chatgpt_stream_is_complete(
             "response.completed",
             &json!({})
         ));
-        assert!(!codex_native_stream_is_complete(
+        assert!(!chatgpt_stream_is_complete(
             "response.incomplete",
             &json!({"type":"response.incomplete","response":{"status":"incomplete"}})
         ));
@@ -1317,7 +1339,7 @@ mod tests {
 
     #[test]
     fn quota_errors_name_reset_time() {
-        let message = codex_http_error(
+        let message = chatgpt_http_error(
             429,
             r#"{"error":{"message":"rate_limit_exceeded","resets_at":1999999999}}"#.into(),
         );
@@ -1327,7 +1349,7 @@ mod tests {
 
     #[test]
     fn long_chats_suggest_a_fresh_conversation() {
-        let message = codex_http_error(
+        let message = chatgpt_http_error(
             400,
             r#"{"error":{"message":"This conversation has reached the maximum context length"}}"#
                 .into(),
@@ -1337,7 +1359,7 @@ mod tests {
 
     #[test]
     fn expired_sessions_ask_to_reconnect() {
-        assert!(codex_http_error(401, String::new()).contains("Reconnect"));
-        assert!(codex_http_error(500, String::new()).contains("HTTP 500"));
+        assert!(chatgpt_http_error(401, String::new()).contains("Reconnect"));
+        assert!(chatgpt_http_error(500, String::new()).contains("HTTP 500"));
     }
 }

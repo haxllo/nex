@@ -2105,6 +2105,10 @@ impl RuntimeWorker {
                 self.overlay.refresh_media();
             }
             OverlayEvent::Escape => {
+                if self.overlay.is_chat_file_picker_active() {
+                    log_info("[nex] ignored overlay dismissal while native chat file picker is active");
+                    return;
+                }
                 let before_shim = self.overlay.is_visible();
                 let before_overlay = self.overlay_state.is_visible();
                 let action = self.overlay_state.on_escape();

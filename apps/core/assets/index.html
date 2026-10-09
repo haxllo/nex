@@ -183,7 +183,6 @@
 
         <div class="chat-composer-wrap">
           <div id="chat-context-selection" class="chat-context-selection" role="group" aria-label="Selected local context" hidden></div>
-          <div id="chat-context-note" class="chat-context-note" hidden>Your next message sends selected file names and contents, optional PC facts, and recent chat history to your configured provider. Chat text, replies, and file names are stored in local conversation history on this device—not file contents. Replies may quote supplied context; those quotes can be sent again in later chat history. PC facts are Windows version/build, Nex build architecture, available logical processor count, and RAM—not usernames, IDs, running apps, or file scans.</div>
           <div id="chat-composer-shell" class="chat-composer-shell">
             <textarea id="chat-input" rows="1" maxlength="16000" aria-label="Message Chat" placeholder="Message Nex…"></textarea>
             <div class="chat-composer-tools">
@@ -204,6 +203,10 @@
           </div>
           <div class="chat-composer-footer">
             <div id="chat-notice" class="chat-notice" role="status"></div>
+            <details class="chat-sharing-details">
+              <summary>What gets sent?</summary>
+              <div class="chat-sharing-disclosure">Your next message sends selected file names and contents, optional PC facts, and recent chat history to your configured provider. Chat text, replies, and file names are stored in local conversation history on this device—not file contents. Replies may quote supplied context; those quotes can be sent again in later chat history. PC facts are Windows version/build, Nex build architecture, available logical processor count, and RAM—not usernames, IDs, running apps, or file scans.</div>
+            </details>
             <span class="chat-composer-hint"><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> new line</span>
           </div>
         </div>

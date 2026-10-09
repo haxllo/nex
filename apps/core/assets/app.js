@@ -55,7 +55,6 @@
   const chatMenuScrim = $("chat-menu-scrim");
   const chatPcInfoButton = $("chat-pc-info-button");
   const chatContextSelection = $("chat-context-selection");
-  const chatContextNote = $("chat-context-note");
   const chatNotice = $("chat-notice");
   const chatLiveStatus = $("chat-live-status");
   const chatSettings = $("chat-settings");
@@ -1798,7 +1797,6 @@
     });
     const hasContext = chatSelectedFiles.length > 0 || chatIncludePcInfo;
     chatContextSelection.hidden = !hasContext;
-    chatContextNote.hidden = !hasContext;
     chatPcInfoButton.setAttribute("aria-pressed", String(chatIncludePcInfo));
     chatInput.placeholder = chatSelectedFiles.length ? "Ask about selected files…" : "Message Nex…";
     postChatResize();

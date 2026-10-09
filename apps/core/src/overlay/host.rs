@@ -543,30 +543,20 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::ChatFilePickerClosed => {
-                    if let Ok(mut s) = state.lock() {
+                    let restore_focus = if let Ok(mut s) = state.lock() {
                         s.chat_file_picker_open = false;
+                        s.visible
+                    } else {
+                        false
+                    };
+                    if restore_focus {
+                        window.set_focus();
                     }
                     if ready {
                         if let Some(wv) = webview.as_ref() {
                             post_json(wv, r#"{"chatPickerLoading":true}"#);
                         }
                     }
-                    let state_after_picker = state.clone();
-                    let tx_after_picker = event_tx.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("nex-chat-picker-focus-check".into())
-                        .spawn(move || {
-                            std::thread::sleep(Duration::from_millis(150));
-                            if let Ok(s) = state_after_picker.lock() {
-                                if s.visible
-                                    && !s.has_focus
-                                    && !s.chat_file_picker_open
-                                    && !crate::overlay::hotkey::is_bare_win_press_active()
-                                {
-                                    let _ = tx_after_picker.send(OverlayEvent::Escape);
-                                }
-                            }
-                        });
                 }
                 UiCommand::ChatFilesPicked(result) => {
                     if let Ok(mut s) = state.lock() {
@@ -1163,13 +1153,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = true;
                 }
                 if !focused {
-                    let picker_open = state
+                    let picker_active = state
                         .lock()
-                        .map(|s| s.chat_file_picker_open)
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
                         .unwrap_or(false);
-                    if picker_open {
+                    if picker_active {
                         crate::runtime::log_info(
-                            "[nex] overlay focus loss ignored while native chat file picker is open",
+                            "[nex] overlay focus loss ignored while native chat file picker is active",
                         );
                         return;
                     }
@@ -1206,6 +1196,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 if let Ok(s) = state_clone.lock() {
                                     if s.visible
                                         && !s.has_focus
+                                        && !s.chat_file_picker_open
+                                        && !s.chat_file_picker_pending
                                         && !crate::overlay::hotkey::is_bare_win_press_active()
                                     {
                                         let _ = tx_clone.send(OverlayEvent::Escape);

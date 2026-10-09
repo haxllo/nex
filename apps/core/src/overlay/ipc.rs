@@ -30,6 +30,10 @@ pub(crate) const MAX_PATH_CHARS: usize = 32_768;
 pub(crate) const MAX_URL_CHARS: usize = 8192;
 /// Longest accepted chat request ID.
 pub(crate) const MAX_CHAT_REQUEST_ID_CHARS: usize = 128;
+pub(crate) const MAX_CHAT_ATTACHMENTS: usize = 3;
+pub(crate) const MAX_CHAT_ATTACHMENT_NAME_CHARS: usize = 128;
+pub(crate) const MAX_CHAT_ATTACHMENT_BYTES: usize = 12 * 1024;
+pub(crate) const MAX_CHAT_ATTACHMENTS_TOTAL_BYTES: usize = 20 * 1024;
 /// Largest accepted row index for submit/select. Real lists hold at most
 /// ~100 rows; this leaves wide headroom while keeping the `as usize`
 /// cast at the call site loss-free on both 32- and 64-bit targets.
@@ -141,12 +145,23 @@ pub(crate) struct ChatTurnPayload {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct ChatAttachmentPayload {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ChatSendPayload {
     #[serde(default)]
     pub request_id: String,
     pub message: String,
     #[serde(default)]
     pub history: Vec<ChatTurnPayload>,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachmentPayload>,
+    #[serde(default)]
+    pub include_pc_info: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -422,33 +437,58 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             check_len(&p.api_key, 4096, "chat API key").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::ChatSend(p) => {
-            check_len(
-                &p.request_id,
-                MAX_CHAT_REQUEST_ID_CHARS,
-                "chat request ID",
-            )
-            .map_err(IpcReject::BadPayload)?;
+            check_len(&p.request_id, MAX_CHAT_REQUEST_ID_CHARS, "chat request ID")
+                .map_err(IpcReject::BadPayload)?;
             check_len(&p.message, 16_000, "chat message").map_err(IpcReject::BadPayload)?;
             if p.history.len() > 24 {
-                return Err(IpcReject::BadPayload("chat history exceeds 24 turns".into()));
+                return Err(IpcReject::BadPayload(
+                    "chat history exceeds 24 turns".into(),
+                ));
             }
             let mut total = 0usize;
             for turn in &p.history {
                 check_len(&turn.role, 16, "chat role").map_err(IpcReject::BadPayload)?;
-                check_len(&turn.content, 6000, "chat history content").map_err(IpcReject::BadPayload)?;
+                check_len(&turn.content, 6000, "chat history content")
+                    .map_err(IpcReject::BadPayload)?;
                 total += turn.content.len();
             }
             if total > 40_000 {
                 return Err(IpcReject::BadPayload("chat history is too large".into()));
             }
+            if p.attachments.len() > MAX_CHAT_ATTACHMENTS {
+                return Err(IpcReject::BadPayload("too many chat attachments".into()));
+            }
+            let mut attachment_bytes = 0usize;
+            for attachment in &p.attachments {
+                check_len(
+                    &attachment.name,
+                    MAX_CHAT_ATTACHMENT_NAME_CHARS,
+                    "chat attachment name",
+                )
+                .map_err(IpcReject::BadPayload)?;
+                if attachment.name.is_empty()
+                    || attachment.name.contains('/')
+                    || attachment.name.contains('\\')
+                    || attachment.name.chars().any(char::is_control)
+                {
+                    return Err(IpcReject::BadPayload("invalid chat attachment name".into()));
+                }
+                if attachment.content.len() > MAX_CHAT_ATTACHMENT_BYTES {
+                    return Err(IpcReject::BadPayload(
+                        "chat attachment exceeds the per-file limit".into(),
+                    ));
+                }
+                attachment_bytes += attachment.content.len();
+            }
+            if attachment_bytes > MAX_CHAT_ATTACHMENTS_TOTAL_BYTES {
+                return Err(IpcReject::BadPayload(
+                    "chat attachments exceed the total size limit".into(),
+                ));
+            }
         }
         OverlayMessage::ChatCancel(p) => {
-            check_len(
-                &p.request_id,
-                MAX_CHAT_REQUEST_ID_CHARS,
-                "chat request ID",
-            )
-            .map_err(IpcReject::BadPayload)?;
+            check_len(&p.request_id, MAX_CHAT_REQUEST_ID_CHARS, "chat request ID")
+                .map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::ChatConnect(p) => {
             check_len(&p.v, 32, "chat provider").map_err(IpcReject::BadPayload)?;
@@ -625,17 +665,17 @@ mod tests {
             Err(IpcReject::BadPayload(_))
         ));
         assert!(matches!(
-            parse_overlay(
-                r#"{"t":"contextAction","v":{"action":"rm-rf","title":"a","path":"b"}}"#
-            ),
+            parse_overlay(r#"{"t":"contextAction","v":{"action":"rm-rf","title":"a","path":"b"}}"#),
             Err(IpcReject::BadPayload(_))
         ));
         // Known actions still parse.
         assert!(parse_overlay(r#"{"t":"powerAction","v":"lock"}"#).is_ok());
-        assert!(parse_overlay(
-            r#"{"t":"contextAction","v":{"action":"copypath","title":"a","path":"b"}}"#
-        )
-        .is_ok());
+        assert!(
+            parse_overlay(
+                r#"{"t":"contextAction","v":{"action":"copypath","title":"a","path":"b"}}"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -675,25 +715,106 @@ mod tests {
 
     #[test]
     fn chat_request_ids_parse_and_are_bounded() {
-        assert!(parse_overlay(
-            r#"{"t":"chatSend","requestId":"req-1","message":"hello","history":[]}"#
-        )
-        .is_ok());
+        assert!(
+            parse_overlay(r#"{"t":"chatSend","requestId":"req-1","message":"hello","history":[]}"#)
+                .is_ok()
+        );
         assert!(parse_overlay(r#"{"t":"chatCancel","requestId":"req-1"}"#).is_ok());
         assert!(parse_overlay(r#"{"t":"chatCancel"}"#).is_ok());
         let too_long = "x".repeat(MAX_CHAT_REQUEST_ID_CHARS + 1);
         assert!(matches!(
-            parse_overlay(&format!(
-                r#"{{"t":"chatCancel","requestId":"{too_long}"}}"#
-            )),
+            parse_overlay(&format!(r#"{{"t":"chatCancel","requestId":"{too_long}"}}"#)),
             Err(IpcReject::BadPayload(_))
         ));
     }
 
     #[test]
+    fn chat_attachments_enforce_file_count_and_size_limits() {
+        let attachment = |index: usize, content: &str| {
+            serde_json::json!({
+                "name": format!("file{index}.txt"),
+                "content": content,
+            })
+        };
+        let send = |attachments: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "t": "chatSend",
+                "requestId": "request-1",
+                "message": "summarize",
+                "attachments": attachments,
+            })
+            .to_string()
+        };
+
+        let within_count = (0..MAX_CHAT_ATTACHMENTS)
+            .map(|index| attachment(index, "hello"))
+            .collect();
+        assert!(parse_overlay(&send(within_count)).is_ok());
+
+        let too_many = (0..=MAX_CHAT_ATTACHMENTS)
+            .map(|index| attachment(index, "hello"))
+            .collect();
+        assert!(matches!(
+            parse_overlay(&send(too_many)),
+            Err(IpcReject::BadPayload(_))
+        ));
+
+        let half_limit = "x".repeat(MAX_CHAT_ATTACHMENTS_TOTAL_BYTES / 2);
+        let at_total_limit = vec![attachment(0, &half_limit), attachment(1, &half_limit)];
+        assert!(parse_overlay(&send(at_total_limit)).is_ok());
+
+        let over_total_limit = vec![
+            attachment(0, &half_limit),
+            attachment(1, &half_limit),
+            attachment(2, "x"),
+        ];
+        assert!(matches!(
+            parse_overlay(&send(over_total_limit)),
+            Err(IpcReject::BadPayload(_))
+        ));
+
+        let too_large = "x".repeat(MAX_CHAT_ATTACHMENT_BYTES + 1);
+        assert!(matches!(
+            parse_overlay(&send(vec![attachment(0, &too_large)])),
+            Err(IpcReject::BadPayload(_))
+        ));
+    }
+
+    #[test]
+    fn chat_attachment_names_reject_paths() {
+        assert!(matches!(
+            parse_overlay(
+                r#"{"t":"chatSend","requestId":"request-1","message":"summarize","attachments":[{"name":"../private.txt","content":"secret"}]}"#
+            ),
+            Err(IpcReject::BadPayload(_))
+        ));
+    }
+
+    #[test]
+    fn chat_pc_info_is_opt_in() {
+        let OverlayMessage::ChatSend(without_opt_in) =
+            parse_overlay(r#"{"t":"chatSend","requestId":"request-1","message":"hello"}"#).unwrap()
+        else {
+            panic!("expected chat send");
+        };
+        assert!(!without_opt_in.include_pc_info);
+
+        let OverlayMessage::ChatSend(with_opt_in) = parse_overlay(
+            r#"{"t":"chatSend","requestId":"request-1","message":"hello","includePcInfo":true}"#,
+        )
+        .unwrap() else {
+            panic!("expected chat send");
+        };
+        assert!(with_opt_in.include_pc_info);
+    }
+
+    #[test]
     fn external_url_parses_and_rejects_overlong() {
         assert!(parse_overlay(r#"{"t":"openExternal","v":"https://example.com/x"}"#).is_ok());
-        let big = format!(r#"{{"t":"openExternal","v":"https://example.com/{}"}}"#, "x".repeat(2048));
+        let big = format!(
+            r#"{{"t":"openExternal","v":"https://example.com/{}"}}"#,
+            "x".repeat(2048)
+        );
         assert!(matches!(parse_overlay(&big), Err(IpcReject::BadPayload(_))));
     }
 
@@ -706,7 +827,10 @@ mod tests {
     fn media_session_key_parses_and_rejects_overlong() {
         assert!(parse_overlay(r#"{"t":"mediaSession","v":"Spotify.exe_x!Spotify"}"#).is_ok());
         assert!(matches!(
-            parse_overlay(&format!(r#"{{"t":"mediaSession","v":"{}"}}"#, "x".repeat(257))),
+            parse_overlay(&format!(
+                r#"{{"t":"mediaSession","v":"{}"}}"#,
+                "x".repeat(257)
+            )),
             Err(IpcReject::BadPayload(_))
         ));
     }

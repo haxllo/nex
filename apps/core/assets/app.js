@@ -2292,6 +2292,7 @@
     chatFilePicker.setAttribute("aria-busy", String(loading));
     chatFilePickerLocation.textContent = typeof listing?.location === "string" ? listing.location : "This PC";
     chatFilePickerBack.disabled = loading || !listing?.can_go_up;
+    chatFilePickerBack.style.visibility = listing?.can_go_up ? "" : "hidden";
     chatFilePickerLoading.hidden = !loading;
     chatFilePickerError.hidden = !chatPickerErrorMessage;
     chatFilePickerError.textContent = chatPickerErrorMessage;

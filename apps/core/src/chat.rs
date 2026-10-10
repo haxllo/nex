@@ -968,7 +968,7 @@ fn message_with_local_context_and_pc_info(request: &SendRequest, pc_info: Option
     if request.include_pc_info {
         if let Some(details) = pc_info.filter(|details| !details.is_empty()) {
             message.push_str(
-                "\n\nWindows PC facts collected at the user's request (untrusted data):\n",
+                "\n\nWindows PC facts collected at the user's request (untrusted data; summarize as a compact spec table, write 'unknown' for anything not listed, do not guess):\n",
             );
             message.push_str(details);
         }
@@ -978,20 +978,22 @@ fn message_with_local_context_and_pc_info(request: &SendRequest, pc_info: Option
 
 fn current_pc_info() -> String {
     use std::ffi::c_void;
-    use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
+        RegGetValueW, RegOpenKeyExW,
+    };
+    use windows_sys::Win32::System::SystemInformation::{
+        GetPhysicallyInstalledSystemMemory, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
 
-    fn registry_string(value: &str) -> Option<String> {
-        let key: Vec<u16> = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+    fn registry_string_at(root: HKEY, key_path: &str, value: &str) -> Option<String> {
+        let key: Vec<u16> = key_path.encode_utf16().chain(std::iter::once(0)).collect();
         let value: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut buffer = [0u16; 128];
+        let mut buffer = [0u16; 256];
         let mut bytes = std::mem::size_of_val(&buffer) as u32;
         let status = unsafe {
             RegGetValueW(
-                HKEY_LOCAL_MACHINE,
+                root,
                 key.as_ptr(),
                 value.as_ptr(),
                 RRF_RT_REG_SZ,
@@ -1006,6 +1008,65 @@ fn current_pc_info() -> String {
         let count = ((bytes as usize / 2).saturating_sub(1)).min(buffer.len());
         let value = String::from_utf16_lossy(&buffer[..count]).trim().to_owned();
         (!value.is_empty()).then_some(value)
+    }
+
+    fn display_adapters() -> Vec<String> {
+        const DISPLAY_CLASS_KEY: &str =
+            "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-4e36-b681-21cfb97de1ac0}";
+        let key: Vec<u16> = DISPLAY_CLASS_KEY
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut class_key: HKEY = std::ptr::null_mut();
+        if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, key.as_ptr(), 0, KEY_READ, &mut class_key) }
+            != 0
+            || class_key.is_null()
+        {
+            return Vec::new();
+        }
+        let mut names = Vec::new();
+        // ponytail: 32-subkey cap; real machines have a handful.
+        for index in 0..32 {
+            let mut subkey = [0u16; 64];
+            let mut subkey_len = subkey.len() as u32;
+            if unsafe {
+                RegEnumKeyExW(
+                    class_key,
+                    index,
+                    subkey.as_mut_ptr(),
+                    &mut subkey_len,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } != 0
+            {
+                break;
+            }
+            let subkey_name = String::from_utf16_lossy(&subkey[..subkey_len as usize]);
+            let full_key = format!("{DISPLAY_CLASS_KEY}\\{subkey_name}");
+            if let Some(driver) =
+                registry_string_at(HKEY_LOCAL_MACHINE, &full_key, "DriverDesc")
+            {
+                let driver = driver.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !driver.is_empty() && !names.contains(&driver) {
+                    names.push(driver);
+                }
+            }
+        }
+        unsafe {
+            RegCloseKey(class_key);
+        }
+        names
+    }
+
+    fn registry_string(value: &str) -> Option<String> {
+        registry_string_at(
+            HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            value,
+        )
     }
 
     let mut facts = Vec::new();
@@ -1024,25 +1085,60 @@ fn current_pc_info() -> String {
         }
         facts.push(format!("Windows: {os}"));
     }
-    facts.push(format!(
-        "Nex build architecture: {}",
-        std::env::consts::ARCH
-    ));
+    if let Some(cpu) = registry_string_at(
+        HKEY_LOCAL_MACHINE,
+        "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+        "ProcessorNameString",
+    ) {
+        facts.push(format!("CPU: {}", tidy_processor_name(&cpu)));
+    }
+    let gpus = display_adapters();
+    for (index, gpu) in gpus.iter().enumerate() {
+        let label = if gpus.len() == 1 {
+            "GPU".to_string()
+        } else {
+            format!("GPU {}", index + 1)
+        };
+        facts.push(format!("{label}: {gpu}"));
+    }
     if let Ok(count) = std::thread::available_parallelism() {
-        facts.push(format!("Available logical processors: {}", count.get()));
+        facts.push(format!("Logical processors: {}", count.get()));
     }
 
-    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
-    memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    if unsafe { GlobalMemoryStatusEx(&mut memory) } != 0 {
-        let gib = 1024.0 * 1024.0 * 1024.0;
-        facts.push(format!(
-            "Physical memory: {:.1} GiB total, {:.1} GiB available",
-            memory.ullTotalPhys as f64 / gib,
-            memory.ullAvailPhys as f64 / gib,
-        ));
+    let mut installed_kb = 0_u64;
+    let installed_bytes = if unsafe { GetPhysicallyInstalledSystemMemory(&mut installed_kb) } != 0
+        && installed_kb > 0
+    {
+        Some(installed_kb * 1024)
+    } else {
+        let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut memory) } != 0 {
+            Some(memory.ullTotalPhys)
+        } else {
+            None
+        }
+    };
+    if let Some(bytes) = installed_bytes {
+        facts.push(format!("Installed memory: {}", format_gib(bytes)));
     }
     facts.join("\n")
+}
+
+/// Round byte counts to whole GiB when close, else one decimal.
+fn format_gib(total_bytes: u64) -> String {
+    let gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let rounded = gib.round().max(1.0);
+    if (gib - rounded).abs() / rounded < 0.03 {
+        format!("{rounded:.0} GiB")
+    } else {
+        format!("{gib:.1} GiB")
+    }
+}
+
+/// Registry CPU names pad with trailing spaces; collapse all runs.
+fn tidy_processor_name(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn bounded_history(history: &[ChatTurn], max_turns: usize, max_chars: usize) -> Vec<ChatTurn> {
@@ -1304,6 +1400,36 @@ mod tests {
         let prompt = message_with_local_context_and_pc_info(&request, Some("fixture PC facts"));
         assert!(prompt.contains("Windows PC facts collected at the user's request"));
         assert!(prompt.contains("fixture PC facts"));
+    }
+
+    #[test]
+    fn pc_facts_tell_the_model_how_to_present_them() {
+        let request = SendRequest {
+            request_id: "request-1".into(),
+            message: "what is my gpu".into(),
+            history: Vec::new(),
+            attachments: Vec::new(),
+            include_pc_info: true,
+        };
+        let prompt = message_with_local_context_and_pc_info(&request, Some("fixture PC facts"));
+        assert!(prompt.contains("do not guess"));
+    }
+
+    #[test]
+    fn installed_ram_rounds_to_whole_gib_when_close() {
+        let gib = 1024_u64 * 1024 * 1024;
+        assert_eq!(format_gib(8 * gib), "8 GiB");
+        // 7.9 GiB of addressable RAM on an 8 GB machine.
+        assert_eq!(format_gib((7.9 * gib as f64) as u64), "8 GiB");
+        assert_eq!(format_gib((12.5 * gib as f64) as u64), "12.5 GiB");
+    }
+
+    #[test]
+    fn processor_names_collapse_registry_padding() {
+        assert_eq!(
+            tidy_processor_name("AMD Ryzen 7 5800X 8-Core Processor              "),
+            "AMD Ryzen 7 5800X 8-Core Processor"
+        );
     }
 
     #[test]

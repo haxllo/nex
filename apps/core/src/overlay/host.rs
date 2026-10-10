@@ -673,18 +673,21 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .lock()
                         .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
                         .unwrap_or(false);
-                    let parent = chat_picker_listing
+                    // At "This PC" (no current dir) there is nowhere to go back to.
+                    // At a drive root there is no parent dir: go back to locations.
+                    let current = chat_picker_listing
                         .as_ref()
-                        .and_then(|listing| listing.current_dir.as_ref())
-                        .and_then(|path| path.parent())
+                        .and_then(|listing| listing.current_dir.clone());
+                    let Some(current) = current else {
+                        return;
+                    };
+                    let parent = current
+                        .parent()
                         .filter(|path| !path.as_os_str().is_empty())
                         .map(|path| path.to_path_buf());
                     if !active {
                         return;
                     }
-                    let Some(parent) = parent else {
-                        return;
-                    };
                     chat_picker_generation = chat_picker_generation.wrapping_add(1);
                     let generation = chat_picker_generation;
                     if ready {
@@ -692,7 +695,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
                         }
                     }
-                    if let Err(error) = start_chat_picker_listing(&proxy, generation, Some(parent)) {
+                    if let Err(error) = start_chat_picker_listing(&proxy, generation, parent) {
                         try_send_ui(
                             &proxy,
                             UiCommand::ChatPickerListed {

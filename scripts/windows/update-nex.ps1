@@ -540,6 +540,39 @@ function Get-LockingProcesses {
   return $found
 }
 
+function Wait-NexWebViewChildren {
+  # Nex's WebView2 child processes (msedgewebview2.exe) can briefly
+  # outlive Nex itself while tearing down. They use Nex's own user-data
+  # dir (%LOCALAPPDATA%\Nex\EBWebView), which is matched here — NEVER
+  # match bare msedgewebview2.exe: that runtime is shared with Edge,
+  # Teams, Office, and countless other apps, and killing those would
+  # take down unrelated programs.
+  param([int]$TimeoutSeconds = 10)
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $remaining = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction Stop |
+        Where-Object { $_.CommandLine -match '\\Nex\\EBWebView' })
+    }
+    catch {
+      return
+    }
+    if (-not $remaining.Count) {
+      return
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  try {
+    $stuck = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction Stop |
+      Where-Object { $_.CommandLine -match '\\Nex\\EBWebView' } |
+      ForEach-Object { "pid $($_.ProcessId)" })
+    if ($stuck.Count) {
+      Write-UpdateLog "WebView2 children still alive after wait: $($stuck -join ', ')" "Yellow"
+    }
+  }
+  catch {}
+}
+
 function Write-PreMoveDiagnostics {
   # Snapshot of everything that could plausibly hold the install tree,
   # taken after Stop-Runtime and before the backup move. Every probe is
@@ -554,7 +587,7 @@ function Write-PreMoveDiagnostics {
   catch {}
   try {
     $webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction Stop |
-      Where-Object { $_.CommandLine -match 'nex' } |
+      Where-Object { $_.CommandLine -match '\\Nex\\EBWebView' } |
       ForEach-Object { "pid $($_.ProcessId): $($_.CommandLine)" })
     if ($webviews.Count) {
       Write-UpdateLog "Nex-owned WebView2 children still alive: $($webviews -join ' | ')" "Yellow"
@@ -756,25 +789,28 @@ $backupDir = $null
 try {
   Write-UpdateLog "[3/5] Stopping active runtime and preparing rollback snapshot..." "Yellow"
   Stop-Runtime -InstalledExePath $installedExe
+  Wait-NexWebViewChildren -TimeoutSeconds 10
   Write-PreMoveDiagnostics -Root $InstallRoot
 
   if (Test-Path -LiteralPath $InstallRoot) {
     $backupRoot = Join-Path $CacheRoot "backups"
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
     $backupDir = Join-Path $backupRoot "nex-backup-$stamp"
-    # Retry transient locks (AV scans, dying processes releasing handles).
+    # Retry longer-lived locks (AV scans, dying processes releasing
+    # handles, WebView2 teardown). Each blocked attempt names the
+    # locker via Restart Manager so updater.log shows the culprit.
     $moved = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $moved; $attempt++) {
+    for ($attempt = 1; $attempt -le 6 -and -not $moved; $attempt++) {
       try {
         Move-Item -LiteralPath $InstallRoot -Destination $backupDir -ErrorAction Stop
         $moved = $true
       }
       catch {
-        if ($attempt -eq 3) { throw }
+        if ($attempt -eq 6) { throw }
         $lockers = @(Get-LockingProcesses -Path $InstallRoot)
         $lockerText = if ($lockers.Count) { " Lockers: $($lockers -join ', '). " } else { " No lockers reported. " }
-        Write-UpdateLog "Backup move blocked, retrying ($attempt/3)...$lockerText" "Yellow"
-        Start-Sleep -Seconds 1
+        Write-UpdateLog "Backup move blocked, retrying ($attempt/6)...$lockerText" "Yellow"
+        Start-Sleep -Seconds 2
       }
     }
     Write-UpdateLog "Backup created: $backupDir"

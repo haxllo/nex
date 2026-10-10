@@ -215,14 +215,76 @@ fn launch_updater_script(
     script_path: &Path,
     channel: UpdateChannel,
 ) -> Result<(), UpdateLaunchError> {
-    build_updater_command(script_path, channel)
-        .spawn()
-        .map_err(|error| {
-            UpdateLaunchError::LaunchFailed(format!(
-                "failed to launch updater script '{}': {error}",
-                script_path.display()
-            ))
-        })?;
+    spawn_updater_detached(script_path, channel)
+}
+
+/// Spawn the real updater with handle inheritance DISABLED.
+///
+/// Rust's `Command::spawn()` always passes `bInheritHandles=TRUE`, so a
+/// child of Nex inherits every inheritable handle Nex holds. If any of
+/// those point into the install tree, the updater's later backup move
+/// fails with "in use" *by itself* — surviving Nex's own death, which
+/// is exactly the persistent (non-transient) failure this guards
+/// against. Raw `CreateProcessW` with `bInheritHandles=FALSE` closes
+/// that hole; the short-lived check/capture paths keep using
+/// `build_updater_command` (no move happens there).
+#[cfg(target_os = "windows")]
+fn spawn_updater_detached(
+    script_path: &Path,
+    channel: UpdateChannel,
+) -> Result<(), UpdateLaunchError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, DETACHED_PROCESS, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+
+    // Let PowerShell and its Inno Setup child activate their own windows.
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
+
+    let command_line = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\" -Channel {}",
+        script_path.display(),
+        channel.as_arg()
+    );
+    let mut command_line: Vec<u16> =
+        std::ffi::OsStr::new(&command_line).encode_wide().chain([0]).collect();
+    let working_dir: Vec<u16> = std::env::temp_dir()
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect();
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let launched = unsafe {
+        CreateProcessW(
+            std::ptr::null(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            std::ptr::null(),
+            working_dir.as_ptr(),
+            &raw mut startup,
+            &raw mut process_info,
+        )
+    };
+    if launched == 0 {
+        let code = unsafe { GetLastError() };
+        return Err(UpdateLaunchError::LaunchFailed(format!(
+            "failed to launch updater script '{}': CreateProcessW failed with code {code}",
+            script_path.display()
+        )));
+    }
+    unsafe {
+        CloseHandle(process_info.hProcess);
+        CloseHandle(process_info.hThread);
+    }
     Ok(())
 }
 

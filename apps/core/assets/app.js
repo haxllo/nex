@@ -52,6 +52,18 @@
   const chatInput = $("chat-input");
   const chatSendButton = $("chat-send-button");
   const chatAttachButton = $("chat-attach-button");
+  const chatFilePicker = $("chat-file-picker");
+  const chatFilePickerBack = $("chat-file-picker-back");
+  const chatFilePickerClose = $("chat-file-picker-close");
+  const chatFilePickerLocation = $("chat-file-picker-location");
+  const chatFilePickerError = $("chat-file-picker-error");
+  const chatFilePickerTruncated = $("chat-file-picker-truncated");
+  const chatFilePickerItems = $("chat-file-picker-items");
+  const chatFilePickerLoading = chatFilePicker.querySelector(".chat-file-picker-state.is-loading");
+  const chatFilePickerEmpty = chatFilePicker.querySelector(".chat-file-picker-state.is-empty");
+  const chatFilePickerCount = $("chat-file-picker-count");
+  const chatFilePickerCancel = $("chat-file-picker-cancel");
+  const chatFilePickerAdd = $("chat-file-picker-add");
   const chatMenuScrim = $("chat-menu-scrim");
   const chatPcInfoButton = $("chat-pc-info-button");
   const chatContextSelection = $("chat-context-selection");
@@ -84,6 +96,16 @@
   let chatIncludePcInfo = false;
   let chatFilesLoading = false;
   let chatContextSelectionEpoch = 0;
+  let chatFilePickerOpen = false;
+  let chatPickerRequested = false;
+  let chatPickerOpenTimeout = 0;
+  let chatPickerOperationTimeout = 0;
+  const CHAT_PICKER_OPERATION_TIMEOUT_MS = 30_000;
+  let chatPickerLoading = false;
+  let chatPickerListing = null;
+  let chatPickerErrorMessage = "";
+  let chatPickerFocusAfterListing = false;
+  const chatPickerSelectedIds = new Set();
   let chatConfig = { provider: "codex", baseUrl: "https://api.openai.com/v1", model: "gpt-6-luna", configured: false, accountConnected: false };
   let chatModels = [];
   let chatModelsProvider = "";
@@ -191,7 +213,7 @@
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatPickerNavigate", "chatPickerAdd"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -1702,6 +1724,7 @@
 
   function closeChatView(restorePrevious) {
     if (!chatOpen) return;
+    if (chatPickerRequested || chatFilePickerOpen) closeChatFilePicker(true, false);
     chatOpen = false;
     chatView.setAttribute("aria-hidden", "true");
     setChatSettingsOpen(false);
@@ -2253,6 +2276,162 @@
       chatHistory.classList.remove("scrolling");
     }, 1200);
   }, { passive: true });
+  function renderChatFilePicker() {
+    chatFilePicker.hidden = !chatFilePickerOpen;
+    chatAttachButton.disabled = chatPickerLoading || chatFilesLoading || chatPickerRequested || chatFilePickerOpen;
+    if (!chatFilePickerOpen) return;
+
+    const listing = chatPickerListing;
+    const loading = chatPickerLoading;
+    const entries = Array.isArray(listing?.entries)
+      ? listing.entries.filter((entry) => entry && Number.isSafeInteger(entry.id) && typeof entry.name === "string" && typeof entry.is_directory === "boolean")
+      : [];
+    const selectedEntries = entries.filter((entry) => !entry.is_directory && chatPickerSelectedIds.has(entry.id));
+    const availableSlots = Math.max(0, CHAT_ATTACHMENT_MAX_FILES - chatSelectedFiles.length);
+
+    chatFilePicker.setAttribute("aria-busy", String(loading));
+    chatFilePickerLocation.textContent = typeof listing?.location === "string" ? listing.location : "This PC";
+    chatFilePickerBack.disabled = loading || !listing?.can_go_up;
+    chatFilePickerLoading.hidden = !loading;
+    chatFilePickerError.hidden = !chatPickerErrorMessage;
+    chatFilePickerError.textContent = chatPickerErrorMessage;
+    chatFilePickerTruncated.hidden = loading || listing?.truncated !== true;
+    chatFilePickerItems.hidden = loading || entries.length === 0;
+    chatFilePickerEmpty.hidden = loading || !listing || entries.length !== 0 || !!chatPickerErrorMessage;
+    chatFilePickerItems.replaceChildren();
+
+    if (!availableSlots) {
+      chatFilePickerCount.textContent = `${chatSelectedFiles.length} attached. Remove a file to add another.`;
+    } else {
+      const selectedLabel = selectedEntries.length === 1 ? "file selected" : "files selected";
+      const attachedLabel = chatSelectedFiles.length === 1 ? "file attached" : "files attached";
+      chatFilePickerCount.textContent = `${selectedEntries.length} ${selectedLabel} · ${chatSelectedFiles.length} ${attachedLabel}`;
+    }
+
+    for (const entry of entries) {
+      const isSelected = !entry.is_directory && chatPickerSelectedIds.has(entry.id);
+      const row = document.createElement("div");
+      row.setAttribute("role", "listitem");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `chat-file-picker-entry${entry.is_directory ? " is-directory" : ""}${isSelected ? " is-selected" : ""}`;
+      button.dataset.entryId = String(entry.id);
+      button.disabled = loading || (!entry.is_directory && !isSelected && selectedEntries.length >= availableSlots);
+      button.setAttribute("aria-label", entry.is_directory
+        ? `Open folder ${entry.name}`
+        : `${isSelected ? "Deselect" : "Select"} file ${entry.name}`);
+      if (!entry.is_directory) button.setAttribute("aria-pressed", String(isSelected));
+
+      const icon = document.createElement("span");
+      icon.className = "chat-file-picker-entry-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = entry.is_directory
+        ? '<svg viewBox="0 0 24 24"><path d="M3.5 7.5h6l2 2h9v9h-17z" /></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z" /><path d="M13.5 3.5v5h5M9 13h6M9 16h6" /></svg>';
+      const name = document.createElement("span");
+      name.className = "chat-file-picker-entry-name";
+      name.textContent = entry.name;
+      button.append(icon, name);
+
+      if (!entry.is_directory && Number.isFinite(entry.size) && entry.size >= 0) {
+        const size = document.createElement("span");
+        size.className = "chat-file-picker-entry-size";
+        size.textContent = entry.size < 1024 ? `${entry.size} B` : `${(entry.size / 1024).toFixed(1)} KB`;
+        size.setAttribute("aria-hidden", "true");
+        button.append(size);
+      }
+      if (!entry.is_directory) {
+        const check = document.createElement("span");
+        check.className = "chat-file-picker-entry-check";
+        check.textContent = isSelected ? "✓" : "";
+        check.setAttribute("aria-hidden", "true");
+        button.append(check);
+      }
+
+      button.addEventListener("click", () => {
+        if (chatPickerLoading) return;
+        chatPickerErrorMessage = "";
+        if (entry.is_directory) {
+          chatPickerSelectedIds.clear();
+          chatPickerLoading = true;
+          chatPickerFocusAfterListing = true;
+          armChatPickerOperationTimeout();
+          renderChatFilePicker();
+          chatFilePickerClose.focus();
+          post("chatPickerNavigate", { v: entry.id });
+          return;
+        }
+        if (isSelected) chatPickerSelectedIds.delete(entry.id);
+        else if (selectedEntries.length < availableSlots) chatPickerSelectedIds.add(entry.id);
+        renderChatFilePicker();
+        chatFilePickerItems.querySelector(`[data-entry-id="${entry.id}"]`)?.focus();
+      });
+      row.append(button);
+      chatFilePickerItems.append(row);
+    }
+
+    const selectedIds = selectedEntries.map((entry) => entry.id);
+    chatFilePickerAdd.disabled = loading || selectedIds.length === 0 || selectedIds.length > availableSlots;
+  }
+
+  function closeChatFilePicker(sendCancel = true, restoreFocus = true) {
+    const wasActive = chatPickerRequested || chatFilePickerOpen;
+    if (sendCancel && wasActive) post("chatPickerCancel");
+    window.clearTimeout(chatPickerOpenTimeout);
+    chatPickerOpenTimeout = 0;
+    clearChatPickerOperationTimeout();
+    chatPickerRequested = false;
+    chatFilePickerOpen = false;
+    chatPickerLoading = false;
+    chatPickerListing = null;
+    chatPickerErrorMessage = "";
+    chatPickerSelectedIds.clear();
+    chatPickerFocusAfterListing = false;
+    renderChatFilePicker();
+    if (wasActive && restoreFocus && chatOpen) chatAttachButton.focus();
+  }
+
+  function clearChatPickerOperationTimeout() {
+    window.clearTimeout(chatPickerOperationTimeout);
+    chatPickerOperationTimeout = 0;
+  }
+
+  function armChatPickerOperationTimeout() {
+    if (chatPickerOperationTimeout) return;
+    chatPickerOperationTimeout = window.setTimeout(() => {
+      chatPickerOperationTimeout = 0;
+      if (!chatFilePickerOpen || !chatPickerLoading) return;
+      closeChatFilePicker(true, false);
+      flashChatNotice("The file picker took too long to respond. Please try again.");
+    }, CHAT_PICKER_OPERATION_TIMEOUT_MS);
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && (chatFilePickerOpen || chatPickerRequested)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeChatFilePicker();
+      return;
+    }
+    if (!chatFilePickerOpen || event.key !== "Tab") return;
+    const focusable = Array.from(chatFilePicker.querySelectorAll("button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"))
+      .filter((element) => !element.hidden && element.getClientRects().length > 0);
+    if (!focusable.length) {
+      event.preventDefault();
+      chatFilePickerClose.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !chatFilePicker.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !chatFilePicker.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, true);
+
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {
@@ -2273,7 +2452,47 @@
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
-  chatAttachButton.addEventListener("click", () => post("chatPickFiles"));
+  chatAttachButton.addEventListener("click", () => {
+    if (chatPickerRequested || chatFilePickerOpen || chatAttachButton.disabled) return;
+    chatPickerRequested = true;
+    renderChatFilePicker();
+    chatPickerOpenTimeout = window.setTimeout(() => {
+      chatPickerOpenTimeout = 0;
+      if (!chatPickerRequested || chatFilePickerOpen) return;
+      post("chatPickerCancel");
+      chatPickerRequested = false;
+      renderChatFilePicker();
+      flashChatNotice("The file picker did not respond. Please try again.");
+    }, 10000);
+    post("chatPickFiles");
+  });
+  chatFilePickerBack.addEventListener("click", () => {
+    if (chatPickerLoading || !chatPickerListing?.can_go_up) return;
+    chatPickerSelectedIds.clear();
+    chatPickerErrorMessage = "";
+    chatPickerLoading = true;
+    chatPickerFocusAfterListing = true;
+    armChatPickerOperationTimeout();
+    renderChatFilePicker();
+    chatFilePickerClose.focus();
+    post("chatPickerUp");
+  });
+  chatFilePickerClose.addEventListener("click", () => closeChatFilePicker());
+  chatFilePickerCancel.addEventListener("click", () => closeChatFilePicker());
+  chatFilePickerAdd.addEventListener("click", () => {
+    if (chatPickerLoading || !chatPickerListing) return;
+    const entries = Array.isArray(chatPickerListing.entries) ? chatPickerListing.entries : [];
+    const selectedIds = entries
+      .filter((entry) => entry && !entry.is_directory && chatPickerSelectedIds.has(entry.id))
+      .map((entry) => entry.id);
+    if (!selectedIds.length || selectedIds.length > CHAT_ATTACHMENT_MAX_FILES - chatSelectedFiles.length) return;
+    chatPickerErrorMessage = "";
+    chatPickerLoading = true;
+    armChatPickerOperationTimeout();
+    renderChatFilePicker();
+    chatFilePickerClose.focus();
+    post("chatPickerAdd", { entries: selectedIds });
+  });
   chatPcInfoButton.addEventListener("click", () => {
     chatIncludePcInfo = !chatIncludePcInfo;
     renderChatContextSelection();
@@ -2298,15 +2517,58 @@
   function applyChatUpdate(state) {
     const hasRequestId = Object.prototype.hasOwnProperty.call(state, "requestId");
     let requestMatches = matchesActiveChatRequest(state);
-    if (typeof state.chatPickerLoading === "boolean") {
-      chatAttachButton.disabled = state.chatPickerLoading || chatFilesLoading;
+    if (state.chatPickerOpen === true) {
+      window.clearTimeout(chatPickerOpenTimeout);
+      chatPickerOpenTimeout = 0;
+      const wasOpen = chatFilePickerOpen;
+      chatPickerRequested = false;
+      chatFilePickerOpen = true;
+      if (!wasOpen) {
+        closeChatModelOptions();
+        closeChatProviderOptions();
+        setChatSettingsOpen(false);
+        setChatHistoryOpen(false);
+        chatFilePickerClose.focus();
+      }
     }
+    if (typeof state.chatPickerLoading === "boolean") chatPickerLoading = state.chatPickerLoading;
+    if (state.chatPickerOpen === true && chatPickerLoading) armChatPickerOperationTimeout();
+    if (state.chatPickerLoading === false || state.chatPickerClosed === true) clearChatPickerOperationTimeout();
+    if (Object.prototype.hasOwnProperty.call(state, "chatPickerListing")) {
+      chatPickerListing = state.chatPickerListing && typeof state.chatPickerListing === "object" ? state.chatPickerListing : null;
+      chatPickerSelectedIds.clear();
+      if (chatPickerFocusAfterListing && chatFilePickerOpen && !chatPickerLoading) {
+        chatPickerFocusAfterListing = false;
+        chatFilePickerLocation.focus();
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "chatPickerError")) {
+      chatPickerErrorMessage = typeof state.chatPickerError === "string" ? state.chatPickerError : "";
+      if (chatPickerErrorMessage && !chatFilePickerOpen) {
+        window.clearTimeout(chatPickerOpenTimeout);
+        chatPickerOpenTimeout = 0;
+        chatPickerRequested = false;
+        chatPickerLoading = false;
+        flashChatNotice(chatPickerErrorMessage);
+      }
+    }
+    if (state.chatPickerClosed === true) {
+      const pickerError = typeof state.chatPickerError === "string" ? state.chatPickerError : "";
+      const hasSelectedFiles = Array.isArray(state.chatFilesSelected) && state.chatFilesSelected.length > 0;
+      closeChatFilePicker(false, !hasSelectedFiles);
+      if (pickerError && !hasSelectedFiles) flashChatNotice(pickerError);
+    }
+    renderChatFilePicker();
     if (Array.isArray(state.chatFilesSelected)) {
       const files = state.chatFilesSelected.map((file) => {
         if (!file || typeof file.name !== "string" || typeof file.content !== "string") return null;
         return { name: file.name, size: chatTextEncoder.encode(file.content).length, text: async () => file.content };
       }).filter(Boolean);
-      if (files.length) void readSelectedChatFiles(files);
+      if (files.length) {
+        void readSelectedChatFiles(files).then(() => {
+          if (chatOpen && !chatFilePickerOpen) chatInput.focus();
+        });
+      }
     }
     if (state.chatConfig) {
       const wasChatGPTConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
@@ -2358,7 +2620,6 @@
       }
     }
     if (state.chatNotice) flashChatNotice(state.chatNotice);
-    if (state.chatPickerError) flashChatNotice(state.chatPickerError);
     if (state.chatError && (!hasRequestId || requestMatches)) {
       setChatModelsLoading(false);
       if (!chatModelOptions.hidden && !chatStreaming) renderChatModelOptions();
@@ -2416,7 +2677,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatPickerError || state.chatPickerLoading !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

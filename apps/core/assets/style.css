@@ -1928,3 +1928,116 @@ html.glass-native #divider {
 html.glass-native .row .icon.placeholder {
   background: transparent;
 }
+
+#chat-file-picker[hidden],
+#chat-file-picker [hidden] {
+  display: none !important;
+}
+
+.chat-file-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.chat-file-picker-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.chat-file-picker-heading { min-width: 0; flex: 1; }
+.chat-file-picker-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 19px; }
+.chat-file-picker-breadcrumb ol { display: flex; min-width: 0; margin: 2px 0 0; padding: 0; list-style: none; }
+.chat-file-picker-breadcrumb li { min-width: 0; overflow: hidden; }
+.chat-file-picker-location,
+#chat-file-picker-location { display: block; overflow: hidden; color: var(--text-faint); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
+
+.chat-file-picker-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px 14px;
+}
+
+.chat-file-picker-error {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--shutdown) 30%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--shutdown) 8%, transparent);
+  color: var(--shutdown);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.chat-file-picker-truncated { flex: 0 0 auto; margin: 0 0 8px; color: var(--text-faint); font-size: 11px; line-height: 1.4; }
+.chat-file-picker-list-area { position: relative; display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.chat-file-picker-items { display: flex; flex: 1 1 auto; flex-direction: column; gap: 5px; min-height: 0; overflow: auto; }
+.chat-file-picker-state { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--text-faint); font-size: 12px; text-align: center; pointer-events: none; }
+.chat-file-picker-entry {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: 400 12px/1.3 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+.chat-file-picker-entry:not(:disabled):hover { background: var(--hover); }
+.chat-file-picker-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-file-picker-entry.is-selected { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.chat-file-picker-entry:disabled { opacity: .55; cursor: default; }
+.chat-file-picker-entry-icon { display: grid; width: 19px; height: 19px; flex: 0 0 auto; place-items: center; color: var(--text-faint); }
+.chat-file-picker-entry-icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
+.chat-file-picker-entry.is-directory .chat-file-picker-entry-icon { color: var(--accent); }
+.chat-file-picker-entry-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-picker-entry-size { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
+.chat-file-picker-entry-check { display: grid; width: 16px; height: 16px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-strong); border-radius: 4px; color: transparent; font-size: 11px; }
+.chat-file-picker-entry.is-selected .chat-file-picker-entry-check { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+.chat-file-picker-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--divider);
+}
+
+.chat-file-picker-count { color: var(--text-faint); font-size: 11px; }
+.chat-file-picker-actions { display: flex; gap: 8px; }
+.chat-file-picker-action { min-height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: 500 12px/1 var(--font); cursor: pointer; }
+.chat-file-picker-action:hover:not(:disabled) { background: var(--hover); }
+.chat-file-picker-action.is-primary { border-color: transparent; background: var(--accent); color: #fff; }
+.chat-file-picker-action.is-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.chat-file-picker-action:disabled { opacity: .45; cursor: default; }
+
+@media (max-width: 360px) {
+  .chat-file-picker-header { gap: 6px; padding-inline: 8px; }
+  .chat-file-picker-content { padding-inline: 10px; }
+  .chat-file-picker-footer { padding-inline: 10px; }
+  .chat-file-picker-action { padding-inline: 10px; }
+}

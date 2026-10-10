@@ -210,6 +210,39 @@
             <span class="chat-composer-hint"><kbd>Enter</kbd> send · <kbd>Shift+Enter</kbd> new line</span>
           </div>
         </div>
+
+        <div id="chat-file-picker" class="chat-file-picker" role="dialog" aria-modal="true" aria-labelledby="chat-file-picker-title" hidden>
+          <header class="chat-file-picker-header">
+            <button type="button" id="chat-file-picker-back" class="chat-icon-button" title="Go to parent folder" aria-label="Go to parent folder">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+            </button>
+            <div class="chat-file-picker-heading">
+              <h2 id="chat-file-picker-title" class="chat-file-picker-title">Add text files</h2>
+              <nav class="chat-file-picker-breadcrumb" aria-label="Current folder">
+                <ol><li><span id="chat-file-picker-location" tabindex="-1" aria-current="location">Home</span></li></ol>
+              </nav>
+            </div>
+            <button type="button" id="chat-file-picker-close" class="chat-icon-button" title="Close file picker" aria-label="Close file picker">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+            </button>
+          </header>
+          <div class="chat-file-picker-content">
+            <div id="chat-file-picker-error" class="chat-file-picker-error" role="alert" hidden></div>
+            <div id="chat-file-picker-truncated" class="chat-file-picker-truncated" role="status" hidden>Only part of this folder is shown. Open a subfolder to narrow the list.</div>
+            <div class="chat-file-picker-list-area">
+              <div class="chat-file-picker-state is-loading" role="status" aria-live="polite" hidden>Loading files…</div>
+              <div id="chat-file-picker-items" class="chat-file-picker-items" role="list" aria-label="Available text files"></div>
+              <div class="chat-file-picker-state is-empty" role="status" aria-live="polite" hidden>No text files in this folder.</div>
+            </div>
+          </div>
+          <footer class="chat-file-picker-footer">
+            <span id="chat-file-picker-count" class="chat-file-picker-count" role="status" aria-live="polite">0 selected</span>
+            <div class="chat-file-picker-actions">
+              <button type="button" id="chat-file-picker-cancel" class="chat-file-picker-action">Cancel</button>
+              <button type="button" id="chat-file-picker-add" class="chat-file-picker-action is-primary" disabled>Add</button>
+            </div>
+          </footer>
+        </div>
       </section>
 
       <div id="whats-new-view" aria-label="What's new">

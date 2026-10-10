@@ -72,6 +72,47 @@ fn try_send_ui(proxy: &EventLoopProxy<UiCommand>, cmd: UiCommand) {
     }
 }
 
+fn start_chat_picker_listing(
+    proxy: &EventLoopProxy<UiCommand>,
+    generation: u64,
+    directory: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    let task_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-chat-picker-browse".into())
+        .spawn(move || {
+            let result = match directory {
+                Some(path) => super::file_picker::chat_picker_directory(path),
+                None => Ok(super::file_picker::chat_picker_locations()),
+            };
+            try_send_ui(
+                &task_proxy,
+                UiCommand::ChatPickerListed { generation, result },
+            );
+        })
+        .map(|_| ())
+        .map_err(|e| format!("Nex couldn't open this folder: {e}"))
+}
+
+fn start_chat_picker_file_read(
+    proxy: &EventLoopProxy<UiCommand>,
+    generation: u64,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let task_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-chat-picker-read".into())
+        .spawn(move || {
+            let result = super::file_picker::read_chat_files(paths);
+            try_send_ui(
+                &task_proxy,
+                UiCommand::ChatPickerFilesRead { generation, result },
+            );
+        })
+        .map(|_| ())
+        .map_err(|e| format!("Nex couldn't read the selected files: {e}"))
+}
+
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
@@ -85,27 +126,25 @@ use wry::WebViewExtWindows;
 use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TRANSITIONS_FORCEDISABLED,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMSBT_NONE,
-    DWMSBT_TRANSIENTWINDOW,
+    DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_ROUND,
 };
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RegisterRawInputDevices, RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
+    GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
 };
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetForegroundWindow, GetShellWindow, IsWindow, RegisterWindowMessageW,
-    SetForegroundWindow, SetWindowPos,
-    WM_INPUT, HWND_BOTTOM, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE,
+    SetForegroundWindow, SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, WM_INPUT,
 };
 
 use crate::overlay::icons::IconCache;
-use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState, TileSize};
 use crate::overlay::model::Theme;
+use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState, TileSize};
 
 const WINDOW_WIDTH: f64 = 700.0;
 const INITIAL_HEIGHT: f64 = 60.0;
@@ -126,8 +165,8 @@ const FOCUS_GRACE_MS: u64 = 400;
 const POST_SHOW_QUIESCENCE_MS: u64 = 2000;
 
 ///Embedded UI assets for settings window
-const SETTINGS_HTML: &str= include_str!("../../assets/settings.html");
-const SETTINGS_JS: &str= include_str!("../../assets/settings.js");
+const SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
+const SETTINGS_JS: &str = include_str!("../../assets/settings.js");
 
 /// Embedded web UI assets (premium Raycast-dark cmdk UI).
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
@@ -160,12 +199,22 @@ pub(crate) enum UiCommand {
     ApplyWhatsNew(String),
     /// Chat state and streamed response updates.
     ChatData(String),
-    /// Open a native, owner-modal picker on a COM STA worker thread.
+    /// Open the in-WebView attachment picker.
     OpenChatFilePicker,
-    /// The native picker has closed, so normal focus-loss handling can resume.
-    ChatFilePickerClosed,
-    /// Files selected by the native picker, already bounded and read as text.
-    ChatFilesPicked(Option<Result<Vec<super::file_picker::SelectedChatFile>, String>>),
+    ChatPickerListed {
+        generation: u64,
+        result: Result<super::file_picker::ChatPickerDirectory, String>,
+    },
+    ChatPickerFilesRead {
+        generation: u64,
+        result: Result<Vec<super::file_picker::SelectedChatFile>, String>,
+    },
+    ChatPickerNavigate(u64),
+    ChatPickerUp,
+    ChatPickerAdd(Vec<u64>),
+    ChatPickerCancel {
+        dismiss_overlay: bool,
+    },
     /// Only the status text changed — send a lightweight update.
     ApplyStatus,
     /// Show + focus the overlay (builds the WebView if not yet created).
@@ -185,7 +234,10 @@ pub(crate) enum UiCommand {
     /// The first native glass frame was presented and can be revealed.
     GlassReady,
     /// The page measured its content height (CSS px); resize to hug it.
-    Resize { h: f64, immediate: bool },
+    Resize {
+        h: f64,
+        immediate: bool,
+    },
     /// Exit the event loop (clean shutdown).
     Quit,
     /// Debounce timer fired — apply the coalesced resize height.
@@ -193,11 +245,17 @@ pub(crate) enum UiCommand {
     /// Delayed keyboard state check (posted ~200ms after hide).
     CheckKeyboardState(Instant),
     /// Open/show the settings window, preload with a config snapshot.
-    OpenSettings { snapshot: String },
+    OpenSettings {
+        snapshot: String,
+    },
     /// Result of a settings save attempt, pushed into the settings page.
-    SettingsSaveResult { json: String },
+    SettingsSaveResult {
+        json: String,
+    },
     /// Push a captured hotkey combo into the settings page.
-    SettingsHotkeyRecorded { combo: String },
+    SettingsHotkeyRecorded {
+        combo: String,
+    },
     /// Delayed focus re-assertion after show (fights Explorer focus theft
     /// on Win key hotkeys).  Spawned ~250ms after Painted.
     FocusReassert,
@@ -266,7 +324,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     if let Ok(mut s) = state.lock() {
         s.glass_native = glass_layer.is_some();
     }
-    unsafe { install_instance_signal_subclass(hwnd, &event_tx); }
+    unsafe {
+        install_instance_signal_subclass(hwnd, &event_tx);
+    }
 
     // Register raw input sink permanently at startup so the overlay
     // receives WM_INPUT for keyboard events regardless of which window
@@ -293,8 +353,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         }
     };
     let mut settings_ui: Option<(tao::window::Window, wry::WebView)> = None;
-    let mut settings_window_id: Option<tao::window::WindowId>= None;
-    let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut settings_window_id: Option<tao::window::WindowId> = None;
+    let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     if let Some(ref wv) = webview {
         subscribe_webview2_diagnostics(wv);
@@ -336,8 +397,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .spawn(move || {
             let mut armed: Option<Instant> = None;
             loop {
-                let timeout = armed
-                    .map(|when| when.saturating_duration_since(Instant::now()));
+                let timeout = armed.map(|when| when.saturating_duration_since(Instant::now()));
                 let result = match timeout {
                     Some(d) => resize_debounce_rx.recv_timeout(d),
                     None => resize_debounce_rx
@@ -360,7 +420,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .ok();
     let resize_debounce_arm = resize_debounce_tx.clone();
 
-
     // Single warm-release timer thread. Hide arms it with (gen, delay);
     // it sends Teardown(gen) when the deadline passes. Teardown clears
     // the icon cache only — the WebView stays warm. Re-arming replaces
@@ -374,8 +433,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .spawn(move || {
             let mut armed: Option<(Instant, u64)> = None;
             loop {
-                let timeout = armed
-                    .map(|(when, _)| when.saturating_duration_since(Instant::now()));
+                let timeout = armed.map(|(when, _)| when.saturating_duration_since(Instant::now()));
                 let result = match timeout {
                     Some(d) => warm_release_rx.recv_timeout(d),
                     None => warm_release_rx
@@ -400,6 +458,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let warm_release_arm = warm_release_tx.clone();
 
     LOOP_ALIVE.store(true, Ordering::SeqCst);
+    let mut chat_picker_generation = 0_u64;
+    let mut chat_picker_listing: Option<super::file_picker::ChatPickerDirectory> = None;
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         event_loop.run_return(move |event, target, control_flow| {
             *control_flow = ControlFlow::Wait;
@@ -492,92 +552,270 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::OpenChatFilePicker => {
-                    let owner = if let Ok(mut s) = state.lock() {
-                        if s.visible && !s.chat_file_picker_pending {
-                            s.chat_file_picker_open = true;
-                            s.chat_file_picker_pending = true;
-                            s.hwnd
-                        } else {
-                            0
-                        }
-                    } else {
-                        0
-                    };
-                    if owner != 0 {
-                        deferred_hide_armed.store(false, Ordering::SeqCst);
-                        deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                        let picker_proxy = proxy.clone();
-                        let spawn = std::thread::Builder::new()
-                            .name("nex-chat-file-picker".into())
-                            .spawn(move || {
-                                let paths = super::file_picker::show_chat_file_dialog(owner);
-                                try_send_ui(&picker_proxy, UiCommand::ChatFilePickerClosed);
-                                match paths {
-                                    Ok(Some(paths)) => {
-                                        let files = super::file_picker::read_chat_files(paths);
-                                        try_send_ui(
-                                            &picker_proxy,
-                                            UiCommand::ChatFilesPicked(Some(files)),
-                                        );
-                                    }
-                                    Ok(None) => try_send_ui(
-                                        &picker_proxy,
-                                        UiCommand::ChatFilesPicked(None),
-                                    ),
-                                    Err(error) => try_send_ui(
-                                        &picker_proxy,
-                                        UiCommand::ChatFilesPicked(Some(Err(error))),
-                                    ),
-                                }
-                            });
-                        if spawn.is_err() {
-                            if let Ok(mut s) = state.lock() {
-                                s.chat_file_picker_open = false;
-                                s.chat_file_picker_pending = false;
+                    let should_open = state
+                        .lock()
+                        .map(|mut s| {
+                            if s.visible && !s.chat_file_picker_open && !s.chat_file_picker_pending {
+                                s.chat_file_picker_open = true;
+                                true
+                            } else {
+                                false
                             }
-                            try_send_ui(
-                                &proxy,
-                                UiCommand::ChatFilesPicked(Some(Err(
-                                    "Nex couldn't start the Windows file picker.".into(),
-                                ))),
+                        })
+                        .unwrap_or(false);
+                    if !should_open {
+                        return;
+                    }
+
+                    chat_picker_generation = chat_picker_generation.wrapping_add(1);
+                    chat_picker_listing = None;
+                    let generation = chat_picker_generation;
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(
+                                wv,
+                                &serde_json::json!({
+                                    "chatPickerOpen": true,
+                                    "chatPickerLoading": true,
+                                    "chatPickerListing": null,
+                                    "chatPickerError": null
+                                }),
                             );
                         }
                     }
-                }
-                UiCommand::ChatFilePickerClosed => {
-                    let restore_focus = if let Ok(mut s) = state.lock() {
-                        s.chat_file_picker_open = false;
-                        s.visible
-                    } else {
-                        false
-                    };
-                    if restore_focus {
-                        window.set_focus();
+                    if let Err(error) = start_chat_picker_listing(&proxy, generation, None) {
+                        try_send_ui(
+                            &proxy,
+                            UiCommand::ChatPickerListed {
+                                generation,
+                                result: Err(error),
+                            },
+                        );
                     }
-                    if ready {
-                        if let Some(wv) = webview.as_ref() {
-                            post_json(wv, r#"{"chatPickerLoading":true}"#);
+                }
+                UiCommand::ChatPickerListed { generation, result } => {
+                    let active = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .unwrap_or(false);
+                    if generation != chat_picker_generation || !active {
+                        return;
+                    }
+                    match result {
+                        Ok(listing) => {
+                            chat_picker_listing = Some(listing.clone());
+                            if ready {
+                                if let Some(wv) = webview.as_ref() {
+                                    post_json(
+                                        wv,
+                                        &serde_json::json!({
+                                            "chatPickerLoading": false,
+                                            "chatPickerListing": listing
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if ready {
+                                if let Some(wv) = webview.as_ref() {
+                                    post_json(
+                                        wv,
+                                        &serde_json::json!({
+                                            "chatPickerLoading": false,
+                                            "chatPickerError": error
+                                        }),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
-                UiCommand::ChatFilesPicked(result) => {
+                UiCommand::ChatPickerNavigate(id) => {
+                    let active = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .unwrap_or(false);
+                    if !active {
+                        return;
+                    }
+                    let path = chat_picker_listing
+                        .as_ref()
+                        .and_then(|listing| {
+                            usize::try_from(id)
+                                .ok()
+                                .and_then(|index| listing.entries.get(index))
+                                .filter(|entry| entry.id == id && entry.is_directory)
+                                .map(|entry| entry.path.clone())
+                        });
+                    let Some(path) = path else {
+                        return;
+                    };
+                    chat_picker_generation = chat_picker_generation.wrapping_add(1);
+                    let generation = chat_picker_generation;
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
+                        }
+                    }
+                    if let Err(error) = start_chat_picker_listing(&proxy, generation, Some(path)) {
+                        try_send_ui(
+                            &proxy,
+                            UiCommand::ChatPickerListed {
+                                generation,
+                                result: Err(error),
+                            },
+                        );
+                    }
+                }
+                UiCommand::ChatPickerUp => {
+                    let active = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .unwrap_or(false);
+                    let parent = chat_picker_listing
+                        .as_ref()
+                        .and_then(|listing| listing.current_dir.as_ref())
+                        .and_then(|path| path.parent())
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .map(|path| path.to_path_buf());
+                    if !active {
+                        return;
+                    }
+                    let Some(parent) = parent else {
+                        return;
+                    };
+                    chat_picker_generation = chat_picker_generation.wrapping_add(1);
+                    let generation = chat_picker_generation;
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
+                        }
+                    }
+                    if let Err(error) = start_chat_picker_listing(&proxy, generation, Some(parent)) {
+                        try_send_ui(
+                            &proxy,
+                            UiCommand::ChatPickerListed {
+                                generation,
+                                result: Err(error),
+                            },
+                        );
+                    }
+                }
+                UiCommand::ChatPickerAdd(ids) => {
+                    let active = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .unwrap_or(false);
+                    if !active {
+                        return;
+                    }
+                    let mut paths = Vec::with_capacity(ids.len());
+                    for id in &ids {
+                        let entry = chat_picker_listing
+                            .as_ref()
+                            .and_then(|listing| {
+                                usize::try_from(*id)
+                                    .ok()
+                                    .and_then(|index| listing.entries.get(index))
+                            })
+                            .filter(|entry| entry.id == *id && !entry.is_directory);
+                        let Some(entry) = entry else {
+                            paths.clear();
+                            break;
+                        };
+                        paths.push(entry.path.clone());
+                    }
+                    if paths.is_empty() || paths.len() != ids.len() || paths.len() > 3 {
+                        if ready {
+                            if let Some(wv) = webview.as_ref() {
+                                post_json(
+                                    wv,
+                                    &serde_json::json!({
+                                        "chatPickerLoading": false,
+                                        "chatPickerError": "Choose up to 3 supported text files."
+                                    }),
+                                );
+                            }
+                        }
+                        return;
+                    }
+                    chat_picker_generation = chat_picker_generation.wrapping_add(1);
+                    chat_picker_listing = None;
+                    let generation = chat_picker_generation;
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
+                        }
+                    }
+                    if let Err(error) = start_chat_picker_file_read(&proxy, generation, paths) {
+                        try_send_ui(
+                            &proxy,
+                            UiCommand::ChatPickerFilesRead {
+                                generation,
+                                result: Err(error),
+                            },
+                        );
+                    }
+                }
+                UiCommand::ChatPickerCancel { dismiss_overlay } => {
+                    chat_picker_generation = chat_picker_generation.wrapping_add(1);
+                    chat_picker_listing = None;
                     if let Ok(mut s) = state.lock() {
+                        s.chat_file_picker_open = false;
                         s.chat_file_picker_pending = false;
                     }
                     if ready {
                         if let Some(wv) = webview.as_ref() {
-                            let update = match result {
-                                Some(Ok(files)) => serde_json::json!({
-                                    "chatPickerLoading": false,
-                                    "chatFilesSelected": files
+                            post_json(
+                                wv,
+                                &serde_json::json!({
+                                    "chatPickerOpen": false,
+                                    "chatPickerClosed": true,
+                                    "chatPickerLoading": false
                                 }),
-                                Some(Err(error)) => serde_json::json!({
-                                    "chatPickerLoading": false,
-                                    "chatPickerError": error
-                                }),
-                                None => serde_json::json!({ "chatPickerLoading": false }),
-                            };
-                            post_json(wv, &update.to_string());
+                            );
+                        }
+                    }
+                    if dismiss_overlay {
+                        let _ = event_tx.send(OverlayEvent::Escape);
+                    }
+                }
+                UiCommand::ChatPickerFilesRead { generation, result } => {
+                    let active = state
+                        .lock()
+                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .unwrap_or(false);
+                    if generation != chat_picker_generation || !active {
+                        return;
+                    }
+                    chat_picker_listing = None;
+                    if let Ok(mut s) = state.lock() {
+                        s.chat_file_picker_open = false;
+                        s.chat_file_picker_pending = false;
+                    }
+                    if ready {
+                        if let Some(wv) = webview.as_ref() {
+                            match result {
+                                Ok(files) => post_json(
+                                    wv,
+                                    &serde_json::json!({
+                                        "chatPickerOpen": false,
+                                        "chatPickerClosed": true,
+                                        "chatPickerLoading": false,
+                                        "chatFilesSelected": files
+                                    }),
+                                ),
+                                Err(error) => post_json(
+                                    wv,
+                                    &serde_json::json!({
+                                        "chatPickerOpen": false,
+                                        "chatPickerClosed": true,
+                                        "chatPickerLoading": false,
+                                        "chatPickerError": error
+                                    }),
+                                ),
+                            }
                         }
                     }
                 }
@@ -1159,14 +1397,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .lock()
                         .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
                         .unwrap_or(false);
-                    if picker_active {
-                        deferred_hide_armed.store(false, Ordering::SeqCst);
-                        deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                        crate::runtime::log_info(
-                            "[nex] overlay focus loss ignored while native chat file picker is active",
-                        );
-                        return;
-                    }
                     let was_focused_val = was_focused;
                     let show_pending_val = show_pending;
                     let bare_win = crate::overlay::hotkey::is_bare_win_press_active();
@@ -1183,6 +1413,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         }
                         let state_clone = state.clone();
                         let tx_clone = event_tx.clone();
+                        let proxy_clone = proxy.clone();
                         let armed = deferred_hide_armed.clone();
                         let epoch_clone = deferred_hide_epoch.clone();
                         let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
@@ -1196,13 +1427,27 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 if epoch_clone.load(Ordering::SeqCst) != my_epoch {
                                     return;
                                 }
-                                if let Ok(s) = state_clone.lock() {
+                                let dismiss_picker = state_clone.lock().ok().and_then(|s| {
                                     if s.visible
                                         && !s.has_focus
-                                        && !s.chat_file_picker_open
-                                        && !s.chat_file_picker_pending
                                         && !crate::overlay::hotkey::is_bare_win_press_active()
                                     {
+                                        Some(
+                                            s.chat_file_picker_open || s.chat_file_picker_pending,
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                });
+                                if let Some(picker_active) = dismiss_picker {
+                                    if picker_active {
+                                        try_send_ui(
+                                            &proxy_clone,
+                                            UiCommand::ChatPickerCancel {
+                                                dismiss_overlay: true,
+                                            },
+                                        );
+                                    } else {
                                         let _ = tx_clone.send(OverlayEvent::Escape);
                                     }
                                 }
@@ -1210,7 +1455,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             })
                             .ok();
                     };
-                    if was_focused_val && !show_pending_val && !bare_win && grace_ms >= FOCUS_GRACE_MS && state_vis
+                    if was_focused_val
+                        && !show_pending_val
+                        && !bare_win
+                        && !picker_active
+                        && grace_ms >= FOCUS_GRACE_MS
+                        && state_vis
                     {
                         // Focus bounced back to the previous foreground window
                         // (Task Manager repaints, elevated windows reassert).
@@ -1276,8 +1526,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         }
                     } else {
                         crate::runtime::log_info(&format!(
-                            "[nex::debug] Focused(false): BLOCKED Escape (was_focused={} show_pending={} bare_win={} grace={}ms state_vis={})",
-                            was_focused_val, show_pending_val, bare_win, grace_ms, state_vis,
+                            "[nex::debug] Focused(false): BLOCKED Escape (was_focused={} show_pending={} picker_active={} bare_win={} grace={}ms state_vis={})",
+                            was_focused_val, show_pending_val, picker_active, bare_win, grace_ms, state_vis,
                         ));
                         // Deferred hide: if overlay still visible and no
                         // retry thread is armed, spawn one.  The double
@@ -1293,7 +1543,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
             }
-            Event::WindowEvent { 
+            Event::WindowEvent {
                 window_id,
                 event: tao::event::WindowEvent::CloseRequested{ .. },
                 ..
@@ -1309,7 +1559,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             _ => {}
         }
     });
-}));
+    }));
 
     if let Err(payload) = run_result {
         let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -1319,7 +1569,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         } else {
             "(unknown panic payload)".to_string()
         };
-        crate::logging::warn(&format!("[nex] event loop panicked during teardown; continuing shutdown: {msg}"));
+        crate::logging::warn(&format!(
+            "[nex] event loop panicked during teardown; continuing shutdown: {msg}"
+        ));
     }
 
     LOOP_ALIVE.store(false, Ordering::SeqCst);
@@ -1444,7 +1696,7 @@ fn handle_ipc(
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
 ) {
-    use crate::overlay::ipc::{OverlayMessage, parse_overlay};
+    use crate::overlay::ipc::{parse_overlay, OverlayMessage};
     let msg = match parse_overlay(body) {
         Ok(msg) => msg,
         Err(reject) => {
@@ -1594,6 +1846,23 @@ fn handle_ipc(
         OverlayMessage::ChatPickFiles(_) => {
             try_send_ui(proxy, UiCommand::OpenChatFilePicker);
         }
+        OverlayMessage::ChatPickerNavigate(p) => {
+            try_send_ui(proxy, UiCommand::ChatPickerNavigate(p.v));
+        }
+        OverlayMessage::ChatPickerUp(_) => {
+            try_send_ui(proxy, UiCommand::ChatPickerUp);
+        }
+        OverlayMessage::ChatPickerAdd(p) => {
+            try_send_ui(proxy, UiCommand::ChatPickerAdd(p.entries));
+        }
+        OverlayMessage::ChatPickerCancel(_) => {
+            try_send_ui(
+                proxy,
+                UiCommand::ChatPickerCancel {
+                    dismiss_overlay: false,
+                },
+            );
+        }
         OverlayMessage::OpenExternal(p) => {
             let _ = event_tx.send(OverlayEvent::OpenExternal(p.v));
         }
@@ -1611,13 +1880,11 @@ fn handle_ipc(
 /// renderer, GPU, or utility process crashes or is killed. Never
 /// propagates — subscription failure is logged and forgotten.
 fn subscribe_webview2_diagnostics(webview: &WebView) {
-    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_PROCESS_FAILED_KIND,
-        ICoreWebView2ProcessFailedEventArgs,
-        ICoreWebView2ProcessFailedEventHandler,
-        ICoreWebView2ProcessFailedEventHandler_Vtbl,
-    };
     use std::sync::atomic::{AtomicU32, Ordering};
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs, ICoreWebView2ProcessFailedEventHandler,
+        ICoreWebView2ProcessFailedEventHandler_Vtbl, COREWEBVIEW2_PROCESS_FAILED_KIND,
+    };
     use windows_core::Interface;
 
     // ── minimal COM object implementing ICoreWebView2ProcessFailedEventHandler ──
@@ -1639,13 +1906,9 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
         if !args.is_null() {
             // SAFETY: WebView2 passes a valid ICoreWebView2ProcessFailedEventArgs pointer
             let args = unsafe { &*(args as *const ICoreWebView2ProcessFailedEventArgs) };
-            let mut kind: COREWEBVIEW2_PROCESS_FAILED_KIND =
-                unsafe { std::mem::zeroed() };
+            let mut kind: COREWEBVIEW2_PROCESS_FAILED_KIND = unsafe { std::mem::zeroed() };
             if unsafe { args.ProcessFailedKind(&mut kind) }.is_ok() {
-                crate::logging::error(&format!(
-                    "[nex:webview2] process_failed kind={}",
-                    kind.0
-                ));
+                crate::logging::error(&format!("[nex:webview2] process_failed kind={}", kind.0));
             } else {
                 crate::logging::error("[nex:webview2] process_failed kind=<unreadable>");
             }
@@ -1653,23 +1916,21 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
         windows_core::HRESULT(0)
     }
 
-    unsafe extern "system" fn add_ref(
-        this: *mut core::ffi::c_void,
-    ) -> u32 {
+    unsafe extern "system" fn add_ref(this: *mut core::ffi::c_void) -> u32 {
         // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
         let h = unsafe { &*(this as *const ProcessFailedHandler) };
         h.ref_count.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    unsafe extern "system" fn release(
-        this: *mut core::ffi::c_void,
-    ) -> u32 {
+    unsafe extern "system" fn release(this: *mut core::ffi::c_void) -> u32 {
         // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
         let h = unsafe { &*(this as *const ProcessFailedHandler) };
         let prev = h.ref_count.fetch_sub(1, Ordering::Release);
         if prev == 1 {
             // SAFETY: ref_count reached 0; we own the sole reference.
-            unsafe { drop(Box::from_raw(this as *mut ProcessFailedHandler)); }
+            unsafe {
+                drop(Box::from_raw(this as *mut ProcessFailedHandler));
+            }
         }
         prev - 1
     }
@@ -1683,7 +1944,9 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
             return windows_core::imp::E_POINTER;
         }
         // SAFETY: out is non-null per check above
-        unsafe { *out = core::ptr::null_mut(); }
+        unsafe {
+            *out = core::ptr::null_mut();
+        }
         if iid.is_null() {
             return windows_core::imp::E_INVALIDARG;
         }
@@ -1694,9 +1957,13 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
             || *iid == <ICoreWebView2ProcessFailedEventHandler as Interface>::IID
         {
             // SAFETY: out is non-null per check above
-            unsafe { *out = _this; }
+            unsafe {
+                *out = _this;
+            }
             // SAFETY: _this points to a valid ProcessFailedHandler
-            unsafe { add_ref(_this); }
+            unsafe {
+                add_ref(_this);
+            }
             windows_core::imp::S_OK
         } else {
             windows_core::imp::E_NOINTERFACE
@@ -1739,9 +2006,7 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
             std::mem::forget(handler_com);
         }
         Err(e) => {
-            crate::logging::warn(&format!(
-                "[nex] webview2 subscriptions skipped: {e}"
-            ));
+            crate::logging::warn(&format!("[nex] webview2 subscriptions skipped: {e}"));
             // Reclaim our allocation since WebView2 didn't take it.
             // SAFETY: handler_ptr was created from Box::into_raw above and has
             // not been freed — we are the sole owner on the error path.
@@ -1752,16 +2017,12 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
 
 /// Fire-and-forget: send a JSON string to the WebView page via
 /// `ICoreWebView2::PostWebMessageAsJson`.
-fn post_json(webview: &WebView, json: &str) {
+fn post_json(webview: &WebView, json: impl std::fmt::Display) {
+    let json = json.to_string();
     let wv2 = webview.webview();
-    let wide: Vec<u16> = json
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
-        let _ = wv2.PostWebMessageAsJson(
-            windows_core::PCWSTR::from_raw(wide.as_ptr()),
-        );
+        let _ = wv2.PostWebMessageAsJson(windows_core::PCWSTR::from_raw(wide.as_ptr()));
     }
 }
 
@@ -1775,7 +2036,12 @@ fn post_json(webview: &WebView, json: &str) {
 /// Both use `PostWebMessageAsJson` (fire-and-forget). The state lock is
 /// released before any icon encoding occurs — only the ShimState clone
 /// runs under the lock (~microseconds).
-fn push_state(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>, icons: &Arc<IconCache>, show_pending: bool) {
+fn push_state(
+    webview: &Option<WebView>,
+    state: &Arc<Mutex<ShimState>>,
+    icons: &Arc<IconCache>,
+    show_pending: bool,
+) {
     let Some(wv) = webview else { return };
 
     // Phase 1: Clone state under lock (microseconds).
@@ -2023,11 +2289,7 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
     let rounded_corners = DWMWCP_ROUND;
-    let _ = set_dwm_attribute(
-        hwnd,
-        DWMWA_TRANSITIONS_FORCEDISABLED,
-        &transitions_disabled,
-    );
+    let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
 
@@ -2124,24 +2386,25 @@ fn position_window_centered(window: &Window) {
     let size = window.inner_size();
     let x = left + (right - left - size.width as i32) / 2;
     let y = top + (bottom - top - size.height as i32) / 2;
-    window.set_outer_position(PhysicalPosition::new(
-        x.max(left),
-        y.max(top),
-    ));
+    window.set_outer_position(PhysicalPosition::new(x.max(left), y.max(top)));
 }
 
 fn animate_window_open(hwnd: HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::AnimateWindow;
     const AW_BLEND: u32 = 0x00080000;
     const AW_ACTIVATE: u32 = 0x00020000;
-    unsafe { AnimateWindow(hwnd, 200, AW_BLEND | AW_ACTIVATE); }
+    unsafe {
+        AnimateWindow(hwnd, 200, AW_BLEND | AW_ACTIVATE);
+    }
 }
 
 fn animate_window_close(hwnd: HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::AnimateWindow;
     const AW_BLEND: u32 = 0x00080000;
     const AW_HIDE: u32 = 0x00100000;
-    unsafe { AnimateWindow(hwnd, 200, AW_BLEND | AW_HIDE); }
+    unsafe {
+        AnimateWindow(hwnd, 200, AW_BLEND | AW_HIDE);
+    }
 }
 
 fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
@@ -2187,7 +2450,16 @@ fn shell_window() -> Option<HWND> {
     if !shell.is_null() && unsafe { IsWindow(shell) } != 0 {
         return Some(shell);
     }
-    let class = [b'P' as u16, b'r' as u16, b'o' as u16, b'g' as u16, b'm' as u16, b'a' as u16, b'n' as u16, 0];
+    let class = [
+        b'P' as u16,
+        b'r' as u16,
+        b'o' as u16,
+        b'g' as u16,
+        b'm' as u16,
+        b'a' as u16,
+        b'n' as u16,
+        0,
+    ];
     let progman = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if !progman.is_null() && unsafe { IsWindow(progman) } != 0 {
         Some(progman)
@@ -2197,7 +2469,10 @@ fn shell_window() -> Option<HWND> {
 }
 
 fn restore_previous_foreground(previous: &mut Option<HWND>) {
-    let Some(target) = previous.take().filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0) else {
+    let Some(target) = previous
+        .take()
+        .filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0)
+    else {
         return;
     };
     unsafe {
@@ -2266,7 +2541,11 @@ fn force_foreground(hwnd: HWND) {
         let foreground_before_show = fg == hwnd || SetForegroundWindow(hwnd) != 0;
         ShowWindow(
             hwnd,
-            if foreground_before_show { SW_SHOWNA } else { SW_SHOW },
+            if foreground_before_show {
+                SW_SHOWNA
+            } else {
+                SW_SHOW
+            },
         );
         BringWindowToTop(hwnd);
         if !foreground_before_show {
@@ -2325,8 +2604,7 @@ unsafe extern "system" fn instance_signal_subclass(
             // to catch toggle presses while the overlay is visible.
             let h_raw_input = lparam as windows_sys::Win32::Foundation::HANDLE;
             let header_sz = std::mem::size_of::<RAWINPUTHEADER>() as u32;
-            let mut raw_input: std::mem::MaybeUninit<RAWINPUT> =
-                std::mem::MaybeUninit::uninit();
+            let mut raw_input: std::mem::MaybeUninit<RAWINPUT> = std::mem::MaybeUninit::uninit();
             let mut sz = std::mem::size_of::<RAWINPUT>() as u32;
             let written = unsafe {
                 GetRawInputData(
@@ -2368,12 +2646,7 @@ unsafe extern "system" fn instance_signal_subclass(
                                 let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
                             }
                         } else if RAW_WIN_DOWN
-                            .compare_exchange(
-                                0,
-                                vk as u32,
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            )
+                            .compare_exchange(0, vk as u32, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                         {
                             RAW_WIN_CHORD.store(false, Ordering::SeqCst);
@@ -2408,12 +2681,15 @@ unsafe extern "system" fn instance_signal_subclass(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
-unsafe fn install_instance_signal_subclass(
-    hwnd: HWND,
-    event_tx: &Sender<OverlayEvent>,
-) {
-    let show_name: Vec<u16> = "Nex.ExternalShow.v1".encode_utf16().chain(std::iter::once(0)).collect();
-    let quit_name: Vec<u16> = "Nex.ExternalQuit.v1".encode_utf16().chain(std::iter::once(0)).collect();
+unsafe fn install_instance_signal_subclass(hwnd: HWND, event_tx: &Sender<OverlayEvent>) {
+    let show_name: Vec<u16> = "Nex.ExternalShow.v1"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let quit_name: Vec<u16> = "Nex.ExternalQuit.v1"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: string pointers are NUL-terminated wide strings
     let msg_show = unsafe { RegisterWindowMessageW(show_name.as_ptr()) };
     let msg_quit = unsafe { RegisterWindowMessageW(quit_name.as_ptr()) };
@@ -2437,35 +2713,43 @@ unsafe fn install_instance_signal_subclass(
 /// While RECORDING_HOTKEY is armed, translate raw keyboard events into a
 /// canonical hotkey string and report via OverlayEvent::HotkeyRecorded.
 /// Every event is swallowed (returns 0) — nothing leaks to the OS.
-unsafe fn handle_recording_key(
-    vk: u16,
-    flags: u16,
-    ctx: &InstanceSignalCtx,
-) -> LRESULT {
+unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> LRESULT {
     let is_break = (flags & RI_KEY_BREAK) != 0;
     //ESC cancels recording, any other key is a candidate.
     let is_win = vk == VK_LWIN || vk == VK_RWIN;
     if vk == 0x1B && !is_break {
         RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-        let _ = ctx.event_tx.send(OverlayEvent::HotkeyRecorded(String::new()));
+        let _ = ctx
+            .event_tx
+            .send(OverlayEvent::HotkeyRecorded(String::new()));
         return 0;
     }
-    let is_modifier =matches!(vk, 0xA0..=0xA5 | 0x10 | 0x11 |0x12 |0x5B | 0x5C);
+    let is_modifier = matches!(vk, 0xA0..=0xA5 | 0x10 | 0x11 | 0x12 | 0x5B | 0x5C);
     if is_win {
         //Commit bare "Win" on keyup only if no other jey is joined it.
         if is_break && !RECORD_WIN_CHORD.load(Ordering::SeqCst) {
             RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-            let _ = ctx.event_tx.send(OverlayEvent::HotkeyRecorded("Win".into()));
+            let _ = ctx
+                .event_tx
+                .send(OverlayEvent::HotkeyRecorded("Win".into()));
         }
         return 0;
     }
     if !is_break && !is_modifier {
         let mut parts: Vec<String> = Vec::new();
-        unsafe  {
-            if GetAsyncKeyState(0x11) as u16 & 0x8000 != 0 { parts.push("Ctrl".into()); }
-            if GetAsyncKeyState(0x12) as u16 & 0x8000 != 0 { parts.push("Alt".into()); }
-            if GetAsyncKeyState(0x10) as u16 & 0x8000 != 0 { parts.push("Shift".into()); }
-            if GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0 || GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0 {
+        unsafe {
+            if GetAsyncKeyState(0x11) as u16 & 0x8000 != 0 {
+                parts.push("Ctrl".into());
+            }
+            if GetAsyncKeyState(0x12) as u16 & 0x8000 != 0 {
+                parts.push("Alt".into());
+            }
+            if GetAsyncKeyState(0x10) as u16 & 0x8000 != 0 {
+                parts.push("Shift".into());
+            }
+            if GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0
+                || GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0
+            {
                 parts.push("Win".into());
                 RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
             }
@@ -2517,13 +2801,13 @@ fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
         hwndTarget: hwnd,
     };
     let ok = unsafe {
-        RegisterRawInputDevices(
-            &mut rid,
-            1,
-            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-        )
+        RegisterRawInputDevices(&mut rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
     } != 0;
-    let err = if !ok { unsafe { windows_sys::Win32::Foundation::GetLastError() } } else { 0 };
+    let err = if !ok {
+        unsafe { windows_sys::Win32::Foundation::GetLastError() }
+    } else {
+        0
+    };
     crate::runtime::log_info(&format!(
         "[nex::debug] register_raw_input_sink: ok={} last_err={} suppress_win={}",
         ok, err, suppress_win,
@@ -2533,7 +2817,7 @@ fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
 
 fn vk_to_hotkey(vk: u16) -> Option<String> {
     match vk {
-        0x41..=0x5A => Some (((vk as u8) as char).to_string()), // A-Z
+        0x41..=0x5A => Some(((vk as u8) as char).to_string()), // A-Z
         0x30..=0x39 => Some(((vk as u8) as char).to_string()), // 0-9
         0x20 => Some("Space".into()),
         0x5B | 0x5C => Some("Win".into()),
@@ -2553,13 +2837,13 @@ fn unregister_raw_input_sink() {
         hwndTarget: std::ptr::null_mut(),
     };
     let ok = unsafe {
-        RegisterRawInputDevices(
-            &mut rid,
-            1,
-            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
-        )
+        RegisterRawInputDevices(&mut rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
     } != 0;
-    let err = if !ok { unsafe { windows_sys::Win32::Foundation::GetLastError() } } else { 0 };
+    let err = if !ok {
+        unsafe { windows_sys::Win32::Foundation::GetLastError() }
+    } else {
+        0
+    };
     crate::runtime::log_info(&format!(
         "[nex::debug] unregister_raw_input_sink: ok={} last_err={}",
         ok, err,

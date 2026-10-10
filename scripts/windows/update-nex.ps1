@@ -450,6 +450,132 @@ public static class NexWindow {
   Write-Host "Warning: installer window was not ready for foreground activation." -ForegroundColor Yellow
 }
 
+if (-not ('NexRestartManager' -as [type])) {
+  # Restart Manager is Windows' own "which process holds this path" API.
+  # Used purely for diagnostics: name the locker when the backup move
+  # is blocked, so updater.log contains the culprit instead of a bare
+  # sharing violation. All signatures use int (not uint) so PowerShell
+  # [ref] marshaling stays simple.
+  Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public enum NexRmAppType { RmUnknownApp = 0, RmMainWindow = 1, RmOtherWindow = 2, RmService = 3, RmExplorer = 4, RmConsole = 5, RmCritical = 1000 }
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct NexRmProcessInfo {
+  public int dwProcessId;
+  public long processStartTime;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string strAppName;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string strServiceShortName;
+  public NexRmAppType ApplicationType;
+  public uint AppStatus;
+  public uint TSSessionId;
+  [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+}
+public static class NexRestartManager {
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+  public static extern int RmStartSession(out int pSessionHandle, int dwSessionFlags, string strSessionKey);
+  [DllImport("rstrtmgr.dll")]
+  public static extern int RmEndSession(int pSessionHandle);
+  [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+  public static extern int RmRegisterResources(int pSessionHandle, int nFiles, string[] rgsFilenames, int nApplications, IntPtr rgApplications, int nServices, string[] rgsServiceNames);
+  [DllImport("rstrtmgr.dll")]
+  public static extern int RmGetList(int dwSessionHandle, out int pnProcInfoNeeded, ref int pnProcInfo, [In, Out] NexRmProcessInfo[] rgAffectedApps, ref int lpdwRebootReasons);
+}
+'@
+}
+
+function Get-LockingProcesses {
+  # Names every process Restart Manager sees holding $Path, e.g.
+  # "MsMpEng.exe [pid 1234, type RmService]". Restart Manager only
+  # tracks files, so directories are expanded to the files inside
+  # (capped — the first entries already name the locker). Never
+  # throws: returns @() when the API is unavailable or nothing holds
+  # the path.
+  param([string]$Path)
+  $found = @()
+  try {
+    $files = @()
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+      # ponytail: 128-file cap; lockers show up in the first entries.
+      $files = @(Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+        Select-Object -First 128 -ExpandProperty FullName)
+    }
+    elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+      $files = @($Path)
+    }
+    if (-not $files.Count) {
+      return $found
+    }
+    $session = 0
+    if ([NexRestartManager]::RmStartSession([ref]$session, 0, [guid]::NewGuid().ToString()) -ne 0) {
+      return $found
+    }
+    try {
+      if ([NexRestartManager]::RmRegisterResources($session, $files.Count, $files, 0, [IntPtr]::Zero, 0, $null) -ne 0) {
+        return $found
+      }
+      $needed = 0
+      $count = 16
+      $reasons = 0
+      $list = New-Object NexRmProcessInfo[] $count
+      $rc = [NexRestartManager]::RmGetList($session, [ref]$needed, [ref]$count, $list, [ref]$reasons)
+      if ($rc -eq 234 -and $needed -gt $count) {
+        # 234 = ERROR_MORE_DATA: resize and ask once more.
+        $count = $needed
+        $list = New-Object NexRmProcessInfo[] $count
+        $rc = [NexRestartManager]::RmGetList($session, [ref]$needed, [ref]$count, $list, [ref]$reasons)
+      }
+      if ($rc -eq 0) {
+        for ($i = 0; $i -lt $count; $i++) {
+          $entry = $list[$i]
+          $found += "$($entry.strAppName) [pid $($entry.dwProcessId), type $($entry.ApplicationType)]"
+        }
+      }
+    }
+    finally {
+      [void][NexRestartManager]::RmEndSession($session)
+    }
+  }
+  catch {}
+  return $found
+}
+
+function Write-PreMoveDiagnostics {
+  # Snapshot of everything that could plausibly hold the install tree,
+  # taken after Stop-Runtime and before the backup move. Every probe is
+  # independent and silent on failure — diagnostics must never break
+  # the update they observe.
+  param([string]$Root)
+  try {
+    $procs = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core", "msedgewebview2" -ErrorAction SilentlyContinue |
+      ForEach-Object { "$($_.ProcessName) [pid $($_.Id)]" })
+    Write-UpdateLog "Processes at backup time: $(if ($procs.Count) { $procs -join ', ' } else { '(none of Nex/NexHelper/msedgewebview2)' })"
+  }
+  catch {}
+  try {
+    $webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction Stop |
+      Where-Object { $_.CommandLine -match 'nex' } |
+      ForEach-Object { "pid $($_.ProcessId): $($_.CommandLine)" })
+    if ($webviews.Count) {
+      Write-UpdateLog "Nex-owned WebView2 children still alive: $($webviews -join ' | ')" "Yellow"
+    }
+  }
+  catch {}
+  try {
+    $av = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct -ErrorAction Stop |
+      ForEach-Object { $_.displayName })
+    if ($av.Count) {
+      Write-UpdateLog "Registered antivirus: $($av -join ', ')"
+    }
+  }
+  catch {}
+  try {
+    $lockers = @(Get-LockingProcesses -Path $Root)
+    Write-UpdateLog "Restart Manager lockers on install root: $(if ($lockers.Count) { $lockers -join ', ' } else { '(none)' })"
+  }
+  catch {}
+}
+
 function Verify-ManifestAndInstaller {
   param(
     $Manifest,
@@ -630,6 +756,7 @@ $backupDir = $null
 try {
   Write-UpdateLog "[3/5] Stopping active runtime and preparing rollback snapshot..." "Yellow"
   Stop-Runtime -InstalledExePath $installedExe
+  Write-PreMoveDiagnostics -Root $InstallRoot
 
   if (Test-Path -LiteralPath $InstallRoot) {
     $backupRoot = Join-Path $CacheRoot "backups"
@@ -644,7 +771,9 @@ try {
       }
       catch {
         if ($attempt -eq 3) { throw }
-        Write-UpdateLog "Backup move blocked, retrying ($attempt/3)..." "Yellow"
+        $lockers = @(Get-LockingProcesses -Path $InstallRoot)
+        $lockerText = if ($lockers.Count) { " Lockers: $($lockers -join ', '). " } else { " No lockers reported. " }
+        Write-UpdateLog "Backup move blocked, retrying ($attempt/3)...$lockerText" "Yellow"
         Start-Sleep -Seconds 1
       }
     }
@@ -705,6 +834,13 @@ try {
 catch {
   # Capture first: every diagnostic below must survive a dead parent pipe.
   $failure = $_.Exception.Message
+  try {
+    $lockers = @(Get-LockingProcesses -Path $InstallRoot)
+    if ($lockers.Count) {
+      $failure = "$failure Lockers at failure time: $($lockers -join ', ')."
+    }
+  }
+  catch {}
   try {
     Write-UpdateLog "Update failed: $failure" "Red"
     Write-UpdateLog "Attempting rollback..." "Yellow"

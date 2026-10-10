@@ -1176,10 +1176,14 @@ html[data-theme="light"] img.icon.glyph {
 #update-notice {
   position: relative;
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-left: 0;
 }
 
-#update-btn {
+#update-btn,
+#whats-new-btn {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1194,11 +1198,13 @@ html[data-theme="light"] img.icon.glyph {
   transition: all 200ms ease;
 }
 
-#update-btn:hover {
+#update-btn:hover,
+#whats-new-btn:hover {
   background: rgba(74, 222, 128, 0.25);
 }
 
-#update-btn:active {
+#update-btn:active,
+#whats-new-btn:active {
   transform: scale(0.98);
 }
 
@@ -1207,31 +1213,42 @@ html[data-theme="light"] img.icon.glyph {
   opacity: 0.7;
 }
 
-#update-btn svg {
+#update-btn svg,
+#whats-new-btn svg {
   flex-shrink: 0;
 }
 
-#update-btn span {
+#update-btn span,
+#whats-new-btn span {
   white-space: nowrap;
 }
 
-html[data-theme="light"] #update-btn {
+html[data-theme="light"] #update-btn,
+html[data-theme="light"] #whats-new-btn {
   background: rgba(22, 163, 74, 0.15);
   color: #16a34a;
 }
 
-html[data-theme="light"] #update-btn:hover {
+html[data-theme="light"] #update-btn:hover,
+html[data-theme="light"] #whats-new-btn:hover {
   background: rgba(22, 163, 74, 0.25);
 }
 
-/* Post-update entry point: same pill, accent palette instead of green. */
-#update-notice.whats-new #update-btn {
+/* Post-update entry point: own pill in the accent palette so it can
+   sit next to Update instead of hijacking it. */
+#whats-new-btn {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--accent);
 }
 
-#update-notice.whats-new #update-btn:hover {
+#whats-new-btn:hover {
   background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+html[data-theme="light"] #whats-new-btn,
+html[data-theme="light"] #whats-new-btn:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
 }
 
 /* ── what's new view ─────────────────────────────────────── */

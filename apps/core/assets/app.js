@@ -27,6 +27,7 @@
   const updateNotice = $("update-notice");
   const updateBtn = $("update-btn");
   const updateBtnLabel = updateBtn.querySelector("span");
+  const whatsNewBtn = $("whats-new-btn");
   const whatsNewTitle = $("whats-new-title");
   const whatsNewItems = $("whats-new-items");
   const whatsNewTips = $("whats-new-tips");
@@ -2794,9 +2795,8 @@
       // text, so stale values can never overwrite the input.
       completion = typeof state.completion === "string" ? state.completion : "";
 
-      // Update availability: show/hide update notice. A pending
-      // post-update version takes over the notice: it opens the
-      // What's New view instead of running an update check.
+      // Update availability: show/hide update notice. Update and
+      // What's New are independent pills now (see syncUpdateNotice).
       if (typeof state.updateAvailable === "boolean" || typeof state.whatsNewPending !== "undefined") {
         if (typeof state.updateAvailable === "boolean") {
           updateAvailable = state.updateAvailable;
@@ -2805,6 +2805,12 @@
           whatsNewPending = typeof state.whatsNewPending === "string" ? state.whatsNewPending : null;
         }
         syncUpdateNotice();
+      }
+
+      // A hide push means a fresh show comes next: never resume into
+      // the What's New view, always back to search.
+      if (state.overlayVisible === false && whatsNewOpen) {
+        closeWhatsNew();
       }
 
       // Native glass below the page: drop painted backgrounds so the
@@ -2922,32 +2928,33 @@
   });
 
   // ── update button ───────────────────────────────────────────
+  // Update and What's New are independent pills: a pending post-update
+  // version no longer hijacks the Update entry point, so a newer
+  // release stays reachable without viewing notes first.
   function syncUpdateNotice() {
     const show = updateAvailable || whatsNewPending !== null;
     updateNotice.classList.toggle("hidden", !show);
-    updateNotice.classList.toggle("whats-new", whatsNewPending !== null);
+    whatsNewBtn.hidden = whatsNewPending === null;
     if (whatsNewPending !== null) {
-      updateBtn.disabled = false;
-      updateBtn.title = "See what's new";
-      updateBtn.setAttribute("aria-label", "See what's new in version " + whatsNewPending);
-      updateBtnLabel.textContent = "What's new";
-    } else if (!updateBtn.disabled || updateBtnLabel.textContent === "What's new") {
+      whatsNewBtn.title = "See what's new";
+      whatsNewBtn.setAttribute("aria-label", "See what's new in version " + whatsNewPending);
+    }
+    if (!updateBtn.disabled) {
       updateBtn.title = "Update available";
       updateBtn.setAttribute("aria-label", "Update available");
-      updateBtnLabel.textContent = "Update";
+      updateBtnLabel.textContent = updateAvailable ? "Update" : "";
     }
+    updateBtn.hidden = !updateAvailable;
   }
 
   updateBtn.addEventListener("click", () => {
-    // Post-update, once per version: open the What's New view instead
-    // of the normal update flow. Rust marks the version seen on open.
-    if (whatsNewPending !== null) {
-      openWhatsNew();
-      return;
-    }
     updateBtn.disabled = true;
     updateBtnLabel.textContent = "Updating...";
     post("checkUpdates");
+  });
+
+  whatsNewBtn.addEventListener("click", () => {
+    openWhatsNew();
   });
 
   // ── what's new view ─────────────────────────────────────────

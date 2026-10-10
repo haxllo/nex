@@ -2203,6 +2203,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,
         "whatsNewPending": s.whats_new_pending,
+        "overlayVisible": s.visible,
         "glassNative": s.glass_native,
     })
     .to_string()

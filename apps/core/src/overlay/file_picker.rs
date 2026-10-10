@@ -119,9 +119,9 @@ pub(crate) fn chat_picker_directory(path: PathBuf) -> Result<ChatPickerDirectory
         entry.id = id as u64;
     }
 
-    let can_go_up = path
-        .parent()
-        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    // Every directory listing can go back: either to its parent directory
+    // or, at a drive root, to the "This PC" locations view.
+    let can_go_up = true;
     Ok(ChatPickerDirectory {
         location: path.display().to_string(),
         can_go_up,

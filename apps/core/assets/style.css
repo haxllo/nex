@@ -1983,7 +1983,10 @@ html.glass-native .row .icon.placeholder {
 
 .chat-file-picker-truncated { flex: 0 0 auto; margin: 0 0 8px; color: var(--text-faint); font-size: 11px; line-height: 1.4; }
 .chat-file-picker-list-area { position: relative; display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
-.chat-file-picker-items { display: flex; flex: 1 1 auto; flex-direction: column; gap: 5px; min-height: 0; overflow: auto; }
+.chat-file-picker-items { display: flex; flex: 1 1 auto; flex-direction: column; gap: 5px; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+.chat-file-picker-items::-webkit-scrollbar { width: 8px; }
+.chat-file-picker-items::-webkit-scrollbar-track { background: transparent; }
+.chat-file-picker-items::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
 .chat-file-picker-state { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--text-faint); font-size: 12px; text-align: center; pointer-events: none; }
 .chat-file-picker-entry {
   display: flex;

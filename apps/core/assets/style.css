@@ -1310,7 +1310,7 @@ html[data-theme="light"] #update-btn:hover {
 }
 
 .chat-icon-button:active { transform: scale(0.96); }
-.chat-icon-button:disabled { opacity: .45; cursor: wait; }
+.chat-icon-button:disabled { opacity: .45; cursor: default; }
 .chat-icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .chat-icon-button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 

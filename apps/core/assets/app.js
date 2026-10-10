@@ -1589,6 +1589,7 @@
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
     $("chat-copy-button").disabled = chatMessages.length === 0;
+    $("chat-new-button").disabled = chatMessages.length === 0;
     if (!streamOnly) {
       if (chatRenderFrame) {
         cancelAnimationFrame(chatRenderFrame);

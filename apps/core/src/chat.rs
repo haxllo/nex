@@ -1012,7 +1012,7 @@ fn current_pc_info() -> String {
 
     fn display_adapters() -> Vec<String> {
         const DISPLAY_CLASS_KEY: &str =
-            "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-4e36-b681-21cfb97de1ac0}";
+            "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
         let key: Vec<u16> = DISPLAY_CLASS_KEY
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -1061,6 +1061,26 @@ fn current_pc_info() -> String {
         names
     }
 
+    fn registry_dword_at(root: HKEY, key_path: &str, value: &str) -> Option<u32> {
+        use windows_sys::Win32::System::Registry::RRF_RT_REG_DWORD;
+        let key: Vec<u16> = key_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let value: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut data = 0u32;
+        let mut bytes = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_DWORD,
+                std::ptr::null_mut(),
+                (&mut data as *mut u32).cast::<c_void>(),
+                &mut bytes,
+            )
+        };
+        (status == 0 && bytes == 4).then_some(data)
+    }
+
     fn registry_string(value: &str) -> Option<String> {
         registry_string_at(
             HKEY_LOCAL_MACHINE,
@@ -1073,17 +1093,17 @@ fn current_pc_info() -> String {
     if let Some(product) = registry_string("ProductName") {
         let version = registry_string("DisplayVersion").or_else(|| registry_string("ReleaseId"));
         let build = registry_string("CurrentBuildNumber");
-        let mut os = product;
-        if let Some(version) = version {
-            os.push(' ');
-            os.push_str(&version);
-        }
-        if let Some(build) = build {
-            os.push_str(" (build ");
-            os.push_str(&build);
-            os.push(')');
-        }
-        facts.push(format!("Windows: {os}"));
+        let ubr = registry_dword_at(
+            HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            "UBR",
+        );
+        facts.push(format_os_line(
+            &product,
+            version.as_deref(),
+            build.as_deref(),
+            ubr,
+        ));
     }
     if let Some(cpu) = registry_string_at(
         HKEY_LOCAL_MACHINE,
@@ -1123,6 +1143,35 @@ fn current_pc_info() -> String {
         facts.push(format!("Installed memory: {}", format_gib(bytes)));
     }
     facts.join("\n")
+}
+
+/// Registry ProductName keeps saying "Windows 10" on systems upgraded to 11,
+/// so derive the 10/11 part from the build number (11 starts at 22000).
+fn format_os_line(
+    product: &str,
+    version: Option<&str>,
+    build: Option<&str>,
+    ubr: Option<u32>,
+) -> String {
+    let mut os = product.to_string();
+    let build_number = build.and_then(|build| build.parse::<u32>().ok());
+    if build_number.is_some_and(|number| number >= 22000) && os.starts_with("Windows 10") {
+        os = os.replacen("Windows 10", "Windows 11", 1);
+    }
+    if let Some(version) = version.filter(|version| !version.is_empty()) {
+        os.push(' ');
+        os.push_str(version);
+    }
+    if let Some(build) = build.filter(|build| !build.is_empty()) {
+        os.push_str(" (build ");
+        os.push_str(build);
+        if let Some(ubr) = ubr {
+            os.push('.');
+            os.push_str(&ubr.to_string());
+        }
+        os.push(')');
+    }
+    format!("Windows: {os}")
 }
 
 /// Round byte counts to whole GiB when close, else one decimal.
@@ -1413,6 +1462,22 @@ mod tests {
         };
         let prompt = message_with_local_context_and_pc_info(&request, Some("fixture PC facts"));
         assert!(prompt.contains("do not guess"));
+    }
+
+    #[test]
+    fn os_line_fixes_win10_product_name_on_win11_builds() {
+        assert_eq!(
+            format_os_line("Windows 10 Pro", Some("26H2"), Some("26300"), Some(9550)),
+            "Windows: Windows 11 Pro 26H2 (build 26300.9550)"
+        );
+        assert_eq!(
+            format_os_line("Windows 10 Pro", Some("21H2"), Some("19045"), None),
+            "Windows: Windows 10 Pro 21H2 (build 19045)"
+        );
+        assert_eq!(
+            format_os_line("Windows 11 Pro", Some("23H2"), Some("22631"), Some(4169)),
+            "Windows: Windows 11 Pro 23H2 (build 22631.4169)"
+        );
     }
 
     #[test]

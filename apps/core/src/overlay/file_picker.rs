@@ -1,26 +1,135 @@
-use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
-use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use serde::Serialize;
-use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize,
-};
-use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-use windows::Win32::UI::Shell::{
-    FOS_ALLOWMULTISELECT, FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
-    FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
-};
-use windows::core::{HRESULT, PCWSTR, w};
-
 use crate::overlay::ipc::{
-    MAX_CHAT_ATTACHMENT_BYTES, MAX_CHAT_ATTACHMENT_NAME_CHARS, MAX_CHAT_ATTACHMENTS,
-    MAX_CHAT_ATTACHMENTS_TOTAL_BYTES,
+    MAX_CHAT_ATTACHMENTS, MAX_CHAT_ATTACHMENTS_TOTAL_BYTES, MAX_CHAT_ATTACHMENT_BYTES,
+    MAX_CHAT_ATTACHMENT_NAME_CHARS,
 };
+use serde::Serialize;
+
+const MAX_CHAT_PICKER_ENTRIES: usize = 500;
+const MAX_CHAT_PICKER_SCAN_ENTRIES: usize = 10_000;
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ChatPickerEntry {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) is_directory: bool,
+    pub(crate) size: Option<u64>,
+    #[serde(skip)]
+    pub(crate) path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ChatPickerDirectory {
+    pub(crate) location: String,
+    pub(crate) can_go_up: bool,
+    pub(crate) truncated: bool,
+    pub(crate) entries: Vec<ChatPickerEntry>,
+    #[serde(skip)]
+    pub(crate) current_dir: Option<PathBuf>,
+}
+
+pub(crate) fn chat_picker_locations() -> ChatPickerDirectory {
+    let mut locations = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        if home.is_dir() {
+            locations.push(("Home".to_string(), home));
+        }
+    }
+
+    let drive_mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    for drive in 0..26 {
+        if drive_mask & (1 << drive) == 0 {
+            continue;
+        }
+        let path = PathBuf::from(format!("{}:\\", char::from(b'A' + drive as u8)));
+        if path.is_dir() {
+            locations.push((path.display().to_string(), path));
+        }
+    }
+
+    ChatPickerDirectory {
+        location: "This PC".into(),
+        can_go_up: false,
+        truncated: false,
+        entries: locations
+            .into_iter()
+            .enumerate()
+            .map(|(id, (name, path))| ChatPickerEntry {
+                id: id as u64,
+                name,
+                is_directory: true,
+                size: None,
+                path,
+            })
+            .collect(),
+        current_dir: None,
+    }
+}
+
+pub(crate) fn chat_picker_directory(path: PathBuf) -> Result<ChatPickerDirectory, String> {
+    let metadata = fs::metadata(&path).map_err(|e| format!("Couldn't open this folder: {e}"))?;
+    if !metadata.is_dir() {
+        return Err("This location is no longer a folder.".into());
+    }
+
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for (scanned, entry) in fs::read_dir(&path)
+        .map_err(|e| format!("Couldn't read this folder: {e}"))?
+        .enumerate()
+    {
+        if scanned >= MAX_CHAT_PICKER_SCAN_ENTRIES || entries.len() >= MAX_CHAT_PICKER_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        let is_directory = file_type.is_dir();
+        if !is_directory && (!file_type.is_file() || !is_supported_extension(&entry.path())) {
+            continue;
+        }
+        let size = if is_directory {
+            None
+        } else {
+            entry.metadata().ok().map(|metadata| metadata.len())
+        };
+        entries.push(ChatPickerEntry {
+            id: 0,
+            name: entry.file_name().to_string_lossy().into_owned(),
+            is_directory,
+            size,
+            path: entry.path(),
+        });
+    }
+    entries.sort_by(|a, b| {
+        b.is_directory
+            .cmp(&a.is_directory)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    for (id, entry) in entries.iter_mut().enumerate() {
+        entry.id = id as u64;
+    }
+
+    let can_go_up = path
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    Ok(ChatPickerDirectory {
+        location: path.display().to_string(),
+        can_go_up,
+        truncated,
+        entries,
+        current_dir: Some(path),
+    })
+}
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "txt", "md", "csv", "json", "json5", "log", "xml", "toml", "ini", "yaml", "yml", "rs", "py",
@@ -31,86 +140,6 @@ const SUPPORTED_EXTENSIONS: &[&str] = &[
 pub(crate) struct SelectedChatFile {
     pub(crate) name: String,
     pub(crate) content: String,
-}
-
-struct ComApartment;
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        unsafe { CoUninitialize() };
-    }
-}
-
-pub(crate) fn show_chat_file_dialog(owner: isize) -> Result<Option<Vec<PathBuf>>, String> {
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    if initialized.is_err() {
-        return Err("Nex couldn't initialize the Windows file picker.".into());
-    }
-    let _apartment = ComApartment;
-
-    let dialog: IFileOpenDialog =
-        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
-            .map_err(|_| "Nex couldn't start the Windows file picker.".to_string())?;
-
-    let patterns = SUPPORTED_EXTENSIONS
-        .iter()
-        .map(|extension| format!("*.{extension}"))
-        .collect::<Vec<_>>()
-        .join(";");
-    let filter_name = wide("Text and source files");
-    let filter_pattern = wide(&patterns);
-    let filter = COMDLG_FILTERSPEC {
-        pszName: PCWSTR(filter_name.as_ptr()),
-        pszSpec: PCWSTR(filter_pattern.as_ptr()),
-    };
-    unsafe {
-        dialog
-            .SetFileTypes(&[filter])
-            .map_err(|_| "Nex couldn't configure the Windows file picker.".to_string())?;
-        let options = dialog
-            .GetOptions()
-            .map_err(|_| "Nex couldn't configure the Windows file picker.".to_string())?;
-        dialog
-            .SetOptions(
-                options
-                    | FOS_ALLOWMULTISELECT
-                    | FOS_DONTADDTORECENT
-                    | FOS_FILEMUSTEXIST
-                    | FOS_FORCEFILESYSTEM,
-            )
-            .map_err(|_| "Nex couldn't configure the Windows file picker.".to_string())?;
-        dialog
-            .SetTitle(w!("Choose text files to attach"))
-            .map_err(|_| "Nex couldn't configure the Windows file picker.".to_string())?;
-    }
-
-    let owner = (owner != 0).then_some(HWND(owner as *mut _));
-    if let Err(error) = unsafe { dialog.Show(owner) } {
-        if error.code() == HRESULT(ERROR_CANCELLED.0 as i32) {
-            return Ok(None);
-        }
-        return Err("Windows couldn't open the file picker.".into());
-    }
-
-    let items = unsafe { dialog.GetResults() }
-        .map_err(|_| "Windows couldn't read the selected files.".to_string())?;
-    let count = unsafe { items.GetCount() }
-        .map_err(|_| "Windows couldn't read the selected files.".to_string())?;
-    if count as usize > MAX_CHAT_ATTACHMENTS {
-        return Err("Choose no more than three files at a time.".into());
-    }
-
-    let mut paths = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let item = unsafe { items.GetItemAt(index) }
-            .map_err(|_| "Windows couldn't read the selected files.".to_string())?;
-        let display_name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }
-            .map_err(|_| "Choose files stored on this device.".to_string())?;
-        let path = PathBuf::from(unsafe { OsString::from_wide(display_name.as_wide()) });
-        unsafe { CoTaskMemFree(Some(display_name.as_ptr().cast())) };
-        paths.push(path);
-    }
-    Ok(Some(paths))
 }
 
 pub(crate) fn read_chat_files(paths: Vec<PathBuf>) -> Result<Vec<SelectedChatFile>, String> {
@@ -177,10 +206,6 @@ fn safe_name(name: &str) -> String {
             }
         })
         .collect()
-}
-
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
 }
 
 #[cfg(test)]

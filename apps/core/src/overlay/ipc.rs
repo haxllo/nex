@@ -124,6 +124,12 @@ pub(crate) struct TextPayload {
     pub v: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatPickerAddPayload {
+    pub entries: Vec<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ChatConfigPayload {
@@ -313,6 +319,14 @@ pub(crate) enum OverlayMessage {
     ChatCancel(ChatCancelPayload),
     #[serde(rename = "chatPickFiles")]
     ChatPickFiles(NoPayload),
+    #[serde(rename = "chatPickerNavigate")]
+    ChatPickerNavigate(IndexPayload),
+    #[serde(rename = "chatPickerUp")]
+    ChatPickerUp(NoPayload),
+    #[serde(rename = "chatPickerAdd")]
+    ChatPickerAdd(ChatPickerAddPayload),
+    #[serde(rename = "chatPickerCancel")]
+    ChatPickerCancel(NoPayload),
     #[serde(rename = "openExternal")]
     OpenExternal(TextPayload),
 }
@@ -384,6 +398,10 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatDisconnect",
         "chatCancel",
         "chatPickFiles",
+        "chatPickerNavigate",
+        "chatPickerUp",
+        "chatPickerAdd",
+        "chatPickerCancel",
         "openExternal",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
@@ -432,6 +450,19 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         }
         OverlayMessage::OpenExternal(p) => {
             check_len(&p.v, 2048, "external URL").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::ChatPickerAdd(p) => {
+            if p.entries.is_empty() || p.entries.len() > MAX_CHAT_ATTACHMENTS {
+                return Err(IpcReject::BadPayload(format!(
+                    "file selection must contain 1 to {MAX_CHAT_ATTACHMENTS} entries"
+                )));
+            }
+            let mut ids = std::collections::HashSet::with_capacity(p.entries.len());
+            if p.entries.iter().any(|id| !ids.insert(*id)) {
+                return Err(IpcReject::BadPayload(
+                    "file selection contains duplicate entries".into(),
+                ));
+            }
         }
         OverlayMessage::ChatConfigure(p) | OverlayMessage::ChatFetchModels(p) => {
             check_len(&p.provider, 32, "chat provider").map_err(IpcReject::BadPayload)?;

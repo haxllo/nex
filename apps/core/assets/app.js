@@ -1415,6 +1415,18 @@
     postChatResize();
   }
 
+  function copyChatTranscript() {
+    const text = chatMessages
+      .filter((message) => message && typeof message.content === "string" && message.content.trim())
+      .map((message) => `${message.role === "user" ? "You" : "Assistant"}: ${message.content.trim()}`)
+      .join("\n\n");
+    if (!text) { flashChatNotice("Nothing to copy yet."); return; }
+    navigator.clipboard.writeText(text).then(
+      () => flashChatNotice("Transcript copied."),
+      () => flashChatNotice("Copy unavailable."),
+    );
+  }
+
   function saveChatTitle() {
     const conversation = chatConversations.find((item) => item.id === chatConversationId);
     if (!conversation || conversation.title !== "New conversation") return;
@@ -1576,6 +1588,7 @@
   function renderChatMessages(streamOnly = false) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
+    $("chat-copy-button").disabled = chatMessages.length === 0;
     if (!streamOnly) {
       if (chatRenderFrame) {
         cancelAnimationFrame(chatRenderFrame);
@@ -2171,6 +2184,7 @@
   $("chat-voice-entry").addEventListener("click", () => { openChatView(false); requestAnimationFrame(startChatVoice); });
   $("chat-back").addEventListener("click", () => closeChatView(true));
   $("chat-new-button").addEventListener("click", newChatConversation);
+  $("chat-copy-button").addEventListener("click", copyChatTranscript);
   $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
   $("chat-model-button").addEventListener("click", (event) => {
     event.currentTarget.blur();

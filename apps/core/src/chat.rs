@@ -778,22 +778,7 @@ fn stream_chatgpt_native(
         .timeout_read(Duration::from_secs(30))
         .build();
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
-    let mut input_items: Vec<Value> =
-        bounded_history(&request.history, 24, HISTORY_CONTEXT_BUDGET_CHARS)
-            .into_iter()
-            .map(|turn| {
-                json!({
-                    "type": "message",
-                    "role": turn.role,
-                    "content": [{"type": "input_text", "text": turn.content}],
-                })
-            })
-            .collect();
-    input_items.push(json!({
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_text", "text": message_with_local_context(request)}],
-    }));
+    let input_items = chatgpt_input_items(request);
     let body = json!({
         "model": config.model,
         "instructions": format!("{SYSTEM_PROMPT} {LOCAL_CONTEXT_RULE}"),
@@ -1190,6 +1175,34 @@ fn tidy_processor_name(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Responses API input items: user turns use `input_text` parts, but
+/// assistant turns must use `output_text` (the API rejects `input_text`
+/// there with "supported values are output_text and refusal").
+fn chatgpt_input_items(request: &SendRequest) -> Vec<Value> {
+    let mut input_items: Vec<Value> =
+        bounded_history(&request.history, 24, HISTORY_CONTEXT_BUDGET_CHARS)
+            .into_iter()
+            .map(|turn| {
+                let part_type = if turn.role == "assistant" {
+                    "output_text"
+                } else {
+                    "input_text"
+                };
+                json!({
+                    "type": "message",
+                    "role": turn.role,
+                    "content": [{"type": part_type, "text": turn.content}],
+                })
+            })
+            .collect();
+    input_items.push(json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": message_with_local_context(request)}],
+    }));
+    input_items
+}
+
 fn bounded_history(history: &[ChatTurn], max_turns: usize, max_chars: usize) -> Vec<ChatTurn> {
     let mut remaining = max_chars;
     let mut selected = Vec::new();
@@ -1495,6 +1508,37 @@ mod tests {
             tidy_processor_name("AMD Ryzen 7 5800X 8-Core Processor              "),
             "AMD Ryzen 7 5800X 8-Core Processor"
         );
+    }
+
+    #[test]
+    fn chatgpt_input_items_use_output_text_for_assistant_turns() {
+        let request = SendRequest {
+            request_id: "request-1".into(),
+            message: "followup".into(),
+            history: vec![
+                ChatTurn {
+                    role: "user".into(),
+                    content: "first question".into(),
+                },
+                ChatTurn {
+                    role: "assistant".into(),
+                    content: "first answer".into(),
+                },
+            ],
+            attachments: Vec::new(),
+            include_pc_info: false,
+        };
+        let items = chatgpt_input_items(&request);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["role"].as_str(), Some("user"));
+        assert_eq!(items[0]["content"][0]["type"].as_str(), Some("input_text"));
+        assert_eq!(items[1]["role"].as_str(), Some("assistant"));
+        assert_eq!(items[1]["content"][0]["type"].as_str(), Some("output_text"));
+        assert_eq!(items[2]["role"].as_str(), Some("user"));
+        assert_eq!(items[2]["content"][0]["type"].as_str(), Some("input_text"));
+        assert!(items[2]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("followup")));
     }
 
     #[test]

@@ -22,7 +22,12 @@
 //!   * [`tray`]    — system tray icon with context menu.
 //!   * [`indexing_progress`] — progress window for first-time indexing.
 //!   * [`refraction`] — native glass spike: D3D11 child beneath WebView.
+//!   * [`composition`] — visual-hosting foundation (composition
+//!                    controller + WinComp rounded clip). Not yet wired;
+//!                    see the module docs for the cutover plan.
 
+#[cfg(target_os = "windows")]
+pub(crate) mod composition;
 #[cfg(target_os = "windows")]
 pub(crate) mod host;
 #[cfg(target_os = "windows")]

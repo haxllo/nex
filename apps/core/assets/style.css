@@ -1966,6 +1966,22 @@ html.bg-white #panel {
   box-shadow: inset 0 0 0 1px var(--panel-edge);
 }
 
+/* Opaque page root in solid modes: WebView2 visual hosting rasterizes
+   the page into an RGBA visual, so a transparent html/body keeps real
+   per-pixel alpha and Chromium falls back to grayscale text globally —
+   even with an opaque DefaultBackgroundColor. Painting the root opaque
+   (same color as the panel, so visually identical) restores subpixel
+   text. Glass keeps its transparent root (refraction needs it). */
+html.bg-black,
+html.bg-black body {
+  background: #000000;
+}
+
+html.bg-white,
+html.bg-white body {
+  background: #ffffff;
+}
+
 html.glass-native .row .icon.placeholder {
   background: transparent;
 }

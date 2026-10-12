@@ -306,8 +306,8 @@ impl Default for QuickLaunchConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelBackground {
-    #[default]
     Glass,
+    #[default]
     Black,
     White,
 }
@@ -365,8 +365,8 @@ mod panel_background_tests {
     }
 
     #[test]
-    fn default_is_glass() {
-        assert_eq!(PanelBackground::default(), PanelBackground::Glass);
+    fn default_is_black() {
+        assert_eq!(PanelBackground::default(), PanelBackground::Black);
     }
 }
 

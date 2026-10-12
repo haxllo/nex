@@ -231,7 +231,7 @@ impl Default for ShimState {
             update_available: false,
             whats_new_pending: None,
             glass_native: false,
-            panel_background: crate::config::PanelBackground::Glass,
+            panel_background: crate::config::PanelBackground::Black,
         }
     }
 }

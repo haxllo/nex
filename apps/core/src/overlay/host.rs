@@ -2085,8 +2085,13 @@ fn sync_webview_background(
         crate::config::PanelBackground::White => (255, 255, 255, 255),
         crate::config::PanelBackground::Glass => (0, 0, 0, 0),
     };
-    if let Err(error) = wv.set_background_color(color) {
-        crate::logging::warn(&format!("[nex] webview background update failed: {error:?}"));
+    match wv.set_background_color(color) {
+        Ok(()) => crate::logging::info(&format!(
+            "[nex] webview surface set for {:?} background (ClearType {})",
+            mode,
+            if mode.is_opaque() { "on" } else { "off" }
+        )),
+        Err(error) => crate::logging::warn(&format!("[nex] webview background update failed: {error:?}")),
     }
 }
 

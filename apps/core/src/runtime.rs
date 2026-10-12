@@ -225,6 +225,24 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let startup_started_at = Instant::now();
     let runtime_config = config::load(None)?;
+    // Seed the WebView background before any WebView environment exists:
+    // Chromium picks subpixel (ClearType) vs grayscale text at surface
+    // creation and ignores later runtime switches (verified with a
+    // magnifier: runtime SetDefaultBackgroundColor alone stays gray).
+    // Opaque modes get an opaque surface; glass stays transparent.
+    // Env-only (no override of an explicitly set value), process-once.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("WEBVIEW2_DEFAULT_BACKGROUND_COLOR").is_none() {
+        let surface = match runtime_config.panel_background {
+            config::PanelBackground::Black => "0xFF000000",
+            config::PanelBackground::White => "0xFFFFFFFF",
+            config::PanelBackground::Glass => "0x00000000",
+        };
+        unsafe {
+            std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", surface);
+        }
+        log_info(&format!("[nex] webview surface seeded {surface}"));
+    }
     if !runtime_config.config_path.exists() {
         config::write_user_template(&runtime_config, &runtime_config.config_path)?;
         log_info(&format!(

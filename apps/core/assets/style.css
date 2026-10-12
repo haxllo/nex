@@ -1479,7 +1479,7 @@ html[data-theme="light"] #whats-new-btn:hover {
 .chat-context-chip button { width: 15px; height: 15px; flex: 0 0 15px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-faint); font: 13px/15px var(--font); cursor: pointer; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); backdrop-filter: blur(16px) saturate(1.08); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease, border-radius 120ms ease; }
+.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); backdrop-filter: blur(16px) saturate(1.08); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
 /* Grown past a few lines the pill relaxes into a rounded box so the
    corners never pinch the scrolled text. */
 .chat-composer-shell.grown { border-radius: 18px; }

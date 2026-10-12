@@ -1942,9 +1942,11 @@ html.glass-native #divider {
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {
   background: #000000;
+  /* No painted stroke or outer ring: on pure black they stack into a
+     thick-looking edge. Depth comes from the soft shadow alone. */
+  border-color: transparent;
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.36),
-    0 0 0 1px rgba(255, 255, 255, 0.04),
     inset 0 1px 0 var(--panel-highlight),
     inset 1px 0 0 var(--panel-sheen),
     inset -1px 0 0 var(--panel-sheen),
@@ -1953,9 +1955,9 @@ html.bg-black #panel {
 
 html.bg-white #panel {
   background: #ffffff;
+  border-color: transparent;
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.28),
-    0 0 0 1px rgba(0, 0, 0, 0.08),
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 

@@ -2306,10 +2306,13 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 
 /// Apply DWM's real desktop acrylic, with legacy acrylic as a Windows 10 fallback.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
-    let (dark, glass_native) = state
-        .lock()
-        .map(|s| (s.theme == Theme::Dark, s.glass_native))
-        .unwrap_or((true, false));
+    let (dark, glass_native, opaque_panel) = state.lock().map(|s| {
+        (
+            s.theme == Theme::Dark,
+            s.glass_native,
+            s.panel_background.is_opaque(),
+        )
+    }).unwrap_or((true, false, false));
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
@@ -2321,7 +2324,9 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     // Keep DWM acrylic for the fallback path. With the native refraction
     // layer active, even reapplying acrylic on a later show paints over the
     // captured image, so keep the main window backdrop disabled.
-    let backdrop = if glass_native {
+    // Opaque panels cover the window fully, so the backdrop contributes
+    // nothing but square corners poking past the rounded panel — off too.
+    let backdrop = if glass_native || opaque_panel {
         DWMSBT_NONE
     } else {
         DWMSBT_TRANSIENTWINDOW

@@ -1491,29 +1491,153 @@
     renderChatHistory();
   }
 
+  // Inline markup: recursive descent so emphasis nests (strong in em,
+  // em in strong, code never nests). Boundaries keep `a*b` math and
+  // `foo_bar` identifiers literal; links stay http(s)-only so no
+  // javascript:/data: URL can ever reach href (all text via textContent).
   function appendChatInline(parent, value) {
-    const token = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
-    let start = 0;
-    for (const match of value.matchAll(token)) {
-      if (match.index > start) parent.appendChild(document.createTextNode(value.slice(start, match.index)));
-      const raw = match[0];
-      let node;
-      if (raw.startsWith("`")) {
-        node = document.createElement("code"); node.textContent = raw.slice(1, -1);
-      } else if (raw.startsWith("**")) {
-        node = document.createElement("strong"); node.textContent = raw.slice(2, -2);
-      } else if (raw.startsWith("*")) {
-        node = document.createElement("em"); node.textContent = raw.slice(1, -1);
-      } else {
-        const link = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(raw);
-        node = document.createElement("a");
-        if (link) { node.textContent = link[1]; node.href = link[2]; node.target = "_blank"; node.rel = "noopener noreferrer"; }
-        else node.textContent = raw;
-      }
-      parent.appendChild(node);
-      start = match.index + raw.length;
+    const text = String(value);
+    appendChatInlineRange(parent, text, 0, text.length);
+  }
+
+  function isWordChar(ch) {
+    return !!ch && /[\p{L}\p{N}_]/u.test(ch);
+  }
+
+  // Find `marker` at/after `from` whose far side is not a word char
+  // (closer rule). Returns index or -1.
+  function findInlineCloser(text, marker, from, end) {
+    let at = text.indexOf(marker, from);
+    while (at !== -1 && at + marker.length <= end) {
+      if (!isWordChar(text[at + marker.length] || "")) return at;
+      at = text.indexOf(marker, at + 1);
     }
-    if (start < value.length) parent.appendChild(document.createTextNode(value.slice(start)));
+    return -1;
+  }
+
+  function appendChatInlineRange(parent, text, start, end) {
+    let i = start;
+    let buf = "";
+    const flush = () => {
+      if (buf) parent.appendChild(document.createTextNode(buf));
+      buf = "";
+    };
+    while (i < end) {
+      const ch = text[i];
+      // Backslash escape: \* → literal * (punctuation only).
+      if (ch === "\\" && i + 1 < end && /[\\`*_{}\[\]()#+\-.!|>]/.test(text[i + 1])) {
+        buf += text[i + 1];
+        i += 2;
+        continue;
+      }
+      // Code span: run of n backticks closed by the same run.
+      if (ch === "`") {
+        let n = 0;
+        while (i + n < end && text[i + n] === "`") n++;
+        let close = text.indexOf("`".repeat(n), i + n);
+        while (close !== -1 && close + n <= end) {
+          const runOk = text[close + n] !== "`" && text[close - 1] !== "`";
+          if (runOk) break;
+          close = text.indexOf("`".repeat(n), close + 1);
+        }
+        if (close !== -1 && close + n <= end) {
+          flush();
+          const node = document.createElement("code");
+          node.textContent = text.slice(i + n, close);
+          parent.appendChild(node);
+          i = close + n;
+          continue;
+        }
+        buf += ch;
+        i++;
+        continue;
+      }
+      // Links/images: [label](https://…) — image ! prefix degrades to a link.
+      if (ch === "[" || (ch === "!" && text[i + 1] === "[")) {
+        const open = ch === "[" ? i : i + 1;
+        const labelEnd = text.indexOf("]", open + 1);
+        const urlMatch = labelEnd !== -1 && labelEnd + 1 < end
+          ? /^\(https?:\/\/[^)\s]+\)/.exec(text.slice(labelEnd + 1, end))
+          : null;
+        if (urlMatch) {
+          flush();
+          const node = document.createElement("a");
+          appendChatInlineRange(node, text, open + 1, labelEnd);
+          node.href = urlMatch[0].slice(1, -1);
+          node.target = "_blank";
+          node.rel = "noopener noreferrer";
+          parent.appendChild(node);
+          i = labelEnd + 1 + urlMatch[0].length;
+          continue;
+        }
+        buf += ch;
+        i++;
+        continue;
+      }
+      // Bare URLs: https://… and www.… (trailing punctuation trimmed).
+      if (
+        text.startsWith("https://", i) || text.startsWith("http://", i) ||
+        text.startsWith("www.", i)
+      ) {
+        const rest = text.slice(i, end);
+        const raw = /^(?:https?:\/\/|www\.)[^\s<>()]+/.exec(rest);
+        if (raw) {
+          let url = raw[0].replace(/[.,;:!?]+$/, "");
+          while (url.endsWith(")") && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length) {
+            url = url.slice(0, -1);
+          }
+          if (url.replace(/^www\./, "").length > 4) {
+            flush();
+            const node = document.createElement("a");
+            node.textContent = url;
+            node.href = url.startsWith("www.") ? "https://" + url : url;
+            node.target = "_blank";
+            node.rel = "noopener noreferrer";
+            parent.appendChild(node);
+            i += url.length;
+            continue;
+          }
+        }
+        buf += ch;
+        i++;
+        continue;
+      }
+      // Strong/emphasis/strike: longest marker first, opener needs a
+      // non-word char before it (or string start).
+      const markers = ["***", "___", "**", "__", "~~", "*", "_"];
+      let matched = null;
+      for (const marker of markers) {
+        if (
+          text.startsWith(marker, i) && i + marker.length <= end &&
+          (i === start || !isWordChar(text[i - 1] || ""))
+        ) {
+          const close = findInlineCloser(text, marker, i + marker.length, end);
+          if (close !== -1) {
+            matched = { marker, close };
+            break;
+          }
+        }
+      }
+      if (matched) {
+        flush();
+        const { marker, close } = matched;
+        const tag = marker[0] === "~" ? "del" : marker.length >= 2 ? "strong" : "em";
+        const inner = document.createElement(tag);
+        if (marker.length === 3) {
+          const mid = document.createElement(marker[0] === "~" ? "strong" : "em");
+          appendChatInlineRange(mid, text, i + 3, close);
+          inner.appendChild(mid);
+        } else {
+          appendChatInlineRange(inner, text, i + marker.length, close);
+        }
+        parent.appendChild(inner);
+        i = close + marker.length;
+        continue;
+      }
+      buf += ch;
+      i++;
+    }
+    flush();
   }
 
   function chatTableCells(line) {
@@ -1560,28 +1684,102 @@
         }
         table.appendChild(body); wrap.appendChild(table); target.appendChild(wrap); continue;
       }
-      const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+      const heading = /^(#{1,6})\s+(.+)$/.exec(line);
       if (heading) {
-        const node = document.createElement("h" + heading[1].length); appendChatInline(node, heading[2]); target.appendChild(node); i++; continue;
+        const level = Math.min(heading[1].length, 6);
+        const node = document.createElement("h" + level);
+        appendChatInline(node, heading[2].replace(/\s+#+$/, ""));
+        target.appendChild(node);
+        i++;
+        continue;
+      }
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) {
+        target.appendChild(document.createElement("hr"));
+        i++;
+        continue;
       }
       if (/^\s*>/.test(line)) {
         const quote = document.createElement("blockquote");
         while (i < lines.length && /^\s*>/.test(lines[i])) { const p = document.createElement("p"); appendChatInline(p, lines[i++].replace(/^\s*>\s?/, "")); quote.appendChild(p); }
         target.appendChild(quote); continue;
       }
-      const listMatch = /^\s*([-*+] |\d+\. )(.*)$/.exec(line);
+      const listMatch = /^(\s*)([-*+] |\d+\. )(.*)$/.exec(line);
       if (listMatch) {
-        const ordered = /^\s*\d+\./.test(line); const listNode = document.createElement(ordered ? "ol" : "ul");
+        // Indent-nested lists via a level stack; `- [ ]`/`- [x]` tasks
+        // get a ☐/☒ marker. Continuation lines fold into the open item.
+        const stack = [];
+        const indentOf = (s) => s.replace(/\t/g, "    ").length;
         while (i < lines.length) {
-          const item = /^\s*([-*+] |\d+\. )(.*)$/.exec(lines[i]);
-          if (!item || /^\s*\d+\./.test(lines[i]) !== ordered) break;
-          const li = document.createElement("li"); appendChatInline(li, item[2]); listNode.appendChild(li); i++;
+          const raw = lines[i];
+          if (!raw.trim()) break;
+          const item = /^(\s*)([-*+] |\d+\. )(.*)$/.exec(raw);
+          if (item) {
+            const indent = indentOf(item[1]);
+            const ordered = /^\d+\./.test(item[2]);
+            while (stack.length && indent < stack[stack.length - 1].indent) stack.pop();
+            if (!stack.length || indent > stack[stack.length - 1].indent) {
+              const listNode = document.createElement(ordered ? "ol" : "ul");
+              if (stack.length) {
+                const host = stack[stack.length - 1].node.lastChild;
+                (host || stack[stack.length - 1].node).appendChild(listNode);
+              } else {
+                target.appendChild(listNode);
+              }
+              stack.push({ indent, ordered, node: listNode });
+            } else if (ordered !== stack[stack.length - 1].ordered) {
+              break;
+            }
+            const top = stack[stack.length - 1];
+            const li = document.createElement("li");
+            const task = /^\[([ xX])\] (.*)$/.exec(item[3]);
+            if (task && !ordered) {
+              const mark = document.createElement("span");
+              mark.className = "chat-task-marker";
+              mark.textContent = task[1].toLowerCase() === "x" ? "☒" : "☐";
+              mark.setAttribute("aria-hidden", "true");
+              li.appendChild(mark);
+              li.appendChild(document.createTextNode(" "));
+              appendChatInline(li, task[2]);
+            } else {
+              appendChatInline(li, item[3]);
+            }
+            top.node.appendChild(li);
+            i++;
+            continue;
+          }
+          // Indented continuation folds into the open item; anything
+          // else ends the list.
+          if (stack.length && /^\s+\S/.test(raw)) {
+            const top = stack[stack.length - 1];
+            const li = top.node.lastChild;
+            if (li) {
+              li.appendChild(document.createTextNode(" "));
+              appendChatInline(li, raw.trim());
+              i++;
+              continue;
+            }
+          }
+          break;
         }
-        target.appendChild(listNode); continue;
+        continue;
+      }
+      const indented = /^(?: {4}|\t)(.*)$/.exec(line);
+      if (indented) {
+        const source = [];
+        while (i < lines.length) {
+          const m = /^(?: {4}|\t)(.*)$/.exec(lines[i]);
+          if (!m) break;
+          source.push(m[1]);
+          i++;
+        }
+        const block = document.createElement("div"); block.className = "chat-code-block";
+        const pre = document.createElement("pre"); const code = document.createElement("code");
+        code.textContent = source.join("\n"); pre.appendChild(code); block.appendChild(pre);
+        target.appendChild(block); continue;
       }
       const paragraph = document.createElement("p");
       const paragraphLines = [];
-      while (i < lines.length && lines[i].trim() && !lines[i].trim().startsWith("```") && !/^(#{1,3})\s/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^\s*([-*+] |\d+\. )/.test(lines[i])) paragraphLines.push(lines[i++]);
+      while (i < lines.length && lines[i].trim() && !lines[i].trim().startsWith("```") && !/^(#{1,6})\s/.test(lines[i]) && !/^\s*(---|\*\*\*|___)\s*$/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^\s*([-*+] |\d+\. )/.test(lines[i])) paragraphLines.push(lines[i++]);
       appendChatInline(paragraph, paragraphLines.join("\n")); target.appendChild(paragraph);
     }
   }

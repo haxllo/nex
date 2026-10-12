@@ -1448,6 +1448,10 @@ html[data-theme="light"] #whats-new-btn:hover {
 .chat-message-content p { margin: 0 0 6px; white-space: pre-wrap; }
 .chat-message-content h1, .chat-message-content h2, .chat-message-content h3 { margin: 9px 0 5px; font-weight: 600; line-height: 1.35; letter-spacing: -0.02em; text-wrap: balance; }
 .chat-message-content h1 { font-size: 17px; }.chat-message-content h2 { font-size: 15px; }.chat-message-content h3 { font-size: 13px; }
+  .chat-message-content h4, .chat-message-content h5, .chat-message-content h6 { margin: 8px 0 4px; font-weight: 600; line-height: 1.35; letter-spacing: -0.02em; }
+  .chat-message-content h4 { font-size: 12px; }.chat-message-content h5, .chat-message-content h6 { font-size: 11px; }
+  .chat-message-content hr { border: 0; border-top: 1px solid var(--border); margin: 8px 0; }
+  .chat-task-marker { margin-right: 2px; }
 .chat-message-content ul, .chat-message-content ol { margin: 4px 0 7px; padding-left: 22px; }
 .chat-message-content li { margin: 2px 0; }
 .chat-message-content blockquote { margin: 6px 0; padding: 2px 0 2px 11px; border-left: 2px solid var(--border-strong); color: var(--text-dim); }

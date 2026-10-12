@@ -3165,8 +3165,11 @@
   }
 
   updateBtn.addEventListener("click", () => {
+    // No pill state change here: progress lives in the status line
+    // ("Updating..."), and the pill hides itself on success. Only
+    // failures resurface it as Retry. Prevents double-launch.
+    if (updateBtn.disabled) return;
     updateBtn.disabled = true;
-    updateBtnLabel.textContent = "Updating...";
     post("checkUpdates");
   });
 

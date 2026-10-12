@@ -1215,6 +1215,7 @@ html[data-theme="light"] img.icon.glyph {
 
 #update-btn svg,
 #whats-new-btn svg {
+  display: block;
   flex-shrink: 0;
 }
 

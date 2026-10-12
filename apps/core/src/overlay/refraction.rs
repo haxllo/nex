@@ -171,15 +171,14 @@ impl GlassLayer {
     }
 
     /// Align to the main window and mark visible. Called on show/resize.
+    /// Position/region only — never touches worker visibility: that is
+    /// owned by set_visible(), otherwise every resize would resurrect a
+    /// parked glass layer (visible square edges behind opaque panels).
     pub fn sync_to_main(&self, main_sys: isize, scale: f64) {
         self.window.move_below(main_sys);
         if let Some((_, _, w, h)) = main_rect(main_sys) {
             self.window.apply_round_region(w, h, scale);
         }
-        let _ = self.tx.send(GlassConfig {
-            visible: true,
-            main_sys,
-        });
     }
 
     /// Show/hide with the panel. No animation, no activation.

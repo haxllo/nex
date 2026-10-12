@@ -492,6 +492,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             try_send_ui(&proxy, UiCommand::Painted);
                         } else if OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
+                            && glass_active(&state)
                         {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.show_ready_frame();

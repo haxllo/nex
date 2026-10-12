@@ -128,9 +128,10 @@ body {
     var(--panel-surface);
   border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
+  /* No outer drop shadow: the window region clips at the window edge
+     (hard cut stump), so depth comes from DWM's own shadow, which
+     follows the region curve. */
   box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.36),
-    0 0 0 1px rgba(255, 255, 255, 0.04),
     inset 0 1px 0 var(--panel-highlight),
     inset 1px 0 0 var(--panel-sheen),
     inset -1px 0 0 var(--panel-sheen),

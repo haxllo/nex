@@ -1617,10 +1617,25 @@ fn build_webview(
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
 
+    // Opaque panel modes get an opaque surface from birth: Chromium
+    // picks subpixel (ClearType) vs grayscale at creation and ignores
+    // later switches, so this must match the startup mode. Glass stays
+    // transparent (refraction needs it).
+    let opaque_bg: Option<(u8, u8, u8, u8)> = state
+        .lock()
+        .ok()
+        .and_then(|s| match s.panel_background {
+            crate::config::PanelBackground::Black => Some((0, 0, 0, 255)),
+            crate::config::PanelBackground::White => Some((255, 255, 255, 255)),
+            crate::config::PanelBackground::Glass => None,
+        });
     let builder = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
-        .with_transparent(true)
-        .with_background_color((0, 0, 0, 0));
+        .with_transparent(opaque_bg.is_none());
+    let builder = match opaque_bg {
+        Some(bg) => builder.with_background_color(bg),
+        None => builder.with_background_color((0, 0, 0, 0)),
+    };
     let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
@@ -2449,19 +2464,14 @@ fn apply_window_height(
     apply_main_round_region(window, h, clip_main);
 }
 
-/// Window regions clip shadows and AA fringes — and they confuse
-/// Chromium's viewport math on top. So the main window gets one only
-/// where something square needs shaping and nothing web paints nearby:
-/// the acrylic fallback. Glass and opaque modes draw their own
-/// silhouette and must keep it (a region there shears the drop shadow
-/// flush at the window edge — the unclean right/bottom cut).
-/// `clip_main=false` removes a stale region instead of leaving one.
+/// Window regions clip shadows and AA fringes — but the WebView child
+/// is always rectangular, and an opaque surface paints its corners
+/// (square border behind our rounded panel). Clipping every mode to
+/// the panel radius hides those corners; the DWM shadow follows the
+/// region, so CSS drops its own outer shadow (see #panel).
 fn should_clip_main(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    !glass_active(state)
-        && !state
-            .lock()
-            .map(|s| s.panel_background.is_opaque())
-            .unwrap_or(false)
+    let _ = state;
+    true
 }
 
 /// Clip the main window itself to the panel radius. DWM only knows its

@@ -1942,17 +1942,15 @@ html.glass-native #divider {
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {
   background: #000000;
-  /* No painted stroke, ring, or inset highlights: on pure black every
-     1px light line reads double. The transparent border is dyed black
-     too, so no acrylic sliver leaks around the edge. Depth comes from
-     the soft drop shadow alone. */
-  border-color: #000000;
+  /* Single hairline only: no ring, no inset highlights. The region
+     clips shadows, so this stroke is the entire edge definition. */
+  border-color: var(--panel-edge);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.36);
 }
 
 html.bg-white #panel {
   background: #ffffff;
-  border-color: #ffffff;
+  border-color: var(--panel-edge);
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.28);
 }

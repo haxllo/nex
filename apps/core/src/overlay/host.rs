@@ -2396,17 +2396,15 @@ fn apply_window_height(
     apply_main_round_region(window, h, clip_main);
 }
 
-/// Window regions clip shadows and AA fringes, so the main window gets
-/// one only where something square needs shaping: the acrylic fallback.
-/// Glass and opaque modes draw their own silhouette (glass region + CSS,
-/// solid panel) and must keep it. `clip_main=false` removes a stale
-/// region instead of leaving one behind.
+/// Window regions clip shadows and AA fringes, so ideally only the
+/// acrylic fallback would get one — but the WebView2 child HWND is
+/// always rectangular, and runtimes with transparency regressions paint
+/// its corners opaque (square border behind our rounded panel, grey
+/// flashes). Clipping every mode to the panel radius hides those
+/// runtime artifacts at the known price (soft shadow cut, 1-bit edge).
 fn should_clip_main(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    !glass_active(state)
-        && !state
-            .lock()
-            .map(|s| s.panel_background.is_opaque())
-            .unwrap_or(false)
+    let _ = state;
+    true
 }
 
 /// Clip the main window itself to the panel radius. DWM only knows its

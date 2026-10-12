@@ -1865,6 +1865,8 @@
     chatInput.style.height = "auto";
     chatInput.style.height = Math.min(112, Math.max(27, chatInput.scrollHeight)) + "px";
     chatInput.style.overflowY = chatInput.scrollHeight > 112 ? "auto" : "hidden";
+    // Relax the pill into a box once pasted text needs real room.
+    chatInput.closest(".chat-composer-shell")?.classList.toggle("grown", chatInput.scrollHeight > 56);
   }
 
   function chatProviderName(provider) {

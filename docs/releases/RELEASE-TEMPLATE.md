@@ -2,20 +2,21 @@
 
 {1-2 sentence summary of release — plain words, what it feels like for the user}
 
-**GitHub release title:** exactly `v{VER}` (version only, no descriptive suffix — the descriptive title lives in this body heading).
-
-**Pre-release checklist (BEFORE writing notes):**
-0. Tag last: create tag `v{VER}` only AFTER the release-notes commit is on master — otherwise the tag lags master by commits and GitHub shows a phantom "1 commit" gap.
-1. `git log v{PREV}..HEAD --oneline` — every commit must appear in the Commit Log; no silent omissions.
-2. List every issue found since v{PREV} (bugs found while testing, GitHub issues, logs) — each must be in the changelog below, linked to its fix, or explicitly deferred with reason.
-3. Work the changelog from the commit list + issue list; if a commit fixes a user-visible bug, it belongs under Bug Fixes, not only in the Commit Log.
-4. Binary links must match `{VER}` exactly — build artifacts first, verify names exist in `artifacts/windows/`.
-
-**Voice (IMPORTANT):** These notes are for readers — anyone who picks up the release page: future us, contributors, and curious people checking what changed. Write like you're explaining to a smart friend, not like a corporate changelog:
-- No "User-Reported Issues" section, no "user" wording — it's "what we fixed", "what changed", "we found that..."
-- Explain *what happened and why it mattered*, not just the technical fix. Say "pressing the hotkey used to stall until the index finished" instead of "blocking read on the service lock was replaced with try_read".
-- Keep technical terms only when there's no plain way to say it (e.g. "search index" is fine, "tantivy" is not; "web engine" instead of "WebView2 environment").
-- Short paragraphs under "What changed" bullets. One idea per bullet.
+<!--
+  PUBLISHING RULES (never ship this block — it is an HTML comment):
+  - GitHub release title must be exactly `v{VER}` (version only, no
+    descriptive suffix — the descriptive title lives in the body heading).
+  - Tag last: create tag `v{VER}` only AFTER the release-notes commit is
+    on master — otherwise the tag lags master and GitHub shows a phantom gap.
+  - `git log v{PREV}..HEAD --oneline` — every commit must appear in the
+    Commit Log; no silent omissions. Work user-visible fixes into the
+    changelog, not only the log.
+  - Binary links must match `{VER}` exactly — build artifacts first,
+    verify names exist in `artifacts/windows/`.
+  - Voice: explain what happened and why it mattered, plain words for
+    readers (future us, contributors, curious people). No "user" wording,
+    no corporate changelog tone. Technical terms only when unavoidable.
+-->
 
 ## What changed
 

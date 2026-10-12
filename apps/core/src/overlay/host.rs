@@ -1,7 +1,9 @@
-//! WebView2 overlay host (tao window + wry WebView).
+//! WebView2 overlay host (tao window + composition-controller page).
 //!
 //! The current overlay implementation: a single borderless, transparent,
-//! always-on-top tao window hosts a wry WebView that renders the
+//! always-on-top tao window hosts a visually-hosted WebView2 page (a
+//! composition controller drawing into a WinComp tree with a rounded-rect
+//! geometric clip — no child HWND, no GDI regions) that renders the
 //! premium cmdk-style UI from embedded HTML/CSS/JS assets. The Rust
 //! side pushes state to JS via `ICoreWebView2::PostWebMessageAsString`
 //! (fire-and-forget, never blocks the host event loop) and receives
@@ -122,8 +124,6 @@ use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
-use wry::WebViewExtWindows;
-use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -143,6 +143,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, WM_INPUT,
 };
 
+use crate::overlay::composition::CompositionView;
 use crate::overlay::icons::IconCache;
 use crate::overlay::model::Theme;
 use crate::overlay::model::{OverlayEvent, OverlayRowRole, ShimState, TileSize};
@@ -359,14 +360,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     };
     let mut settings_ui: Option<(tao::window::Window, wry::WebView)> = None;
     let mut settings_window_id: Option<tao::window::WindowId> = None;
+    // Last known cursor position in physical px, for button/wheel events
+    // (tao's MouseInput/MouseWheel carry no position). Updated on every
+    // CursorMoved over the overlay window; forwarded to the composition
+    // controller via SendMouseInput (visual hosting has no child HWND).
+    let mut last_cursor_px: Option<(i32, i32)> = None;
     let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
 
     if let Some(ref wv) = webview {
-        subscribe_webview2_diagnostics(wv);
-        // Oversize the viewport up front so the first show/grow has
-        // pre-rasterized content beyond the window edge.
-        keep_webview_viewport_max(wv);
+        subscribe_webview2_diagnostics(&wv.core);
     }
     let mut ready = false;
     let mut warm_gen: u64 = 0;
@@ -476,7 +479,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
                             position_window(&window, hwnd);
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
@@ -863,7 +866,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             acrylic_available,
                         ) {
                             Ok(wv) => {
-                                subscribe_webview2_diagnostics(&wv);
+                                subscribe_webview2_diagnostics(&wv.core);
                                 webview = Some(wv);
                             }
                             Err(e) => {
@@ -912,7 +915,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                     // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state), is_opaque_panel(&state));
+                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -1077,7 +1080,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -1087,7 +1090,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -1095,7 +1098,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -1113,7 +1116,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     }
                 }
@@ -1578,6 +1581,106 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             }
             Event::WindowEvent {
                 window_id,
+                event: tao::event::WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                if window_id != window.id() {
+                    return;
+                }
+                let x = position.x as i32;
+                let y = position.y as i32;
+                last_cursor_px = Some((x, y));
+                if let Some(view) = webview.as_ref() {
+                    let _ = crate::overlay::composition::send_mouse_input(
+                        &view.controller,
+                        &crate::overlay::composition::MouseForward::Move { x_px: x, y_px: y },
+                    );
+                }
+            }
+            Event::WindowEvent {
+                window_id,
+                event: tao::event::WindowEvent::MouseInput { state, button, .. },
+                ..
+            } => {
+                if window_id != window.id() {
+                    return;
+                }
+                let Some((x, y)) = last_cursor_px else {
+                    return;
+                };
+                let pressed = state == tao::event::ElementState::Pressed;
+                let action = match button {
+                    tao::event::MouseButton::Left if pressed => Some(
+                        crate::overlay::composition::MouseForward::LeftDown { x_px: x, y_px: y },
+                    ),
+                    tao::event::MouseButton::Left => Some(
+                        crate::overlay::composition::MouseForward::LeftUp { x_px: x, y_px: y },
+                    ),
+                    tao::event::MouseButton::Right if pressed => Some(
+                        crate::overlay::composition::MouseForward::RightDown { x_px: x, y_px: y },
+                    ),
+                    tao::event::MouseButton::Right => Some(
+                        crate::overlay::composition::MouseForward::RightUp { x_px: x, y_px: y },
+                    ),
+                    tao::event::MouseButton::Middle if pressed => Some(
+                        crate::overlay::composition::MouseForward::MiddleDown { x_px: x, y_px: y },
+                    ),
+                    tao::event::MouseButton::Middle => Some(
+                        crate::overlay::composition::MouseForward::MiddleUp { x_px: x, y_px: y },
+                    ),
+                    _ => None,
+                };
+                if let (Some(view), Some(action)) = (webview.as_ref(), action) {
+                    let _ = crate::overlay::composition::send_mouse_input(&view.controller, &action);
+                }
+            }
+            Event::WindowEvent {
+                window_id,
+                event: tao::event::WindowEvent::MouseWheel { delta, .. },
+                ..
+            } => {
+                if window_id != window.id() {
+                    return;
+                }
+                let Some((x, y)) = last_cursor_px else {
+                    return;
+                };
+                let wheel = match delta {
+                    tao::event::MouseScrollDelta::LineDelta(_, rows) => (rows * 120.0) as i32,
+                    tao::event::MouseScrollDelta::PixelDelta(pos) => pos.y as i32,
+                    _ => 0,
+                };
+                if wheel != 0 {
+                    if let Some(view) = webview.as_ref() {
+                        let _ = crate::overlay::composition::send_mouse_input(
+                            &view.controller,
+                            &crate::overlay::composition::MouseForward::Wheel {
+                                x_px: x,
+                                y_px: y,
+                                delta: wheel,
+                            },
+                        );
+                    }
+                }
+            }
+            Event::WindowEvent {
+                window_id,
+                event: tao::event::WindowEvent::CursorLeft { .. },
+                ..
+            } => {
+                if window_id != window.id() {
+                    return;
+                }
+                // Dismiss hover popups when the pointer leaves the panel.
+                if let Some(view) = webview.as_ref() {
+                    let _ = crate::overlay::composition::send_mouse_input(
+                        &view.controller,
+                        &crate::overlay::composition::MouseForward::Leave,
+                    );
+                }
+            }
+            Event::WindowEvent {
+                window_id,
                 event: tao::event::WindowEvent::CloseRequested{ .. },
                 ..
             } => {
@@ -1613,14 +1716,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     Ok(())
 }
 
-/// Build a WebView on `window` with the custom protocol + IPC handler.
+/// Build a visually-hosted page on `window`: composition controller +
+/// WinComp rounded clip + protocol/IPC handlers. No child HWND, no GDI
+/// regions — the 20px silhouette is a geometric clip (see
+/// [`crate::overlay::composition`]). The settings window keeps wry HWND
+/// hosting (square, no ClearType requirement).
 fn build_webview(
     window: &Window,
     state: &Arc<Mutex<ShimState>>,
     proxy: &EventLoopProxy<UiCommand>,
     event_tx: &Sender<OverlayEvent>,
     acrylic_available: bool,
-) -> Result<WebView, String> {
+) -> Result<CompositionView, String> {
     let ipc_state = state.clone();
     let ipc_proxy = proxy.clone();
     let ipc_tx = event_tx.clone();
@@ -1629,33 +1736,29 @@ fn build_webview(
     // picks subpixel (ClearType) vs grayscale at creation and ignores
     // later switches, so this must match the startup mode. Glass stays
     // transparent (refraction needs it).
-    let opaque_bg: Option<(u8, u8, u8, u8)> = state
+    let opaque_rgb: Option<(u8, u8, u8)> = state
         .lock()
         .ok()
         .and_then(|s| match s.panel_background {
-            crate::config::PanelBackground::Black => Some((0, 0, 0, 255)),
-            crate::config::PanelBackground::White => Some((255, 255, 255, 255)),
+            crate::config::PanelBackground::Black => Some((0, 0, 0)),
+            crate::config::PanelBackground::White => Some((255, 255, 255)),
             crate::config::PanelBackground::Glass => None,
         });
-    let builder = WebViewBuilder::new()
-        .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
-        .with_transparent(opaque_bg.is_none());
-    let builder = match opaque_bg {
-        Some(bg) => builder.with_background_color(bg),
-        None => builder.with_background_color((0, 0, 0, 0)),
-    };
-    let webview = builder
-        .with_url("nexasset://localhost/")
-        .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request, acrylic_available)
-        })
-        .with_ipc_handler(move |req: Request<String>| {
-            handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
-        })
-        .build(window)
-        .map_err(|e| format!("{e}"))?;
-
-    Ok(webview)
+    crate::overlay::composition::build_composition_view(
+        window.hwnd() as isize,
+        window.scale_factor(),
+        WINDOW_WIDTH,
+        INITIAL_HEIGHT,
+        opaque_rgb,
+        &[
+            DISABLE_NATIVE_CONTEXT_MENU,
+            crate::overlay::composition::IPC_SHIM_SCRIPT,
+        ],
+        Box::new(move |body: String| {
+            handle_ipc(&body, &ipc_state, &ipc_proxy, &ipc_tx);
+        }),
+        Box::new(move |request| serve_asset(request, acrylic_available)),
+    )
 }
 
 /// Serve embedded UI assets.
@@ -1927,10 +2030,10 @@ fn handle_ipc(
 /// Logs `[nex:webview2] process_failed kind=<N>` when the WebView2
 /// renderer, GPU, or utility process crashes or is killed. Never
 /// propagates — subscription failure is logged and forgotten.
-fn subscribe_webview2_diagnostics(webview: &WebView) {
+fn subscribe_webview2_diagnostics(core: &webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2) {
     use std::sync::atomic::{AtomicU32, Ordering};
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2ProcessFailedEventArgs, ICoreWebView2ProcessFailedEventHandler,
+        ICoreWebView2, ICoreWebView2ProcessFailedEventArgs, ICoreWebView2ProcessFailedEventHandler,
         ICoreWebView2ProcessFailedEventHandler_Vtbl, COREWEBVIEW2_PROCESS_FAILED_KIND,
     };
     use windows_core::Interface;
@@ -2030,7 +2133,7 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
 
     // ── construct handler + subscribe ──
 
-    let wv2 = webview.webview();
+    let wv2: &ICoreWebView2 = core;
     let handler = Box::new(ProcessFailedHandler {
         vtbl: &VTBL as *const _,
         ref_count: AtomicU32::new(1),
@@ -2065,12 +2168,11 @@ fn subscribe_webview2_diagnostics(webview: &WebView) {
 
 /// Fire-and-forget: send a JSON string to the WebView page via
 /// `ICoreWebView2::PostWebMessageAsJson`.
-fn post_json(webview: &WebView, json: impl std::fmt::Display) {
+fn post_json(webview: &CompositionView, json: impl std::fmt::Display) {
     let json = json.to_string();
-    let wv2 = webview.webview();
     let wide: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
-        let _ = wv2.PostWebMessageAsJson(windows_core::PCWSTR::from_raw(wide.as_ptr()));
+        let _ = webview.core.PostWebMessageAsJson(windows_core::PCWSTR::from_raw(wide.as_ptr()));
     }
 }
 
@@ -2095,7 +2197,7 @@ fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::S
 /// only subpixels over opaque — transparent always falls back to
 /// grayscale, and no CSS can change that). Glass keeps transparency.
 fn sync_webview_background(
-    webview: Option<&wry::WebView>,
+    webview: Option<&CompositionView>,
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     let Some(wv) = webview else { return };
@@ -2103,12 +2205,12 @@ fn sync_webview_background(
         .lock()
         .map(|s| s.panel_background)
         .unwrap_or(crate::config::PanelBackground::Glass);
-    let color: wry::RGBA = match mode {
-        crate::config::PanelBackground::Black => (0, 0, 0, 255),
-        crate::config::PanelBackground::White => (255, 255, 255, 255),
-        crate::config::PanelBackground::Glass => (0, 0, 0, 0),
+    let opaque_rgb = match mode {
+        crate::config::PanelBackground::Black => Some((0, 0, 0)),
+        crate::config::PanelBackground::White => Some((255, 255, 255)),
+        crate::config::PanelBackground::Glass => None,
     };
-    match wv.set_background_color(color) {
+    match crate::overlay::composition::sync_background(&wv.controller, opaque_rgb) {
         Ok(()) => crate::logging::info(&format!(
             "[nex] webview surface set for {:?} background (ClearType {})",
             mode,
@@ -2119,7 +2221,7 @@ fn sync_webview_background(
 }
 
 fn push_state(
-    webview: &Option<WebView>,
+    webview: &Option<CompositionView>,
     state: &Arc<Mutex<ShimState>>,
     icons: &Arc<IconCache>,
     show_pending: bool,
@@ -2150,7 +2252,7 @@ fn push_state(
 /// Push only a selection change to the page (lightweight, no full
 /// re-render). The JS side detects the missing `rows` field and
 /// applies the selection incrementally.
-fn push_selected(webview: &Option<WebView>, selected: usize) {
+fn push_selected(webview: &Option<CompositionView>, selected: usize) {
     let Some(wv) = webview else { return };
     let json = serde_json::json!({ "selected": selected }).to_string();
     post_json(&wv, &json);
@@ -2159,7 +2261,7 @@ fn push_selected(webview: &Option<WebView>, selected: usize) {
 /// Push only a status text change (lightweight, no full re-render).
 /// Mirrors push_selected: the JS side detects the missing `rows` field
 /// and applies the status without rebuilding the result list.
-fn push_status(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>) {
+fn push_status(webview: &Option<CompositionView>, state: &Arc<Mutex<ShimState>>) {
     let Some(wv) = webview else { return };
     let status = state
         .lock()
@@ -2170,17 +2272,22 @@ fn push_status(webview: &Option<WebView>, state: &Arc<Mutex<ShimState>>) {
     post_json(&wv, &json);
 }
 
-fn focus_input(webview: &Option<WebView>) {
+fn focus_input(webview: &Option<CompositionView>) {
     if let Some(wv) = webview {
         // DOM focus alone (`input.focus()`) does not move WebView2's native
         // controller focus. On a fresh show, Windows can therefore deliver
         // the first WM_CHAR to the host/previous focus target and play the
         // system error sound. Move native keyboard focus into WebView2 first,
         // then focus the editable search element inside the page.
-        if let Err(error) = wv.focus() {
+        if let Err(error) =
+            crate::overlay::composition::move_focus_programmatic(&wv.controller)
+        {
             crate::runtime::log_info(&format!("[nex] WebView native focus failed: {error}"));
         }
-        let _ = wv.evaluate_script("window.nex&&window.nex.focus()");
+        let _ = crate::overlay::composition::execute_script(
+            &wv.core,
+            "window.nex&&window.nex.focus()",
+        );
     }
 }
 
@@ -2440,32 +2547,22 @@ fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
     }
 }
 
-/// Keep the WebView viewport pinned to the maximum panel size so content
-/// beyond the window edge is always rasterized. Window growth then just
-/// reveals already-painted pixels — no blank webview frame, no acrylic
-/// flash; shrink requires no WebView work at all (the window clips it).
-fn keep_webview_viewport_max(webview: &WebView) {
-    use wry::dpi::{LogicalPosition, LogicalSize};
-    let _ = webview.set_bounds(wry::Rect {
-        position: LogicalPosition::new(0.0, 0.0).into(),
-        size: LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT).into(),
-    });
-}
-
-/// Resize the window and immediately re-assert the oversized WebView
-/// viewport (wry snaps it to the window size on WM_SIZE). The spike
-/// glass re-aligns to the main window rect (size follows for free).
+/// Resize the window and immediately re-assert the page size, bounds,
+/// and rounded clip (exact sizing — visual hosting has no child HWND
+/// left for wry to snap on `WM_SIZE`). The spike glass re-aligns to the
+/// main window rect (size follows for free).
 fn apply_window_height(
     window: &Window,
-    webview: Option<&WebView>,
+    webview: Option<&CompositionView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
-    clip_main: bool,
-    opaque_panel: bool,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
-    if let Some(wv) = webview {
-        keep_webview_viewport_max(wv);
+    if let Some(view) = webview {
+        let scale = window.scale_factor();
+        if let Err(e) = crate::overlay::composition::resize_view(view, WINDOW_WIDTH, h, scale) {
+            crate::logging::warn(&format!("[nex] composition resize failed: {e}"));
+        }
     }
     if let Some(layer) = glass {
         let scale = window.scale_factor();
@@ -2477,140 +2574,6 @@ fn apply_window_height(
             crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
             crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
         );
-    }
-    apply_main_round_region(window, h, clip_main);
-    apply_webview_round_region(window, h, opaque_panel);
-}
-
-/// Round the WebView child window to the panel radius. The child HWND
-/// is always rectangular; with an opaque surface its square corners
-/// would poke past the rounded panel. Clipping the child (not the
-/// parent) keeps the main window's shadows and AA fringe intact.
-/// Runs every resize: transient states heal on the next apply.
-fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
-    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-    struct Search {
-        found: HWND,
-    }
-    unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
-        const WRY_WEBVIEW: &[u16] = &[
-            b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
-            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
-        ];
-        let search = &mut *(param as *mut Search);
-        let mut name = [0u16; 32];
-        let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
-        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
-            search.found = hwnd;
-            return 0;
-        }
-        1
-    }
-    // Opaque surfaces need clipping; transparent glass keeps its fringe.
-    let clip = opaque;
-    let mut search = Search {
-        found: std::ptr::null_mut(),
-    };
-    unsafe {
-        EnumChildWindows(
-            window.hwnd() as HWND,
-            Some(find_webview),
-            &mut search as *mut Search as isize,
-        );
-    }
-    if search.found.is_null() {
-        return;
-    }
-    if !clip {
-        // Glass has no region to clear (transparent fringe stays); drop
-        // the redraw flag so every resize doesn't force a full child
-        // repaint and flash the transparent surface beneath.
-        unsafe {
-            SetWindowRgn(search.found, std::ptr::null_mut(), 0);
-        }
-        return;
-    }
-    let scale = window.scale_factor();
-    let w_px = (WINDOW_WIDTH * scale).round() as i32;
-    let h_px = (h * scale).round() as i32;
-    // Panel radius token is 20 logical px; region wants diameters.
-    // Inflated 1px outward all around: the region tucks under the
-    // panel's antialiased edge instead of stair-stepping against it,
-    // so no desktop slivers peek between the two curves. Reads as a
-    // uniform hairline rather than jaggies.
-    let d = ((20.0 * scale * 2.0).round() as i32).max(2) + 2;
-    let rgn = unsafe { CreateRoundRectRgn(-1, -1, w_px + 2, h_px + 2, d, d) };
-    if rgn.is_null() {
-        return;
-    }
-    // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(search.found, rgn, 1) } == 0 {
-        unsafe {
-            DeleteObject(rgn);
-        }
-    }
-}
-
-/// Window regions clip shadows and AA fringes — and they confuse
-/// Chromium's viewport math on top. So the main window gets one only
-/// where something square needs shaping and nothing web paints nearby:
-/// the acrylic fallback. Glass and opaque modes draw their own
-/// silhouette and must keep it.
-/// `clip_main=false` removes a stale region instead of leaving one
-/// behind.
-fn should_clip_main(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    !glass_active(state)
-        && !state
-            .lock()
-            .map(|s| s.panel_background.is_opaque())
-            .unwrap_or(false)
-}
-
-/// Opaque WebView surfaces paint square corners; the child clip above
-/// needs to know.
-fn is_opaque_panel(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    state
-        .lock()
-        .map(|s| s.panel_background.is_opaque())
-        .unwrap_or(false)
-}
-
-/// Clip the main window itself to the panel radius. DWM only knows its
-/// own fixed small round, which used to draw a second, smaller corner
-/// curve behind ours — with DWM corners off, our region is the single
-/// silhouette in every mode (glass, opaque, and acrylic fallback).
-fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
-    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-    let hwnd = window.hwnd() as HWND;
-    if !clip_main {
-        // Glass/opaque modes draw their own silhouette: remove any stale
-        // region without a forced repaint — redraw=1 here invalidated the
-        // whole transparent window on every resize (black flash).
-        unsafe {
-            SetWindowRgn(hwnd, std::ptr::null_mut(), 0);
-        }
-        return;
-    }
-    let scale = window.scale_factor();
-    // Size from the requested geometry, not window.inner_size(): tao
-    // applies set_inner_size asynchronously, so reading it back here
-    // yields the stale rect and the region would cut live content.
-    let w_px = (WINDOW_WIDTH * scale).round() as i32;
-    let h_px = (h * scale).round() as i32;
-    // Panel radius token is 20 logical px; region wants diameters.
-    let d = ((20.0 * scale * 2.0).round() as i32).max(2);
-    let rgn = unsafe {
-        CreateRoundRectRgn(0, 0, w_px + 1, h_px + 1, d, d)
-    };
-    if rgn.is_null() {
-        return;
-    }
-    // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(hwnd, rgn, 1) } == 0 {
-        unsafe {
-            DeleteObject(rgn);
-        }
     }
 }
 

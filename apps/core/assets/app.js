@@ -2943,11 +2943,17 @@
       if (!Array.isArray(state.rows) && typeof state.status === "string") {
         statusEl.dataset.text = state.status || "";
         if (state.status.startsWith("Updated")) {
+          updateAvailable = false;
           updateBtn.disabled = true;
           updateBtnLabel.textContent = "Updated";
+          updateBtn.hidden = true;
+          syncUpdateNotice();
         } else if (state.status.startsWith("Up to date")) {
+          updateAvailable = false;
           updateBtn.disabled = false;
           updateBtnLabel.textContent = "Up to date";
+          updateBtn.hidden = true;
+          syncUpdateNotice();
         } else if (state.status.startsWith("Update failed") || state.status.startsWith("Could not")) {
           updateBtn.disabled = false;
           updateBtnLabel.textContent = "Retry";

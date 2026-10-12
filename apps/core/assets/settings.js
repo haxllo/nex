@@ -9,6 +9,7 @@ const FIELDS = [
   ["quickLaunchMaxItems", "valueNumber"],
   ["indexMaxItemsTotal", "valueNumber"],
   ["searchModeDefault", "valueSelect"],
+  ["panelBackground", "valueSelect"],
   ["searchDslEnabled", "checked"],
   ["webSearchProvider", "valueSelect"],
 ];

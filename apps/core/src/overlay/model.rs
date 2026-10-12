@@ -197,6 +197,9 @@ pub struct ShimState {
     /// Post-update version with unseen notes. When set, the update notice
     /// opens the What's New view instead of running an update check.
     pub whats_new_pending: Option<String>,
+    /// Panel background mode: live glass, or an opaque black/white
+    /// panel (glass layer parked, page paints solid).
+    pub panel_background: crate::config::PanelBackground,
 }
 
 impl Default for ShimState {
@@ -228,6 +231,7 @@ impl Default for ShimState {
             update_available: false,
             whats_new_pending: None,
             glass_native: false,
+            panel_background: crate::config::PanelBackground::Glass,
         }
     }
 }

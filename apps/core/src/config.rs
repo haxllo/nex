@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 21;
+pub const CURRENT_CONFIG_VERSION: u32 = 22;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -47,6 +47,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "plugins_safe_mode",
     "game_mode_enabled",
     "grid_view",
+    "panel_background",
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
@@ -302,6 +303,73 @@ impl Default for QuickLaunchConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelBackground {
+    #[default]
+    Glass,
+    Black,
+    White,
+}
+
+impl PanelBackground {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "glass" | "transparent" | "liquid" => Some(Self::Glass),
+            "black" | "dark" => Some(Self::Black),
+            "white" | "light" => Some(Self::White),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Glass => "glass",
+            Self::Black => "black",
+            Self::White => "white",
+        }
+    }
+
+    /// Opaque modes paint solid and park the glass layer.
+    pub fn is_opaque(self) -> bool {
+        !matches!(self, Self::Glass)
+    }
+}
+
+#[cfg(test)]
+mod panel_background_tests {
+    use super::*;
+
+    #[test]
+    fn parse_known_values() {
+        assert_eq!(PanelBackground::parse("glass"), Some(PanelBackground::Glass));
+        assert_eq!(PanelBackground::parse("Black"), Some(PanelBackground::Black));
+        assert_eq!(PanelBackground::parse("WHITE"), Some(PanelBackground::White));
+    }
+
+    #[test]
+    fn parse_rejects_unknown() {
+        assert_eq!(PanelBackground::parse(""), None);
+        assert_eq!(PanelBackground::parse("neon"), None);
+    }
+
+    #[test]
+    fn as_str_round_trip() {
+        for v in [
+            PanelBackground::Glass,
+            PanelBackground::Black,
+            PanelBackground::White,
+        ] {
+            assert_eq!(PanelBackground::parse(v.as_str()), Some(v));
+        }
+    }
+
+    #[test]
+    fn default_is_glass() {
+        assert_eq!(PanelBackground::default(), PanelBackground::Glass);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
@@ -336,6 +404,7 @@ pub struct Config {
     pub plugins_safe_mode: bool,
     pub game_mode_enabled: bool,
     pub grid_view: bool,
+    pub panel_background: PanelBackground,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     /// How long (ms) the WebView stays resident after the overlay is
@@ -418,6 +487,7 @@ impl Default for Config {
             plugins_safe_mode: true,
             game_mode_enabled: false,
             grid_view: true,
+            panel_background: PanelBackground::Glass,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
@@ -847,6 +917,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     );
     text.push_str("grid_view = ");
     text.push_str(if cfg.grid_view { "true" } else { "false" });
+    text.push('\n');
+    text.push_str("# Panel background: glass (live refraction) | black (opaque) | white (opaque)\n");
+    text.push_str("panel_background = ");
+    text.push_str(&json_string(cfg.panel_background.as_str()));
     text.push('\n');
     text.push_str("plugin_paths = ");
     text.push_str(&plugin_paths_section);
@@ -1333,6 +1407,11 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
     }
     if source_version < 21 && !raw_has_key(raw, "url_tlds") {
         cfg.url_tlds = Config::default().url_tlds;
+        changed = true;
+    }
+
+    if source_version < 22 && !raw_has_key(raw, "panel_background") {
+        cfg.panel_background = Config::default().panel_background;
         changed = true;
     }
 

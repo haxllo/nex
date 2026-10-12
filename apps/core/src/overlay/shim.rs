@@ -543,6 +543,11 @@ impl NativeOverlayShell {
         self.post(UiCommand::Apply);
     }
 
+    pub fn set_panel_background(&self, background: crate::config::PanelBackground) {
+        self.with_state(|s| s.panel_background = background);
+        self.post(UiCommand::Apply);
+    }
+
     /// Arm the post-update What's New entry point for `version`.
     pub fn set_whats_new_pending(&self, version: String) {
         self.with_state(|s| s.whats_new_pending = Some(version));

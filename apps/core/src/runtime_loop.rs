@@ -234,6 +234,7 @@ pub(crate) fn run_windows_runtime(
     );
     overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
     overlay.set_grid_view(runtime_config.grid_view);
+    overlay.set_panel_background(runtime_config.panel_background);
     log_info("[nex] native overlay shell initialized (hidden)");
     log_info(&format!(
         "[nex] startup_phase phase=overlay_ready elapsed_ms={}",
@@ -1943,6 +1944,9 @@ impl RuntimeWorker {
                                 self.config_generation += 1;
                                 self.search_worker.clear_session();
                                 self.overlay.set_grid_view(self.runtime_config.grid_view);
+                                self.overlay.set_panel_background(
+                                    self.runtime_config.panel_background,
+                                );
                                 if let Ok(meta) = std::fs::metadata(&updated.config_path) {
                                     if let Ok(mtime) = meta.modified() {
                                         self.config_watcher.last_modified = Some(mtime);

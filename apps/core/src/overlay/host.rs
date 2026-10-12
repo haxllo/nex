@@ -321,8 +321,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     );
     // The page drops its painted backgrounds when native glass is live
     // so refracted pixels show through (pushed with every snapshot).
+    // Opaque panel modes park the layer: glass_active() gates every
+    // show/wait below, so only this line decides.
     if let Ok(mut s) = state.lock() {
-        s.glass_native = glass_layer.is_some();
+        s.glass_native = glass_layer.is_some() && !s.panel_background.is_opaque();
     }
     unsafe {
         install_instance_signal_subclass(hwnd, &event_tx);
@@ -495,6 +497,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Apply => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
                         push_state(&webview, &state, &icon_cache, false);
+                    }
+                    // Opaque panel modes park the glass layer immediately
+                    // (no waiting for the next show/hide cycle).
+                    if !glass_active(&state) {
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.set_visible(false);
+                        }
                     }
                 }
                 UiCommand::ApplyStatus => {
@@ -1122,7 +1131,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             painted_waiting_for_glass = false;
                             return;
                         }
-                        if glass_layer.as_ref().is_some_and(|layer| !layer.is_ready()) {
+                        if glass_active(&state)
+                            && glass_layer.as_ref().is_some_and(|layer| !layer.is_ready())
+                        {
                             painted_waiting_for_glass = true;
                             crate::runtime::log_info(
                                 "[nex] host Painted: waiting for first captured glass frame",
@@ -1161,8 +1172,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Start glass capture with the panel. Its HWND is
                         // revealed only after the worker presents a frame.
-                        if let Some(layer) = glass_layer.as_ref() {
-                            layer.set_visible(true);
+                        // Parked in opaque panel modes (solid CSS covers it).
+                        if glass_active(&state) {
+                            if let Some(layer) = glass_layer.as_ref() {
+                                layer.set_visible(true);
+                            }
                         }
                         // Reassert the focused page input after native window
                         // activation; the pre-show focus above closes the
@@ -2039,6 +2053,12 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// Both use `PostWebMessageAsJson` (fire-and-forget). The state lock is
 /// released before any icon encoding occurs — only the ShimState clone
 /// runs under the lock (~microseconds).
+/// Native glass renders only in glass panel mode: opaque black/white
+/// panels paint solid and the layer stays parked (no capture, no wait).
+fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
+    state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+}
+
 fn push_state(
     webview: &Option<WebView>,
     state: &Arc<Mutex<ShimState>>,
@@ -2204,7 +2224,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "updateAvailable": s.update_available,
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
-        "glassNative": s.glass_native,
+        "panelBackground": s.panel_background.as_str(),
+        "glassNative": s.glass_native && !s.panel_background.is_opaque(),
     })
     .to_string()
 }

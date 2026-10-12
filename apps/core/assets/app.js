@@ -2757,6 +2757,17 @@
 
       if (state.theme) document.documentElement.dataset.theme = state.theme;
 
+      // Panel background: opaque black/white paint solid and force the
+      // matching palette (light text can't survive a white panel);
+      // glass follows the system theme untouched.
+      if (typeof state.panelBackground === "string") {
+        const root = document.documentElement;
+        root.classList.toggle("bg-black", state.panelBackground === "black");
+        root.classList.toggle("bg-white", state.panelBackground === "white");
+        if (state.panelBackground === "white") root.dataset.theme = "light";
+        else if (state.panelBackground === "black") root.dataset.theme = "dark";
+      }
+
       // System accent (DWM AccentColor) → CSS var; falls back to theme palette.
       if (state.accent) {
         document.documentElement.style.setProperty("--accent", state.accent);

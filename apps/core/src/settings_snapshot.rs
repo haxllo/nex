@@ -34,6 +34,8 @@ struct SettingsSaveCfg {
     search_dsl_enabled: Option<bool>,
     #[serde(default, rename = "webSearchProvider")]
     web_search_provider: Option<String>,
+    #[serde(default, rename = "panelBackground")]
+    panel_background: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -112,6 +114,10 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
         cfg.web_search_provider = config::WebSearchProvider::parse(s)
             .ok_or_else(|| format!("unknown webSearchProvider: {s:?}"))?;
     }
+    if let Some(s) = cfg_obj.panel_background.as_deref() {
+        cfg.panel_background = config::PanelBackground::parse(s)
+            .ok_or_else(|| format!("unknown panelBackground: {s:?}"))?;
+    }
     crate::config::validate(&cfg).map_err(|e| format!("invalid settings: {e}"))?;
     Ok(cfg)
 }
@@ -138,6 +144,7 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "searchModeDefault": cfg.search_mode_default.as_str(),
         "searchDslEnabled": cfg.search_dsl_enabled,
         "webSearchProvider": cfg.web_search_provider.as_str(),
+        "panelBackground": cfg.panel_background.as_str(),
         "version": env!("CARGO_PKG_VERSION"),
     })
     .to_string()

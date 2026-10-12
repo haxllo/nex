@@ -124,6 +124,7 @@ use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
+use wry::WebViewBuilderExtWindows;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -1326,7 +1327,17 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let record_hwnd = hwnd;
                         let snapshot_for_ipc = last_settings_snapshot.clone();
                         let proxy_for_ipc = proxy.clone();
-                        let webview = wry::WebViewBuilder::new()
+                        let shared_env = webview.as_ref().map(|v| v.environment());
+                        let builder = wry::WebViewBuilder::new();
+                        // Share the composition page's environment: a second
+                        // environment on the same user-data dir with
+                        // different options is rejected (ERROR_INVALID_STATE
+                        // killed settings open).
+                        let builder = match shared_env {
+                            Some(env) => builder.with_environment(env),
+                            None => builder,
+                        };
+                        let webview = builder
                             .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")

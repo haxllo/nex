@@ -449,6 +449,15 @@ pub fn create_environment() -> Result<
         },
     ));
     let options = webview2_com::CoreWebView2EnvironmentOptions::default();
+    // wry parity (wry-0.55.1 webview2/mod.rs): the settings window is
+    // still wry-built on the same user-data dir, and WebView2 rejects a
+    // second environment with different browser args (ERROR_INVALID_STATE
+    // killed settings open). Same default args keep both compatible.
+    unsafe {
+        options.set_additional_browser_arguments(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection".to_string(),
+        );
+    }
     let user_data = windows_core::HSTRING::from("");
     let create = unsafe {
         CreateCoreWebView2EnvironmentWithOptions(
@@ -546,6 +555,15 @@ pub struct CompositionView {
     pub(crate) core: ICoreWebView2,
     pub(crate) compositor: CompositorHost,
     _env: ICoreWebView2Environment,
+}
+
+impl CompositionView {
+    /// Cloned handle to the shared environment — hand it to wry's
+    /// `with_environment` so secondary pages (settings) reuse it instead
+    /// of creating a second, conflicting one on the same user-data dir.
+    pub(crate) fn environment(&self) -> ICoreWebView2Environment {
+        self._env.clone()
+    }
 }
 
 /// Take a `CoTaskMem`-allocated `PWSTR` from WebView2 and free it.

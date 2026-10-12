@@ -128,7 +128,8 @@ use wry::{WebView, WebViewBuilder};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_BORDER_COLOR, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED,
+    DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND,
 };
 use windows_sys::Win32::UI::Input::{
@@ -2333,8 +2334,11 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
     // Win11 draws a 1px DWM border on the square window rect, which pokes
-    // past our rounded panel corners. It has no alpha channel, so dye it
-    // to the panel color in opaque modes (glass keeps the default).
+    // past our rounded panel corners. A COLORREF has no alpha, so first
+    // try removing non-client rendering entirely (borderless custom UI
+    // needs none of it); the dyed border below stays as fallback.
+    let ncr_disabled = DWMNCRP_DISABLED;
+    let _ = set_dwm_attribute(hwnd, DWMWA_NCRENDERING_POLICY, &ncr_disabled);
     if opaque_panel {
         let border: u32 = match state
             .lock()

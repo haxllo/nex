@@ -473,7 +473,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
                             position_window(&window, hwnd);
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state));
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
@@ -899,7 +899,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         layer.sync_to_main(hwnd as isize, window.scale_factor());
                     }
                     // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state));
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -1061,7 +1061,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state));
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -1071,7 +1071,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state));
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -1079,7 +1079,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state));
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -1097,7 +1097,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state));
                         }
                     }
                 }
@@ -2384,6 +2384,7 @@ fn apply_window_height(
     webview: Option<&WebView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
+    clip_main: bool,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
@@ -2392,34 +2393,51 @@ fn apply_window_height(
     if let Some(layer) = glass {
         layer.sync_to_main(window.hwnd() as isize, window.scale_factor());
     }
-    apply_main_round_region(window);
+    apply_main_round_region(window, h, clip_main);
+}
+
+/// Window regions clip shadows and AA fringes, so the main window gets
+/// one only where something square needs shaping: the acrylic fallback.
+/// Glass and opaque modes draw their own silhouette (glass region + CSS,
+/// solid panel) and must keep it. `clip_main=false` removes a stale
+/// region instead of leaving one behind.
+fn should_clip_main(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
+    !glass_active(state)
+        && !state
+            .lock()
+            .map(|s| s.panel_background.is_opaque())
+            .unwrap_or(false)
 }
 
 /// Clip the main window itself to the panel radius. DWM only knows its
 /// own fixed small round, which used to draw a second, smaller corner
 /// curve behind ours — with DWM corners off, our region is the single
 /// silhouette in every mode (glass, opaque, and acrylic fallback).
-fn apply_main_round_region(window: &Window) {
+fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+    let hwnd = window.hwnd() as HWND;
+    if !clip_main {
+        unsafe {
+            SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+        }
+        return;
+    }
     let scale = window.scale_factor();
-    let size = window.inner_size();
+    // Size from the requested geometry, not window.inner_size(): tao
+    // applies set_inner_size asynchronously, so reading it back here
+    // yields the stale rect and the region would cut live content.
+    let w_px = (WINDOW_WIDTH * scale).round() as i32;
+    let h_px = (h * scale).round() as i32;
     // Panel radius token is 20 logical px; region wants diameters.
     let d = ((20.0 * scale * 2.0).round() as i32).max(2);
     let rgn = unsafe {
-        CreateRoundRectRgn(
-            0,
-            0,
-            size.width as i32 + 1,
-            size.height as i32 + 1,
-            d,
-            d,
-        )
+        CreateRoundRectRgn(0, 0, w_px + 1, h_px + 1, d, d)
     };
     if rgn.is_null() {
         return;
     }
     // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(window.hwnd() as HWND, rgn, 1) } == 0 {
+    if unsafe { SetWindowRgn(hwnd, rgn, 1) } == 0 {
         unsafe {
             DeleteObject(rgn);
         }

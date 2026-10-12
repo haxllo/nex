@@ -67,11 +67,13 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, SetWindowDisplayAffinity,
-    SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WDA_EXCLUDEFROMCAPTURE,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetClientRect, RegisterClassW,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Foundation::POINT;
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
 
 /// Refraction is on by default; an explicit zero keeps the Acrylic fallback.
@@ -1261,22 +1263,23 @@ fn align_glass_to_main(glass: HWND, main_sys: isize) -> Option<(u32, u32)> {
 }
 
 fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
-    // Extended frame bounds, not GetWindowRect: the latter includes the
-    // invisible DWM drop shadow (~8px per side), which made the glass
-    // poke out around the panel. RECT is the windows (not windows_sys)
-    // shape already imported here.
-    let mut rect: RECT = unsafe { std::mem::zeroed() };
-    let ok = unsafe {
-        windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(
-            main_sys as *mut std::ffi::c_void,
-            windows_sys::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS as u32,
-            &mut rect as *mut _ as *mut std::ffi::c_void,
-            std::mem::size_of::<RECT>() as u32,
-        )
-    } == 0;
-    if !ok {
+    // Client rect mapped to screen, not extended frame bounds: DWM's
+    // extended bounds can include invisible shadow margins (asymmetric
+    // — observed as glass spilling past the panel's left edge), and
+    // GetWindowRect has the same shadow problem in reverse. The client
+    // area is exactly the visible panel in every mode.
+    let hwnd = HWND(main_sys as *mut std::ffi::c_void);
+    let mut client: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
         return None;
     }
-    let (w, h) = ((rect.right - rect.left).max(1), (rect.bottom - rect.top).max(1));
-    Some((rect.left, rect.top, w as u32, h as u32))
+    let mut origin = POINT { x: 0, y: 0 };
+    if unsafe { ClientToScreen(hwnd, &mut origin) }.0 == 0 {
+        return None;
+    }
+    let (w, h) = (
+        (client.right - client.left).max(1),
+        (client.bottom - client.top).max(1),
+    );
+    Some((origin.x, origin.y, w as u32, h as u32))
 }

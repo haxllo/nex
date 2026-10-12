@@ -509,6 +509,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             layer.set_visible(false);
                         }
                     }
+                    sync_webview_background(webview.as_ref(), &state);
                 }
                 UiCommand::ApplyStatus => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
@@ -920,6 +921,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
+                    // Mode may have changed while hidden (Apply skips
+                    // pushes then), so re-sync the surface every show.
+                    sync_webview_background(webview.as_ref(), &state);
                 }
                 UiCommand::FocusInput => {
                     // Start/Explorer can reassert foreground after the
@@ -2061,6 +2065,29 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// panels paint solid and the layer stays parked (no capture, no wait).
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
     state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+}
+
+/// Match the WebView surface to the panel mode. Opaque modes get an
+/// opaque surface, which re-enables ClearType subpixel text (Chromium
+/// only subpixels over opaque — transparent always falls back to
+/// grayscale, and no CSS can change that). Glass keeps transparency.
+fn sync_webview_background(
+    webview: Option<&wry::WebView>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    let Some(wv) = webview else { return };
+    let mode = state
+        .lock()
+        .map(|s| s.panel_background)
+        .unwrap_or(crate::config::PanelBackground::Glass);
+    let color: wry::RGBA = match mode {
+        crate::config::PanelBackground::Black => (0, 0, 0, 255),
+        crate::config::PanelBackground::White => (255, 255, 255, 255),
+        crate::config::PanelBackground::Glass => (0, 0, 0, 0),
+    };
+    if let Err(error) = wv.set_background_color(color) {
+        crate::logging::warn(&format!("[nex] webview background update failed: {error:?}"));
+    }
 }
 
 fn push_state(

@@ -1464,6 +1464,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let armed = deferred_hide_armed.clone();
                         let epoch_clone = deferred_hide_epoch.clone();
                         let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
+                        let hwnd_raw = hwnd as isize;
                         std::thread::Builder::new()
                             .name("nex-deferred-hide".into())
                             .spawn(move || {
@@ -1475,8 +1476,20 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     return;
                                 }
                                 let dismiss_picker = state_clone.lock().ok().and_then(|s| {
+                                    // Native ownership beats the logical flag:
+                                    // after a show the OS can report a
+                                    // spurious Focused(false) (or a
+                                    // Focused(true) goes missing when focus
+                                    // bounces off a just-hidden window, e.g.
+                                    // settings close) while the overlay still
+                                    // owns the foreground. Escaping then kills
+                                    // a live overlay — the flash-then-hide.
+                                    let foreground_owned = unsafe {
+                                        GetForegroundWindow() as isize == hwnd_raw
+                                    };
                                     if s.visible
                                         && !s.has_focus
+                                        && !foreground_owned
                                         && !crate::overlay::hotkey::is_bare_win_press_active()
                                     {
                                         Some(

@@ -1666,7 +1666,26 @@ impl RuntimeWorker {
                     crate::overlay::hotkey::finish_bare_win_press();
                     return;
                 }
-                let action = self.overlay_state.on_hotkey(self.overlay.has_focus());
+                let action = {
+                    // Native ownership beats the logical flag: a missed
+                    // Focused(true) (focus bouncing off a just-hidden
+                    // window) leaves has_focus false while the overlay owns
+                    // the foreground, and the toggle then loops
+                    // FocusExisting forever instead of hiding.
+                    #[cfg(target_os = "windows")]
+                    let foreground_owned = {
+                        let hwnd = self.overlay.hwnd();
+                        hwnd != 0
+                            && unsafe {
+                                windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow(
+                                ) as isize == hwnd
+                            }
+                    };
+                    #[cfg(not(target_os = "windows"))]
+                    let foreground_owned = false;
+                    self.overlay_state
+                        .on_hotkey(self.overlay.has_focus() || foreground_owned)
+                };
                 log_info(&format!(
                     "[nex::debug] Hotkey: action={:?} has_focus={}",
                     action, self.overlay.has_focus(),

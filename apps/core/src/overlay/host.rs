@@ -2517,8 +2517,12 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
     let w_px = (WINDOW_WIDTH * scale).round() as i32;
     let h_px = (h * scale).round() as i32;
     // Panel radius token is 20 logical px; region wants diameters.
-    let d = ((20.0 * scale * 2.0).round() as i32).max(2);
-    let rgn = unsafe { CreateRoundRectRgn(0, 0, w_px + 1, h_px + 1, d, d) };
+    // Inflated 1px outward all around: the region tucks under the
+    // panel's antialiased edge instead of stair-stepping against it,
+    // so no desktop slivers peek between the two curves. Reads as a
+    // uniform hairline rather than jaggies.
+    let d = ((20.0 * scale * 2.0).round() as i32).max(2) + 2;
+    let rgn = unsafe { CreateRoundRectRgn(-1, -1, w_px + 2, h_px + 2, d, d) };
     if rgn.is_null() {
         return;
     }

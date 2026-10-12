@@ -322,10 +322,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     );
     // The page drops its painted backgrounds when native glass is live
     // so refracted pixels show through (pushed with every snapshot).
-    // Opaque panel modes park the layer: glass_active() gates every
-    // show/wait below, so only this line decides.
+    // Latch layer existence only — NOT the current panel mode. The
+    // snapshot gates glassNative on panel_background per push, so a
+    // session started opaque can still switch to liquid mid-run.
+    // (Latching the mode here froze glass off for the whole session
+    // whenever the saved config was opaque.)
     if let Ok(mut s) = state.lock() {
-        s.glass_native = glass_layer.is_some() && !s.panel_background.is_opaque();
+        s.glass_native = glass_layer.is_some();
     }
     unsafe {
         install_instance_signal_subclass(hwnd, &event_tx);

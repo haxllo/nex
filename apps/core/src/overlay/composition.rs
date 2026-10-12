@@ -335,6 +335,30 @@ pub fn creation_background(
     unsafe { options3.SetDefaultBackgroundColor(color) }
 }
 
+/// Read back the live surface color (proves what WebView2 thinks, not
+/// just what we requested). Call after build + after each sync.
+pub fn log_surface_color(
+    controller: &webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController,
+) {
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller, ICoreWebView2Controller2,
+    };
+    let read: windows_core::Result<String> = (|| {
+        let base: ICoreWebView2Controller = windows_core::Interface::cast(controller)?;
+        let c2: ICoreWebView2Controller2 = windows_core::Interface::cast(&base)?;
+        let mut color = unsafe { std::mem::zeroed() };
+        unsafe { c2.DefaultBackgroundColor(&mut color) }?;
+        Ok(format!(
+            "A={} R={} G={} B={}",
+            color.A, color.R, color.G, color.B
+        ))
+    })();
+    match read {
+        Ok(s) => crate::logging::info(&format!("[nex] composition: surface readback {s}")),
+        Err(e) => crate::logging::warn(&format!("[nex] composition: surface readback failed: {e}")),
+    }
+}
+
 /// Runtime surface switch (panel background changes without restart).
 /// Takes effect on newly-painted content; a creation-time mismatch still
 /// needs a controller rebuild for ClearType. Mirrors wry's
@@ -858,6 +882,7 @@ pub fn build_composition_view(
     .map_err(|e| format!("Navigate: {e}"))?;
     crate::logging::info("[nex] composition: navigated");
     set_visible(&controller, true).map_err(|e| format!("visible: {e}"))?;
+    log_surface_color(&controller);
     Ok(CompositionView {
         controller,
         core,

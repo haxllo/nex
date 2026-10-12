@@ -128,7 +128,7 @@ use wry::{WebView, WebViewBuilder};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWA_BORDER_COLOR, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND,
 };
 use windows_sys::Win32::UI::Input::{
@@ -2332,6 +2332,20 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         DWMSBT_TRANSIENTWINDOW
     };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
+    // Win11 draws a 1px DWM border on the square window rect, which pokes
+    // past our rounded panel corners. It has no alpha channel, so dye it
+    // to the panel color in opaque modes (glass keeps the default).
+    if opaque_panel {
+        let border: u32 = match state
+            .lock()
+            .map(|s| s.panel_background)
+            .unwrap_or(crate::config::PanelBackground::Glass)
+        {
+            crate::config::PanelBackground::White => 0x00FF_FFFF,
+            _ => 0x0000_0000,
+        };
+        let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
+    }
     let available = if native_backdrop {
         true
     } else if glass_native {

@@ -264,9 +264,13 @@ impl CompositorHost {
         let clip = compositor
             .CreateGeometricClipWithGeometry(&geometry)
             .map_err(|e| format!("CreateGeometricClip: {e}"))?;
-        content
-            .SetClip(&clip)
-            .map_err(|e| format!("SetClip: {e}"))?;
+        // TEMP-TEST: skip SetClip to learn whether the cutout transparency
+        // itself forces grayscale globally. Expect square corners + (maybe)
+        // ClearType. REVERT after the magnifier verdict.
+        let _ = clip;
+        // content
+        //     .SetClip(&clip)
+        //     .map_err(|e| format!("SetClip: {e}"))?;
         root.Children()
             .and_then(|kids| kids.InsertAtTop(&content))
             .map_err(|e| format!("InsertAtTop: {e}"))?;

@@ -1942,17 +1942,17 @@ html.glass-native #divider {
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {
   background: #000000;
-  /* Single hairline only: no ring, no inset highlights. The region
-     clips shadows, so this stroke is the entire edge definition. */
-  border-color: var(--panel-edge);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.36);
+  /* Single hairline only, drawn as an inset ring: outer edges lose
+     subpixels asymmetrically (right/bottom) to size rounding, but an
+     inset ring always lands fully inside. Region clips outer shadow. */
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
 }
 
 html.bg-white #panel {
   background: #ffffff;
-  border-color: var(--panel-edge);
-  box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.28);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
 }
 
 html.glass-native .row .icon.placeholder {

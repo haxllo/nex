@@ -129,7 +129,7 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUND,
+    DWMWCP_DONOTROUND,
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -2316,7 +2316,7 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
-    let rounded_corners = DWMWCP_ROUND;
+    let rounded_corners = DWMWCP_DONOTROUND;
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
@@ -2391,6 +2391,38 @@ fn apply_window_height(
     }
     if let Some(layer) = glass {
         layer.sync_to_main(window.hwnd() as isize, window.scale_factor());
+    }
+    apply_main_round_region(window);
+}
+
+/// Clip the main window itself to the panel radius. DWM only knows its
+/// own fixed small round, which used to draw a second, smaller corner
+/// curve behind ours — with DWM corners off, our region is the single
+/// silhouette in every mode (glass, opaque, and acrylic fallback).
+fn apply_main_round_region(window: &Window) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+    let scale = window.scale_factor();
+    let size = window.inner_size();
+    // Panel radius token is 20 logical px; region wants diameters.
+    let d = ((20.0 * scale * 2.0).round() as i32).max(2);
+    let rgn = unsafe {
+        CreateRoundRectRgn(
+            0,
+            0,
+            size.width as i32 + 1,
+            size.height as i32 + 1,
+            d,
+            d,
+        )
+    };
+    if rgn.is_null() {
+        return;
+    }
+    // Ownership passes to the OS on success; delete only on failure.
+    if unsafe { SetWindowRgn(window.hwnd() as HWND, rgn, 1) } == 0 {
+        unsafe {
+            DeleteObject(rgn);
+        }
     }
 }
 

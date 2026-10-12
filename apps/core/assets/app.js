@@ -137,6 +137,7 @@
   // per installed version. While set, the update notice opens the
   // dedicated view instead of running an update check.
   let updateAvailable = false;
+  let updateConfirmTimer = 0;
   let whatsNewPending = null;
   let whatsNewOpen = false;
   let whatsNewContent = null;
@@ -2949,11 +2950,17 @@
           updateBtn.hidden = true;
           syncUpdateNotice();
         } else if (state.status.startsWith("Up to date")) {
+          // Brief confirmation, then hide: a click must visibly land.
           updateAvailable = false;
-          updateBtn.disabled = false;
-          updateBtnLabel.textContent = "Up to date";
-          updateBtn.hidden = true;
           syncUpdateNotice();
+          updateBtn.disabled = true;
+          updateBtnLabel.textContent = "Up to date";
+          updateBtn.hidden = false;
+          window.clearTimeout(updateConfirmTimer);
+          updateConfirmTimer = window.setTimeout(() => {
+            updateBtn.disabled = false;
+            syncUpdateNotice();
+          }, 3000);
         } else if (state.status.startsWith("Update failed") || state.status.startsWith("Could not")) {
           updateBtn.disabled = false;
           updateBtnLabel.textContent = "Retry";

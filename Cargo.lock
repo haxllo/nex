@@ -1649,6 +1649,7 @@ dependencies = [
  "ureq",
  "url",
  "walkdir",
+ "webview2-com",
  "webview2-com-sys",
  "window-vibrancy",
  "windows",

@@ -219,6 +219,10 @@ pub struct CompositorHost {
     content: windows::UI::Composition::ContainerVisual,
     geometry: windows::UI::Composition::CompositionRoundedRectangleGeometry,
     _target: windows::UI::Composition::Desktop::DesktopWindowTarget,
+    // DispatcherQueueController for this thread: WinComp requires one
+    // before Compositor activation on classic Win32 threads. Held while
+    // the tree lives (None when the queue already existed, e.g. rebuild).
+    _dq_controller: Option<windows::System::DispatcherQueueController>,
 }
 
 impl CompositorHost {
@@ -227,7 +231,22 @@ impl CompositorHost {
     pub fn new(hwnd_sys: isize) -> Result<Self, String> {
         use windows::UI::Composition::Compositor;
         use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::WinRT::{
+            CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA,
+            DQTYPE_THREAD_CURRENT,
+        };
         use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
+        // One queue per thread; a repeat call (page rebuild on the same
+        // thread) fails but the existing queue still serves — so this is
+        // best-effort and Compositor::new below is the real gate.
+        let dq_controller = unsafe {
+            CreateDispatcherQueueController(DispatcherQueueOptions {
+                dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
+                threadType: DQTYPE_THREAD_CURRENT,
+                apartmentType: DQTAT_COM_STA,
+            })
+        }
+        .ok();
         let compositor = Compositor::new().map_err(|e| format!("Compositor::new: {e}"))?;
         let interop: ICompositorDesktopInterop =
             windows_core::Interface::cast(&compositor).map_err(|e| format!("cast interop: {e}"))?;
@@ -259,6 +278,7 @@ impl CompositorHost {
             content,
             geometry,
             _target: target,
+            _dq_controller: dq_controller,
         })
     }
 
@@ -398,162 +418,52 @@ pub fn mem_stream(bytes: &[u8]) -> Option<windows::Win32::System::Com::IStream> 
 
 // ── Async creation (hand-rolled completed handlers + pump) ───────────────
 
-use std::sync::mpsc::{self, Receiver};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 
-/// Pump window messages until `rx` delivers or 120s elapse. Mirrors
-/// `webview2_com::wait_with_pump` (WebView2 fires completions through the
-/// calling thread's message loop), plus a deadline so a wedged runtime
-/// fails loudly instead of hanging launch forever.
-fn wait_with_pump<T>(rx: Receiver<T>, what: &str) -> Result<T, String> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageA, PeekMessageA, TranslateMessage, MSG, PM_REMOVE,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    let mut msg = MSG::default();
-    loop {
-        if let Ok(v) = rx.try_recv() {
-            return Ok(v);
-        }
-        if std::time::Instant::now() > deadline {
-            return Err(format!("{what}: timed out after 120s"));
-        }
-        let mut pumped = false;
-        while unsafe { PeekMessageA(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-            pumped = true;
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageA(&msg);
-            }
-            if let Ok(v) = rx.try_recv() {
-                return Ok(v);
-            }
-        }
-        if !pumped {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-}
+// ── Async creation via webview2_com factories ────────────────────────────
+// Hand-rolled COM completed-handlers died here (S_OK + dangling result;
+// implement!/webview2_com-built handlers live in every tested combo), so
+// every async completion and event subscription below goes through
+// webview2_com's proven factories. No raw vtbls remain in this module.
 
-macro_rules! completed_handler {
-    ($name:ident, $handler_iface:ty, $vtbl:ty, $result_iface:ty, $iid_of:ty) => {
-        #[repr(C)]
-        struct $name {
-            vtbl: *const $vtbl,
-            ref_count: AtomicU32,
-            tx: mpsc::Sender<Result<$result_iface, String>>,
-        }
-
-        impl $name {
-            unsafe extern "system" fn add_ref(this: *mut core::ffi::c_void) -> u32 {
-                let h = unsafe { &*(this as *const $name) };
-                h.ref_count.fetch_add(1, Ordering::Relaxed) + 1
-            }
-
-            unsafe extern "system" fn release(this: *mut core::ffi::c_void) -> u32 {
-                let h = unsafe { &*(this as *const $name) };
-                let prev = h.ref_count.fetch_sub(1, Ordering::Release);
-                if prev == 1 {
-                    unsafe {
-                        drop(Box::from_raw(this as *mut $name));
-                    }
-                }
-                prev - 1
-            }
-
-            unsafe extern "system" fn query_interface(
-                this: *mut core::ffi::c_void,
-                iid: *const windows_core::GUID,
-                out: *mut *mut core::ffi::c_void,
-            ) -> windows_core::HRESULT {
-                if out.is_null() || iid.is_null() {
-                    return windows_core::imp::E_POINTER;
-                }
-                unsafe {
-                    *out = core::ptr::null_mut();
-                }
-                let iid = unsafe { &*iid };
-                if *iid == <windows_core::IUnknown as windows_core::Interface>::IID
-                    || *iid == <$iid_of as windows_core::Interface>::IID
-                {
-                    unsafe {
-                        *out = this;
-                    }
-                    unsafe {
-                        Self::add_ref(this);
-                    }
-                    windows_core::imp::S_OK
-                } else {
-                    windows_core::imp::E_NOINTERFACE
-                }
-            }
-
-            unsafe extern "system" fn invoke(
-                this: *mut core::ffi::c_void,
-                error: windows_core::HRESULT,
-                result: *mut core::ffi::c_void,
-            ) -> windows_core::HRESULT {
-                let h = unsafe { &*(this as *const $name) };
-                let iface: windows_core::Result<$result_iface> =
-                    unsafe { windows_core::Type::from_abi(result) };
-                let value: Result<$result_iface, String> = if error.is_ok() && !result.is_null() {
-                    iface.map_err(|e| format!("creation failed: {e}"))
-                } else {
-                    Err(format!("creation failed: {error:?}"))
-                };
-                let _ = h.tx.send(value);
-                windows_core::imp::S_OK
-            }
-        }
-    };
-}
-
-/// Create the shared WebView2 environment (default user-data dir, same as
-/// wry's default). Must run on the tao main thread — completions arrive
-/// through its message loop.
+/// Create the shared WebView2 environment (wry-parity options object,
+/// default user-data dir). Must run on the tao main thread — completions
+/// arrive through its message loop.
 pub fn create_environment() -> Result<
     webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
     String,
 > {
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        CreateCoreWebView2Environment, ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
-        ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler_Vtbl,
-        ICoreWebView2Environment,
+        CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2Environment,
+        ICoreWebView2EnvironmentOptions,
     };
-    completed_handler!(
-        EnvCompleted,
-        ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
-        ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler_Vtbl,
-        ICoreWebView2Environment,
-        ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler
-    );
-    static ENV_VTBL: ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler_Vtbl =
-        ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: EnvCompleted::query_interface,
-                AddRef: EnvCompleted::add_ref,
-                Release: EnvCompleted::release,
-            },
-            Invoke: EnvCompleted::invoke,
-        };
     let (tx, rx) = mpsc::channel();
-    let handler = Box::new(EnvCompleted {
-        vtbl: &ENV_VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-        tx,
-    });
-    let raw = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let com: ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler =
-        unsafe { core::mem::transmute_copy(&raw) };
-    let create = unsafe { CreateCoreWebView2Environment(&com) };
-    std::mem::forget(com);
+    let handler = webview2_com::CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
+        move |error_code, environment| {
+            let result: Result<ICoreWebView2Environment, String> = (|| {
+                error_code.map_err(|e| format!("{e}"))?;
+                environment.ok_or_else(|| "null environment".to_string())
+            })();
+            let _ = tx.send(result);
+            Ok(())
+        },
+    ));
+    let options = webview2_com::CoreWebView2EnvironmentOptions::default();
+    let user_data = windows_core::HSTRING::from("");
+    let create = unsafe {
+        CreateCoreWebView2EnvironmentWithOptions(
+            windows_core::PCWSTR::null(),
+            &user_data,
+            &ICoreWebView2EnvironmentOptions::from(options),
+            &handler,
+        )
+    };
+    std::mem::forget(handler);
     if let Err(e) = create {
-        unsafe {
-            drop(Box::from_raw(raw as *mut EnvCompleted));
-        }
         return Err(format!("CreateCoreWebView2Environment: {e}"));
     }
-    wait_with_pump(rx, "CreateCoreWebView2Environment")?
+    webview2_com::wait_with_pump(rx)
+        .map_err(|e| format!("CreateCoreWebView2Environment: {e}"))?
 }
 
 /// Create a composition controller on `hwnd` with the opaque surface from
@@ -571,37 +481,22 @@ pub fn create_composition_controller(
     String,
 > {
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2CompositionController,
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler,
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler_Vtbl,
-        ICoreWebView2Environment10, ICoreWebView2Environment3,
+        ICoreWebView2CompositionController, ICoreWebView2Environment10,
+        ICoreWebView2Environment3,
     };
     use windows::Win32::Foundation::HWND;
-    completed_handler!(
-        CompositionCompleted,
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler,
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler_Vtbl,
-        ICoreWebView2CompositionController,
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler
-    );
-    static COMPOSITION_VTBL: ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler_Vtbl =
-        ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: CompositionCompleted::query_interface,
-                AddRef: CompositionCompleted::add_ref,
-                Release: CompositionCompleted::release,
-            },
-            Invoke: CompositionCompleted::invoke,
-        };
     let (tx, rx) = mpsc::channel();
-    let handler = Box::new(CompositionCompleted {
-        vtbl: &COMPOSITION_VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-        tx,
-    });
-    let raw = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let com: ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler =
-        unsafe { core::mem::transmute_copy(&raw) };
+    let handler =
+        webview2_com::CreateCoreWebView2CompositionControllerCompletedHandler::create(Box::new(
+            move |error_code, controller| {
+                let result: Result<ICoreWebView2CompositionController, String> = (|| {
+                    error_code.map_err(|e| format!("{e}"))?;
+                    controller.ok_or_else(|| "null composition controller".to_string())
+                })();
+                let _ = tx.send(result);
+                Ok(())
+            },
+        ));
     let hwnd = HWND(hwnd_sys as *mut _);
     let create = if let Ok(env10) = windows_core::Interface::cast::<ICoreWebView2Environment10>(env)
     {
@@ -609,39 +504,31 @@ pub fn create_composition_controller(
             let opts = unsafe { env10.CreateCoreWebView2ControllerOptions() }?;
             creation_background(&opts, opaque_rgb)?;
             unsafe {
-                env10.CreateCoreWebView2CompositionControllerWithOptions(hwnd, &opts, &com)
+                env10.CreateCoreWebView2CompositionControllerWithOptions(hwnd, &opts, &handler)
             }
         })()
     } else if let Ok(env3) = windows_core::Interface::cast::<ICoreWebView2Environment3>(env) {
         crate::logging::warn(
             "[nex] Environment10 missing: composition controller without creation-time background",
         );
-        unsafe { env3.CreateCoreWebView2CompositionController(hwnd, &com) }
+        unsafe { env3.CreateCoreWebView2CompositionController(hwnd, &handler) }
     } else {
         Err(windows_core::Error::from(windows_core::imp::E_NOINTERFACE))
     };
-    std::mem::forget(com);
+    std::mem::forget(handler);
     if let Err(e) = create {
-        unsafe {
-            drop(Box::from_raw(raw as *mut CompositionCompleted));
-        }
         return Err(format!("CreateCoreWebView2CompositionController: {e}"));
     }
-    wait_with_pump(rx, "CreateCoreWebView2CompositionController")?
+    webview2_com::wait_with_pump(rx)
+        .map_err(|e| format!("CreateCoreWebView2CompositionController: {e}"))?
 }
 
 // ── Page view: controller + core + compositor ────────────────────────────
 
 use std::borrow::Cow;
 use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
-    ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler_Vtbl,
-    ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2Environment,
-    ICoreWebView2ExecuteScriptCompletedHandler, ICoreWebView2ExecuteScriptCompletedHandler_Vtbl,
-    ICoreWebView2WebMessageReceivedEventArgs, ICoreWebView2WebMessageReceivedEventHandler,
-    ICoreWebView2WebMessageReceivedEventHandler_Vtbl, ICoreWebView2WebResourceRequestedEventArgs,
-    ICoreWebView2WebResourceRequestedEventHandler,
-    ICoreWebView2WebResourceRequestedEventHandler_Vtbl,
+    ICoreWebView2, ICoreWebView2CompositionController, ICoreWebView2Controller,
+    ICoreWebView2Environment, ICoreWebView2WebResourceRequestedEventArgs,
 };
 
 /// `serve_asset`-shaped responder (lives in host.rs; bridged in so this
@@ -688,86 +575,7 @@ pub fn revert_protocol_workaround(uri: &str) -> String {
     uri.replace("http://nexasset.", &format!("{NEXASSET_SCHEME}://"))
 }
 
-macro_rules! unknown_impl {
-    ($name:ident, $iid_of:ty) => {
-        impl $name {
-            unsafe extern "system" fn add_ref(this: *mut core::ffi::c_void) -> u32 {
-                let h = unsafe { &*(this as *const $name) };
-                h.ref_count.fetch_add(1, Ordering::Relaxed) + 1
-            }
-
-            unsafe extern "system" fn release(this: *mut core::ffi::c_void) -> u32 {
-                let h = unsafe { &*(this as *const $name) };
-                let prev = h.ref_count.fetch_sub(1, Ordering::Release);
-                if prev == 1 {
-                    unsafe {
-                        drop(Box::from_raw(this as *mut $name));
-                    }
-                }
-                prev - 1
-            }
-
-            unsafe extern "system" fn query_interface(
-                this: *mut core::ffi::c_void,
-                iid: *const windows_core::GUID,
-                out: *mut *mut core::ffi::c_void,
-            ) -> windows_core::HRESULT {
-                if out.is_null() || iid.is_null() {
-                    return windows_core::imp::E_POINTER;
-                }
-                unsafe {
-                    *out = core::ptr::null_mut();
-                }
-                let iid = unsafe { &*iid };
-                if *iid == <windows_core::IUnknown as windows_core::Interface>::IID
-                    || *iid == <$iid_of as windows_core::Interface>::IID
-                {
-                    unsafe {
-                        *out = this;
-                    }
-                    unsafe {
-                        Self::add_ref(this);
-                    }
-                    windows_core::imp::S_OK
-                } else {
-                    windows_core::imp::E_NOINTERFACE
-                }
-            }
-        }
-    };
-}
-
 // ── JS→Rust: WebMessageReceived → handle_ipc ────────────────────────────
-
-#[repr(C)]
-struct MessageHandler {
-    vtbl: *const ICoreWebView2WebMessageReceivedEventHandler_Vtbl,
-    ref_count: AtomicU32,
-    cb: Box<dyn Fn(String) + Send>,
-}
-
-unknown_impl!(
-    MessageHandler,
-    ICoreWebView2WebMessageReceivedEventHandler
-);
-
-impl MessageHandler {
-    unsafe extern "system" fn invoke(
-        this: *mut core::ffi::c_void,
-        _sender: *mut core::ffi::c_void,
-        args: *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT {
-        if !args.is_null() {
-            // SAFETY: WebView2 passes a valid event-args pointer.
-            let args = unsafe { &*(args as *const ICoreWebView2WebMessageReceivedEventArgs) };
-            let mut msg = windows_core::PWSTR::null();
-            if unsafe { args.TryGetWebMessageAsString(&mut msg) }.is_ok() {
-                (unsafe { &*(this as *const MessageHandler) }.cb)(unsafe { take_pwstr(msg) });
-            }
-        }
-        windows_core::imp::S_OK
-    }
-}
 
 /// Subscribe page→Rust messages (`window.ipc.postMessage` via
 /// [`IPC_SHIM_SCRIPT`); delivers the raw JSON string to `on_message`
@@ -777,58 +585,54 @@ pub fn attach_ipc_handler(
     core: &ICoreWebView2,
     on_message: Box<dyn Fn(String) + Send>,
 ) -> Result<(), String> {
-    static VTBL: ICoreWebView2WebMessageReceivedEventHandler_Vtbl =
-        ICoreWebView2WebMessageReceivedEventHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: MessageHandler::query_interface,
-                AddRef: MessageHandler::add_ref,
-                Release: MessageHandler::release,
-            },
-            Invoke: MessageHandler::invoke,
-        };
-    let handler = Box::new(MessageHandler {
-        vtbl: &VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-        cb: on_message,
-    });
-    let raw = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let com: ICoreWebView2WebMessageReceivedEventHandler =
-        unsafe { core::mem::transmute_copy(&raw) };
+    let handler = webview2_com::WebMessageReceivedEventHandler::create(Box::new(
+        move |_sender, args| {
+            if let Some(args) = args {
+                let mut msg = windows_core::PWSTR::null();
+                if unsafe { args.TryGetWebMessageAsString(&mut msg) }.is_ok() {
+                    on_message(unsafe { take_pwstr(msg) });
+                }
+            }
+            Ok(())
+        },
+    ));
     let mut token = 0i64;
-    let sub = unsafe { core.add_WebMessageReceived(&com, &mut token) };
-    std::mem::forget(com);
+    let sub = unsafe { core.add_WebMessageReceived(&handler, &mut token) };
+    std::mem::forget(handler);
     sub.map_err(|e| format!("add_WebMessageReceived: {e}"))
 }
 
 // ── Rust→page assets: WebResourceRequested → serve_asset ─────────────────
 
-#[repr(C)]
-struct ProtocolHandler {
-    vtbl: *const ICoreWebView2WebResourceRequestedEventHandler_Vtbl,
-    ref_count: AtomicU32,
-    env: ICoreWebView2Environment,
+/// Filter `http://nexasset.localhost/*` into [`serve_protocol_request`].
+/// Handler intentionally leaked (process-lifetime page).
+pub fn attach_protocol_handler(
+    core: &ICoreWebView2,
+    env: &ICoreWebView2Environment,
     serve: ServeAsset,
-}
-
-unknown_impl!(
-    ProtocolHandler,
-    ICoreWebView2WebResourceRequestedEventHandler
-);
-
-impl ProtocolHandler {
-    unsafe extern "system" fn invoke(
-        this: *mut core::ffi::c_void,
-        _sender: *mut core::ffi::c_void,
-        args: *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT {
-        if !args.is_null() {
-            // SAFETY: WebView2 passes a valid event-args pointer.
-            let args = unsafe { &*(args as *const ICoreWebView2WebResourceRequestedEventArgs) };
-            let h = unsafe { &*(this as *const ProtocolHandler) };
-            serve_protocol_request(&h.env, &h.serve, args);
-        }
-        windows_core::imp::S_OK
+) -> Result<(), String> {
+    use webview2_com_sys::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
+    let filter = wide_null(PROTOCOL_FILTER);
+    unsafe {
+        core.AddWebResourceRequestedFilter(
+            windows_core::PCWSTR::from_raw(filter.as_ptr()),
+            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+        )
     }
+    .map_err(|e| format!("AddWebResourceRequestedFilter: {e}"))?;
+    let env = env.clone();
+    let handler = webview2_com::WebResourceRequestedEventHandler::create(Box::new(
+        move |_sender, args| {
+            if let Some(args) = args {
+                serve_protocol_request(&env, &serve, &args);
+            }
+            Ok(())
+        },
+    ));
+    let mut token = 0i64;
+    let sub = unsafe { core.add_WebResourceRequested(&handler, &mut token) };
+    std::mem::forget(handler);
+    sub.map_err(|e| format!("add_WebResourceRequested: {e}"))
 }
 
 fn serve_protocol_request(
@@ -946,176 +750,42 @@ fn err_response(msg: &str) -> wry::http::Response<Cow<'static, [u8]>> {
         .unwrap_or_else(|_| wry::http::Response::new(Cow::Borrowed(&b""[..])))
 }
 
-/// Filter `http://nexasset.localhost/*` into [`serve_protocol_request`].
-/// Handler intentionally leaked (process-lifetime page).
-pub fn attach_protocol_handler(
-    core: &ICoreWebView2,
-    env: &ICoreWebView2Environment,
-    serve: ServeAsset,
-) -> Result<(), String> {
-    use webview2_com_sys::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
-    static VTBL: ICoreWebView2WebResourceRequestedEventHandler_Vtbl =
-        ICoreWebView2WebResourceRequestedEventHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: ProtocolHandler::query_interface,
-                AddRef: ProtocolHandler::add_ref,
-                Release: ProtocolHandler::release,
-            },
-            Invoke: ProtocolHandler::invoke,
-        };
-    let filter = wide_null(PROTOCOL_FILTER);
-    unsafe {
-        core.AddWebResourceRequestedFilter(
-            windows_core::PCWSTR::from_raw(filter.as_ptr()),
-            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-        )
-    }
-    .map_err(|e| format!("AddWebResourceRequestedFilter: {e}"))?;
-    let handler = Box::new(ProtocolHandler {
-        vtbl: &VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-        env: env.clone(),
-        serve,
-    });
-    let raw = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let com: ICoreWebView2WebResourceRequestedEventHandler =
-        unsafe { core::mem::transmute_copy(&raw) };
-    let mut token = 0i64;
-    let sub = unsafe { core.add_WebResourceRequested(&com, &mut token) };
-    std::mem::forget(com);
-    sub.map_err(|e| format!("add_WebResourceRequested: {e}"))
-}
-
 // ── Init scripts + fire-and-forget ExecuteScript ─────────────────────────
-
-#[repr(C)]
-struct ScriptAddedHandler {
-    vtbl: *const ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler_Vtbl,
-    ref_count: AtomicU32,
-    tx: mpsc::Sender<Result<(), String>>,
-}
-
-unknown_impl!(
-    ScriptAddedHandler,
-    ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler
-);
-
-impl ScriptAddedHandler {
-    unsafe extern "system" fn invoke(
-        this: *mut core::ffi::c_void,
-        error: windows_core::HRESULT,
-        _id: windows_core::PCWSTR,
-    ) -> windows_core::HRESULT {
-        let h = unsafe { &*(this as *const ScriptAddedHandler) };
-        let _ = h.tx.send(if error.is_ok() {
-            Ok(())
-        } else {
-            Err(format!("AddScriptToExecuteOnDocumentCreated: {error:?}"))
-        });
-        windows_core::imp::S_OK
-    }
-}
 
 /// Register one document-start script and wait for confirmation (wry
 /// parity: scripts must land before `Navigate` returns content).
 pub fn add_init_script(core: &ICoreWebView2, js: &str) -> Result<(), String> {
-    static VTBL: ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler_Vtbl =
-        ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: ScriptAddedHandler::query_interface,
-                AddRef: ScriptAddedHandler::add_ref,
-                Release: ScriptAddedHandler::release,
-            },
-            Invoke: ScriptAddedHandler::invoke,
-        };
     let (tx, rx) = mpsc::channel();
-    let handler = Box::new(ScriptAddedHandler {
-        vtbl: &VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-        tx,
-    });
-    let raw = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let com: ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler =
-        unsafe { core::mem::transmute_copy(&raw) };
+    let handler =
+        webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(
+            move |error_code, _id| {
+                let result: Result<(), String> =
+                    error_code.map_err(|e| format!("{e}")).map(|_| ());
+                let _ = tx.send(result);
+                Ok(())
+            },
+        ));
     let script = windows_core::HSTRING::from(js);
-    let add = unsafe { core.AddScriptToExecuteOnDocumentCreated(&script, &com) };
-    std::mem::forget(com);
+    let add = unsafe { core.AddScriptToExecuteOnDocumentCreated(&script, &handler) };
+    std::mem::forget(handler);
     if let Err(e) = add {
-        unsafe {
-            drop(Box::from_raw(raw as *mut ScriptAddedHandler));
-        }
         return Err(format!("AddScriptToExecuteOnDocumentCreated: {e}"));
     }
-    wait_with_pump(rx, "AddScriptToExecuteOnDocumentCreated")?
-}
-
-#[repr(C)]
-struct NoopExecHandler {
-    vtbl: *const ICoreWebView2ExecuteScriptCompletedHandler_Vtbl,
-}
-
-unsafe impl Send for NoopExecHandler {}
-unsafe impl Sync for NoopExecHandler {}
-
-impl NoopExecHandler {
-    unsafe extern "system" fn add_ref(_this: *mut core::ffi::c_void) -> u32 {
-        1
-    }
-    unsafe extern "system" fn release(_this: *mut core::ffi::c_void) -> u32 {
-        1
-    }
-    unsafe extern "system" fn query_interface(
-        this: *mut core::ffi::c_void,
-        iid: *const windows_core::GUID,
-        out: *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT {
-        if out.is_null() || iid.is_null() {
-            return windows_core::imp::E_POINTER;
-        }
-        unsafe {
-            *out = core::ptr::null_mut();
-        }
-        let iid = unsafe { &*iid };
-        if *iid == <windows_core::IUnknown as windows_core::Interface>::IID
-            || *iid == <ICoreWebView2ExecuteScriptCompletedHandler as windows_core::Interface>::IID
-        {
-            unsafe {
-                *out = this;
-            }
-            windows_core::imp::S_OK
-        } else {
-            windows_core::imp::E_NOINTERFACE
-        }
-    }
-    unsafe extern "system" fn invoke(
-        _this: *mut core::ffi::c_void,
-        _error: windows_core::HRESULT,
-        _result: windows_core::PCWSTR,
-    ) -> windows_core::HRESULT {
-        windows_core::imp::S_OK
-    }
+    webview2_com::wait_with_pump(rx)
+        .map_err(|e| format!("AddScriptToExecuteOnDocumentCreated: {e}"))?
 }
 
 /// Fire-and-forget `ExecuteScript` (focus ping, future toasts). The
-/// result is dropped on the floor — the `'static` handler makes that
-/// sound. Never use for calls whose return value matters.
+/// result is dropped on the floor. Never use for calls whose return
+/// value matters.
 pub fn execute_script(core: &ICoreWebView2, js: &str) -> windows_core::Result<()> {
-    static VTBL: ICoreWebView2ExecuteScriptCompletedHandler_Vtbl =
-        ICoreWebView2ExecuteScriptCompletedHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: NoopExecHandler::query_interface,
-                AddRef: NoopExecHandler::add_ref,
-                Release: NoopExecHandler::release,
-            },
-            Invoke: NoopExecHandler::invoke,
-        };
-    static NOOP: NoopExecHandler = NoopExecHandler {
-        vtbl: &VTBL as *const _,
-    };
-    let com: ICoreWebView2ExecuteScriptCompletedHandler =
-        unsafe { core::mem::transmute_copy(&&NOOP) };
+    let handler = webview2_com::ExecuteScriptCompletedHandler::create(Box::new(
+        move |_error_code, _result| Ok(()),
+    ));
     let script = windows_core::HSTRING::from(js);
-    unsafe { core.ExecuteScript(&script, &com) }
+    let r = unsafe { core.ExecuteScript(&script, &handler) };
+    std::mem::forget(handler);
+    r
 }
 
 // ── Full assembly ────────────────────────────────────────────────────────
@@ -1135,7 +805,9 @@ pub fn build_composition_view(
     serve: ServeAsset,
 ) -> Result<CompositionView, String> {
     let env = create_environment()?;
+    crate::logging::info("[nex] composition: environment ready");
     let controller = create_composition_controller(&env, hwnd_sys, opaque_rgb)?;
+    crate::logging::info("[nex] composition: controller ready");
     // NAV_URL is the workaround form of the page origin — keep both
     // spellings pinned together.
     debug_assert_eq!(NAV_URL, apply_protocol_workaround("nexasset://localhost/"));
@@ -1144,23 +816,29 @@ pub fn build_composition_view(
     let core: ICoreWebView2 =
         unsafe { base.CoreWebView2() }.map_err(|e| format!("CoreWebView2: {e}"))?;
     let compositor = CompositorHost::new(hwnd_sys)?;
+    crate::logging::info("[nex] composition: compositor ready");
     let (w, h) = panel_size_px(window_width_lp, height_lp, scale);
     compositor.resize(w, h, corner_radius_px(scale))?;
     set_root_visual(&controller, compositor.content_visual())
         .map_err(|e| format!("root visual: {e}"))?;
+    crate::logging::info("[nex] composition: root visual set");
     set_rasterization_scale(&controller, scale).map_err(|e| format!("rasterization: {e}"))?;
     set_bounds_px(&controller, w as i32, h as i32).map_err(|e| format!("bounds: {e}"))?;
     attach_protocol_handler(&core, &env, serve)?;
+    crate::logging::info("[nex] composition: protocol attached");
     attach_ipc_handler(&core, on_message)?;
+    crate::logging::info("[nex] composition: ipc attached");
     for js in init_scripts {
         add_init_script(&core, js)?;
     }
+    crate::logging::info("[nex] composition: init scripts registered");
     unsafe {
         core.Navigate(&windows_core::HSTRING::from(apply_protocol_workaround(
             "nexasset://localhost/",
         )))
     }
     .map_err(|e| format!("Navigate: {e}"))?;
+    crate::logging::info("[nex] composition: navigated");
     set_visible(&controller, true).map_err(|e| format!("visible: {e}"))?;
     Ok(CompositionView {
         controller,

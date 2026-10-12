@@ -2031,137 +2031,34 @@ fn handle_ipc(
 /// renderer, GPU, or utility process crashes or is killed. Never
 /// propagates — subscription failure is logged and forgotten.
 fn subscribe_webview2_diagnostics(core: &webview2_com_sys::Microsoft::Web::WebView2::Win32::ICoreWebView2) {
-    use std::sync::atomic::{AtomicU32, Ordering};
     use webview2_com_sys::Microsoft::Web::WebView2::Win32::{
-        ICoreWebView2, ICoreWebView2ProcessFailedEventArgs, ICoreWebView2ProcessFailedEventHandler,
-        ICoreWebView2ProcessFailedEventHandler_Vtbl, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        ICoreWebView2ProcessFailedEventArgs, COREWEBVIEW2_PROCESS_FAILED_KIND,
     };
-    use windows_core::Interface;
-
-    // ── minimal COM object implementing ICoreWebView2ProcessFailedEventHandler ──
-
-    #[repr(C)]
-    struct ProcessFailedHandler {
-        vtbl: *const ICoreWebView2ProcessFailedEventHandler_Vtbl,
-        ref_count: AtomicU32,
-    }
-
-    unsafe impl Send for ProcessFailedHandler {}
-    unsafe impl Sync for ProcessFailedHandler {}
-
-    unsafe extern "system" fn invoke(
-        _this: *mut core::ffi::c_void,
-        _sender: *mut core::ffi::c_void,
-        args: *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT {
-        if !args.is_null() {
-            // SAFETY: WebView2 passes a valid ICoreWebView2ProcessFailedEventArgs pointer
-            let args = unsafe { &*(args as *const ICoreWebView2ProcessFailedEventArgs) };
-            let mut kind: COREWEBVIEW2_PROCESS_FAILED_KIND = unsafe { std::mem::zeroed() };
-            if unsafe { args.ProcessFailedKind(&mut kind) }.is_ok() {
-                crate::logging::error(&format!("[nex:webview2] process_failed kind={}", kind.0));
-            } else {
-                crate::logging::error("[nex:webview2] process_failed kind=<unreadable>");
+    let handler = webview2_com::ProcessFailedEventHandler::create(Box::new(
+        move |_sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+            if let Some(args) = args {
+                let mut kind: COREWEBVIEW2_PROCESS_FAILED_KIND = unsafe { std::mem::zeroed() };
+                if unsafe { args.ProcessFailedKind(&mut kind) }.is_ok() {
+                    crate::logging::error(&format!(
+                        "[nex:webview2] process_failed kind={}",
+                        kind.0
+                    ));
+                } else {
+                    crate::logging::error("[nex:webview2] process_failed kind=<unreadable>");
+                }
             }
-        }
-        windows_core::HRESULT(0)
-    }
-
-    unsafe extern "system" fn add_ref(this: *mut core::ffi::c_void) -> u32 {
-        // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
-        let h = unsafe { &*(this as *const ProcessFailedHandler) };
-        h.ref_count.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    unsafe extern "system" fn release(this: *mut core::ffi::c_void) -> u32 {
-        // SAFETY: `this` points to a valid ProcessFailedHandler from Box::into_raw
-        let h = unsafe { &*(this as *const ProcessFailedHandler) };
-        let prev = h.ref_count.fetch_sub(1, Ordering::Release);
-        if prev == 1 {
-            // SAFETY: ref_count reached 0; we own the sole reference.
-            unsafe {
-                drop(Box::from_raw(this as *mut ProcessFailedHandler));
-            }
-        }
-        prev - 1
-    }
-
-    unsafe extern "system" fn query_interface(
-        _this: *mut core::ffi::c_void,
-        iid: *const windows_core::GUID,
-        out: *mut *mut core::ffi::c_void,
-    ) -> windows_core::HRESULT {
-        if out.is_null() {
-            return windows_core::imp::E_POINTER;
-        }
-        // SAFETY: out is non-null per check above
-        unsafe {
-            *out = core::ptr::null_mut();
-        }
-        if iid.is_null() {
-            return windows_core::imp::E_INVALIDARG;
-        }
-        // Support IUnknown and our own interface.
-        // SAFETY: iid is non-null per check above
-        let iid = unsafe { &*iid };
-        if *iid == <windows_core::IUnknown as Interface>::IID
-            || *iid == <ICoreWebView2ProcessFailedEventHandler as Interface>::IID
-        {
-            // SAFETY: out is non-null per check above
-            unsafe {
-                *out = _this;
-            }
-            // SAFETY: _this points to a valid ProcessFailedHandler
-            unsafe {
-                add_ref(_this);
-            }
-            windows_core::imp::S_OK
-        } else {
-            windows_core::imp::E_NOINTERFACE
-        }
-    }
-
-    static VTBL: ICoreWebView2ProcessFailedEventHandler_Vtbl =
-        ICoreWebView2ProcessFailedEventHandler_Vtbl {
-            base__: windows_core::IUnknown_Vtbl {
-                QueryInterface: query_interface,
-                AddRef: add_ref,
-                Release: release,
-            },
-            Invoke: invoke,
-        };
-
-    // ── construct handler + subscribe ──
-
-    let wv2: &ICoreWebView2 = core;
-    let handler = Box::new(ProcessFailedHandler {
-        vtbl: &VTBL as *const _,
-        ref_count: AtomicU32::new(1),
-    });
-    // SAFETY: ProcessFailedHandler is #[repr(C)] with vtbl pointer as the first
-    // field, matching the COM object layout expected by ICoreWebView2ProcessFailedEventHandler
-    // (which is repr(transparent) over IUnknown over *mut c_void).
-    let handler_ptr = Box::into_raw(handler) as *mut core::ffi::c_void;
-    let handler_com: ICoreWebView2ProcessFailedEventHandler =
-        unsafe { core::mem::transmute(handler_ptr) };
-
+            Ok(())
+        },
+    ));
     let mut token: i64 = 0;
-    let result = unsafe { wv2.add_ProcessFailed(&handler_com, &mut token) };
-    match result {
+    match unsafe { core.add_ProcessFailed(&handler, &mut token) } {
         Ok(()) => {
             crate::logging::info("[nex] webview2 ProcessFailed subscription OK");
-            // Intentionally leak handler_com — WebView2 holds a ref and
-            // will call remove_ProcessFailed (via token) implicitly when
-            // the webview is destroyed. Our AddRef=1 keeps it alive.
-            // The handler just logs; no cleanup needed.
-            std::mem::forget(handler_com);
+            // Intentionally leak: lives as long as the process-lifetime page.
+            std::mem::forget(handler);
         }
         Err(e) => {
             crate::logging::warn(&format!("[nex] webview2 subscriptions skipped: {e}"));
-            // Reclaim our allocation since WebView2 didn't take it.
-            // SAFETY: handler_ptr was created from Box::into_raw above and has
-            // not been freed — we are the sole owner on the error path.
-            drop(unsafe { Box::from_raw(handler_ptr as *mut ProcessFailedHandler) });
         }
     }
 }

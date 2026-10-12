@@ -315,9 +315,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // initialization failure keeps the Acrylic fallback available.
     let mut glass_layer = crate::overlay::refraction::GlassLayer::create_for_window(
         hwnd as isize,
-        WINDOW_WIDTH,
-        INITIAL_HEIGHT,
-        window.scale_factor(),
+        crate::overlay::refraction::physical_px(WINDOW_WIDTH, window.scale_factor()),
+        crate::overlay::refraction::physical_px(MAX_HEIGHT, window.scale_factor()),
         proxy.clone(),
     );
     // The page drops its painted backgrounds when native glass is live
@@ -902,7 +901,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Spike glass follows the main window: same rect,
                     // ordered directly below it (never activating).
                     if let Some(layer) = glass_layer.as_mut() {
-                        layer.sync_to_main(hwnd as isize, window.scale_factor());
+                        let scale = window.scale_factor();
+                        layer.sync_to_main(
+                            hwnd as isize,
+                            scale,
+                            WINDOW_WIDTH,
+                            INITIAL_HEIGHT,
+                            crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
+                            crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
+                        );
                     }
                     // Start at search-bar height — JS sends resize when content appears.
                     apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state), is_opaque_panel(&state));
@@ -2461,7 +2468,15 @@ fn apply_window_height(
         keep_webview_viewport_max(wv);
     }
     if let Some(layer) = glass {
-        layer.sync_to_main(window.hwnd() as isize, window.scale_factor());
+        let scale = window.scale_factor();
+        layer.sync_to_main(
+            window.hwnd() as isize,
+            scale,
+            WINDOW_WIDTH,
+            h,
+            crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
+            crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
+        );
     }
     apply_main_round_region(window, h, clip_main);
     apply_webview_round_region(window, h, opaque_panel);
@@ -2508,8 +2523,11 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
         return;
     }
     if !clip {
+        // Glass has no region to clear (transparent fringe stays); drop
+        // the redraw flag so every resize doesn't force a full child
+        // repaint and flash the transparent surface beneath.
         unsafe {
-            SetWindowRgn(search.found, std::ptr::null_mut(), 1);
+            SetWindowRgn(search.found, std::ptr::null_mut(), 0);
         }
         return;
     }
@@ -2566,8 +2584,11 @@ fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
     let hwnd = window.hwnd() as HWND;
     if !clip_main {
+        // Glass/opaque modes draw their own silhouette: remove any stale
+        // region without a forced repaint — redraw=1 here invalidated the
+        // whole transparent window on every resize (black flash).
         unsafe {
-            SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+            SetWindowRgn(hwnd, std::ptr::null_mut(), 0);
         }
         return;
     }

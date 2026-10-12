@@ -47,7 +47,7 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
     D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
@@ -101,10 +101,15 @@ const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
 
-/// Host -> worker config. `main_sys == 0` means unchanged.
+/// Host -> worker config. `main_sys == 0` / `None` means unchanged.
 struct GlassConfig {
-    visible: bool,
+    visible: Option<bool>,
     main_sys: isize,
+    max_wh: Option<(u32, u32)>,
+    /// Requested panel size (physical px). The worker renders this
+    /// instead of polling the window rect, so content tracks the region
+    /// on the same tick — no frame of stale rows on growth.
+    panel_wh: Option<(u32, u32)>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -117,6 +122,11 @@ pub struct GlassLayer {
 
 struct GlassWindow {
     hwnd: HWND,
+    /// Physical HWND size. The glass lives at max-panel size permanently;
+    /// resizes only shrink/grow the round region below, so DWM and the
+    /// swapchain never see a resize in steady state (no flash, no lag).
+    hwnd_size: std::cell::Cell<(u32, u32)>,
+    last_region: std::cell::Cell<Option<(u32, u32, u64)>>,
 }
 
 impl GlassLayer {
@@ -125,16 +135,15 @@ impl GlassLayer {
     /// Acrylic). Starts hidden; the host shows it with the panel.
     pub fn create_for_window(
         main_sys: isize,
-        logical_w: f64,
-        logical_h: f64,
-        scale: f64,
+        max_w_px: u32,
+        max_h_px: u32,
         proxy: EventLoopProxy<UiCommand>,
     ) -> Option<GlassLayer> {
         if !enabled() {
             crate::logging::info("[nex][refract] disabled by environment — acrylic path");
             return None;
         }
-        match GlassWindow::create(main_sys, logical_w, logical_h, scale) {
+        match GlassWindow::create(main_sys, max_w_px, max_h_px) {
             Ok(window) => {
                 // The main window's own DWM backdrop would blur our live
                 // pixels along with the desktop (that's the acrylic wash
@@ -149,7 +158,9 @@ impl GlassLayer {
                 let hwnd_sys = window.hwnd().0 as isize;
                 match std::thread::Builder::new()
                     .name("glass-capture".into())
-                    .spawn(move || worker_main(hwnd_sys, main_sys, rx, proxy, worker_ready))
+                    .spawn(move || {
+                        worker_main(hwnd_sys, main_sys, rx, proxy, worker_ready, (max_w_px, max_h_px))
+                    })
                 {
                     Ok(_) => {
                         crate::logging::info("[nex][refract] capture worker spawned");
@@ -174,11 +185,30 @@ impl GlassLayer {
     /// Position/region only — never touches worker visibility: that is
     /// owned by set_visible(), otherwise every resize would resurrect a
     /// parked glass layer (visible square edges behind opaque panels).
-    pub fn sync_to_main(&self, main_sys: isize, scale: f64) {
-        self.window.move_below(main_sys);
-        if let Some((_, _, w, h)) = main_rect(main_sys) {
-            self.window.apply_round_region(w, h, scale);
-        }
+    ///
+    /// The HWND stays at max-panel size; only the round region tracks
+    /// the current height, so a resize is one synchronous region call —
+    /// no SetWindowPos, no swapchain resize, nothing to lag a frame.
+    pub fn sync_to_main(
+        &self,
+        main_sys: isize,
+        scale: f64,
+        logical_w: f64,
+        logical_h: f64,
+        max_w_px: u32,
+        max_h_px: u32,
+    ) {
+        // Requested size, not main_rect: tao applies set_inner_size
+        // async, so reading the window back yields the stale rect.
+        let (w, h) = (physical_px(logical_w, scale), physical_px(logical_h, scale));
+        self.window.ensure_window_max(main_sys, max_w_px, max_h_px);
+        self.window.apply_round_region(w, h, scale);
+        let _ = self.tx.send(GlassConfig {
+            visible: None,
+            main_sys,
+            max_wh: Some((max_w_px, max_h_px)),
+            panel_wh: Some((w, h)),
+        });
     }
 
     /// Show/hide with the panel. No animation, no activation.
@@ -187,8 +217,10 @@ impl GlassLayer {
             self.window.show(show);
         }
         let _ = self.tx.send(GlassConfig {
-            visible: show,
+            visible: Some(show),
             main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
         });
     }
 
@@ -244,12 +276,10 @@ fn disable_main_backdrop(main_sys: isize) {
 }
 
 impl GlassWindow {
-    fn create(
-        main_sys: isize,
-        logical_w: f64,
-        logical_h: f64,
-        scale: f64,
-    ) -> Result<GlassWindow, String> {
+    /// Max-panel HWND, top-left aligned to the main window. The visible
+    /// shape comes from the round region (per-resize); the window and
+    /// swapchain buffers stay max-size so neither ever resizes.
+    fn create(main_sys: isize, max_w_px: u32, max_h_px: u32) -> Result<GlassWindow, String> {
         let instance: HMODULE = unsafe { GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e:?}"))? };
         let class = w!("NexGlassLayer");
         let wndclass = WNDCLASSW {
@@ -273,9 +303,8 @@ impl GlassWindow {
         }
 
         let main = HWND(main_sys as *mut std::ffi::c_void);
-        let (x, y, width, height) = main_rect(main_sys)
-            .map(|(x, y, w, h)| (x, y, w, h))
-            .unwrap_or((0, 0, physical_px(logical_w, scale), physical_px(logical_h, scale)));
+        let (x, y) = main_origin(main_sys).unwrap_or((0, 0));
+        let (width, height) = (max_w_px, max_h_px);
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -305,19 +334,64 @@ impl GlassWindow {
                 )),
             }
         }
+        // No DWM transitions on the glass itself: sync_to_main
+        // re-inserts it in z-order on every resize, and an animated
+        // insert over a flip swapchain reads as a black flash.
+        {
+            use windows_sys::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+            };
+            let off = 1_i32;
+            unsafe {
+                DwmSetWindowAttribute(
+                    hwnd.0 as *mut std::ffi::c_void,
+                    DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+                    &off as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of_val(&off) as u32,
+                );
+            }
+        }
         crate::logging::info(&format!(
             "[nex][refract] glass top-level hwnd={hwnd:?} {width}x{height}px at ({x},{y})"
         ));
-        Ok(GlassWindow { hwnd })
+        Ok(GlassWindow {
+            hwnd,
+            hwnd_size: std::cell::Cell::new((width, height)),
+            last_region: std::cell::Cell::new(None),
+        })
     }
 
     fn hwnd(&self) -> HWND {
         self.hwnd
     }
 
-    /// Same rect as main, ordered directly below it, never activating.
-    fn move_below(&self, main_sys: isize) {
-        align_glass_to_main(self.hwnd, main_sys);
+    /// Grow the HWND if the max panel outgrew it (DPI/scale change).
+    /// Steady-state resizes never come here: the region clips the
+    /// max-size window, so no SetWindowPos churn per resize.
+    fn ensure_window_max(&self, main_sys: isize, max_w: u32, max_h: u32) {
+        let cur = self.hwnd_size.get();
+        if max_w <= cur.0 && max_h <= cur.1 {
+            return;
+        }
+        let Some((x, y)) = main_origin(main_sys) else {
+            return;
+        };
+        let main = HWND(main_sys as *mut std::ffi::c_void);
+        if let Err(error) = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                Some(main),
+                x,
+                y,
+                max_w as i32,
+                max_h as i32,
+                SWP_NOACTIVATE,
+            )
+        } {
+            crate::logging::warn(&format!("[nex][refract] glass grow failed: {error:?}"));
+        } else {
+            self.hwnd_size.set((max_w, max_h));
+        }
     }
 
     fn show(&self, show: bool) {
@@ -328,9 +402,14 @@ impl GlassWindow {
     }
 
     /// Match the panel's rounded corners so sharp desktop slivers never
-    /// peek past the glass. Runs on every sync; no-ops visually when same.
+    /// peek past the glass. Skips identical regions: re-setting the same
+    /// region forces a repaint/recompose of the flip window (flash).
     fn apply_round_region(&self, w_px: u32, h_px: u32, scale: f64) {
         use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+        let key = (w_px, h_px, scale.to_bits());
+        if self.last_region.get() == Some(key) {
+            return;
+        }
         // Panel radius token is 20 logical px; region wants diameters.
         let d = ((20.0 * scale * 2.0).round() as i32).max(2);
         let rgn = unsafe {
@@ -344,30 +423,42 @@ impl GlassWindow {
             unsafe {
                 DeleteObject(rgn);
             }
+        } else {
+            self.last_region.set(Some(key));
         }
     }
 }
 
-/// Worker-owned renderer: every D3D/D2D object. Prewarmed while hidden
-/// and rebuilt on size change.
+/// Worker-owned renderer: every D3D/D2D object. Built once at max
+/// panel size; panel-size changes rebuild content bitmaps only — the
+/// buffers (and HWND) never resize, so presents never invalidate.
 struct Engine {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain1,
     d2d: ID2D1DeviceContext,
-    blur: Option<ID2D1Effect>,
-    displace: Option<ID2D1Effect>,
+    /// Size-agnostic effect graph, built once: rebuilds only swap the
+    /// bitmaps underneath via SetInput, so a panel resize costs two
+    /// bitmap creates instead of a full graph rebuild.
+    blur: ID2D1Effect,
+    displace: ID2D1Effect,
     source: Option<ID2D1Bitmap1>,
     map: Option<ID2D1Bitmap1>,
     tint_brush: ID2D1SolidColorBrush,
+    /// Swapchain buffer size (max panel; grow-only).
     width: u32,
     height: u32,
+    /// Currently rendered panel size (top-left of the buffers; the
+    /// glass region clips the rest).
+    panel_w: u32,
+    panel_h: u32,
 }
 
 impl Engine {
-    /// Build everything for a panel size: device, swapchain (first
-    /// working desc wins), D2D graph, and effect resources.
-    fn build(hwnd: HWND, width: u32, height: u32) -> Result<Engine, String> {
+    /// Build everything at max-panel buffers with the current panel
+    /// content size: device, swapchain (first working desc wins), D2D
+    /// graph, and effect resources.
+    fn build(hwnd: HWND, buf_w: u32, buf_h: u32, panel_w: u32, panel_h: u32) -> Result<Engine, String> {
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
         let mut feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -392,8 +483,8 @@ impl Engine {
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
                 .map_err(|e| format!("CreateDXGIFactory2 failed: {e:?}"))?;
         let mut desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: width,
-            Height: height,
+            Width: buf_w,
+            Height: buf_h,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             Stereo: false.into(),
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
@@ -469,42 +560,89 @@ impl Engine {
             )
             .map_err(|e| format!("glass tint brush failed: {e:?}"))?
         };
+        let blur: ID2D1Effect = unsafe {
+            d2d.CreateEffect(&CLSID_D2D1GaussianBlur as *const _)
+                .map_err(|e| format!("blur CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            blur
+                .SetValue(
+                    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &BLUR_STDDEV.to_ne_bytes(),
+                )
+                .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
+        }
+        let displace: ID2D1Effect = unsafe {
+            d2d.CreateEffect(&CLSID_D2D1DisplacementMap as *const _)
+                .map_err(|e| format!("displace CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &BEND_SCALE.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace scale failed: {e:?}"))?;
+            // The effect defaults both axes to alpha, which is opaque in
+            // this map and creates a constant down-right sample offset.
+            // The bezel encodes horizontal displacement in red and vertical
+            // displacement in green, so select those channels explicitly.
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &D2D1_CHANNEL_SELECTOR_R.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace X channel select failed: {e:?}"))?;
+            displace
+                .SetValue(
+                    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32,
+                    D2D1_PROPERTY_TYPE_ENUM,
+                    &D2D1_CHANNEL_SELECTOR_G.0.to_ne_bytes(),
+                )
+                .map_err(|e| format!("displace Y channel select failed: {e:?}"))?;
+        }
         let mut engine = Engine {
             device,
             context,
             swapchain,
             d2d,
-            blur: None,
-            displace: None,
             source: None,
             map: None,
             tint_brush,
-            width,
-            height,
+            width: buf_w,
+            height: buf_h,
+            panel_w,
+            panel_h,
+            blur,
+            displace,
         };
         engine.rebuild_content()?;
         Ok(engine)
     }
 
     /// Rebuild size-dependent content: a transparent initial source,
-    /// displacement map, and blur→displacement pair. Live captured frames
+    /// displacement map, and blur→displacement pair, sized to the
+    /// current panel (top-left of the max buffers). Live captured frames
     /// replace the source via ingest_frame before presentation.
     fn rebuild_content(&mut self) -> Result<(), String> {
         let (w, h) = (
-            self.width as usize + BLUR_PAD as usize * 2,
-            self.height as usize + BLUR_PAD as usize * 2,
+            self.panel_w as usize + BLUR_PAD as usize * 2,
+            self.panel_h as usize + BLUR_PAD as usize * 2,
         );
         let src_bytes = vec![0u8; w * h * 4];
         let mut map_bytes = vec![128u8; w * h * 4];
         for alpha in map_bytes.iter_mut().skip(3).step_by(4) {
             *alpha = 255;
         }
-        let panel_map = bezel_bytes(self.width as usize, self.height as usize);
-        for row in 0..self.height as usize {
+        let panel_map = bezel_bytes(self.panel_w as usize, self.panel_h as usize);
+        for row in 0..self.panel_h as usize {
             let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
-            let src = row * self.width as usize * 4;
-            map_bytes[dst..dst + self.width as usize * 4]
-                .copy_from_slice(&panel_map[src..src + self.width as usize * 4]);
+            let src = row * self.panel_w as usize * 4;
+            map_bytes[dst..dst + self.panel_w as usize * 4]
+                .copy_from_slice(&panel_map[src..src + self.panel_w as usize * 4]);
         }
         let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
         let source: ID2D1Bitmap1 = unsafe {
@@ -533,59 +671,15 @@ impl Engine {
                 )
                 .map_err(|e| format!("map CreateBitmap failed: {e:?}"))?
         };
-        let blur: ID2D1Effect = unsafe {
-            self.d2d
-                .CreateEffect(&CLSID_D2D1GaussianBlur as *const _)
-                .map_err(|e| format!("blur CreateEffect failed: {e:?}"))?
-        };
+        // Re-point the shared effect graph at the new bitmaps. Effects
+        // are size-agnostic; only the bitmaps track the panel.
         unsafe {
-            blur
-                .SetValue(
-                    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32,
-                    D2D1_PROPERTY_TYPE_FLOAT,
-                    &BLUR_STDDEV.to_ne_bytes(),
-                )
-                .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
-            blur.SetInput(0, &source, true);
-        }
-        let displace: ID2D1Effect = unsafe {
-            self.d2d
-                .CreateEffect(&CLSID_D2D1DisplacementMap as *const _)
-                .map_err(|e| format!("displace CreateEffect failed: {e:?}"))?
-        };
-        unsafe {
-            displace
-                .SetValue(
-                    D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32,
-                    D2D1_PROPERTY_TYPE_FLOAT,
-                    &BEND_SCALE.to_ne_bytes(),
-                )
-                .map_err(|e| format!("displace scale failed: {e:?}"))?;
-            // The effect defaults both axes to alpha, which is opaque in
-            // this map and creates a constant down-right sample offset.
-            // The bezel encodes horizontal displacement in red and vertical
-            // displacement in green, so select those channels explicitly.
-            displace.SetInput(0, &blur_output(&blur)?, true);
-            displace.SetInput(1, &map, true);
-            displace
-                .SetValue(
-                    D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32,
-                    D2D1_PROPERTY_TYPE_ENUM,
-                    &D2D1_CHANNEL_SELECTOR_R.0.to_ne_bytes(),
-                )
-                .map_err(|e| format!("displace X channel select failed: {e:?}"))?;
-            displace
-                .SetValue(
-                    D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32,
-                    D2D1_PROPERTY_TYPE_ENUM,
-                    &D2D1_CHANNEL_SELECTOR_G.0.to_ne_bytes(),
-                )
-                .map_err(|e| format!("displace Y channel select failed: {e:?}"))?;
+            self.blur.SetInput(0, &source, true);
+            self.displace.SetInput(0, &blur_output(&self.blur)?, true);
+            self.displace.SetInput(1, &map, true);
         }
         self.source = Some(source);
         self.map = Some(map);
-        self.blur = Some(blur);
-        self.displace = Some(displace);
         Ok(())
     }
 
@@ -594,8 +688,8 @@ impl Engine {
     /// queued covers the next one.
     fn ingest_frame(&self, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
         let source = self.source.as_ref().ok_or("no source bitmap")?;
-        let expected_w = self.width + BLUR_PAD * 2;
-        let expected_h = self.height + BLUR_PAD * 2;
+        let expected_w = self.panel_w + BLUR_PAD * 2;
+        let expected_h = self.panel_h + BLUR_PAD * 2;
         if w != expected_w || h != expected_h {
             return Err("size drift, dropped".to_string());
         }
@@ -611,9 +705,9 @@ impl Engine {
     }
 
     /// Draw the effect into the current backbuffer and present it. The
-    /// target rebinds every frame: flip-model buffers rotate.
+    /// target rebinds every frame: bitblt-model buffers rotate.
     fn render_frame(&self) -> Result<(), String> {
-        let displace = self.displace.as_ref().ok_or("glass effect not built")?;
+        let displace = &self.displace;
         let texture: ID3D11Texture2D = unsafe {
             self.swapchain
                 .GetBuffer(0)
@@ -633,8 +727,8 @@ impl Engine {
             let source_rect = D2D_RECT_F {
                 left: BLUR_PAD as f32,
                 top: BLUR_PAD as f32,
-                right: (BLUR_PAD + self.width) as f32,
-                bottom: (BLUR_PAD + self.height) as f32,
+                right: (BLUR_PAD + self.panel_w) as f32,
+                bottom: (BLUR_PAD + self.panel_h) as f32,
             };
             self.d2d.DrawImage(
                 &blur_output(displace)?,
@@ -665,7 +759,8 @@ impl Engine {
         Ok(())
     }
 
-    /// ResizeBuffers + content rebuild for a new panel size.
+    /// Grow the buffers (DPI/scale change only). Steady-state panel
+    /// resizes never come here — content rebuilds in place instead.
     fn resize_buffers(&mut self, width: u32, height: u32) -> Result<(), String> {
         // D2D retains the last target even after render_frame's local bitmap
         // is dropped. Detach it before ResizeBuffers or DXGI sees a live
@@ -821,6 +916,7 @@ fn worker_main(
     rx: Receiver<GlassConfig>,
     proxy: EventLoopProxy<UiCommand>,
     ready: Arc<AtomicBool>,
+    init_max: (u32, u32),
 ) {
     let hwnd = HWND(glass_sys as *mut std::ffi::c_void);
     crate::logging::info("[nex][refract] worker alive (D3D11/DXGI/D2D need no COM init here)");
@@ -828,6 +924,11 @@ fn worker_main(
     let mut capture: Option<Capture> = None;
     let mut visible = false;
     let mut main_sys: isize = initial_main_sys;
+    // Max panel the buffers/HWND cover (grow-only in steady state).
+    let mut max_wh = init_max;
+    // Requested panel size from the host; preferred over the polled
+    // rect so the first render after a resize is already correct.
+    let mut cfg_panel: Option<(u32, u32)> = None;
     // Build and render one frame while hidden, so the first show has a
     // ready surface instead of waiting for D3D/capture initialization.
     let mut prewarm_pending = true;
@@ -839,37 +940,63 @@ fn worker_main(
     // Last panel position the glass was aligned to. Re-align if the
     // window position changes while the capture worker is active.
     let mut last_glass_at = (0i32, 0i32);
+    // Full-frame staging mirror valid yet (fresh capture starts
+    // uninitialized; first mirrored frame arms it).
+    let mut staged = false;
+    // Last presented capture box, fallback fill when the mirror is not
+    // yet armed (static desktop + panel change before first frame).
+    let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
     // Straight failures in a row: a poisoned device/capture never heals
     // by retrying the same calls, so rebuild everything after a few.
     let mut n_fail = 0u32;
 
     loop {
         while let Ok(cfg) = rx.try_recv() {
-            visible = cfg.visible;
+            if let Some(v) = cfg.visible {
+                visible = v;
+            }
             if cfg.main_sys != 0 {
                 main_sys = cfg.main_sys;
             }
-        }
-        if (!visible && !prewarm_pending) || main_sys == 0 {
-            if capture.take().is_some() {
-                crate::logging::info("[nex][refract] capture stopped (hidden)");
+            if let Some(m) = cfg.max_wh {
+                max_wh = m;
             }
+            if let Some(p) = cfg.panel_wh {
+                cfg_panel = Some(p);
+            }
+        }
+        if main_sys == 0 {
             std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        if !visible && !prewarm_pending {
+            // Hidden: hold the duplication session + staging mirror (no
+            // acquire/render) so the next show presents a fresh frame
+            // within milliseconds instead of paying a capture restart.
+            // ponytail: one idle session; no polling cost while hidden.
+            std::thread::sleep(Duration::from_millis(10));
             continue;
         }
         let Some((mx, my, mw, mh)) = main_rect(main_sys) else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         };
+        // Requested size wins over the polled rect: tao applies resizes
+        // async, so the rect lags the region by a frame and growth would
+        // reveal stale buffer rows meanwhile.
+        let (pw, ph) = cfg_panel.unwrap_or((mw, mh));
         // Position follow (see declaration): re-align + log on moves.
         if (mx, my) != last_glass_at {
-            align_glass_to_main(hwnd, main_sys);
+            align_glass_to_main(hwnd, main_sys, max_wh.0, max_wh.1);
             crate::logging::info(&format!("[nex][refract] glass follows panel to ({mx},{my})"));
             last_glass_at = (mx, my);
         }
-        // Engine ensure / resize (buffers only when one exists).
+        // Buffers + HWND cover the max panel; the region clips the
+        // current size. Panel changes rebuild content bitmaps in place
+        // (buffers stay valid, presents never stall); buffers grow only
+        // on DPI/scale change. No steady-state ResizeBuffers, no lag.
         if engine.is_none() {
-            match Engine::build(hwnd, mw, mh) {
+            match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(e) => engine = Some(e),
                 Err(error) => {
                     crate::logging::warn(&format!("[nex][refract] engine build failed: {error}"));
@@ -878,12 +1005,112 @@ fn worker_main(
                 }
             }
         } else if let Some(e) = engine.as_mut() {
-            if e.width != mw || e.height != mh {
-                if let Err(error) = e.resize_buffers(mw, mh) {
+            // Rebuild, then re-present below. Buffers stay valid through
+            // a panel rebuild (no ResizeBuffers), so the old frame shows
+            // meanwhile — never black.
+            let mut rebuilt = false;
+            let t0 = Instant::now();
+            if max_wh.0 > e.width || max_wh.1 > e.height {
+                // Rare (DPI/scale change): grow buffers (rebuilds inside).
+                e.panel_w = pw;
+                e.panel_h = ph;
+                if let Err(error) = e.resize_buffers(max_wh.0, max_wh.1) {
                     crate::logging::warn(&format!("[nex][refract] engine resize failed: {error}"));
                     engine = None;
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
+                }
+                rebuilt = true;
+            } else if e.panel_w != pw || e.panel_h != ph {
+                e.panel_w = pw;
+                e.panel_h = ph;
+                if let Err(error) = e.rebuild_content() {
+                    crate::logging::warn(&format!("[nex][refract] content rebuild failed: {error}"));
+                    engine = None;
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                rebuilt = true;
+            }
+            if rebuilt {
+                // Fresh zeros after rebuild: re-present immediately so a
+                // static desktop (no new duplication frame) never leaves
+                // the panel black. Exact crop from the staging mirror —
+                // never a stretched old frame; stretch is only the
+                // fallback when the mirror isn't armed yet.
+                let exact: Option<(Vec<u8>, u32, u32)> = if staged {
+                    capture.as_ref().and_then(|cap| {
+                        let pad = BLUR_PAD as i32;
+                        let (nbx, nby, nbw, nbh) = clamp_panel_box(
+                            mx - pad,
+                            my - pad,
+                            pw + BLUR_PAD * 2,
+                            ph + BLUR_PAD * 2,
+                            cap.origin_x,
+                            cap.origin_y,
+                            cap.frame_w,
+                            cap.frame_h,
+                        );
+                        if nbw != pw + BLUR_PAD * 2 || nbh != ph + BLUR_PAD * 2 {
+                            return None;
+                        }
+                        crop_staging(
+                            &e.context,
+                            &e.device,
+                            &cap.staging,
+                            cap.frame_w,
+                            cap.frame_h,
+                            nbx,
+                            nby,
+                            nbw,
+                            nbh,
+                        )
+                        .ok()
+                        .map(|px| (px, nbw, nbh))
+                    })
+                } else {
+                    None
+                };
+                if let Some((fresh, fw, fh)) = exact {
+                    match e
+                        .ingest_frame(&fresh, fw, fh)
+                        .and_then(|_| e.render_frame())
+                    {
+                        Ok(()) => {
+                            n_pre += 1;
+                            last_present = Instant::now();
+                            last_frame = Some((fresh, fw, fh));
+                            crate::logging::info(&format!(
+                                "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
+                                t0.elapsed().as_millis()
+                            ));
+                        }
+                        Err(error) => crate::logging::warn(&format!(
+                            "[nex][refract] resize re-present failed: {error}"
+                        )),
+                    }
+                } else if let Some((prev, cw, ch)) = last_frame.as_ref() {
+                    let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
+                    if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
+                        let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
+                        match e
+                            .ingest_frame(&stretched, ew, eh)
+                            .and_then(|_| e.render_frame())
+                        {
+                            Ok(()) => {
+                                n_pre += 1;
+                                last_present = Instant::now();
+                                last_frame = Some((stretched, ew, eh));
+                                crate::logging::info(&format!(
+                                    "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
+                                    t0.elapsed().as_millis()
+                                ));
+                            }
+                            Err(error) => crate::logging::warn(&format!(
+                                "[nex][refract] resize re-present failed: {error}"
+                            )),
+                        }
+                    }
                 }
             }
         }
@@ -911,6 +1138,7 @@ fn worker_main(
                         c.frame_w, c.frame_h
                     ));
                     capture = Some(c);
+                    staged = false;
                 }
                 Err(error) => {
                     crate::logging::warn(&format!("[nex][refract] capture start failed: {error}"));
@@ -963,104 +1191,63 @@ fn worker_main(
         }
         let pad = BLUR_PAD as i32;
         let (bx, by, bw, bh) = clamp_panel_box(
-            mx - pad, my - pad, mw + BLUR_PAD * 2, mh + BLUR_PAD * 2,
+            mx - pad, my - pad, pw + BLUR_PAD * 2, ph + BLUR_PAD * 2,
             cap.origin_x, cap.origin_y, cap.frame_w, cap.frame_h,
         );
-        if bw != mw + BLUR_PAD * 2 || bh != mh + BLUR_PAD * 2 {
+        if bw != pw + BLUR_PAD * 2 || bh != ph + BLUR_PAD * 2 {
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             continue;
         }
-        let frame_ok = (|| -> Result<(u64, u64), String> {
+        let frame_ok = (|| -> Result<(u64, u64, Vec<u8>), String> {
             let tex: ID3D11Texture2D = resource
                 .as_ref()
                 .ok_or("empty frame resource")?
                 .cast()
                 .map_err(|e| format!("frame QI texture failed: {e:?}"))?;
-            // Validate the box against the staging target before the
-            // copy: D3D11 queues the copy and surfaces range faults
-            // later (typically at Map) as device-removed, which
-            // misdirects the whole diagnosis.
-            if bx
-                .checked_add(bw)
-                .map(|r| r > cap.frame_w)
-                .unwrap_or(true)
-                || by
-                    .checked_add(bh)
-                    .map(|r| r > cap.frame_h)
-                    .unwrap_or(true)
-            {
-                return Err(format!(
-                    "box {bx},{by} {bw}x{bh} outside staging {}x{}",
-                    cap.frame_w, cap.frame_h
-                ));
-            }
-            let srcbox = D3D11_BOX {
-                left: bx,
-                top: by,
-                front: 0,
-                right: bx + bw,
-                bottom: by + bh,
-                back: 1,
-            };
+            // Full-frame mirror into staging: the latest desktop image
+            // stays on the GPU, so a later resize crops the new box
+            // exactly (no stretched stale frame) without waiting for a
+            // desktop delta that may never come on a static screen.
             unsafe {
                 eng.context.CopySubresourceRegion(
-                    &cap.staging, 0, 0, 0, 0, &tex, 0, Some(&srcbox as *const _),
+                    &cap.staging, 0, 0, 0, 0, &tex, 0, None,
                 );
             }
-            let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
-            if let Err(e) = unsafe {
-                eng.context.Map(
-                    &cap.staging,
-                    0,
-                    D3D11_MAP_READ,
-                    0,
-                    Some(&mut mapped as *mut _),
-                )
-            } {
-                // Name the removal cause: TDR/hung/driver behave the
-                // same at Map, and the reason decides the next move.
-                let reason = match unsafe { eng.device.GetDeviceRemovedReason() } {
-                    Ok(()) => "healthy".to_string(),
-                    Err(reason) => format!("0x{:08X}", reason.code().0 as u32),
-                };
-                return Err(format!("staging Map failed: {e:?} (removed reason={reason})"));
-            }
             let t0 = Instant::now();
-            let mut pixels = vec![0u8; (bw * bh * 4) as usize];
-            for row in 0..bh {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        (mapped.pData as *const u8).add((row * mapped.RowPitch) as usize),
-                        pixels.as_mut_ptr().add((row * bw * 4) as usize),
-                        (bw * 4) as usize,
-                    );
-                }
-            }
-            unsafe {
-                eng.context.Unmap(&cap.staging, 0);
-            }
+            let pixels = crop_staging(
+                &eng.context,
+                &eng.device,
+                &cap.staging,
+                cap.frame_w,
+                cap.frame_h,
+                bx,
+                by,
+                bw,
+                bh,
+            )?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
             eng.ingest_frame(&pixels, bw, bh)?;
             eng.render_frame()?;
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
-            Ok((us, render_us))
+            Ok((us, render_us, pixels))
         })();
         match frame_ok {
-            Ok((us, frame_render_us)) => {
+            Ok((us, frame_render_us, pixels)) => {
                 copy_us += us;
                 render_us += frame_render_us;
                 n_pre += 1;
                 n_fail = 0;
                 last_present = Instant::now();
+                staged = true;
+                last_frame = Some((pixels, bw, bh));
                 if !ready.swap(true, Ordering::AcqRel) {
                     let _ = proxy.send_event(UiCommand::GlassReady);
                 }
                 if prewarm_pending {
                     prewarm_pending = false;
                     if !visible {
-                        capture = None;
                         crate::logging::info("[nex][refract] first frame prewarmed while hidden");
                     }
                 }
@@ -1197,6 +1384,81 @@ impl Capture {
     }
 }
 
+/// Crop a panel box out of the staging mirror: exact desktop pixels,
+/// never stretched. Out-of-range crops fail (callers fall back) rather
+/// than surfacing D3D11 range faults later as device-removed.
+fn crop_staging(
+    context: &ID3D11DeviceContext,
+    device: &ID3D11Device,
+    staging: &ID3D11Texture2D,
+    fw: u32,
+    fh: u32,
+    bx: u32,
+    by: u32,
+    bw: u32,
+    bh: u32,
+) -> Result<Vec<u8>, String> {
+    if bw == 0
+        || bh == 0
+        || bx.checked_add(bw).map(|r| r > fw).unwrap_or(true)
+        || by.checked_add(bh).map(|r| r > fh).unwrap_or(true)
+    {
+        return Err(format!("box {bx},{by} {bw}x{bh} outside staging {fw}x{fh}"));
+    }
+    let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+    if let Err(e) = unsafe {
+        context.Map(
+            staging,
+            0,
+            D3D11_MAP_READ,
+            0,
+            Some(&mut mapped as *mut _),
+        )
+    } {
+        // Name the removal cause: TDR/hung/driver behave the
+        // same at Map, and the reason decides the next move.
+        let reason = match unsafe { device.GetDeviceRemovedReason() } {
+            Ok(()) => "healthy".to_string(),
+            Err(reason) => format!("0x{:08X}", reason.code().0 as u32),
+        };
+        return Err(format!("staging Map failed: {e:?} (removed reason={reason})"));
+    }
+    let mut pixels = vec![0u8; (bw * bh * 4) as usize];
+    let base = mapped.pData as *const u8;
+    let pitch = mapped.RowPitch as usize;
+    for row in 0..bh as usize {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                base.add(by as usize * pitch + row * pitch + bx as usize * 4),
+                pixels.as_mut_ptr().add(row * bw as usize * 4),
+                bw as usize * 4,
+            );
+        }
+    }
+    unsafe {
+        context.Unmap(staging, 0);
+    }
+    Ok(pixels)
+}
+
+/// Nearest-neighbor BGRA stretch: fallback only, when the staging
+fn stretch_bgra_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let mut out = vec![0u8; dw * dh * 4];
+    if sw == 0 || sh == 0 || src.len() != sw * sh * 4 {
+        return out;
+    }
+    for y in 0..dh {
+        let sy = y * sh / dh;
+        for x in 0..dw {
+            let sx = x * sw / dw;
+            out[(y * dw + x) * 4..(y * dw + x) * 4 + 4]
+                .copy_from_slice(&src[(sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4]);
+        }
+    }
+    out
+}
+
 /// Panel rect minus monitor origin, clamped to the frame. Zero area
 /// when the panel sits off the duplicated output.
 fn clamp_panel_box(
@@ -1234,15 +1496,15 @@ fn last_error_code() -> u32 {
     unsafe { windows::Win32::Foundation::GetLastError().0 }
 }
 
-fn physical_px(logical: f64, scale: f64) -> u32 {
+pub(crate) fn physical_px(logical: f64, scale: f64) -> u32 {
     ((logical * scale).round() as u32).max(1)
 }
 
-/// Align a glass window to the main panel: same rect, ordered directly
-/// below it, never activating. Shared by the host (show/resize) and the
-/// worker (position follows — nothing else re-syncs after a drag).
-fn align_glass_to_main(glass: HWND, main_sys: isize) -> Option<(u32, u32)> {
-    let (x, y, width, height) = main_rect(main_sys)?;
+/// Align a max-size glass window to the main panel: same top-left,
+/// ordered directly below it, never activating. Shared by the host
+/// (grow path) and the worker (position follows).
+fn align_glass_to_main(glass: HWND, main_sys: isize, w: u32, h: u32) -> Option<(u32, u32)> {
+    let (x, y) = main_origin(main_sys)?;
     let main = HWND(main_sys as *mut std::ffi::c_void);
     if let Err(error) = unsafe {
         SetWindowPos(
@@ -1250,15 +1512,26 @@ fn align_glass_to_main(glass: HWND, main_sys: isize) -> Option<(u32, u32)> {
             Some(main),
             x,
             y,
-            width as i32,
-            height as i32,
+            w as i32,
+            h as i32,
             SWP_NOACTIVATE,
         )
     } {
         crate::logging::warn(&format!("[nex][refract] align failed: {error:?}"));
         return None;
     }
-    Some((width, height))
+    Some((w, h))
+}
+
+/// Client origin on screen. Size deliberately excluded: tao applies
+/// set_inner_size async, so the live rect lags the request.
+fn main_origin(main_sys: isize) -> Option<(i32, i32)> {
+    let hwnd = HWND(main_sys as *mut std::ffi::c_void);
+    let mut origin = POINT { x: 0, y: 0 };
+    if unsafe { ClientToScreen(hwnd, &mut origin) }.0 == 0 {
+        return None;
+    }
+    Some((origin.x, origin.y))
 }
 
 fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {

@@ -2950,17 +2950,11 @@
           updateBtn.hidden = true;
           syncUpdateNotice();
         } else if (state.status.startsWith("Up to date")) {
-          // Brief confirmation, then hide: a click must visibly land.
+          // Silent when current: no pill, no confirmation. The status
+          // line still carries the version for anyone looking.
           updateAvailable = false;
-          syncUpdateNotice();
-          updateBtn.disabled = true;
-          updateBtnLabel.textContent = "Up to date";
-          updateBtn.hidden = false;
           window.clearTimeout(updateConfirmTimer);
-          updateConfirmTimer = window.setTimeout(() => {
-            updateBtn.disabled = false;
-            syncUpdateNotice();
-          }, 3000);
+          syncUpdateNotice();
         } else if (state.status.startsWith("Update failed") || state.status.startsWith("Could not")) {
           updateBtn.disabled = false;
           updateBtnLabel.textContent = "Retry";

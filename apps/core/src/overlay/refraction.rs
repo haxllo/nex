@@ -105,30 +105,31 @@ const REFRACT_PX: f64 = 30.0;
 const BEVEL: f64 = 38.0;
 /// Whole-pane convexity, so the flat middle still reads as solid glass.
 const DOME: f32 = 0.35;
-/// Frosted layer Gaussian sigma in px: wide enough to separate the
-/// backdrop from the UI, tight enough to keep type legible through it.
-const BLUR_SIGMA: f64 = 9.0;
-/// How far beyond the pane the capture reaches, in px. Desktop
-/// duplication renders our own (capture-excluded) windows as black, so
-/// the pixels directly under the pane are unavailable by construction.
-/// Capturing a margin and sampling into it is the only way to see real
-/// desktop content through the material — sampling the pane's own rect
-/// would give a feedback mirror of the panel above it.
+/// Frosted layer Gaussian sigma in px. This is the legibility budget:
+/// wide enough that the desktop's high-contrast detail behind the panel
+/// stops competing with the page's text, tight enough that the mirrored
+/// surroundings still read as content rather than a flat wash. (The
+/// pane's middle is ~100% frost — the sharp layer ramps to zero there —
+/// so this number alone sets how alive the centre feels.)
+const BLUR_SIGMA: f64 = 11.0;
+/// How far beyond the pane the capture reaches, in px.
+///
+/// The pane's own rect is *not* usable as a backdrop source. Our glass
+/// window is excluded from capture, but Chromium's WebView windows
+/// refuse `WDA_EXCLUDEFROMCAPTURE` with E_ACCESSDENIED, so their
+/// composited output stays in the duplicated frame. Sampling the pane
+/// rect therefore feeds nex's own pixels back into the glass — a
+/// feedback mirror that grows frame over frame. Everything the material
+/// shows is instead built from the margin, which is real desktop.
 const CROP_MARGIN: f64 = 120.0;
-/// How far the pane's centre samples outward, in px: the interior
-/// takes its backdrop from the surround, the way light entering a
-/// window continues across it. Must stay under CROP_MARGIN minus the
-/// rim bend or sampling walks off the captured region.
-const PUSH_MAX: f64 = 64.0;
-/// Extra outward offset at the rim itself, in px. The pane's own edge
-/// is inside the excluded rectangle, so the rim has to reach past it
-/// before it has anything real to bend.
-const RIM_PUSH: f64 = 10.0;
-/// Chroma bleed radius in px — how far background colour spreads along
+/// Chroma bleed radius in px - how far background colour spreads along
 /// the rim before the sharp layer takes over.
 const BLEED_PX: f64 = 11.0;
 /// Extra displacement concentrated into the outer band (1 = none).
-const EDGE_BOOST: f32 = 1.55;
+/// Kept modest: past ~2 the outermost pixels overshoot far enough that
+/// the bend stops reading as a lens edge and starts reading as a smear
+/// of whatever happened to be off to the side.
+const EDGE_BOOST: f32 = 1.15;
 /// Per-channel IOR spread. 0.055 splits red/blue by ~10% of the total
 /// bend at the rim, which is the part of dispersion the eye can see.
 const DISPERSION: f32 = 0.055;
@@ -148,8 +149,10 @@ const SATURATION: f32 = 1.38;
 /// Absorption per unit path length, per channel. Real glass eats red
 /// first, so the long grazing paths at the rim read faintly cool.
 const ABSORB: [f32; 3] = [0.021, 0.016, 0.013];
-/// Output dither; breaks banding in the smooth falloffs.
-const GRAIN: f32 = 1.6 / 255.0;
+/// Output dither. The frost layer is a very smooth gradient, which is
+/// exactly where 8-bit output bands; without this the pane shows
+/// concentric stripes over flat wallpaper.
+const GRAIN: f32 = 2.5 / 255.0;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
@@ -240,6 +243,10 @@ impl GlassLayer {
     /// restart capture for a pane nobody can see.
     pub fn sync_to_main(&self, main_sys: isize, scale: f64) {
         self.window.move_below(main_sys);
+        // Chromium rebuilds its child windows on resize, and the new
+        // ones are not capture-excluded. Re-walk the tree here so the
+        // pane never picks up a reflection of the page.
+        exclude_from_capture(HWND(main_sys as *mut std::ffi::c_void));
         let _ = self.tx.send(GlassConfig {
             visible: self.visible.load(Ordering::Acquire),
             main_sys,
@@ -357,18 +364,20 @@ impl GlassWindow {
         // Self-exclusion is mandatory, not optional: the glass window
         // sits directly under the panel, so a capture that includes
         // either one feeds the pane's own pixels back into itself and
-        // the material smears into a feedback mirror. Both windows are
-        // marked before the first capture is taken.
-        for (label, target) in [("glass", hwnd), ("main", main)] {
-            match unsafe { SetWindowDisplayAffinity(target, WDA_EXCLUDEFROMCAPTURE) } {
-                Ok(()) => {
-                    crate::logging::info(&format!("[nex][refract] {label} excluded from capture"))
-                }
-                Err(error) => crate::logging::warn(&format!(
-                    "[nex][refract] {label} exclusion failed: {error:?} (feedback risk)"
-                )),
-            }
-        }
+        // the material smears into a feedback mirror. Both top-level
+        // windows must be excluded individually.
+        exclude_from_capture(hwnd);
+        exclude_from_capture(main);
+        // Chromium's own windows (wry's host, Chrome_WidgetWin_0/1,
+        // Chrome_RenderWidgetHostHWND, its D3D intermediate) also sit
+        // over the pane. Exclusion does not inherit to children, and
+        // Chromium refuses WDA_EXCLUDEFROMCAPTURE outright with
+        // E_ACCESSDENIED, so they cannot be excluded at all. The
+        // shaders therefore never sample the pane's own rect and build
+        // the backdrop from the margin instead; see CROP_MARGIN.
+        crate::logging::info(
+            "[nex][refract] glass + panel excluded; Chromium child windows cannot be excluded, backdrop is built from the capture margin",
+        );
         crate::logging::info(&format!(
             "[nex][refract] glass top-level hwnd={hwnd:?} {width}x{height}px at ({x},{y})"
         ));
@@ -430,30 +439,115 @@ VSOut VSMain(uint vid : SV_VertexID) {
 }
 "#;
 
-/// Separable Gaussian. Taps ride at sigma/2 spacing so eight bilinear
-/// samples cover +-2 sigma: each pair stands in for the two texels its
-/// offset straddles, which is what keeps the tap count low without the
-/// kernel looking banded.
+/// Separable Gaussian over the capture crop.
+///
+/// The pane's own rect is never sampled. Our two top-level windows are
+/// capture-excluded, but Chromium's WebView windows refuse
+/// `WDA_EXCLUDEFROMCAPTURE` with E_ACCESSDENIED, so their composited
+/// output stays in the duplicated frame — reading that rect feeds nex's
+/// own pixels back in, and blurring it would smear a feedback mirror
+/// across the entire pane. Clamping each axis extends the surrounding
+/// margin inward instead: continuous, and under a blur wide enough to
+/// read as frost it is just the soft wash glass has anyway.
 const BLUR_HLSL: &str = r#"
 cbuffer B : register(b0) {
     float4 axis;   // sigmaU, sigmaV, dirX, dirY
     float4 invOut; // 1/width, 1/height
+    float4 pane;   // pane rect in crop px: x0, y0, x1, y1 (uv = px * invOut)
 };
 Texture2D srcTex : register(t0);
 SamplerState samp : register(s0);
 
+// Fill a tap from the margin when it lands inside the pane's rect.
+// Chromium's WebView windows refuse capture exclusion, so that rect
+// holds nex's own output and sampling it is a feedback mirror.
+//
+// The tap is mirrored about its nearest pane edge into the margin: a
+// single spatial mapping, so unlike row/column averaging it cannot
+// print phantom dots, unlike per-axis clamping it cannot streak, and
+// unlike triangle folding it has no tiling creases. It is C0 at the
+// edge (values match), and the frost blur softens the one derivative
+// kink along the medial axis where the nearest edge switches.
+//
+// Past the margin's reach the mirror would clamp into streaks, so the
+// deep interior blends to the flat side-mean across a band instead.
+// That mean is averaged across spread points so margin text melts
+// before entering. p is in half-res crop px; the rect halves with it.
+// Slow warp for mirror coordinates, shared by the blur and glass
+// mirrors so both layers agree. Takes crop-px, returns a crop-px
+// offset: two sine octaves, wavelengths ~150-230px, amplitude ~7px.
+float2 warpVecPx(float2 q) {
+    return float2(
+        sin(q.y * 0.043 + sin(q.x * 0.031) * 2.0),
+        cos(q.x * 0.039 + cos(q.y * 0.027) * 2.0)) * 7.0;
+}
+
+float3 sideAvg(float2 a, float2 b) {
+    float3 s = srcTex.Sample(samp, (a + (b - a) * 0.125) * invOut.xy).rgb;
+    s += srcTex.Sample(samp, (a + (b - a) * 0.375) * invOut.xy).rgb;
+    s += srcTex.Sample(samp, (a + (b - a) * 0.625) * invOut.xy).rgb;
+    s += srcTex.Sample(samp, (a + (b - a) * 0.875) * invOut.xy).rgb;
+    return s * 0.25;
+}
+
+float3 flatFill(float2 p, float2 pmn, float2 pmx) {
+    // Side lines sit a third of the way into the margin, not hugging
+    // the rect boundary: the first pixels outside the edge carry light
+    // spill and nearby-window brightness that the deeper mirror never
+    // sees, and that tone mismatch prints as a ring where the two
+    // strategies meet. Deep-margin means share the mirror's tone.
+    float ix = pmn.x / 3.0;
+    float iy = pmn.y / 3.0;
+    float3 T = sideAvg(float2(pmn.x, iy), float2(pmx.x, iy));
+    float3 B = sideAvg(float2(pmn.x, pmx.y + iy), float2(pmx.x, pmx.y + iy));
+    float3 L = sideAvg(float2(ix, pmn.y), float2(ix, pmx.y));
+    float3 R = sideAvg(float2(pmx.x + ix, pmn.y), float2(pmx.x + ix, pmx.y));
+    float2 w = (p - pmn) / (pmx - pmn);
+    return (lerp(L, R, w.x) + lerp(T, B, w.y)) * 0.5;
+}
+
+float3 fillTap(float2 p) {
+    float2 pmn = pane.xy * 0.5;
+    float2 pmx = pane.zw * 0.5;
+    if (p.x <= pmn.x || p.x >= pmx.x || p.y <= pmn.y || p.y >= pmx.y) {
+        return srcTex.Sample(samp, p * invOut.xy).rgb;
+    }
+    float dl = p.x - pmn.x, dr = pmx.x - p.x;
+    float dt = p.y - pmn.y, db = pmx.y - p.y;
+    float depth = min(min(dl, dr), min(dt, db));
+    float2 q = p;
+    if (depth == dl) q.x = pmn.x - dl;
+    else if (depth == dr) q.x = pmx.x + dr;
+    else if (depth == dt) q.y = pmn.y - dt;
+    else q.y = pmx.y + db;
+    // Break the mirror's grid alignment. The margin often holds text,
+    // and a faithful mirror reproduces its rows and columns as raised
+    // bands across the pane. A slow warp (wavelengths far above text
+    // scale, amplitude around it) wobbles those lines into organic
+    // mottling while large shapes survive — which is what frosted
+    // glass does with surface roughness.
+    q += warpVecPx(q);
+    // Margin reach in half-px (crop starts at 0, margin is uniform), so
+    // the mirror always lands on real content while it applies.
+    float reach = pmn.x;
+    float w = smoothstep(reach - 16.0, reach, depth);
+    float2 dim = 1.0 / invOut.xy;
+    float3 mirrored = srcTex.Sample(samp, clamp(q, 0.5, dim - 0.5) * invOut.xy).rgb;
+    return lerp(mirrored, flatFill(p, pmn, pmx), w);
+}
+
 float4 PSMain(float4 pos : SV_Position) : SV_Target {
-    float2 uv  = pos.xy * invOut.xy;
     float2 dir = axis.zw;
     float sig  = (dir.x != 0.0) ? axis.x : axis.y;
-    float3 acc = srcTex.Sample(samp, uv).rgb;
+    float3 acc = fillTap(pos.xy);
     float wsum = 1.0;
     [unroll]
     for (int k = 1; k <= 4; ++k) {
         float w = exp(-0.125 * k * k);          // g(k*sigma/2) = e^(-k^2/8)
-        float2 o = dir * (sig * k * 0.5);
-        acc += srcTex.Sample(samp, uv + o).rgb * w;
-        acc += srcTex.Sample(samp, uv - o).rgb * w;
+        // Tap offset is in crop-uv; pos.xy is half-res px, so convert.
+        float2 o = dir * (sig * k * 0.5) / invOut.xy;
+        acc += fillTap(pos.xy + o).rgb * w;
+        acc += fillTap(pos.xy - o).rgb * w;
         wsum += 2.0 * w;
     }
     return float4(acc / wsum, 1.0);
@@ -466,7 +560,7 @@ const GLASS_HLSL: &str = r#"
 cbuffer C : register(b0) {
     float4 invOut;      // 1/cropW, 1/cropH, grain, unused
     float4 sizeRadius;  // paneW, paneH, corner radius, rim width
-    float4 crop;        // marginX, marginY, pushMax, rimPush
+    float4 crop;        // marginX, marginY, unused, unused
     float4 state;       // hover, reveal, press, hasPointer
     float4 pointer;     // pointerX, pointerY, tiltX, pointerSigma
     float4 tiltRefract; // tiltY, refract px, bevel, dome
@@ -501,6 +595,66 @@ float hash12(float2 p) {
     return frac((p3.x + p3.y) * p3.z);
 }
 
+// Bilinear margin fill for the sharp layer. Same contract as the blur
+// pass's fillTap: mirror about the nearest pane edge (a single spatial
+// mapping — no cross-product dots, no streaks, no tiling creases), and
+// past the margin's reach blend to the flat side-mean so it never
+// clamps into streaks. The old single-sample-per-side average printed
+// phantom dots wherever sharp fetches landed inside the rect, which is
+// exactly the mid band between the rim (fetches exit to real content)
+// and the centre (pure frost). Outside the rect, sample directly.
+// Slow warp for mirror coordinates, shared with the blur mirror so
+// both layers agree. Takes crop-px, returns a crop-px offset.
+float2 warpVecPx(float2 q) {
+    return float2(
+        sin(q.y * 0.043 + sin(q.x * 0.031) * 2.0),
+        cos(q.x * 0.039 + cos(q.y * 0.027) * 2.0)) * 7.0;
+}
+
+float3 sideAvgS(float2 a, float2 b) {    float3 s = sharpTex.Sample(samp, a + (b - a) * 0.125).rgb;
+    s += sharpTex.Sample(samp, a + (b - a) * 0.375).rgb;
+    s += sharpTex.Sample(samp, a + (b - a) * 0.625).rgb;
+    s += sharpTex.Sample(samp, a + (b - a) * 0.875).rgb;
+    return s * 0.25;
+}
+
+float3 flatFillS(float2 uv, float2 p0, float2 p1) {
+    // Same deep-margin placement as the blur fill: boundary-hugging
+    // means carry spill the mirror never sees, printing as a ring.
+    float2 ix = float2(p0.x / 3.0, p0.y / 3.0);
+    float3 T = sideAvgS(float2(p0.x, ix.y), float2(p1.x, ix.y));
+    float3 B = sideAvgS(float2(p0.x, p1.y + ix.y), float2(p1.x, p1.y + ix.y));
+    float3 L = sideAvgS(float2(ix.x, p0.y), float2(ix.x, p1.y));
+    float3 R = sideAvgS(float2(p1.x + ix.x, p0.y), float2(p1.x + ix.x, p1.y));
+    float2 w = (uv - p0) / (p1 - p0);
+    return (lerp(L, R, w.x) + lerp(T, B, w.y)) * 0.5;
+}
+
+float3 fillSharp(float2 uv) {
+    float2 p0 = crop.xy * invOut.xy;
+    float2 p1 = (crop.xy + sizeRadius.xy) * invOut.xy;
+    if (uv.x <= p0.x || uv.x >= p1.x || uv.y <= p0.y || uv.y >= p1.y) {
+        return sharpTex.Sample(samp, uv).rgb;
+    }
+    float dl = uv.x - p0.x, dr = p1.x - uv.x;
+    float dt = uv.y - p0.y, db = p1.y - uv.y;
+    float depth = min(min(dl, dr), min(dt, db));
+    float2 q = uv;
+    if (depth == dl) q.x = p0.x - dl;
+    else if (depth == dr) q.x = p1.x + dr;
+    else if (depth == dt) q.y = p0.y - dt;
+    else q.y = p1.y + db;
+    // Same grid-breaking warp as the blur mirror (converted to uv),
+    // so the sharp layer agrees with the frost instead of
+    // reintroducing aligned bands.
+    q += warpVecPx(q / invOut.xy) * invOut.xy;
+    // Margin reach in uv (crop starts at 0, margin is uniform).
+    float reach = p0.x;
+    float w = smoothstep(reach - 16.0 * invOut.x, reach, depth);
+    float3 mirrored = sharpTex.Sample(samp, clamp(q, 0.5 * invOut.xy, 1.0 - 0.5 * invOut.xy)).rgb;
+    return lerp(mirrored, flatFillS(uv, p0, p1), w);
+}
+
 float4 PSMain(float4 pos : SV_Position) : SV_Target {
     float2 px = pos.xy;
     float2 half_ = sizeRadius.xy * 0.5;
@@ -512,15 +666,14 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target {
     float rim  = 1.0 - lens;               // 1 at the very edge
     float reveal = state.y;
 
-    // The captured frame is the pane plus a margin, and the pane's own
-    // rect is black in it (our windows are capture-excluded). So the
-    // material reads its backdrop from the margin: every fetch is
-    // offset outward, growing toward the centre, the way light crossing
-    // a window keeps arriving from outside it. Without this the pane
-    // samples its own excluded rectangle and either goes black or
-    // mirrors the panel stacked above it.
-    float2 outward = normalize(rel + float2(1e-4, 1e-4)) * (crop.z * lens + crop.w);
-    float2 uv = (crop.xy + px + outward) * invOut.xy;
+    // Pane pixel -> capture-crop uv. Chromium's WebView windows reject
+    // WDA_EXCLUDEFROMCAPTURE (E_ACCESSDENIED), so the pane's own rect
+    // in the capture holds nex's own output and must never be sampled
+    // directly — that is a feedback mirror. `fillSharp` below blends
+    // the four margin sides bilinearly instead: smooth in both axes,
+    // with no streaks and no tiling creases. The frost layer arrives
+    // already filled by the blur pass, so it samples straight.
+    float2 uv = (crop.xy + px) * invOut.xy;
 
     // ── surface normal from the bevel height field ───────────────────
     float hx = lensT(px + float2(1.0, 0.0)) - lensT(px - float2(1.0, 0.0));
@@ -580,16 +733,22 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target {
     frost += max(halo - frost, 0.0) * (0.35 * rim);
 
     // Per-channel fetch is real dispersion: red bends least, blue most.
+    // The sharp layer still holds nex's own output inside the pane rect
+    // (only the frost pass is filled), so these go through the same
+    // bilinear margin fill as the blur taps.
     float3 sharp;
-    sharp.r = sharpTex.Sample(samp, uv + oR).r;
-    sharp.g = sharpTex.Sample(samp, uv + oG).g;
-    sharp.b = sharpTex.Sample(samp, uv + oB).b;
+    sharp.r = fillSharp(uv + oR).r;
+    sharp.g = fillSharp(uv + oG).g;
+    sharp.b = fillSharp(uv + oB).b;
 
     // Frost across the flat middle, refracted detail at the rim. The
-    // centre leans on frost because the sharp fetch there would be a
-    // magnified copy of one point; the rim wants the sharp layer so the
-    // bent edge stays crisp and coloured.
-    float mixSharp = saturate(0.06 + 0.88 * rim * rim);
+    // rim wants the sharp layer so the bend stays crisp, but it must
+    // not reach full strength right at the cut: the outermost pixels
+    // sit where the surface turns away hardest, and an unmasked,
+    // fully-sharp fetch there reads as a hard band of raw colour
+    // rather than as an edge. Ramp it in over the first few pixels.
+    float rimMix = smoothstep(0.0, 0.35, rim);
+    float mixSharp = saturate(0.06 + 0.88 * rim * rim) * rimMix;
     float3 col = lerp(frost, sharp, mixSharp);
 
     // ── colour ───────────────────────────────────────────────────────
@@ -603,18 +762,23 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target {
     col *= exp(-tintSat.xyz * (tiltRefract.z * (path - 1.0)));
 
     // ── light ────────────────────────────────────────────────────────
-    float fres = pow(1.0 - saturate(N.z), 2.0);
+    // Rim light has to stay directional. A uniform term here (even a
+    // small one) draws a bright ring all the way round and the pane
+    // reads as a picture frame rather than as glass: real glass only
+    // catches light on the side turned toward the source, and goes
+    // quiet on the rest.
+    float fres = pow(1.0 - saturate(N.z), 3.0);
     float2 nOut = normalize(n2 + float2(1e-5, 1e-5));
     float2 L = normalize(lightSpec.xy);
     // Half vector for a viewer straight ahead: H is (L + V) normalized.
     float3 H = normalize(float3(L.x, L.y, 2.0));
 
-    float spec  = pow(saturate(dot(N, H)), lightSpec.w) * lightSpec.z;
-    float lit   = fres * (0.30 + 1.05 * saturate(dot(nOut, L))) * rim;
-    float bounce = fres * (0.30 + 1.05 * saturate(dot(-nOut, L))) * rim;
+    float key  = saturate(dot(nOut, L));
+    float fill = saturate(dot(-nOut, L));
+    float spec = pow(saturate(dot(N, H)), lightSpec.w) * lightSpec.z;
 
-    col += lit * bleedEdge.w * KEY_TINT;
-    col += bounce * bleedEdge.w * 0.30 * FILL_TINT;
+    col += fres * pow(key, 2.0) * bleedEdge.w * KEY_TINT;
+    col += fres * pow(fill, 2.0) * bleedEdge.w * 0.22 * FILL_TINT;
     col += spec * KEY_TINT;
 
     // Pressing swells the surface under the pointer; a hair of lift
@@ -688,8 +852,16 @@ fn compile(source: &str, entry: &str, profile: &str) -> Result<Vec<u8>, String> 
                 .trim()
                 .to_string()
         };
-        if !text.is_empty() {
+        // fxc reports warnings through the same blob as errors. Warnings
+        // (X4000 and friends) still produce a usable shader, so only
+        // lines containing an actual error fail the build; the rest are
+        // logged for what they are.
+        let failed = text.lines().any(|line| line.contains("error"));
+        if failed {
             return Err(format!("{profile} {entry}: {text}"));
+        }
+        if !text.is_empty() {
+            crate::logging::info(&format!("[nex][refract] {profile} {entry}: {text}"));
         }
     }
     if hr != 0 {
@@ -1124,6 +1296,14 @@ impl Engine {
                         dir.1,
                     ],
                     [1.0 / hw as f32, 1.0 / hh as f32, 0.0, 0.0],
+                    // Pane rect in crop px; the blur folds taps onto the
+                    // margin rather than reading our own output back in.
+                    [
+                        self.margin as f32,
+                        self.margin as f32,
+                        (self.margin + self.width) as f32,
+                        (self.margin + self.height) as f32,
+                    ],
                 ],
             );
             unsafe {
@@ -1145,6 +1325,165 @@ impl Engine {
     /// duplication texture means Windows really did hand us a black
     /// frame, black only after the copy means the copy is at fault,
     /// black only in the output means the passes are.
+    /// Dump a full pane-width row of `tex` as ASCII brightness: one line
+    /// per call, so horizontal banding across the whole pane (edge vs
+    /// middle vs centre zones) reads directly. Temporary diagnostic.
+    /// `mark` draws tick labels at the given x positions (pane px) to
+    /// correlate brightness steps with known transition depths.
+    fn dump_row(
+        &self,
+        label: &str,
+        tex: &ID3D11Texture2D,
+        format: DXGI_FORMAT,
+        top: u32,
+        height: u32,
+        mark: &[u32],
+    ) {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
+        };
+        const RAMP: &[u8] = b" .:-=+*#%@";
+        let w = self.width.max(1);
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe {
+            let _ = self.device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: w,
+                    Height: height.max(1),
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: format,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                },
+                None,
+                Some(&mut staging as *mut _),
+            );
+        }
+        let Some(staging) = staging else { return };
+        // Downsample x4 horizontally so a ~700px row fits in the log.
+        let box_ = D3D11_BOX {
+            left: 0,
+            top,
+            right: w,
+            bottom: top + height.max(1),
+            front: 0,
+            back: 1,
+        };
+        unsafe {
+            self.context.CopySubresourceRegion(
+                &staging, 0, 0, 0, 0, tex, 0,
+                Some(&box_ as *const _),
+            );
+        }
+        let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+        if unsafe { self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.is_err() {
+            return;
+        }
+        unsafe {
+            let p = mapped.pData as *const u8;
+            let pitch = mapped.RowPitch as usize;
+            for r in 0..height.max(1) as usize {
+                let mut row = String::new();
+                let mut x = 0usize;
+                while x < w as usize {
+                    let o = r * pitch + x * 4;
+                    let lum = (*p.add(o) as u32 + *p.add(o + 1) as u32 + *p.add(o + 2) as u32) / 3;
+                    row.push(RAMP[(lum as usize * (RAMP.len() - 1)) / 256] as char);
+                    x += 2;
+                }
+                crate::logging::info(&format!("[nex][refract] row {label}: |{row}|"));
+            }
+            // Tick ruler: marks the known transition depths so a step
+            // landing on one identifies its cause.
+            let mut ruler = String::new();
+            let mut x = 0u32;
+            while x < w {
+                if mark.contains(&x) {
+                    ruler.push('^');
+                } else {
+                    ruler.push(' ');
+                }
+                x += 2;
+            }
+            crate::logging::info(&format!("[nex][refract] marks: |{ruler}|"));
+            self.context.Unmap(&staging, 0);
+        }
+    }
+
+    /// Dump a W×H patch of `tex` as ASCII brightness so a visual
+    /// artifact can be inspected without a screenshot (the glass window
+    /// is capture-excluded, so screenshots never show it). Temporary
+    /// diagnostic for the centre checkerboard.
+    fn dump_patch(&self, label: &str, tex: &ID3D11Texture2D, format: DXGI_FORMAT, left: u32, top: u32) {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
+        };
+        const W: u32 = 120;
+        const H: u32 = 40;
+        const RAMP: &[u8] = b" .:-=+*#%@";
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe {
+            let _ = self.device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: W,
+                    Height: H,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: format,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                },
+                None,
+                Some(&mut staging as *mut _),
+            );
+        }
+        let Some(staging) = staging else { return };
+        let box_ = D3D11_BOX {
+            left,
+            top,
+            right: left + W,
+            bottom: top + H,
+            front: 0,
+            back: 1,
+        };
+        unsafe {
+            self.context.CopySubresourceRegion(
+                &staging, 0, 0, 0, 0, tex, 0,
+                Some(&box_ as *const _),
+            );
+        }
+        let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+        if unsafe { self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.is_err() {
+            return;
+        }
+        let mut rows = Vec::new();
+        unsafe {
+            let p = mapped.pData as *const u8;
+            let pitch = mapped.RowPitch as usize;
+            for y in 0..H as usize {
+                let mut row = String::with_capacity(W as usize);
+                for x in 0..W as usize {
+                    let o = y * pitch + x * 4;
+                    let lum = (*p.add(o) as u32 + *p.add(o + 1) as u32 + *p.add(o + 2) as u32) / 3;
+                    row.push(RAMP[(lum as usize * (RAMP.len() - 1)) / 256] as char);
+                }
+                rows.push(row);
+            }
+            self.context.Unmap(&staging, 0);
+        }
+        crate::logging::info(&format!("[nex][refract] patch {label} @({left},{top}):"));
+        for row in rows {
+            crate::logging::info(&format!("[nex][refract] |{row}|"));
+        }
+    }
+
     fn read_pixels(
         &self,
         tex: &ID3D11Texture2D,
@@ -1213,35 +1552,86 @@ impl Engine {
     /// Probe the whole chain in one go: duplication frame → capture
     /// texture → finished composite.
     fn probe(&self, acquired: &ID3D11Texture2D, region: D3D11_BOX) {
-        let (hw, hh) = (
-            self.width.div_ceil(2).max(1),
-            self.height.div_ceil(2).max(1),
-        );
-        let mid = (self.height / 2).min(hh.saturating_sub(1));
+        // Frost targets track the crop, so probe those dims too.
+        let hh = self.crop_height().div_ceil(2).max(1);
+        // Row through the middle of the pane, in crop space. The frost
+        // targets are half-resolution crops, so their rows are halved too.
+        let row = self.margin + self.height / 2;
+        let frost_mid = (row / 2).min(hh.saturating_sub(1));
         let local = D3D11_BOX {
-            left: 0,
-            top: mid,
-            right: 10.min(self.width),
-            bottom: mid + 1,
+            left: self.margin,
+            top: row,
+            right: self.margin + 10,
+            bottom: row + 1,
             front: 0,
             back: 1,
         };
         let local_frost = D3D11_BOX {
-            left: 0,
-            top: mid,
-            right: 10.min(hw),
-            bottom: mid + 1,
+            left: self.margin / 2,
+            top: frost_mid,
+            right: self.margin / 2 + 10,
+            bottom: frost_mid + 1,
+            front: 0,
+            back: 1,
+        };
+        // The pane's centre is the spot that used to read as the
+        // capture's black hole; sample there explicitly.
+        let centre = D3D11_BOX {
+            left: self.margin + self.width / 2 - 5,
+            top: row,
+            right: self.margin + self.width / 2 + 5,
+            bottom: row + 1,
+            front: 0,
+            back: 1,
+        };
+        let centre_frost = D3D11_BOX {
+            left: (self.margin + self.width / 2).saturating_sub(5) / 2,
+            top: frost_mid,
+            right: (self.margin + self.width / 2).saturating_add(5) / 2,
+            bottom: frost_mid + 1,
             front: 0,
             back: 1,
         };
         let remote = D3D11_BOX {
             left: region.left,
-            top: region.top + mid,
+            top: region.top + row,
             right: region.left + 10.min(region.right - region.left),
-            bottom: region.top + mid + 1,
+            bottom: region.top + row + 1,
             front: 0,
             back: 1,
         };
+        // The decisive sample: the pane's own centre, its inner edge,
+        // and the margin just outside it, all from the same duplication
+        // frame. If the centre is black while the margin is not, the
+        // exclusion is what hollows the pane out and the fill strategy
+        // has to account for it.
+        let pt = |x: u32, y: u32| {
+            let b = D3D11_BOX {
+                left: x,
+                top: y,
+                right: x + 1,
+                bottom: y + 1,
+                front: 0,
+                back: 1,
+            };
+            self.read_pixels(acquired, self.source_format, b).unwrap_or_default()
+        };
+        let m = self.margin as u32;
+        let centre_px = pt(
+            region.left + m + self.width / 2,
+            region.top + m + self.height / 2,
+        );
+        let edge = pt(
+            region.left + m + self.width / 2,
+            region.top + m + 2,
+        );
+        let margin = pt(
+            region.left + m + self.width / 2,
+            region.top + (m / 2).max(1),
+        );
+        crate::logging::info(&format!(
+            "[nex][refract] probe edge[{edge}] margin[{margin}] centre[{centre_px}]"
+        ));
         let dup = self.read_pixels(acquired, self.source_format, remote).unwrap_or_default();
         let cap = self.read_pixels(&self.sharp.tex, self.source_format, local).unwrap_or_default();
         let frost = self
@@ -1252,9 +1642,50 @@ impl Engine {
             .as_ref()
             .and_then(|t| self.read_pixels(t, DXGI_FORMAT_B8G8R8A8_UNORM, local))
             .unwrap_or_default();
+        // Centre samples: what the pane's middle actually resolves to.
+        let frost_c = self
+            .read_pixels(&self.frost_b.tex, DXGI_FORMAT_B8G8R8A8_UNORM, centre_frost)
+            .unwrap_or_default();
+        let out_c = self
+            .back_tex
+            .as_ref()
+            .and_then(|t| self.read_pixels(t, DXGI_FORMAT_B8G8R8A8_UNORM, centre))
+            .unwrap_or_default();
         crate::logging::info(&format!(
             "[nex][refract] probe dup[{dup}] cap[{cap}] frost[{frost}] out[{out}]"
         ));
+        crate::logging::info(&format!(
+            "[nex][refract] probe centre frost[{frost_c}] out[{out_c}]"
+        ));
+        // ASCII picture of the pane centre in each stage: sharp capture,
+        // frost, and finished composite. The checkerboard's scale and
+        // orientation identify which stage introduces it. Wide enough to
+        // tell source content (text, wallpaper) from pipeline artifact.
+        let cx = self.margin + self.width / 2;
+        let cy = self.margin + self.height / 2;
+        self.dump_patch("sharp", &self.sharp.tex, self.source_format, cx - 60, cy - 20);
+        self.dump_patch(
+            "frost",
+            &self.frost_b.tex,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            (cx - 60) / 2,
+            (cy - 20) / 2,
+        );
+        if let Some(back) = self.back_tex.as_ref() {
+            self.dump_patch("out", back, DXGI_FORMAT_B8G8R8A8_UNORM, cx - 60, cy - 20);
+        }
+        // Full-width rows of the finished composite (pane space, no
+        // margin offset): edge vs middle vs centre zones in one line.
+        // Marks: rim width, mirror/flat blend band, half-width.
+        if let Some(back) = self.back_tex.as_ref() {
+            let marks = [
+                (RIM_WIDTH * self.scale) as u32,
+                self.margin - 32,
+                self.margin,
+                self.width / 2,
+            ];
+            self.dump_row("out-mid", back, DXGI_FORMAT_B8G8R8A8_UNORM, self.height / 2, 1, &marks);
+        }
     }
 
     /// Point the capture texture at the desktop's real pixel format.
@@ -1329,7 +1760,14 @@ impl Engine {
     /// backbuffer undefined the moment Present returns.
     fn draws(&mut self, motion: &Motion, pointer: (f32, f32), pointer_in: bool) {
         let (w, h, scale) = (self.width, self.height, self.scale);
-        let (hw, hh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+        // Frost targets are sized to the *capture crop*, not the pane —
+        // the blur pass works on the crop. Taking half the pane instead
+        // leaves the viewport short of the target and every tap lands
+        // past its edge, which reads as a black pane.
+        let (hw, hh) = (
+            self.crop_width().div_ceil(2).max(1),
+            self.crop_height().div_ceil(2).max(1),
+        );
         // Every optical constant is scaled here and nowhere else.
         let mut params = self.glass_params;
         write_params(
@@ -1342,12 +1780,7 @@ impl Engine {
                     0.0,
                 ],
                 [w as f32, h as f32, 8.0 * scale as f32, (RIM_WIDTH * scale) as f32],
-                [
-                    self.margin as f32,
-                    self.margin as f32,
-                    (PUSH_MAX * scale) as f32,
-                    (RIM_PUSH * scale) as f32,
-                ],
+                [self.margin as f32, self.margin as f32, 0.0, 0.0],
                 [motion.hover, motion.reveal, motion.press, f32::from(pointer_in)],
                 [
                     pointer.0,
@@ -2044,6 +2477,44 @@ fn last_error_code() -> u32 {
     unsafe { windows::Win32::Foundation::GetLastError().0 }
 }
 
+/// Mark one window (and its whole subtree) as invisible to screen
+/// capture. WDA_EXCLUDEFROMCAPTURE does not inherit to children, so a
+/// WebView has to be walked explicitly or Chromium's composited output
+/// lands in the capture and the pane mirrors its own text.
+fn exclude_from_capture(hwnd: HWND) -> u32 {
+    if hwnd.0.is_null() {
+        return 0;
+    }
+    match unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+        Ok(()) => {}
+        Err(error) => crate::logging::warn(&format!(
+            "[nex][refract] exclusion of {hwnd:?} failed: {error:?} (feedback risk)"
+        )),
+    }
+    1 + exclude_descendants(hwnd)
+}
+
+fn exclude_descendants(parent: HWND) -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::EnumChildWindows;
+    // EnumChildWindows hands each window to the callback; a thread-local
+    // counter lets the plain `extern "system"` fn tally the subtree,
+    // which is how we can tell "no children yet" (the WebView is still
+    // being built) from "excluded nothing".
+    thread_local! {
+        static FOUND: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    FOUND.with(|f| f.set(0));
+    unsafe extern "system" fn walk(hwnd: HWND, _: LPARAM) -> BOOL {
+        let n = exclude_from_capture(hwnd);
+        FOUND.with(|f| f.set(f.get() + n));
+        BOOL(1)
+    }
+    unsafe {
+        let _ = EnumChildWindows(Some(parent), Some(walk), LPARAM(0));
+    }
+    FOUND.with(|f| f.get())
+}
+
 fn physical_px(logical: f64, scale: f64) -> u32 {
     ((logical * scale).round() as u32).max(1)
 }
@@ -2052,25 +2523,22 @@ fn physical_px(logical: f64, scale: f64) -> u32 {
 mod tests {
     use super::*;
 
-    /// The shader samples the capture crop outward from the pane by at
-    /// most `PUSH_MAX * lens + RIM_PUSH`, where `lens` peaks at 1 in the
-    /// centre. If that ever exceeds the captured margin, the pane starts
-    /// reading past the edge of its own crop and the material degrades
-    /// into clamped smears — which is the same failure mode as the
-    /// feedback mirror it replaced, and much harder to see.
+    /// A redirect travels from inside the pane out to the nearest edge
+    /// (at most half the pane's width from its centre), then the rim
+    /// bend and the bleed taps are added on top. All of it has to stay
+    /// inside the captured margin, or the pane reads past its own crop
+    /// and clamps into bright smears along the border.
     #[test]
-    fn outward_push_stays_inside_the_capture_margin() {
-        let worst = PUSH_MAX + RIM_PUSH;
+    fn rim_bend_fits_inside_the_capture_margin() {
+        // Worst case: a redirect from the pane's centre (half the pane
+        // away) is *not* what limits us, because the redirect always
+        // lands on the pane's edge, which is already margin px from the
+        // crop border. What must fit is the bend plus bleed applied to
+        // that redirected position.
         assert!(
-            worst < CROP_MARGIN,
-            "outward push {worst}px reaches past the {CROP_MARGIN}px capture margin"
-        );
-        // And it must clear the rim bend, which is added on top of it.
-        assert!(
-            worst + REFRACT_PX < CROP_MARGIN,
-            "push plus rim bend ({:.0}px) exceeds the {:.0}px margin",
-            worst + REFRACT_PX,
-            CROP_MARGIN
+            REFRACT_PX + BLEED_PX + BLUR_SIGMA * 3.0 < CROP_MARGIN,
+            "rim bend {:.0}px + bleed + blur exceeds the {CROP_MARGIN}px margin",
+            REFRACT_PX
         );
     }
 

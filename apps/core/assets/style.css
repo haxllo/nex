@@ -1933,6 +1933,17 @@ html.glass-native #panel {
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
 }
 
+/* Native glass owns the blur. Any page-side backdrop-filter would
+   re-blur the glass beneath it, stacking a second frosted band over
+   the material (selection and hover bands especially). Keep the
+   translucent tints, drop every blur. */
+html.glass-native *,
+html.glass-native *::before,
+html.glass-native *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
 html.glass-native #divider {
   background: color-mix(in srgb, var(--text) 16%, transparent);
 }

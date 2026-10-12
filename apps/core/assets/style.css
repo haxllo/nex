@@ -1942,23 +1942,19 @@ html.glass-native #divider {
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {
   background: #000000;
-  /* No painted stroke or outer ring: on pure black they stack into a
-     thick-looking edge. Depth comes from the soft shadow alone. */
-  border-color: transparent;
-  box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.36),
-    inset 0 1px 0 var(--panel-highlight),
-    inset 1px 0 0 var(--panel-sheen),
-    inset -1px 0 0 var(--panel-sheen),
-    inset 0 -1px 0 var(--panel-bottom-edge);
+  /* No painted stroke, ring, or inset highlights: on pure black every
+     1px light line reads double. The transparent border is dyed black
+     too, so no acrylic sliver leaks around the edge. Depth comes from
+     the soft drop shadow alone. */
+  border-color: #000000;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.36);
 }
 
 html.bg-white #panel {
   background: #ffffff;
-  border-color: transparent;
+  border-color: #ffffff;
   box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    0 12px 40px rgba(0, 0, 0, 0.28);
 }
 
 html.glass-native .row .icon.placeholder {

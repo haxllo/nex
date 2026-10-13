@@ -380,7 +380,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
     let mut show_arm_at: Option<Instant> = None;
-    let mut previous_foreground: Option<HWND> = None;
+    // Previously-foregrounded windows, newest last (capped). Pushed on
+    // Show and on every genuine focus loss; drained (dead pruned) on
+    // hide. A single slot restores stale windows after multi-window
+    // flows (settings open/close, transient popups).
+    let mut fg_stack: Vec<HWND> = Vec::new();
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
     // threads from a previous cycle can detect they are outdated and
@@ -853,9 +857,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     show_cmd_at = Some(Instant::now());
-                    if previous_foreground.is_none() {
-                        previous_foreground = capture_previous_foreground(hwnd);
-                    }
+                    push_fg_stack(&mut fg_stack, hwnd);
                     if webview.is_none() {
                         ready = false;
                         // Mark the show as pending before building the
@@ -1003,7 +1005,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_previous_foreground(&mut previous_foreground);
+                    restore_fg_stack(&mut fg_stack);
                     crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     let is_visible = unsafe {
@@ -1058,7 +1060,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_previous_foreground(&mut previous_foreground);
+                    restore_fg_stack(&mut fg_stack);
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
@@ -1476,6 +1478,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = true;
                 }
                 if !focused {
+                    // Track the window that took foreground for the restore
+                    // stack (Raycast-style foreground history). Filtered to
+                    // foreign live non-shell windows inside.
+                    push_fg_stack(&mut fg_stack, hwnd);
                     let picker_active = state
                         .lock()
                         .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
@@ -2810,18 +2816,28 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
     Some((r.left, r.top, r.right, r.bottom))
 }
 
-fn capture_previous_foreground(overlay_hwnd: HWND) -> Option<HWND> {
+/// Push the current foreground window for later restore. Skips null,
+/// self, shell, dead, and consecutive-duplicate windows. Called on Show
+/// and on genuine focus loss so the restore target tracks reality
+/// instead of a stale single slot.
+fn push_fg_stack(stack: &mut Vec<HWND>, overlay_hwnd: HWND) {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() || foreground == overlay_hwnd {
-        return None;
+        return;
     }
     if unsafe { IsWindow(foreground) } == 0 {
-        return None;
+        return;
     }
     if shell_window().is_some_and(|shell| shell == foreground) {
-        return None;
+        return;
     }
-    Some(foreground)
+    if stack.last().is_some_and(|&top| top == foreground) {
+        return;
+    }
+    stack.push(foreground);
+    while stack.len() > 8 {
+        stack.remove(0);
+    }
 }
 
 fn shell_window() -> Option<HWND> {
@@ -2847,16 +2863,18 @@ fn shell_window() -> Option<HWND> {
     }
 }
 
-fn restore_previous_foreground(previous: &mut Option<HWND>) {
-    let Some(target) = previous
-        .take()
-        .filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0)
-    else {
-        return;
-    };
-    unsafe {
-        SetForegroundWindow(target);
+/// Restore the newest live window from the stack, pruning dead ones.
+/// Clears the rest: each show cycle starts tracking fresh.
+fn restore_fg_stack(stack: &mut Vec<HWND>) {
+    while let Some(target) = stack.pop() {
+        if unsafe { IsWindow(target) } != 0 {
+            unsafe {
+                SetForegroundWindow(target);
+            }
+            break;
+        }
     }
+    stack.clear();
 }
 
 fn hide_overlay_window(

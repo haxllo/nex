@@ -56,6 +56,27 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// dispatch is gated so the helper and the hook can never double-toggle.
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Outbound command pipe to the helper (simulation transport).
+/// Connected best-effort during helper setup; `None` when down.
+static HELPER_CMD: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Send one allowlisted simulation command (`play_pause`, `copy`, …).
+/// Returns false when the pipe is down.
+pub(crate) fn send_helper_key(cmd: &str) -> bool {
+    let mut line = cmd.to_string();
+    line.push('\n');
+    if let Ok(mut slot) = HELPER_CMD.lock() {
+        if let Some(pipe) = slot.as_mut() {
+            use std::io::Write;
+            if pipe.write_all(line.as_bytes()).is_ok() {
+                return true;
+            }
+        }
+        *slot = None;
+    }
+    false
+}
+
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.
@@ -137,7 +158,6 @@ pub(crate) fn finish_bare_win_press() {
 pub(crate) fn set_suppress_focus_escape(suppress: bool) {
     SUPPRESS_FOCUS_ESCAPE.store(suppress, Ordering::SeqCst);
 }
-
 /// Check if the configured hotkey is currently pressed using
 /// GetAsyncKeyState.  Works regardless of foreground window or thread
 /// context.  Used by the polling fallback thread (runtime_loop) when
@@ -919,6 +939,25 @@ impl HotkeyListener {
                                 return;
                             }
                             logging::info("[nex] hotkey: using elevated helper for detection");
+                            // Helper command pipe (simulation transport):
+                            // connected best-effort for send_helper_key.
+                            // Transports stay on their native APIs (media
+                            // sessions, clipboard); this exists for targets
+                            // only elevated input reaches.
+                            let cmd_pipe_name = format!(
+                                r"\\.\pipe\NexHelperCmd\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&cmd_pipe_name) {
+                                Ok(cmd_file) => {
+                                    if let Ok(mut slot) = HELPER_CMD.lock() {
+                                        *slot = Some(cmd_file);
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper cmd pipe unavailable: {e}"
+                                )),
+                            }
                             // Helper log pipe: forward helper
                             // diagnostics into nex's log. Best-effort — the
                             // hotkey pipe already proved the helper is alive.
@@ -1824,4 +1863,5 @@ mod tests {
     #[test] fn dispatch_plain_combo_uses_system() { assert_eq!(dispatch_for(0x20, false, true, false), DispatchReason::SystemHotkey); }
     #[test] fn dispatch_numpad_bounds() { assert_eq!(dispatch_for(0x6F, false, true, false), DispatchReason::NumpadKey); assert_eq!(dispatch_for(0x5F, false, true, false), DispatchReason::SystemHotkey); assert_eq!(dispatch_for(0x70, false, true, false), DispatchReason::SystemHotkey); }
     #[test] fn dispatch_refused_wins_over_win() { assert_eq!(dispatch_for(0x20, true, true, true), DispatchReason::RefusedDemoted); }
+    #[test] fn send_helper_key_down_without_pipe() { assert!(!send_helper_key("play_pause")); }
 }

@@ -9,7 +9,7 @@
 
 :root {
   --radius: 20px;
-  --row-radius: 6px;
+  --row-radius: 14px;
   --pad-x: 16px;
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 

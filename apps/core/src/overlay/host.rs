@@ -2499,17 +2499,18 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
     // Frame rendering stays on: with DEFAULT corners DWM draws the rounded
     // silhouette and clips the whole window (child included) itself.
-    if opaque_panel {
-        let border: u32 = match state
-            .lock()
-            .map(|s| s.panel_background)
-            .unwrap_or(crate::config::PanelBackground::Glass)
-        {
-            crate::config::PanelBackground::White => 0x00FF_FFFF,
-            _ => 0x0000_0000,
-        };
-        let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
-    }
+    // Dye the 1px DWM border in every mode: the default black reads
+    // harsh against glass. Opaque modes match their panel; glass
+    // matches its acrylic tint (COLORREF is 0x00BBGGRR, no alpha).
+    let panel = state.lock().map(|s| s.panel_background).unwrap_or(crate::config::PanelBackground::Glass);
+    let dark = state.lock().map(|s| s.theme == crate::overlay::model::Theme::Dark).unwrap_or(true);
+    let border: u32 = match panel {
+        crate::config::PanelBackground::White => 0x00FF_FFFF,
+        crate::config::PanelBackground::Black => 0x0000_0000,
+        crate::config::PanelBackground::Glass if dark => 0x001C_1614,
+        crate::config::PanelBackground::Glass => 0x00FA_F7F5,
+    };
+    let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
     let available = if opaque_panel {
         // Opaque panels paint solid over an opaque WebView surface
         // (ClearType): no backdrop, and no acrylic fallback — any

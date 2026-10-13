@@ -376,7 +376,6 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
-    let mut painted_waiting_for_glass = false;
     let mut previous_foreground: Option<HWND> = None;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
@@ -482,14 +481,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             first_resize_after_show = true;
                             push_state(&webview, &state, &icon_cache, true);
                             show_pending = true;
-                            painted_waiting_for_glass = false;
+
                         }
                     }
                     UiCommand::GlassReady => {
-                        if show_pending && painted_waiting_for_glass {
-                            painted_waiting_for_glass = false;
-                            try_send_ui(&proxy, UiCommand::Painted);
-                        } else if OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                        if OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
                             && glass_active(&state)
                         {
@@ -854,7 +850,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
                         show_pending = true;
-                        painted_waiting_for_glass = false;
+
                         match build_webview(
                             &window,
                             &state,
@@ -882,7 +878,23 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebviewReady is already queued and completes the
                         // show via show_pending.
                         show_pending = true;
-                        painted_waiting_for_glass = false;
+
+                        return;
+                    }
+                    // Already up: don't replay the full show pipeline
+                    // (position, push, Painted roundtrip can flash). The
+                    // page is current (Apply pushes while visible), so
+                    // just re-assert foreground + input and disarm any
+                    // stale deferred-hide.
+                    if !show_pending
+                        && OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                        && state.lock().map(|s| s.visible).unwrap_or(false)
+                    {
+                        deferred_hide_armed.store(false, Ordering::SeqCst);
+                        deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
+                        force_foreground(hwnd);
+                        window.set_focus();
+                        focus_input(&webview);
                         return;
                     }
                     // Set show_pending FIRST so spurious Focused(false) during
@@ -890,7 +902,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // trigger Escape (which would desync OverlayState from
                     // the actual window state).
                     show_pending = true;
-                    painted_waiting_for_glass = false;
+
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
                     // Bump the epoch so any in-flight deferred-hide thread
@@ -1004,7 +1016,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     was_focused = false;
                     show_pending = false;
-                    painted_waiting_for_glass = false;
+
                     // Clear deferred-hide flag — the overlay is already
                     // hidden, no need for the thread to fire Escape.
                     deferred_hide_armed.store(false, Ordering::SeqCst);
@@ -1038,7 +1050,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = false;
                     focus_reassert_used = false;
                     show_pending = false;
-                    painted_waiting_for_glass = false;
+
                     warm_gen = warm_gen.wrapping_add(1);
                     let generation = warm_gen;
                     let delay = state
@@ -1144,20 +1156,23 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         if !should_show {
                             crate::runtime::log_info("[nex] host Painted: stale (visible=false), skipping show");
                             show_pending = false;
-                            painted_waiting_for_glass = false;
+
                             return;
                         }
                         if glass_active(&state)
                             && glass_layer.as_ref().is_some_and(|layer| !layer.is_ready())
                         {
-                            painted_waiting_for_glass = true;
+                            // Glass frame not ready yet: show the panel now
+                            // anyway (its backdrop covers the gap) and let
+                            // the pending GlassReady reveal the layer —
+                            // blocking the whole panel on first capture
+                            // reads as a hung show.
                             crate::runtime::log_info(
-                                "[nex] host Painted: waiting for first captured glass frame",
+                                "[nex] host Painted: glass frame pending, showing panel first",
                             );
-                            return;
                         }
                         show_pending = false;
-                        painted_waiting_for_glass = false;
+
                         last_show = Instant::now();
                         was_focused = false;
                         focus_reassert_used = false;
@@ -1194,11 +1209,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 layer.set_visible(true);
                             }
                         }
-                        // Reassert the focused page input after native window
-                        // activation; the pre-show focus above closes the
-                        // immediate-typing race while this completes handoff.
-                        focus_input(&webview);
-                        // SetWindowPos(SWP_NOACTIVATE) is used on hide to keep
+                        // Re-assert topmost Z-position. When the overlay
                         // Explorer from exposing the taskbar. Depending on
                         // WebView2/tao focus notifications, the next show can
                         // otherwise remain marked unfocused even though the
@@ -1450,6 +1461,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let armed = deferred_hide_armed.clone();
                         let epoch_clone = deferred_hide_epoch.clone();
                         let my_epoch = deferred_hide_epoch.load(Ordering::SeqCst);
+                        let hwnd_raw = hwnd as isize;
                         std::thread::Builder::new()
                             .name("nex-deferred-hide".into())
                             .spawn(move || {
@@ -1461,8 +1473,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     return;
                                 }
                                 let dismiss_picker = state_clone.lock().ok().and_then(|s| {
+                                    // Native ownership beats the logical flag:
+                                    // a missed Focused(true) (focus bouncing
+                                    // off a just-hidden window) leaves
+                                    // has_focus false while the overlay still
+                                    // owns the foreground. Escaping then kills
+                                    // a live overlay (flash-then-hide).
+                                    let foreground_owned = unsafe {
+                                        GetForegroundWindow() as isize == hwnd_raw
+                                    };
                                     if s.visible
                                         && !s.has_focus
+                                        && !foreground_owned
                                         && !crate::overlay::hotkey::is_bare_win_press_active()
                                     {
                                         Some(
@@ -2094,6 +2116,10 @@ fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::S
 /// opaque surface, which re-enables ClearType subpixel text (Chromium
 /// only subpixels over opaque — transparent always falls back to
 /// grayscale, and no CSS can change that). Glass keeps transparency.
+///
+/// Skips when the mode already matches: runtime SetDefaultBackgroundColor
+/// cannot re-enable ClearType anyway (creation-time only), and this runs
+/// on every Show and Apply — including per keystroke.
 fn sync_webview_background(
     webview: Option<&wry::WebView>,
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
@@ -2103,17 +2129,27 @@ fn sync_webview_background(
         .lock()
         .map(|s| s.panel_background)
         .unwrap_or(crate::config::PanelBackground::Glass);
+    static LAST_MODE: std::sync::Mutex<Option<crate::config::PanelBackground>> =
+        std::sync::Mutex::new(None);
+    if LAST_MODE.lock().map(|g| *g == Some(mode)).unwrap_or(false) {
+        return;
+    }
     let color: wry::RGBA = match mode {
         crate::config::PanelBackground::Black => (0, 0, 0, 255),
         crate::config::PanelBackground::White => (255, 255, 255, 255),
         crate::config::PanelBackground::Glass => (0, 0, 0, 0),
     };
     match wv.set_background_color(color) {
-        Ok(()) => crate::logging::info(&format!(
-            "[nex] webview surface set for {:?} background (ClearType {})",
-            mode,
-            if mode.is_opaque() { "on" } else { "off" }
-        )),
+        Ok(()) => {
+            if let Ok(mut last) = LAST_MODE.lock() {
+                *last = Some(mode);
+            }
+            crate::logging::info(&format!(
+                "[nex] webview surface set for {:?} background (ClearType {})",
+                mode,
+                if mode.is_opaque() { "on" } else { "off" }
+            ))
+        }
         Err(error) => crate::logging::warn(&format!("[nex] webview background update failed: {error:?}")),
     }
 }
@@ -2526,8 +2562,12 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
         // Glass has no region to clear (transparent fringe stays); drop
         // the redraw flag so every resize doesn't force a full child
         // repaint and flash the transparent surface beneath.
-        unsafe {
-            SetWindowRgn(search.found, std::ptr::null_mut(), 0);
+        let key = (search.found as isize, 0, 0, 0, false);
+        if last_webview_rgn() == Some(key) {
+            return;
+        }
+        if unsafe { SetWindowRgn(search.found, std::ptr::null_mut(), 0) } != 0 {
+            cache_webview_rgn(key);
         }
         return;
     }
@@ -2540,6 +2580,13 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
     // so no desktop slivers peek between the two curves. Reads as a
     // uniform hairline rather than jaggies.
     let d = ((20.0 * scale * 2.0).round() as i32).max(2) + 2;
+    // Skip redundant region churn: same child, size, and mode as the last
+    // apply needs no GDI work (SetWindowRgn with redraw forces a full
+    // child repaint on every resize while typing).
+    let key = (search.found as isize, w_px, h_px, d, clip);
+    if last_webview_rgn() == Some(key) {
+        return;
+    }
     let rgn = unsafe { CreateRoundRectRgn(-1, -1, w_px + 2, h_px + 2, d, d) };
     if rgn.is_null() {
         return;
@@ -2549,6 +2596,28 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
         unsafe {
             DeleteObject(rgn);
         }
+    } else {
+        cache_webview_rgn(key);
+    }
+}
+
+/// Last applied WebView child region, to skip redundant GDI churn.
+/// Key: (child HWND, w_px, h_px, diameter, clip). The child HWND in the
+/// key keeps a WebView rebuild (new child, same size) applying fresh.
+/// Only recorded after SetWindowRgn succeeds, so transient failures
+/// keep healing on the next apply.
+static LAST_WEBVIEW_RGN: std::sync::Mutex<Option<(isize, i32, i32, i32, bool)>> =
+    std::sync::Mutex::new(None);
+
+fn last_webview_rgn() -> Option<(isize, i32, i32, i32, bool)> {
+    LAST_WEBVIEW_RGN.lock().ok().and_then(|g| *g)
+}
+
+/// Record a successfully applied WebView child region (see
+/// [`LAST_WEBVIEW_RGN`]).
+fn cache_webview_rgn(key: (isize, i32, i32, i32, bool)) {
+    if let Ok(mut g) = LAST_WEBVIEW_RGN.lock() {
+        *g = Some(key);
     }
 }
 
@@ -2580,6 +2649,12 @@ fn is_opaque_panel(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model
 /// own fixed small round, which used to draw a second, smaller corner
 /// curve behind ours — with DWM corners off, our region is the single
 /// silhouette in every mode (glass, opaque, and acrylic fallback).
+/// Last applied main-window region (see [`LAST_WEBVIEW_RGN`] for the
+/// same pattern). Key: (w_px, h_px, diameter, clip). Recorded only after
+/// SetWindowRgn succeeds.
+static LAST_MAIN_RGN: std::sync::Mutex<Option<(i32, i32, i32, bool)>> =
+    std::sync::Mutex::new(None);
+
 fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
     let hwnd = window.hwnd() as HWND;
@@ -2587,8 +2662,14 @@ fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
         // Glass/opaque modes draw their own silhouette: remove any stale
         // region without a forced repaint — redraw=1 here invalidated the
         // whole transparent window on every resize (black flash).
-        unsafe {
-            SetWindowRgn(hwnd, std::ptr::null_mut(), 0);
+        let key = (0, 0, 0, false);
+        if LAST_MAIN_RGN.lock().map(|g| *g == Some(key)).unwrap_or(false) {
+            return;
+        }
+        if unsafe { SetWindowRgn(hwnd, std::ptr::null_mut(), 0) } != 0 {
+            if let Ok(mut g) = LAST_MAIN_RGN.lock() {
+                *g = Some(key);
+            }
         }
         return;
     }
@@ -2600,6 +2681,13 @@ fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
     let h_px = (h * scale).round() as i32;
     // Panel radius token is 20 logical px; region wants diameters.
     let d = ((20.0 * scale * 2.0).round() as i32).max(2);
+    // Same skip as the child clip: unchanged geometry needs no GDI work.
+    // (The clear path above records (0,0,0,false), so a clip-after-clear
+    // still applies — different key.)
+    let key = (w_px, h_px, d, clip_main);
+    if LAST_MAIN_RGN.lock().map(|g| *g == Some(key)).unwrap_or(false) {
+        return;
+    }
     let rgn = unsafe {
         CreateRoundRectRgn(0, 0, w_px + 1, h_px + 1, d, d)
     };
@@ -2611,6 +2699,8 @@ fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
         unsafe {
             DeleteObject(rgn);
         }
+    } else if let Ok(mut g) = LAST_MAIN_RGN.lock() {
+        *g = Some(key);
     }
 }
 

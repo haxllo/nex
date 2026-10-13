@@ -175,7 +175,8 @@ body {
   position: absolute;
   left: 0;
   top: 50%;
-  transform: translateY(calc(-50% - 1px));
+  /* Same no-transform rule as #query: margin instead of translateY. */
+  margin-top: -11.5px;
   max-width: 100%;
   overflow: visible;
   white-space: pre;
@@ -209,7 +210,10 @@ body {
   font-weight: 300;
   line-height: 1;
   padding: 0;
-  transform: translateY(-1px);
+  /* NOTE: never transform this element (even 1px): Chromium disables
+     subpixel text on composited layers, so translateY here grayscales
+     the query permanently. position+top shifts identically. */
+  top: -1px;
   -webkit-user-select: text;
   user-select: text;
 }

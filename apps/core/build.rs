@@ -27,5 +27,9 @@ fn main() {
 
     let mut res = winres::WindowsResource::new();
     res.set_icon(icon_path);
+    res.set("FileDescription", "Nex");
+    res.set("InternalName", "nex");
+    res.set("OriginalFilename", "nex.exe");
+    res.set("ProductName", "Nex");
     res.compile().expect("failed to compile Windows resources");
 }

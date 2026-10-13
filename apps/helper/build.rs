@@ -5,7 +5,7 @@ fn main() {
     }
 
     let mut res = winres::WindowsResource::new();
-    res.set("FileDescription", "NexHelper");
+    res.set("FileDescription", "Nex Helper");
     res.set("InternalName", "NexHelper");
     res.set("OriginalFilename", "NexHelper.exe");
     res.set("ProductName", "Nex");

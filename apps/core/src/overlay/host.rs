@@ -2504,11 +2504,14 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     // matches its acrylic tint (COLORREF is 0x00BBGGRR, no alpha).
     let panel = state.lock().map(|s| s.panel_background).unwrap_or(crate::config::PanelBackground::Glass);
     let dark = state.lock().map(|s| s.theme == crate::overlay::model::Theme::Dark).unwrap_or(true);
+    // Slight 1px DWM edge: near-panel tones, never stark. Their own
+    // UI leaves the system border alone; ours is dyed just enough to
+    // read against any desktop.
     let border: u32 = match panel {
-        crate::config::PanelBackground::White => 0x00FF_FFFF,
-        crate::config::PanelBackground::Black => 0x002E_3238,
-        crate::config::PanelBackground::Glass if dark => 0x004A_5058,
-        crate::config::PanelBackground::Glass => 0x00C9_CDD3,
+        crate::config::PanelBackground::White => 0x00E8_E8E8,
+        crate::config::PanelBackground::Black => 0x001A_1D21,
+        crate::config::PanelBackground::Glass if dark => 0x002A_2E35,
+        crate::config::PanelBackground::Glass => 0x00E2_E5E9,
     };
     let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
     let available = if opaque_panel {

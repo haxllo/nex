@@ -939,53 +939,6 @@ impl HotkeyListener {
                                 return;
                             }
                             logging::info("[nex] hotkey: using elevated helper for detection");
-                            // Helper command pipe (simulation transport):
-                            // connected best-effort for send_helper_key.
-                            // Transports stay on their native APIs (media
-                            // sessions, clipboard); this exists for targets
-                            // only elevated input reaches.
-                            let cmd_pipe_name = format!(
-                                r"\\.\pipe\NexHelperCmd\{}",
-                                std::process::id()
-                            );
-                            match connect_pipe(&cmd_pipe_name) {
-                                Ok(cmd_file) => {
-                                    if let Ok(mut slot) = HELPER_CMD.lock() {
-                                        *slot = Some(cmd_file);
-                                    }
-                                }
-                                Err(e) => logging::warn(&format!(
-                                    "[nex] helper cmd pipe unavailable: {e}"
-                                )),
-                            }
-                            // Helper log pipe: forward helper
-                            // diagnostics into nex's log. Best-effort — the
-                            // hotkey pipe already proved the helper is alive.
-                            let log_pipe_name = format!(
-                                r"\\.\pipe\NexHelperLog\{}",
-                                std::process::id()
-                            );
-                            match connect_pipe(&log_pipe_name) {
-                                Ok(log_file) => {
-                                    match thread::Builder::new()
-                                        .name("NexHelper-log-reader".into())
-                                        .spawn(move || {
-                                            use std::io::BufRead;
-                                            let reader = std::io::BufReader::new(log_file);
-                                            for line in reader.lines().flatten() {
-                                                logging::info(&format!("[helper] {line}"));
-                                            }
-                                        }) {
-                                        Ok(_) => {}
-                                        Err(e) => logging::warn(&format!(
-                                            "[nex] helper log reader spawn failed: {e}"
-                                        )),
-                                    }
-                                }
-                                Err(e) => logging::warn(&format!(
-                                    "[nex] helper log pipe unavailable: {e}"
-                                )),
-                            }
                             let pipe_event_tx = event_tx_h;
                             match thread::Builder::new()
                                 .name("NexHelper-pipe-reader".into())
@@ -1044,6 +997,54 @@ impl HotkeyListener {
                                     ));
                                     kill_helper_process(helper_handle);
                                 }
+                            }
+                            // Auxiliary pipes connect AFTER detection flows:
+                            // best-effort plumbing must never gate the pipe
+                            // reader or HELPER_ACTIVE. Small budgets so a
+                            // missing server costs ~1s, not ~8s.
+                            // Helper command pipe (simulation transport for
+                            // send_helper_key). Server end is inbound, so the
+                            // client opens write-only.
+                            let cmd_pipe_name = format!(
+                                r"\\.\pipe\NexHelperCmd\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&cmd_pipe_name, 0x40000000, 3) {
+                                Ok(cmd_file) => {
+                                    if let Ok(mut slot) = HELPER_CMD.lock() {
+                                        *slot = Some(cmd_file);
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper cmd pipe unavailable: {e}"
+                                )),
+                            }
+                            // Helper log pipe: forward helper
+                            // diagnostics into nex's log.
+                            let log_pipe_name = format!(
+                                r"\\.\pipe\NexHelperLog\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&log_pipe_name, 0x80000000, 3) {
+                                Ok(log_file) => {
+                                    match thread::Builder::new()
+                                        .name("NexHelper-log-reader".into())
+                                        .spawn(move || {
+                                            use std::io::BufRead;
+                                            let reader = std::io::BufReader::new(log_file);
+                                            for line in reader.lines().flatten() {
+                                                logging::info(&format!("[helper] {line}"));
+                                            }
+                                        }) {
+                                        Ok(_) => {}
+                                        Err(e) => logging::warn(&format!(
+                                            "[nex] helper log reader spawn failed: {e}"
+                                        )),
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper log pipe unavailable: {e}"
+                                )),
                             }
                         }
                         Err(e) => {
@@ -1407,7 +1408,7 @@ fn spawn_and_connect_helper(
     run_helper_task()?;
 
     // 5. Connect to the helper's named pipe (retry — helper may still be starting)
-    let pipe_file = connect_pipe(&pipe_name)?;
+    let pipe_file = connect_pipe(&pipe_name, 0x80000000, 10)?;
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))
@@ -1700,7 +1701,11 @@ fn run_helper_task() -> Result<(), String> {
 }
 
 /// Connect to an existing named pipe (client side, read-only).
-fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
+/// Connect to a helper pipe. `desired_access` must match the server end
+/// (outbound server → GENERIC_READ, inbound server → GENERIC_WRITE);
+/// a wrong direction fails every attempt, so auxiliaries pass a small
+/// `attempts` budget and never gate detection flow.
+fn connect_pipe(pipe_name: &str, desired_access: u32, attempts: u32) -> Result<std::fs::File, String> {
     let wide = to_wide(pipe_name);
 
     #[link(name = "kernel32")]
@@ -1717,15 +1722,16 @@ fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
     }
 
     const GENERIC_READ: u32 = 0x80000000;
+    const GENERIC_WRITE: u32 = 0x40000000;
     const FILE_SHARE_READ: u32 = 0x00000001;
     const FILE_SHARE_WRITE: u32 = 0x00000002;
     const OPEN_EXISTING: u32 = 3;
 
-    for attempt in 0..10 {
+    for attempt in 0..attempts {
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ,
+                desired_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 std::ptr::null_mut(),
                 OPEN_EXISTING,

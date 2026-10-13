@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -650,6 +650,63 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 // Overlay foreground helper (called from message loop on event signal)
 // ---------------------------------------------------------------------------
 
+/// Monotonic activation generation. Each overlay-ready signal claims the
+/// next number; a retry loop whose number is stale abandons instead of
+/// fighting the newer activation (Raycast: abandon superseded).
+static FG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// True when a newer activation superseded `seq`.
+fn is_superseded(seq: u64) -> bool {
+    FG_SEQ.load(Ordering::SeqCst) != seq
+}
+
+/// Best-effort `hwnd=0x.. title='..' pid=.. proc='..'` snapshot.
+/// Never panics; unknown fields render as `?`.
+fn describe_window(hwnd: isize) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let mut pid = 0u32;
+    let _ = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd as _,
+            &mut pid,
+        )
+    };
+    let mut title = String::from("?");
+    if hwnd != 0 {
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(hwnd as _, buf.as_mut_ptr(), buf.len() as i32) };
+        if n > 0 {
+            title = String::from_utf16_lossy(&buf[..n as usize]);
+            title = title.chars().take(80).collect();
+        }
+    }
+    let mut proc = String::from("?");
+    if pid != 0 {
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h as isize != 0 {
+            let mut buf = [0u16; 260];
+            let mut len = buf.len() as u32;
+            if unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) } != 0 {
+                let full = String::from_utf16_lossy(&buf[..len as usize]);
+                proc = full.rsplit(['\\', '/']).next().unwrap_or("?").to_string();
+            }
+            unsafe {
+                CloseHandle(h);
+            }
+        }
+    }
+    format!("hwnd=0x{hwnd:x} title='{title}' pid={pid} proc='{proc}'")
+}
+
+/// One-line activation report: `force_activate_window: <outcome> target=.. actual=..`.
+fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String {
+    format!("force_activate_window: {outcome} target={target} actual={actual}")
+}
+
 /// Write a diagnostic line to the helper debug log.
 /// The helper has no console (windows_subsystem = "windows"), so file logging
 /// is the only way to observe failures.
@@ -672,7 +729,10 @@ fn debug_log(msg: &str) {
 /// 1. Attach to the current foreground thread (same High IL, no UIPI),
 ///    then call SetForegroundWindow so the system grants the call.
 /// 2. Also grant nex.exe foreground permission as a backup.
-fn set_overlay_foreground() {
+///
+/// `seq` is this activation's generation: the retry loop abandons when a
+/// newer overlay-ready signal supersedes it instead of stealing focus back.
+fn set_overlay_foreground(seq: u64) {
     let class = to_wide("NexOverlayWindowClass\0");
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd as isize == 0 {
@@ -689,6 +749,16 @@ fn set_overlay_foreground() {
             SetForegroundWindow,
         };
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
+        // Already foreground: nothing to do (Raycast: already foreground).
+        if GetForegroundWindow() == hwnd {
+            debug_log(&format_activation_report(
+                "already foreground",
+                &describe_window(hwnd as isize),
+                &describe_window(hwnd as isize),
+            ));
+            return;
+        }
 
         // 1. Grant nex.exe foreground permission (backup path)
         if let Some(cfg) = CFG.read().unwrap().as_ref() {
@@ -734,8 +804,18 @@ fn set_overlay_foreground() {
         // until the overlay actually owns the foreground (bounded).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while unsafe { GetForegroundWindow() } != hwnd {
+            if is_superseded(seq) {
+                debug_log(&format!(
+                    "force_activate_window: abandoning superseded activation seq={seq}"
+                ));
+                return;
+            }
             if std::time::Instant::now() > deadline {
-                debug_log("foreground verify: overlay did not win focus within 600ms");
+                debug_log(&format_activation_report(
+                    "failed",
+                    &describe_window(hwnd as isize),
+                    &describe_window(unsafe { GetForegroundWindow() } as isize),
+                ));
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -761,7 +841,11 @@ fn set_overlay_foreground() {
                 AttachThreadInput(helper_tid, fg_tid, 0);
             }
         }
-        debug_log("foreground verified: overlay owns focus");
+        debug_log(&format_activation_report(
+            "verified",
+            &describe_window(hwnd as isize),
+            &describe_window(hwnd as isize),
+        ));
     }
 }
 
@@ -1002,7 +1086,8 @@ fn main() {
             // now set foreground from High IL.
             // (Event is auto-reset, so it returns to nonsignaled automatically.)
             debug_log("overlay-ready event received, calling set_overlay_foreground");
-            set_overlay_foreground();
+            let seq = FG_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            set_overlay_foreground(seq);
             debug_log("set_overlay_foreground returned");
         }
         // WAIT_OBJECT_0 + 1 = nex process handle signaled (nex exited)
@@ -1162,5 +1247,38 @@ fn main() {
                 fallback_id,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn superseded_only_when_newer_claimed() {
+        FG_SEQ.store(7, Ordering::SeqCst);
+        assert!(!is_superseded(7));
+        assert!(is_superseded(6));
+        FG_SEQ.store(8, Ordering::SeqCst);
+        assert!(is_superseded(7));
+    }
+
+    #[test]
+    fn activation_report_carries_both_ends() {
+        let r = format_activation_report(
+            "failed",
+            "hwnd=0x1 title='Nex' pid=1 proc='nex.exe'",
+            "hwnd=0x2 title='Task' pid=2 proc='taskmgr.exe'",
+        );
+        assert!(r.starts_with("force_activate_window: failed"));
+        assert!(r.contains("target=hwnd=0x1"));
+        assert!(r.contains("actual=hwnd=0x2"));
+    }
+
+    #[test]
+    fn describe_null_window_never_panics() {
+        let d = describe_window(0);
+        assert!(d.contains("hwnd=0x0"));
+        assert!(d.contains("pid=0"));
     }
 }

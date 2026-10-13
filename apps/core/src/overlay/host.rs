@@ -483,7 +483,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
                             position_window(&window, hwnd);
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, is_opaque_panel(&state));
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
@@ -940,7 +940,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                     // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, is_opaque_panel(&state));
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -1124,7 +1124,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, is_opaque_panel(&state));
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -1134,7 +1134,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, is_opaque_panel(&state));
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -1142,7 +1142,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, is_opaque_panel(&state));
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -1160,7 +1160,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, is_opaque_panel(&state));
                         }
                     }
                 }
@@ -2572,6 +2572,7 @@ fn apply_window_height(
     webview: Option<&WebView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
+    opaque_panel: bool,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
@@ -2588,6 +2589,65 @@ fn apply_window_height(
             crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
         );
     }
+    // Frameless windows get no DWM rounding, and the opaque WebView paints
+    // square to the window edges: clip only the child to the 8px DWM
+    // radius so opaque corners read round. Glass paints its own rounded
+    // panel over transparency and needs no clip. Main window stays
+    // region-free in every mode.
+    apply_webview_round_region(window, h, opaque_panel);
+}
+
+/// Round the WebView child to the 8px DWM radius. Keyed dedup: SetWindowRgn
+/// with redraw forces a full child repaint, so unchanged geometry skips.
+static LAST_WEBVIEW_RGN: std::sync::Mutex<Option<(isize, i32, i32, i32, bool)>> =
+    std::sync::Mutex::new(None);
+
+fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+    let found = find_webview_child(window);
+    if found.is_null() {
+        return;
+    }
+    let key_base = found as isize;
+    if !opaque {
+        if LAST_WEBVIEW_RGN.lock().map(|g| *g == Some((key_base, 0, 0, 0, false))).unwrap_or(false) {
+            return;
+        }
+        if unsafe { SetWindowRgn(found, std::ptr::null_mut(), 0) } != 0 {
+            if let Ok(mut g) = LAST_WEBVIEW_RGN.lock() {
+                *g = Some((key_base, 0, 0, 0, false));
+            }
+        }
+        return;
+    }
+    let scale = window.scale_factor();
+    let w_px = (WINDOW_WIDTH * scale).round() as i32;
+    let h_px = (h * scale).round() as i32;
+    let d = ((8.0 * scale * 2.0).round() as i32).max(2);
+    let key = (key_base, w_px, h_px, d, opaque);
+    if LAST_WEBVIEW_RGN.lock().map(|g| *g == Some(key)).unwrap_or(false) {
+        return;
+    }
+    let rgn = unsafe { CreateRoundRectRgn(-1, -1, w_px + 2, h_px + 2, d, d) };
+    if rgn.is_null() {
+        return;
+    }
+    if unsafe { SetWindowRgn(found, rgn, 1) } == 0 {
+        unsafe {
+            DeleteObject(rgn);
+        }
+    } else if let Ok(mut g) = LAST_WEBVIEW_RGN.lock() {
+        *g = Some(key);
+    }
+}
+
+/// Opaque WebView surfaces paint square corners; the child clip above
+/// needs to know.
+fn is_opaque_panel(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
+    state
+        .lock()
+        .map(|s| s.panel_background.is_opaque())
+        .unwrap_or(false)
 }
 
 /// Center the window horizontally on the monitor under the cursor and

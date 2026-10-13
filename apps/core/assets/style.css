@@ -185,7 +185,9 @@ body {
   color: var(--text-dim);
   font-size: 21px;
   font-family: inherit;
-  font-weight: 300;
+  /* 400, not 300: probe proved 300-weight 21px renders grayscale in
+     Chromium while 400 fringes hard (avg chroma 19 -> 74). */
+  font-weight: 400;
   line-height: 1;
   pointer-events: none;
   user-select: none;
@@ -207,7 +209,7 @@ body {
   color: var(--text);
   font-size: 21px;
   font-family: inherit;
-  font-weight: 300;
+  font-weight: 400;
   line-height: 1;
   padding: 0;
   /* NOTE: never transform this element (even 1px): Chromium disables
@@ -220,7 +222,7 @@ body {
 
 #query::placeholder {
   color: var(--text-dim);
-  font-weight: 300;
+  font-weight: 400;
 }
 
 /* Grey text selection in the query input — subtle, theme-aware.

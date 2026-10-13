@@ -3070,11 +3070,19 @@
         pendingShow = true;
         lastH = 0; // fresh show cycle: trigger resize on first content paint
         scrollToInstant(0);
-        // Reveal waits for content (or the cap below) — never the idle
+        // Reveal waits for content (or the cap below) - never the idle
         // mid-state. needsPainted is consumed by measure's paint path.
         needsPainted = false;
         window.clearTimeout(showRevealTimer);
-        showRevealTimer = window.setTimeout(fireShowReveal, 500);
+        // Idle show (empty rows, empty query): nothing more is coming
+        // until keystrokes, so reveal on the next paint instead of the
+        // 500ms cap. Otherwise the cap covers late-arriving content.
+        if (rows.length === 0 && !(state.query || "").trim()) {
+          needsPainted = true;
+          showRevealTimer = 0;
+        } else {
+          showRevealTimer = window.setTimeout(fireShowReveal, 500);
+        }
         // Transient model-settings state must not survive hide/show.
         setChatSettingsOpen(false);
       }

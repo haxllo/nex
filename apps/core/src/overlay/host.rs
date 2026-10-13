@@ -499,7 +499,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         }
                     }
                 UiCommand::Apply => {
-                    if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
+                    // Push while visible — or while a show is pending: stale
+                    // in-flight results (or a slow quick-launch load) are the
+                    // awaited content, and gating them on visibility deadlocks
+                    // the reveal on the 500ms cap. The page's pendingShow
+                    // bridge consumes the first non-empty rows and reveals
+                    // fast; without a pending show, hidden pushes stay
+                    // suppressed as before.
+                    if ready
+                        && (state.lock().map(|s| s.visible).unwrap_or(false) || show_pending)
+                    {
                         push_state(&webview, &state, &icon_cache, false);
                     }
                     // Opaque panel modes park the glass layer immediately

@@ -406,15 +406,16 @@ body {
   animation: none;
 }
 
-/* Entrance stagger — rows fade+rise in; re-animation gated in JS. */
+/* Entrance stagger — rows fade in; re-animation gated in JS.
+   NOTE: opacity-only, never transform: a translateY here keeps
+   Inter-variable text on a composited layer permanently (probe:
+   Inter+translate = all gray, Inter+opacity = fringes, avg 9 -> 34). */
 @keyframes nexRowIn {
   from {
     opacity: 0;
-    transform: translateY(5px);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 .section {

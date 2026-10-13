@@ -379,6 +379,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Show-path latency telemetry: stamped on UiCommand::Show receipt,
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
+    let mut show_arm_at: Option<Instant> = None;
     let mut previous_foreground: Option<HWND> = None;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
@@ -948,6 +949,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Mode may have changed while hidden (Apply skips
                     // pushes then), so re-sync the surface every show.
                     sync_webview_background(webview.as_ref(), &state);
+                    show_arm_at = Some(Instant::now());
+                    if let Some(t0) = show_cmd_at {
+                        crate::runtime::log_info(&format!(
+                            "[nex] show_latency show_arm_ms={}",
+                            t0.elapsed().as_millis()
+                        ));
+                    }
                 }
                 UiCommand::FocusInput => {
                     // Start/Explorer can reassert foreground after the
@@ -1150,6 +1158,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Painted => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
                     if show_pending {
+                        if let Some(t0) = show_arm_at.take() {
+                            crate::runtime::log_info(&format!(
+                                "[nex] show_latency painted_wait_ms={}",
+                                t0.elapsed().as_millis()
+                            ));
+                        }
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.

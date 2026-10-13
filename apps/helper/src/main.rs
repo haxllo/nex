@@ -1108,8 +1108,29 @@ fn main() {
     }
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
+    /// Reason a binding skips RegisterHotKey, or None when the system
+    /// hotkey path serves it. Pure so both registration sites agree.
+    fn fallback_demoted(vk: u32, any_mod: bool) -> Option<&'static str> {
+        if (0x60..=0x6F).contains(&vk) {
+            Some("numpad keys are indistinguishable to RegisterHotKey")
+        } else if !any_mod {
+            Some("single-tap needs hook press/release tracking")
+        } else {
+            None
+        }
+    }
+
     fn register_fallback(ctx: &HotkeyConfig) -> i32 {
         if ctx.target_is_win || !ctx.detect_enabled { return 0; }
+        // Demote bindings RegisterHotKey can't serve well; the hook stays
+        // the detector. Same table as the unit-tested nex-side decision.
+        if let Some(reason) = fallback_demoted(
+            ctx.target_vk,
+            ctx.mod_ctrl || ctx.mod_alt || ctx.mod_shift || ctx.mod_win,
+        ) {
+            debug_log(&format!("dispatches via hook: {reason}"));
+            return 0;
+        }
         let mut mods: u32 = 0;
         if ctx.mod_ctrl {
             mods |= 0x0002; // MOD_CONTROL
@@ -1135,7 +1156,11 @@ fn main() {
         };
         if ok == 0 {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
+            if err == 1409 {
+                debug_log("RegisterHotKey refused (already in use): demoted to hook");
+            } else {
+                eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
+            }
             return 0;
         }
         id

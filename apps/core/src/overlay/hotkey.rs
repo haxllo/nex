@@ -678,8 +678,9 @@ impl HotkeyListener {
                 // foreground window or integrity level.  This ensures the
                 // hotkey works even when elevated/UWP windows (Task Manager,
                 // advanced settings) are foreground.
-                // Only registered for non-Win hotkeys (Win key cannot be
-                // registered via RegisterHotKeyW).
+                // Win combos skip it (raw-input path owns them); numpad and
+                // single-tap bindings demote to the hook with a reason.
+                const ERROR_HOTKEY_ALREADY_IN_USE: u32 = 1409;
                 let mut fallback_id: u32 = 0;
                 // Copy what we need and release HOOK_CTX immediately. The
                 // hook proc locks this same mutex on EVERY keystroke, so a
@@ -705,20 +706,43 @@ impl HotkeyListener {
                     }
                     // Generate a unique hotkey ID that won't collide.
                     fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                    let ok = match register_hotkey {
-                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
-                        None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
-                    };
-                    if ok == 0 {
-                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                        logging::warn(&format!(
-                            "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
-                            err,
+                    let reason = dispatch_for(
+                        target_key_local,
+                        false,
+                        !required_mods_local.is_empty(),
+                        false,
+                    );
+                    if reason != DispatchReason::SystemHotkey {
+                        logging::info(&format!(
+                            "[nex::debug] Hook: dispatches via hook: {}",
+                            dispatch_reason_text(reason),
                         ));
                         fallback_id = 0;
                     } else {
-                        logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
+                        let ok = match register_hotkey {
+                            Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
+                            None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
+                        };
+                        if ok == 0 {
+                            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                            if err == ERROR_HOTKEY_ALREADY_IN_USE {
+                                logging::warn("[nex::debug] Hook: RegisterHotKey refused (already in use): demoted to hook");
+                            } else {
+                                logging::warn(&format!(
+                                    "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
+                                    err,
+                                ));
+                            }
+                            fallback_id = 0;
+                        } else {
+                            logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
+                        }
                     }
+                } else {
+                    logging::info(&format!(
+                        "[nex::debug] Hook: dispatches via hook: {}",
+                        dispatch_reason_text(DispatchReason::WinCombo),
+                    ));
                 }
 
                 let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -762,12 +786,39 @@ impl HotkeyListener {
                                     if ctx.required_mods.contains(&vk) { mods |= flag; }
                                 }
                                 fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                                let ok = match register_hotkey {
-                                    Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
-                                    None => 0,
-                                };
-                                if ok == 0 { fallback_id = 0; logging::warn("[nex::debug] Hook: live re-register FAILED"); }
-                                else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
+                                let reason = dispatch_for(
+                                    ctx.target_key,
+                                    false,
+                                    !ctx.required_mods.is_empty(),
+                                    false,
+                                );
+                                if reason != DispatchReason::SystemHotkey {
+                                    logging::info(&format!(
+                                        "[nex::debug] Hook: live dispatches via hook: {}",
+                                        dispatch_reason_text(reason),
+                                    ));
+                                    fallback_id = 0;
+                                } else {
+                                    let ok = match register_hotkey {
+                                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
+                                        None => 0,
+                                    };
+                                    if ok == 0 {
+                                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                                        if err == ERROR_HOTKEY_ALREADY_IN_USE {
+                                            logging::warn("[nex::debug] Hook: live RegisterHotKey refused (already in use): demoted to hook");
+                                        } else {
+                                            logging::warn("[nex::debug] Hook: live re-register FAILED");
+                                        }
+                                        fallback_id = 0;
+                                    }
+                                    else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
+                                }
+                            } else {
+                                logging::info(&format!(
+                                    "[nex::debug] Hook: live dispatches via hook: {}",
+                                    dispatch_reason_text(DispatchReason::WinCombo),
+                                ));
                             }
                         }
                         drop(g);

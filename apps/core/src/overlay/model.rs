@@ -141,7 +141,7 @@ pub(crate) enum Theme {
 }
 
 /// A single item in the Quick Launch section.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QuickLaunchItem {
     pub kind: String,
     pub title: String,

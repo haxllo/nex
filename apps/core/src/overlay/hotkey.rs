@@ -1687,6 +1687,55 @@ fn vk_from_key(key: &str) -> Result<u32, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch decision: RegisterHotKey vs keyboard hook, with reasons
+// ---------------------------------------------------------------------------
+
+/// Why a binding goes to the hook instead of RegisterHotKey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchReason {
+    /// Win in the combo: Start-menu conflicts need the raw-input path.
+    WinCombo,
+    /// Numpad keys: the OS can't tell them apart from dedicated keys.
+    NumpadKey,
+    /// No modifiers: single-tap needs press/release tracking the hook owns.
+    SingleTap,
+    /// RegisterHotKey refused (already registered elsewhere): demoted.
+    RefusedDemoted,
+    /// Default: RegisterHotKey delivers it.
+    SystemHotkey,
+}
+
+/// Numpad virtual-key range (VK_NUMPAD0..VK_DIVIDE).
+fn is_numpad_vk(vk: u32) -> bool {
+    (0x60..=0x6F).contains(&vk)
+}
+
+/// Decide dispatch for one binding. Pure: same inputs, same answer.
+fn dispatch_for(vk: u32, has_win_mod: bool, has_any_mod: bool, refused: bool) -> DispatchReason {
+    if refused {
+        DispatchReason::RefusedDemoted
+    } else if has_win_mod {
+        DispatchReason::WinCombo
+    } else if is_numpad_vk(vk) {
+        DispatchReason::NumpadKey
+    } else if !has_any_mod {
+        DispatchReason::SingleTap
+    } else {
+        DispatchReason::SystemHotkey
+    }
+}
+
+fn dispatch_reason_text(reason: DispatchReason) -> &'static str {
+    match reason {
+        DispatchReason::WinCombo => "Win combo needs the raw-input path",
+        DispatchReason::NumpadKey => "numpad keys are indistinguishable to RegisterHotKey",
+        DispatchReason::SingleTap => "single-tap needs hook press/release tracking",
+        DispatchReason::RefusedDemoted => "RegisterHotKey refused the combination",
+        DispatchReason::SystemHotkey => "RegisterHotKey delivers it",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1699,4 +1748,9 @@ mod tests {
     #[test] fn vk_single_letter() { assert_eq!(vk_from_key("A").unwrap(), b'A' as u32); }
     #[test] fn vk_win_key() { assert_eq!(vk_from_key("Win").unwrap(), VK_LWIN); }
     #[test] fn modifier_vks() { let mods = modifier_vks_from_names(&["Ctrl".into(), "Shift".into()]).unwrap(); assert_eq!(mods, vec![VK_CTRL, VK_SHIFT]); }
+    #[test] fn dispatch_win_goes_hook() { assert_eq!(dispatch_for(0x20, true, true, false), DispatchReason::WinCombo); }
+    #[test] fn dispatch_numpad_goes_hook() { assert_eq!(dispatch_for(0x60, false, true, false), DispatchReason::NumpadKey); }
+    #[test] fn dispatch_single_tap_goes_hook() { assert_eq!(dispatch_for(0x70, false, false, false), DispatchReason::SingleTap); }
+    #[test] fn dispatch_refused_demotes() { assert_eq!(dispatch_for(0x20, false, true, true), DispatchReason::RefusedDemoted); }
+    #[test] fn dispatch_plain_combo_uses_system() { assert_eq!(dispatch_for(0x20, false, true, false), DispatchReason::SystemHotkey); }
 }

@@ -879,6 +879,7 @@ impl RuntimeWorker {
                         .collect();
                     self.quick_launch_loaded = true;
                     self.overlay.set_quick_launch_items(self.quick_launch_items.clone());
+                    Self::save_ql_snapshot_to(&Self::ql_snapshot_path(), &self.quick_launch_items);
                     log_info(&format!(
                         "[nex] quick_launch loaded items={}",
                         self.quick_launch_items.len()
@@ -936,6 +937,7 @@ impl RuntimeWorker {
                         })
                         .collect();
                     self.overlay.set_quick_launch_items(self.quick_launch_items.clone());
+                    Self::save_ql_snapshot_to(&Self::ql_snapshot_path(), &self.quick_launch_items);
                     log_info(&format!(
                         "[nex] quick_launch reloaded items={} pinned={}",
                         self.quick_launch_items.len(),
@@ -947,6 +949,55 @@ impl RuntimeWorker {
                 }
             }
         }
+    }
+
+    /// Path of the Quick Launch snapshot (stale-while-revalidate).
+    fn ql_snapshot_path() -> std::path::PathBuf {
+        let base = std::env::var("APPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("USERPROFILE")
+                    .unwrap_or_else(|_| "C:\\Users\\Default".into());
+                std::path::PathBuf::from(home).join("AppData").join("Roaming")
+            });
+        base.join("Nex").join("ql-snapshot.json")
+    }
+
+    fn save_ql_snapshot_to(path: &std::path::Path, items: &[crate::overlay::model::QuickLaunchItem]) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(items) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn load_ql_snapshot_from(path: &std::path::Path) -> Vec<crate::overlay::model::QuickLaunchItem> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Idle content for a show: fresh load, else last snapshot (instant,
+    /// refreshed silently when the lock frees), else hold the reveal.
+    /// Stale-while-revalidate: the snapshot keys match fresh rows, so the
+    /// page skips re-animation and nothing visibly pops.
+    fn prepare_idle_content(&mut self) {
+        self.load_quick_launch_items();
+        if self.runtime_config.quick_launch.enabled && !self.quick_launch_loaded {
+            let snap = Self::load_ql_snapshot_from(&Self::ql_snapshot_path());
+            if !snap.is_empty() {
+                self.quick_launch_items = snap.clone();
+                self.overlay.set_quick_launch_items(snap);
+                self.overlay.set_content_pending(false);
+            } else {
+                self.overlay.set_content_pending(true);
+            }
+        } else {
+            self.overlay.set_content_pending(false);
+        }
+        self.show_idle_or_quick_launch();
     }
 
     /// Show Quick Launch items in idle state if available.
@@ -1716,16 +1767,7 @@ impl RuntimeWorker {
                             &mut self.suppressed_uninstall_titles,
                         );
                         if self.overlay.query_text().trim().is_empty() {
-                            self.load_quick_launch_items();
-                            // Indexer busy at startup defers the load: hold
-                            // the instant idle reveal so Quick Launch lands
-                            // with the first reveal instead of popping in
-                            // split-delayed after the input.
-                            self.overlay.set_content_pending(
-                                self.runtime_config.quick_launch.enabled
-                                    && !self.quick_launch_loaded,
-                            );
-                            self.show_idle_or_quick_launch();
+                            self.prepare_idle_content();
                         }
                         self.overlay.show_and_focus();
                         log_info(&format!(
@@ -1791,12 +1833,7 @@ impl RuntimeWorker {
                 spawn_recent_documents_refresh(&self.service);
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 if self.overlay.query_text().trim().is_empty() {
-                    self.load_quick_launch_items();
-                    self.overlay.set_content_pending(
-                        self.runtime_config.quick_launch.enabled
-                            && !self.quick_launch_loaded,
-                    );
-                    self.show_idle_or_quick_launch();
+                    self.prepare_idle_content();
                 }
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
@@ -3130,4 +3167,40 @@ fn copy_to_clipboard(text: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_items() -> Vec<crate::overlay::model::QuickLaunchItem> {
+        vec![crate::overlay::model::QuickLaunchItem {
+            kind: "app".into(),
+            title: "Demo".into(),
+            path: "C:\\Demo\\app.exe".into(),
+            subtitle: "sub".into(),
+            icon_path: String::new(),
+            is_pinned: true,
+        }]
+    }
+
+    #[test]
+    fn ql_snapshot_round_trips() {
+        let dir = std::env::temp_dir().join(format!("nex-ql-test-{}", std::process::id()));
+        let path = dir.join("ql-snapshot.json");
+        RuntimeWorker::save_ql_snapshot_to(&path, &sample_items());
+        assert_eq!(RuntimeWorker::load_ql_snapshot_from(&path), sample_items());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ql_snapshot_missing_or_corrupt_is_empty() {
+        let dir = std::env::temp_dir().join(format!("nex-ql-test-missing-{}", std::process::id()));
+        assert!(RuntimeWorker::load_ql_snapshot_from(&dir.join("nope.json")).is_empty());
+        let bad = dir.join("bad.json");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&bad, "{not json");
+        assert!(RuntimeWorker::load_ql_snapshot_from(&bad).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -773,6 +773,13 @@ fn spawn_log_pipe_server(log_path: String) {
         .ok();
 }
 
+/// True when the config bytes differ from the last applied ones.
+/// Pure: the event doorbell and the mtime safety-net funnel through one
+/// reload so a single write applies exactly once.
+fn config_changed(last_applied: &[u8], next: &[u8]) -> bool {
+    last_applied != next
+}
+
 // ---------------------------------------------------------------------------
 // Startup privilege self-check: elevation, integrity, UI access.
 // ---------------------------------------------------------------------------
@@ -1120,6 +1127,58 @@ fn main() {
         }
     }
 
+    /// Re-read the config file, republish hook atomics, reset transient
+    /// key state, and swap the RegisterHotKeyW fallback. Skips when the
+    /// file bytes match the last applied reload.
+    fn reload_hotkey_config(
+        config_file_path: &str,
+        fallback_id: &mut i32,
+        last_applied: &mut Vec<u8>,
+    ) {
+        let bytes = std::fs::read(config_file_path).unwrap_or_default();
+        if !config_changed(last_applied, &bytes) {
+            debug_log("reload skipped: config unchanged");
+            return;
+        }
+        if *fallback_id != 0 {
+            unsafe {
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), *fallback_id);
+            }
+            *fallback_id = 0;
+        }
+        if config_file_path.is_empty() {
+            return;
+        }
+        match parse_config_file(config_file_path) {
+            Ok(next) => {
+                debug_log(&format!(
+                    "reloaded hotkey='{}' vk={} is_win={}",
+                    next.hotkey_desc, next.target_vk, next.target_is_win,
+                ));
+                publish_hotkey_atomics(&next);
+                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
+                // Reset the hook's transient state. A stale
+                // CONSUMED_WIN_VK (Win key-down whose key-up was
+                // eaten by RIDEV_NOHOTKEYS) or a mask key left held
+                // by the old Win path makes the new combo undetectable.
+                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+                CHORD_DETECTED.store(false, Ordering::SeqCst);
+                HOTKEY_FIRED.store(false, Ordering::SeqCst);
+                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
+                CTRL_DOWN.store(false, Ordering::SeqCst);
+                ALT_DOWN.store(false, Ordering::SeqCst);
+                SHIFT_DOWN.store(false, Ordering::SeqCst);
+                send_mask_up();
+                *last_applied = bytes;
+                let g = CFG.read().unwrap();
+                if let Some(cfg) = g.as_ref() {
+                    *fallback_id = register_fallback(cfg);
+                }
+            }
+            Err(e) => debug_log(&format!("reload failed: {e}")),
+        }
+    }
+
     fn register_fallback(ctx: &HotkeyConfig) -> i32 {
         if ctx.target_is_win || !ctx.detect_enabled { return 0; }
         // Demote bindings RegisterHotKey can't serve well; the hook stays
@@ -1240,6 +1299,7 @@ fn main() {
     const WAIT_SLICE_MS: u32 = 250;
     let mut last_config_mtime: Option<std::time::SystemTime> =
         std::fs::metadata(&config_file_path).ok().and_then(|m| m.modified().ok());
+    let mut last_applied_config: Vec<u8> = Vec::new();
 
     loop {
 
@@ -1279,73 +1339,18 @@ fn main() {
         // RegisterHotKeyW fallback. No respawn, no cross-IL writes.
         if wait_result == rehotkey_wake {
             debug_log("config event received, reloading hotkey");
-            if fallback_id != 0 {
-                unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
-                }
-                fallback_id = 0;
-            }
-            if !config_file_path.is_empty() {
-                match parse_config_file(&config_file_path) {
-                    Ok(next) => {
-                        debug_log(&format!(
-                            "config event: reloaded hotkey='{}' vk={} is_win={}",
-                            next.hotkey_desc, next.target_vk, next.target_is_win,
-                        ));
-                        publish_hotkey_atomics(&next);
-                        *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
-                        // Reset the hook's transient state. A stale
-                        // CONSUMED_WIN_VK (Win key-down whose key-up was
-                        // eaten by RIDEV_NOHOTKEYS) or a mask key left held
-                        // by the old Win path makes the new combo undetectable.
-                        CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-                        CHORD_DETECTED.store(false, Ordering::SeqCst);
-                        HOTKEY_FIRED.store(false, Ordering::SeqCst);
-                        WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
-                        CTRL_DOWN.store(false, Ordering::SeqCst);
-                        ALT_DOWN.store(false, Ordering::SeqCst);
-                        SHIFT_DOWN.store(false, Ordering::SeqCst);
-                        send_mask_up();
-                    }
-                    Err(e) => debug_log(&format!("config event: reload failed: {e}")),
-                }
-            }
-            let g = CFG.read().unwrap();
-            if let Some(cfg) = g.as_ref() {
-                fallback_id = register_fallback(cfg);
-            }
+            reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
         }
 
         // Mtime safety-net: catches a missed doorbell signal within one
-        // wait slice (250ms) no matter what.
+        // wait slice (250ms) no matter what. Content-skipped when the
+        // event path already applied the same bytes.
         if let Ok(m) = std::fs::metadata(&config_file_path) {
             if let Ok(modt) = m.modified() {
                 if Some(modt) != last_config_mtime {
                     last_config_mtime = Some(modt);
                     debug_log("mtime changed, reloading hotkey");
-                    if fallback_id != 0 {
-                        unsafe {
-                            windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
-                        }
-                        fallback_id = 0;
-                    }
-                    if !config_file_path.is_empty() {
-                        match parse_config_file(&config_file_path) {
-                            Ok(next) => {
-                                publish_hotkey_atomics(&next);
-                                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
-                                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-                                CHORD_DETECTED.store(false, Ordering::SeqCst);
-                                HOTKEY_FIRED.store(false, Ordering::SeqCst);
-                                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
-                                CTRL_DOWN.store(false, Ordering::SeqCst);
-                                ALT_DOWN.store(false, Ordering::SeqCst);
-                                SHIFT_DOWN.store(false, Ordering::SeqCst);
-                                send_mask_up();
-                            }
-                            Err(e) => debug_log(&format!("reload failed: {e}")),
-                        }
-                    }
+                    reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
                 }
             }
         }
@@ -1486,5 +1491,12 @@ mod tests {
         let r = format_startup_report("Full", "High", false);
         assert_eq!(r, "privilege: elevation=Full integrity=High uiaccess=false");
         assert!(!r.contains('\n'));
+    }
+
+    #[test]
+    fn config_changed_detects_new_bytes() {
+        assert!(config_changed(b"", b"{\"a\":1}"));
+        assert!(!config_changed(b"{\"a\":1}", b"{\"a\":1}"));
+        assert!(config_changed(b"{\"a\":1}", b"{\"a\":2}"));
     }
 }

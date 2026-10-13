@@ -1721,6 +1721,11 @@ fn build_webview(
             crate::config::PanelBackground::White => Some((255, 255, 255, 255)),
             crate::config::PanelBackground::Glass => None,
         });
+    // The acrylic CSS override (transparent panel-surface) must also stay
+    // glass-only: injected in an opaque mode it puts all text over a
+    // transparent panel and grayscales everything, voiding the opaque
+    // surface above. Both are creation-time: switching modes needs restart.
+    let glass_css = acrylic_available && opaque_bg.is_none();
     let builder = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(opaque_bg.is_none());
@@ -1731,7 +1736,7 @@ fn build_webview(
     let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request, acrylic_available)
+            serve_asset(request, glass_css)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);

@@ -138,6 +138,7 @@ unsafe extern "system" {
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
+const PIPE_ACCESS_INBOUND: u32 = 0x00000001;
 const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
 const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
@@ -404,6 +405,130 @@ fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
     pipe.write_all(b"HOTKEY\n")?;
     pipe.flush()?;
     Ok(())
+}
+
+/// Inbound command pipe (nex writes, helper executes). Same per-pid
+/// scoping as the log pipe.
+
+/// `\\.\pipe\nex-hotkey\<pid>` -> `\\.\pipe\NexHelperCmd\<pid>`.
+fn cmd_pipe_for(pipe_path: &str) -> String {
+    match pipe_path.rsplit_once('\\') {
+        Some((_, pid)) if !pid.is_empty() => format!("\\\\.\\pipe\\NexHelperCmd\\{pid}"),
+        _ => format!("{pipe_path}-cmd"),
+    }
+}
+
+/// One synthetic key tap, optionally with Ctrl held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SimTap {
+    vk: u32,
+    ctrl: bool,
+}
+
+/// Allowlisted simulation commands. Media keys tap blind; edit chords
+/// hold Ctrl. Anything else is rejected before touching input.
+fn sim_action(cmd: &str) -> Option<SimTap> {
+    let ctrl_tap = |vk: u32| SimTap { vk, ctrl: true };
+    let tap = |vk: u32| SimTap { vk, ctrl: false };
+    Some(match cmd {
+        "play_pause" => tap(0xB3),
+        "next" => tap(0xB0),
+        "prev" => tap(0xB1),
+        "stop" => tap(0xB2),
+        "mute" => tap(0xAD),
+        "vol_up" => tap(0xAF),
+        "vol_down" => tap(0xAE),
+        "copy" => ctrl_tap(0x43),
+        "paste" => ctrl_tap(0x56),
+        "cut" => ctrl_tap(0x58),
+        "select_all" => ctrl_tap(0x41),
+        "undo" => ctrl_tap(0x5A),
+        _ => return None,
+    })
+}
+
+fn exec_sim(action: SimTap) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut seq: Vec<INPUT> = Vec::with_capacity(4);
+    let mut key = |vk: u32, up: bool| {
+        let mut input: INPUT = unsafe { std::mem::zeroed() };
+        input.r#type = INPUT_KEYBOARD;
+        input.Anonymous.ki = KEYBDINPUT {
+            wVk: vk as u16,
+            wScan: 0,
+            dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        seq.push(input);
+    };
+    if action.ctrl {
+        key(0x11, false);
+    }
+    key(action.vk, false);
+    key(action.vk, true);
+    if action.ctrl {
+        key(0x11, true);
+    }
+    let _ = unsafe {
+        SendInput(
+            seq.len() as u32,
+            seq.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
+/// Parked thread: serve the command pipe, execute allowlisted lines.
+fn spawn_cmd_pipe_server(cmd_path: String) {
+    std::thread::Builder::new()
+        .name("NexHelper-cmd-pipe".into())
+        .spawn(move || {
+            let wide = to_wide(&cmd_path);
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide.as_ptr(),
+                    PIPE_ACCESS_INBOUND,
+                    PIPE_TYPE_MESSAGE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                debug_log("cmd pipe create failed");
+                return;
+            }
+            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
+            if wait_for_client(&file).is_err() {
+                return;
+            }
+            debug_log("cmd pipe client connected");
+            // Single buffered reader for the session: recreating it per
+            // line would drop buffered bytes with it.
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(file);
+            loop {
+                let mut buf = String::new();
+                match reader.read_line(&mut buf) {
+                    Ok(0) | Err(_) => return, // client gone
+                    Ok(_) => {}
+                }
+                let cmd = buf.trim().to_string();
+                match sim_action(&cmd) {
+                    Some(action) => {
+                        debug_log(&format!("sim exec: {cmd}"));
+                        exec_sim(action);
+                    }
+                    None => debug_log(&format!("sim rejected: {cmd}")),
+                }
+            }
+        })
+        .ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1211,7 @@ fn main() {
 
     debug_log(&startup_privilege_report());
     spawn_log_pipe_server(log_pipe_for(&pipe_path));
+    spawn_cmd_pipe_server(cmd_pipe_for(&pipe_path));
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 
@@ -1526,6 +1652,31 @@ mod tests {
         assert!(config_changed(b"", b"{\"a\":1}"));
         assert!(!config_changed(b"{\"a\":1}", b"{\"a\":1}"));
         assert!(config_changed(b"{\"a\":1}", b"{\"a\":2}"));
+    }
+
+    #[test]
+    fn sim_allowlist_maps_known_commands() {
+        assert_eq!(sim_action("play_pause"), Some(SimTap { vk: 0xB3, ctrl: false }));
+        assert_eq!(sim_action("next"), Some(SimTap { vk: 0xB0, ctrl: false }));
+        assert_eq!(sim_action("copy"), Some(SimTap { vk: 0x43, ctrl: true }));
+        assert_eq!(sim_action("select_all"), Some(SimTap { vk: 0x41, ctrl: true }));
+        assert_eq!(sim_action("vol_up"), Some(SimTap { vk: 0xAF, ctrl: false }));
+    }
+
+    #[test]
+    fn sim_allowlist_rejects_unknown() {
+        assert_eq!(sim_action(""), None);
+        assert_eq!(sim_action("format_c:"), None);
+        assert_eq!(sim_action("PLAY_PAUSE"), None);
+        assert_eq!(sim_action("copy "), None);
+    }
+
+    #[test]
+    fn cmd_pipe_mirrors_pid() {
+        assert_eq!(
+            cmd_pipe_for(r"\\.\pipe\nex-hotkey\1234"),
+            r"\\.\pipe\NexHelperCmd\1234"
+        );
     }
 
     #[test]

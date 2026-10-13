@@ -589,6 +589,15 @@ impl HotkeyListener {
         let required_mods = modifier_vks_from_names(&parsed.modifiers)?;
         let target_key = vk_from_key(&parsed.key)?;
         let target_is_win = target_key == VK_LWIN;
+        // Dispatch verdict at startup: which path serves this combo and
+        // why. The hook thread logs per-attempt outcomes on top of this.
+        let has_win_mod = required_mods.iter().any(|m| *m == VK_LWIN || *m == VK_RWIN);
+        let startup_reason = dispatch_for(target_key, target_is_win || has_win_mod, !required_mods.is_empty(), false);
+        logging::info(&format!(
+            "[nex] hotkey '{hotkey_str}' dispatches via {}: {}",
+            if startup_reason == DispatchReason::SystemHotkey { "system hotkey + hook" } else { "hook" },
+            dispatch_reason_text(startup_reason),
+        ));
 
         let should_exit = Arc::new(AtomicBool::new(false));
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
@@ -859,13 +868,19 @@ impl HotkeyListener {
                 format!("failed to spawn hotkey thread: {e}")
             })?;
 
-        match ready_rx.recv() {
+        // Bounded wait: a hung hook install must fail startup loudly,
+        // not block it forever. Disconnect still means the thread died.
+        match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Err(e);
             }
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err("hotkey thread start timed out".into());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Err("hotkey thread panicked".into());
             }
@@ -1238,7 +1253,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     let parsed = match parse_hotkey(hotkey_str) {
         Ok(p) => p,
         Err(e) => {
-            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
             return false;
         }
     };
@@ -1249,7 +1264,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
         match vk_from_key(&parsed.key) {
             Ok(vk) => vk,
             Err(e) => {
-                logging::warn(&format!("[nex] live hotkey update: {e}"));
+                logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
                 return false;
             }
         }
@@ -1257,7 +1272,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
         Ok(m) => m,
         Err(e) => {
-            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
             return false;
         }
     };
@@ -1804,4 +1819,6 @@ mod tests {
     #[test] fn dispatch_single_tap_goes_hook() { assert_eq!(dispatch_for(0x70, false, false, false), DispatchReason::SingleTap); }
     #[test] fn dispatch_refused_demotes() { assert_eq!(dispatch_for(0x20, false, true, true), DispatchReason::RefusedDemoted); }
     #[test] fn dispatch_plain_combo_uses_system() { assert_eq!(dispatch_for(0x20, false, true, false), DispatchReason::SystemHotkey); }
+    #[test] fn dispatch_numpad_bounds() { assert_eq!(dispatch_for(0x6F, false, true, false), DispatchReason::NumpadKey); assert_eq!(dispatch_for(0x5F, false, true, false), DispatchReason::SystemHotkey); assert_eq!(dispatch_for(0x70, false, true, false), DispatchReason::SystemHotkey); }
+    #[test] fn dispatch_refused_wins_over_win() { assert_eq!(dispatch_for(0x20, true, true, true), DispatchReason::RefusedDemoted); }
 }

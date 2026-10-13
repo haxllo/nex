@@ -578,6 +578,25 @@ fn package_logo_png(apps_folder_path: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// Fraction of pixels with meaningful alpha. Shared by the sparse-bitmap
+/// guard and the square normalizer.
+fn alpha_fill_ratio(img: &image::RgbaImage) -> f32 {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let content = img.pixels().filter(|p| p[3] > 8).count();
+    content as f32 / (w as f32 * h as f32)
+}
+
+/// True when a large bitmap carries only a small glyph: it would serve
+/// tiny in the UI and never recover downstream. Small dense natives
+/// (32px file icons) are exempt — they render crisp at CSS size.
+fn is_sparse_bitmap(img: &image::RgbaImage) -> bool {
+    let (w, h) = img.dimensions();
+    w.max(h) >= 64 && alpha_fill_ratio(img) < 0.45
+}
+
 /// Normalize an arbitrary RGBA image to a square canvas without stretching
 /// its artwork. Low-resolution sources stay native-sized; high-resolution
 /// padded sources are cropped before fitting to the target canvas.
@@ -1101,6 +1120,16 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
         DeleteDC(dst_dc);
 
         let img = image::RgbaImage::from_raw(canvas as u32, canvas as u32, rgba)?;
+        // Sparse large bitmaps (a 24px frame on 128px transparency from
+        // shell items without hi-res art) serve tiny and never recover
+        // downstream: reject so the chain falls to denser extractors.
+        if is_sparse_bitmap(&img) {
+            crate::logging::info(&format!(
+                "[nex] icon: sparse {canvas}px bitmap rejected (fill={:.1}%)",
+                alpha_fill_ratio(&img) * 100.0,
+            ));
+            return None;
+        }
         normalize_to_square_png(img)
     }
 }
@@ -1928,6 +1957,66 @@ mod probe_magnifier {
                 }
             }
         }
+    }
+
+    /// Stage probe: factory vs SHGetFileInfo fallback for sparse shell items.
+    /// Regression: the sparse factory bitmap must be rejected so the
+    /// chain serves the dense fallback.
+    #[test]
+    fn probe_sparse_fallback_stages() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0,
+            );
+        }
+        let path = "shell:AppsFolder\\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\magnify.exe";
+        // Factory must reject the sparse bitmap...
+        let factory = shell_item_image_factory_png(path);
+        println!(
+            "stage probe [factory]: {}",
+            factory.as_ref().map(|b| format!("SERVED {} bytes (BUG)", b.len())).unwrap_or_else(|| "None (rejected)".into())
+        );
+        assert!(factory.is_none(), "factory must reject the sparse magnifier bitmap");
+        // ...so the chain serves the dense SHGetFileInfo fallback.
+        // (Direct fallback calls are probed print-only: first-call shell
+        // namespace warmup makes them flaky outside the chain order.)
+        let chained = decode_png(&PathBuf::from(path));
+        match chained {
+            Some(bytes) => match image::load_from_memory(&bytes) {
+                Ok(img) => {
+                    let rgba = img.into_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let total = (w * h) as f64;
+                    let content = rgba.pixels().filter(|p| p[3] > 8).count() as f64;
+                    let fill = content / total * 100.0;
+                    println!("stage probe [fullchain]: dims={w}x{h} fill={fill:.1}% bytes={}", bytes.len());
+                    assert!(fill >= 45.0, "chain must serve dense art, got {fill:.1}%");
+                }
+                Err(e) => panic!("chain PNG must decode: {e}"),
+            },
+            None => panic!("chain must serve the fallback icon"),
+        }
+    }
+
+    #[test]
+    fn sparse_guard_keeps_small_dense_natives() {
+        let full = |w: u32, h: u32| {
+            image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]))
+        };
+        // 32px dense file icon: exempt, renders crisp at CSS size.
+        assert!(!is_sparse_bitmap(&full(32, 32)));
+        // 128px sparse glyph: rejected, chain falls through.
+        let mut sparse = image::RgbaImage::from_pixel(128, 128, image::Rgba([0, 0, 0, 0]));
+        for y in 52..76 {
+            for x in 52..76 {
+                sparse.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        assert!(is_sparse_bitmap(&sparse));
+        // 128px dense icon: kept.
+        assert!(!is_sparse_bitmap(&full(128, 128)));
     }
 
     #[test]

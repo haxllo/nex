@@ -200,6 +200,10 @@ pub struct ShimState {
     /// Panel background mode: live glass, or an opaque black/white
     /// panel (glass layer parked, page paints solid).
     pub panel_background: crate::config::PanelBackground,
+    /// First-show content still incoming (Quick Launch deferred by a busy
+    /// indexer). The page holds its instant idle reveal and waits for the
+    /// rows instead of flashing input-first then popping rows in.
+    pub content_pending: bool,
 }
 
 impl Default for ShimState {
@@ -232,6 +236,17 @@ impl Default for ShimState {
             whats_new_pending: None,
             glass_native: false,
             panel_background: crate::config::PanelBackground::Black,
+            content_pending: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_pending_defaults_false() {
+        assert!(!ShimState::default().content_pending);
     }
 }

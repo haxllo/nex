@@ -645,6 +645,14 @@ impl NativeOverlayShell {
         });
     }
 
+    /// Mark first-show content as still incoming (deferred Quick Launch).
+    /// The page holds its instant idle reveal until the rows land.
+    pub fn set_content_pending(&self, pending: bool) {
+        self.with_state(|s| {
+            s.content_pending = pending;
+        });
+    }
+
     /// Get current Quick Launch items.
     pub fn quick_launch_items(&self) -> Vec<QuickLaunchItem> {
         self.inner

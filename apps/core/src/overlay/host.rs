@@ -2381,6 +2381,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "bentoView": s.bento_view,
         "completion": s.completion,
         "showPending": show_pending,
+        "contentPending": s.content_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,

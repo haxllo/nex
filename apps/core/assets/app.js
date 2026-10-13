@@ -3076,8 +3076,10 @@
         window.clearTimeout(showRevealTimer);
         // Idle show (empty rows, empty query): nothing more is coming
         // until keystrokes, so reveal on the next paint instead of the
-        // 500ms cap. Otherwise the cap covers late-arriving content.
-        if (rows.length === 0 && !(state.query || "").trim()) {
+        // 500ms cap. Deferred Quick Launch (native contentPending) still
+        // has rows incoming — take the cap so input and rows reveal as
+        // one instead of input-first with a split-delayed pop-in.
+        if (rows.length === 0 && !(state.query || "").trim() && !state.contentPending) {
           needsPainted = true;
           showRevealTimer = 0;
         } else {

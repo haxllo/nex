@@ -1611,6 +1611,7 @@ impl RuntimeWorker {
         {
             self.load_quick_launch_items();
             if self.quick_launch_loaded {
+                self.overlay.set_content_pending(false);
                 self.show_idle_or_quick_launch();
             }
         }
@@ -1716,6 +1717,14 @@ impl RuntimeWorker {
                         );
                         if self.overlay.query_text().trim().is_empty() {
                             self.load_quick_launch_items();
+                            // Indexer busy at startup defers the load: hold
+                            // the instant idle reveal so Quick Launch lands
+                            // with the first reveal instead of popping in
+                            // split-delayed after the input.
+                            self.overlay.set_content_pending(
+                                self.runtime_config.quick_launch.enabled
+                                    && !self.quick_launch_loaded,
+                            );
                             self.show_idle_or_quick_launch();
                         }
                         self.overlay.show_and_focus();
@@ -1747,6 +1756,7 @@ impl RuntimeWorker {
                     }
                     HotkeyAction::Hide => {
                         self.overlay.hide();
+                        self.overlay.set_content_pending(false);
                         self.bento_query = None;
                         reset_overlay_session(
                             &self.overlay,
@@ -1782,6 +1792,10 @@ impl RuntimeWorker {
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 if self.overlay.query_text().trim().is_empty() {
                     self.load_quick_launch_items();
+                    self.overlay.set_content_pending(
+                        self.runtime_config.quick_launch.enabled
+                            && !self.quick_launch_loaded,
+                    );
                     self.show_idle_or_quick_launch();
                 }
                 self.overlay.show_and_focus();

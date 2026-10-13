@@ -906,7 +906,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     {
                         deferred_hide_armed.store(false, Ordering::SeqCst);
                         deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                        force_foreground(hwnd);
+                        request_foreground(hwnd);
                         window.set_focus();
                         focus_input(&webview);
                         return;
@@ -975,8 +975,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let visible = state.lock().map(|s| s.visible).unwrap_or(false);
                     if visible {
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
-                        force_foreground(hwnd);
-                        crate::overlay::hotkey::signal_overlay_ready();
+                        request_foreground(hwnd);
                     }
                     window.set_focus();
                     focus_input(&webview);
@@ -1218,9 +1217,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView focus (Windows beeps for those unhandled
                         // characters).
                         focus_input(&webview);
-                        // Activate the hidden window before its first visible
-                        // frame so DWM doesn't show Acrylic's inactive fallback.
-                        force_foreground(hwnd);
+                        // Single activation path (helper owns foreground;
+                        // local force only without helper). Request before
+                        // first visible frame so DWM doesn't show Acrylic's
+                        // inactive fallback.
+                        request_foreground(hwnd);
                         window.set_visible(true);
                         // Set focus on the native host after activation, then
                         // restore DOM focus to the WebView's search control.
@@ -1245,9 +1246,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         if let Ok(mut s) = state.lock() {
                             s.has_focus = true;
                         }
-                        // Signal the elevated helper to call SetForegroundWindow
-                        // from High IL (bypasses UIPI for Task Manager scenario).
-                        crate::overlay::hotkey::signal_overlay_ready();
+                        // Helper was already signaled by request_foreground
+                        // above; no second signal needed.
                         // Re-assert topmost Z-position. When the overlay
                         // hides while focused, the focus-sink window
                         // (activated before hide to prevent Explorer
@@ -1308,7 +1308,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // state too; only retake the OS foreground when needed.
                     if visible && (!foreground_owned || !logical_focused) {
                         if !foreground_owned {
-                            force_foreground(hwnd);
+                            crate::runtime::log_info(&format!(
+                                "[nex] FocusReassert: retaking foreground (was {:?})",
+                                unsafe { GetForegroundWindow() }
+                            ));
+                            request_foreground(hwnd);
                             window.set_focus();
                         }
                         focus_input(&webview);
@@ -1563,7 +1567,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 "[nex::debug] Focused(false): re-asserting foreground (grace={}ms)",
                                 grace_ms
                             ));
-                            force_foreground(hwnd);
+                            request_foreground(hwnd);
                             // Put keyboard focus back INTO the webview —
                             // SetForeground alone leaves the page unfocusable
                             // until clicked.
@@ -2935,6 +2939,20 @@ fn force_foreground(hwnd: HWND) {
             // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
+    }
+}
+
+/// Single activation entry point (mature privilege split): the elevated
+/// helper owns SetForegroundWindow — High IL, UIPI-proof, with its own
+/// verify-and-retry loop. The local AttachThreadInput path runs only
+/// while no helper is active (first run, elevation declined); the
+/// FocusReassert watchdog re-requests if foreground still isn't ours,
+/// and a dead helper clears HELPER_ACTIVE via pipe-EOF so later
+/// requests fall back to local automatically.
+fn request_foreground(hwnd: HWND) {
+    crate::overlay::hotkey::signal_overlay_ready();
+    if !crate::overlay::hotkey::helper_active() {
+        force_foreground(hwnd);
     }
 }
 

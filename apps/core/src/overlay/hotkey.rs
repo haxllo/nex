@@ -1086,6 +1086,12 @@ fn create_overlay_event() -> String {
     name
 }
 
+/// Whether the elevated helper currently owns detection (and
+/// activation). Gates the single-activation path in host.rs.
+pub(crate) fn helper_active() -> bool {
+    HELPER_ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Signal the elevated helper that the overlay is now visible.  Called
 /// from host.rs's Painted handler after force_foreground().
 pub(crate) fn signal_overlay_ready() {
@@ -1320,7 +1326,7 @@ fn write_helper_config(
     }
 
     let json = format!(
-        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
+        r#"{{"proto":1,"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
         pipe_name,
         pid,
         target_key,

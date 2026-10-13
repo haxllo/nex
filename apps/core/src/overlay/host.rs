@@ -376,6 +376,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    // Show-path latency telemetry: stamped on UiCommand::Show receipt,
+    // reported when Painted reveals the window.
+    let mut show_cmd_at: Option<Instant> = None;
     let mut previous_foreground: Option<HWND> = None;
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
@@ -839,6 +842,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
+                    show_cmd_at = Some(Instant::now());
                     if previous_foreground.is_none() {
                         previous_foreground = capture_previous_foreground(hwnd);
                     }
@@ -1240,6 +1244,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             );
                         }
                         focus_input(&webview);
+                        if let Some(t0) = show_cmd_at.take() {
+                            let fg_owned = unsafe { GetForegroundWindow() == hwnd };
+                            crate::runtime::log_info(&format!(
+                                "[nex] show_latency host_ms={} fg_owned_at_reveal={}",
+                                t0.elapsed().as_millis(),
+                                fg_owned
+                            ));
+                        }
                         // Delayed re-assertion: Explorer re-asserts foreground
                         // ~100-200ms after Win key-down reaches the OS.  The
                         // initial force_foreground above often loses that race.

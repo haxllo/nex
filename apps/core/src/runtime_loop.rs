@@ -1686,6 +1686,8 @@ impl RuntimeWorker {
                     self.overlay_state
                         .on_hotkey(self.overlay.has_focus() || foreground_owned)
                 };
+                // Show-path latency telemetry (one line per toggle/show).
+                let hotkey_at = Instant::now();
                 log_info(&format!(
                     "[nex::debug] Hotkey: action={:?} has_focus={}",
                     action, self.overlay.has_focus(),
@@ -1717,6 +1719,10 @@ impl RuntimeWorker {
                             self.show_idle_or_quick_launch();
                         }
                         self.overlay.show_and_focus();
+                        log_info(&format!(
+                            "[nex] show_latency worker_ms={}",
+                            hotkey_at.elapsed().as_millis()
+                        ));
                         // Fresh media state on every show: the overlay may
                         // reopen into a surviving media view, and Spotify may
                         // have quit while hidden. The push auto-closes the

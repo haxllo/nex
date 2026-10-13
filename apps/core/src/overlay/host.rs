@@ -2506,9 +2506,9 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let dark = state.lock().map(|s| s.theme == crate::overlay::model::Theme::Dark).unwrap_or(true);
     let border: u32 = match panel {
         crate::config::PanelBackground::White => 0x00FF_FFFF,
-        crate::config::PanelBackground::Black => 0x0000_0000,
-        crate::config::PanelBackground::Glass if dark => 0x001C_1614,
-        crate::config::PanelBackground::Glass => 0x00FA_F7F5,
+        crate::config::PanelBackground::Black => 0x002E_3238,
+        crate::config::PanelBackground::Glass if dark => 0x004A_5058,
+        crate::config::PanelBackground::Glass => 0x00C9_CDD3,
     };
     let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
     let available = if opaque_panel {

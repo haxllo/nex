@@ -130,11 +130,7 @@ body {
   border-radius: var(--radius);
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.36),
-    0 0 0 1px rgba(255, 255, 255, 0.04),
-    inset 0 1px 0 var(--panel-highlight),
-    inset 1px 0 0 var(--panel-sheen),
-    inset -1px 0 0 var(--panel-sheen),
-    inset 0 -1px 0 var(--panel-bottom-edge);
+    0 0 0 1px rgba(255, 255, 255, 0.04);
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the
      window and margins don't collapse past the measured height. */

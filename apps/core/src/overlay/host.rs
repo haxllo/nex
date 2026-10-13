@@ -169,7 +169,7 @@ const POST_SHOW_QUIESCENCE_MS: u64 = 2000;
 const SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
 const SETTINGS_JS: &str = include_str!("../../assets/settings.js");
 
-/// Embedded web UI assets (premium Raycast-dark cmdk UI).
+/// Embedded web UI assets (premium dark cmdk UI).
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
@@ -1496,7 +1496,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 if !focused {
                     // Track the window that took foreground for the restore
-                    // stack (Raycast-style foreground history). Filtered to
+                    // stack (newest-live-first foreground history). Filtered to
                     // foreign live non-shell windows inside.
                     push_fg_stack(&mut fg_stack, hwnd);
                     let picker_active = state
@@ -2745,7 +2745,7 @@ fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
 }
 
 /// Center the window horizontally on the monitor under the cursor and
-/// anchor it in the upper third (Raycast/Spotlight placement).
+/// anchor it in the upper third (launcher placement).
 fn position_window(window: &Window, _hwnd: HWND) {
     let Some((left, top, right, bottom)) = cursor_monitor_work_area() else {
         return;

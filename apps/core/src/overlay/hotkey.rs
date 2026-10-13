@@ -853,6 +853,34 @@ impl HotkeyListener {
                                 return;
                             }
                             logging::info("[nex] hotkey: using elevated helper for detection");
+                            // Helper log pipe: forward helper
+                            // diagnostics into nex's log. Best-effort — the
+                            // hotkey pipe already proved the helper is alive.
+                            let log_pipe_name = format!(
+                                r"\\.\pipe\NexHelperLog\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&log_pipe_name) {
+                                Ok(log_file) => {
+                                    match thread::Builder::new()
+                                        .name("NexHelper-log-reader".into())
+                                        .spawn(move || {
+                                            use std::io::BufRead;
+                                            let reader = std::io::BufReader::new(log_file);
+                                            for line in reader.lines().flatten() {
+                                                logging::info(&format!("[helper] {line}"));
+                                            }
+                                        }) {
+                                        Ok(_) => {}
+                                        Err(e) => logging::warn(&format!(
+                                            "[nex] helper log reader spawn failed: {e}"
+                                        )),
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper log pipe unavailable: {e}"
+                                )),
+                            }
                             let pipe_event_tx = event_tx_h;
                             match thread::Builder::new()
                                 .name("NexHelper-pipe-reader".into())

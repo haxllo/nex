@@ -17,6 +17,7 @@ use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -652,7 +653,7 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 
 /// Monotonic activation generation. Each overlay-ready signal claims the
 /// next number; a retry loop whose number is stale abandons instead of
-/// fighting the newer activation (Raycast: abandon superseded).
+/// fighting the newer activation (a newer signal always wins).
 static FG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// True when a newer activation superseded `seq`.
@@ -709,7 +710,8 @@ fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String
 
 /// Write a diagnostic line to the helper debug log.
 /// The helper has no console (windows_subsystem = "windows"), so file logging
-/// is the only way to observe failures.
+/// is the only way to observe failures. Lines also fan out to the log pipe
+/// (when nex connected) so they land in nex's own log.
 fn debug_log(msg: &str) {
     let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
@@ -720,6 +722,155 @@ fn debug_log(msg: &str) {
         let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
         let _ = f.flush();
     }
+    if let Ok(mut slot) = LOG_PIPE.lock() {
+        if let Some(pipe) = slot.as_mut() {
+            use std::io::Write;
+            if writeln!(pipe, "{msg}").is_err() {
+                *slot = None; // reader gone; file log continues
+            } else {
+                let _ = pipe.flush();
+            }
+        }
+    }
+}
+
+/// Outbound log pipe (helper serves, nex reads), same per-pid scoping
+/// as the hotkey pipe.
+/// Naming convention for new nex processes: future binaries are
+/// `Nex.<Role>.exe`, e.g. `Nex.Elevated.exe`; pipes stay
+/// `\\.\pipe\<Name>\<pid>`.
+static LOG_PIPE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// `\\.\pipe\nex-hotkey\<pid>` -> `\\.\pipe\NexHelperLog\<pid>`.
+/// nex.exe mirrors this rule to connect; pure so both ends agree.
+fn log_pipe_for(pipe_path: &str) -> String {
+    match pipe_path.rsplit_once('\\') {
+        Some((_, pid)) if !pid.is_empty() => format!("\\\\.\\pipe\\NexHelperLog\\{pid}"),
+        _ => format!("{pipe_path}-log"),
+    }
+}
+
+/// Parked thread: serve the log pipe, then hold it for debug_log fan-out.
+fn spawn_log_pipe_server(log_path: String) {
+    std::thread::Builder::new()
+        .name("NexHelper-log-pipe".into())
+        .spawn(move || {
+            let pipe = match create_named_pipe(&log_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    debug_log(&format!("log pipe create failed: {e}"));
+                    return;
+                }
+            };
+            if wait_for_client(&pipe).is_err() {
+                return;
+            }
+            debug_log("log pipe client connected");
+            if let Ok(mut slot) = LOG_PIPE.lock() {
+                *slot = Some(pipe);
+            }
+        })
+        .ok();
+}
+
+// ---------------------------------------------------------------------------
+// Startup privilege self-check: elevation, integrity, UI access.
+// ---------------------------------------------------------------------------
+
+/// Integrity-level RID to name (SECURITY_MANDATORY_*_RID).
+fn integrity_label(rid: u32) -> &'static str {
+    match rid {
+        0x1000 => "Low",
+        0x2000 => "Medium",
+        0x2100 => "MediumPlus",
+        0x3000 => "High",
+        0x4000 => "System",
+        _ => "Unknown",
+    }
+}
+
+/// TOKEN_ELEVATION_TYPE value to name.
+fn elevation_label(t: u32) -> &'static str {
+    match t {
+        1 => "Default",
+        2 => "Full",
+        3 => "Limited",
+        _ => "Unknown",
+    }
+}
+
+fn format_startup_report(elev: &str, integrity: &str, ui_access: bool) -> String {
+    format!("privilege: elevation={elev} integrity={integrity} uiaccess={ui_access}")
+}
+
+/// Best-effort current-process privilege snapshot. Unknowns render as `?`.
+fn startup_privilege_report() -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevationType,
+        TokenIntegrityLevel, TokenUIAccess, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut elev = String::from("?");
+    let mut integrity = String::from("?");
+    let mut ui_access = false;
+    let mut ui_known = false;
+    unsafe {
+        let mut tok = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) != 0 {
+            let mut val = 0u32;
+            let mut len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenElevationType,
+                &mut val as *mut u32 as *mut _,
+                4,
+                &mut len,
+            ) != 0
+            {
+                elev = elevation_label(val).to_string();
+            }
+            let mut tml = [0u64; 8];
+            let mut tml_len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenIntegrityLevel,
+                tml.as_mut_ptr() as *mut _,
+                (tml.len() * 8) as u32,
+                &mut tml_len,
+            ) != 0
+            {
+                let sid = *(tml.as_ptr() as *const *mut core::ffi::c_void);
+                let n = *GetSidSubAuthorityCount(sid);
+                if n > 0 {
+                    let rid = *GetSidSubAuthority(sid, (n - 1) as u32);
+                    integrity = integrity_label(rid).to_string();
+                }
+            }
+            let mut ui_val = 0u32;
+            let mut ui_len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenUIAccess,
+                &mut ui_val as *mut u32 as *mut _,
+                4,
+                &mut ui_len,
+            ) != 0
+            {
+                ui_access = ui_val != 0;
+                ui_known = true;
+            }
+            CloseHandle(tok);
+        }
+    }
+    let ui = if ui_known {
+        ui_access.to_string()
+    } else {
+        String::from("?")
+    };
+    format!(
+        "privilege: elevation={elev} integrity={integrity} uiaccess={ui}"
+    )
 }
 
 /// Called when nex.exe signals that the overlay is now visible.
@@ -750,7 +901,7 @@ fn set_overlay_foreground(seq: u64) {
         };
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
-        // Already foreground: nothing to do (Raycast: already foreground).
+        // Already foreground: nothing to do.
         if GetForegroundWindow() == hwnd {
             debug_log(&format_activation_report(
                 "already foreground",
@@ -897,6 +1048,9 @@ fn main() {
         debug_log("watchdog: nex exited, helper shutting down");
         std::process::exit(0);
     });
+
+    debug_log(&startup_privilege_report());
+    spawn_log_pipe_server(log_pipe_for(&pipe_path));
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 
@@ -1280,5 +1434,32 @@ mod tests {
         let d = describe_window(0);
         assert!(d.contains("hwnd=0x0"));
         assert!(d.contains("pid=0"));
+    }
+
+    #[test]
+    fn log_pipe_mirrors_pid() {
+        assert_eq!(
+            log_pipe_for(r"\\.\pipe\nex-hotkey\1234"),
+            r"\\.\pipe\NexHelperLog\1234"
+        );
+        assert_eq!(log_pipe_for("odd"), "odd-log");
+    }
+
+    #[test]
+    fn privilege_labels_cover_known_values() {
+        assert_eq!(integrity_label(0x2000), "Medium");
+        assert_eq!(integrity_label(0x3000), "High");
+        assert_eq!(integrity_label(0x4000), "System");
+        assert_eq!(integrity_label(0x9999), "Unknown");
+        assert_eq!(elevation_label(2), "Full");
+        assert_eq!(elevation_label(3), "Limited");
+        assert_eq!(elevation_label(9), "Unknown");
+    }
+
+    #[test]
+    fn startup_report_is_one_line() {
+        let r = format_startup_report("Full", "High", false);
+        assert_eq!(r, "privilege: elevation=Full integrity=High uiaccess=false");
+        assert!(!r.contains('\n'));
     }
 }

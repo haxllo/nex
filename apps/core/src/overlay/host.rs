@@ -2196,6 +2196,7 @@ fn push_state(
 
     // Phase 2: Build lightweight JSON without icons (~2KB).
     let state_json = snapshot_state_json(&snapshot, show_pending);
+    crate::logging::info(&format!("TEMP-DIAG push rows={} show_pending={}", snapshot.rows.len(), show_pending)); // TEMP-DIAG
 
     // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
     // Note: png_bytes() may block on first decode per icon (cold cache),

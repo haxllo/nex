@@ -972,8 +972,11 @@ impl HotkeyListener {
                                     // Pipe EOF/error: the helper is gone. Clear the
                                     // flag so the next hotkey change falls back to
                                     // full re-registration instead of signalling a
-                                    // dead process.
+                                    // dead process. Also drop focus-escape
+                                    // suppression: a SUPPRESS_ON without its OFF
+                                    // would stick otherwise.
                                     HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                                    crate::overlay::hotkey::set_suppress_focus_escape(false);
                                     logging::warn(
                                         "[nex] helper pipe closed — live-update path disabled until a new helper connects",
                                     );

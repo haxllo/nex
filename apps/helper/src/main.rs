@@ -374,6 +374,30 @@ fn send_mask_up() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
+/// Whether this process currently holds the mask down. Centralizes the
+/// pairing so a missed key-up path can't double-hold or leak the hold.
+static MASK_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold the mask unless already held. Returns true on transition.
+fn hold_mask() -> bool {
+    if MASK_HELD.swap(true, Ordering::SeqCst) {
+        false
+    } else {
+        send_mask_down();
+        true
+    }
+}
+
+/// Release the mask if held. Returns true on transition.
+fn release_mask() -> bool {
+    if MASK_HELD.swap(false, Ordering::SeqCst) {
+        send_mask_up();
+        true
+    } else {
+        false
+    }
+}
+
 /// Write "HOTKEY\n" to the pipe. Returns Err on failure (client disconnected).
 fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
     debug_log("firing HOTKEY to nex");
@@ -440,7 +464,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    send_mask_down();
+                    hold_mask();
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
             }
@@ -448,7 +472,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
                 if consumed_vk != 0 {
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    send_mask_up();
+                    release_mask();
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
@@ -470,7 +494,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         {
             // Chord detected — release the mask so the OS handles Win+X.
             CHORD_DETECTED.store(true, Ordering::SeqCst);
-            send_mask_up();
+            release_mask();
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
         }
     }
@@ -494,7 +518,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);
-                send_mask_down();
+                hold_mask();
             }
             // DO NOT EAT — pass Win through so Win+ chords work
             return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -1014,6 +1038,9 @@ fn set_overlay_foreground(seq: u64) {
 fn main() {
     // Log startup immediately (before anything can fail)
     debug_log("helper started");
+    // Orphan release: a dead predecessor may have held the mask down
+    // across its death. Raw key-up is a no-op otherwise.
+    send_mask_up();
 
     let cfg = match parse_args() {
         Ok(c) => c,
@@ -1053,6 +1080,7 @@ fn main() {
             windows_sys::Win32::System::Threading::WaitForSingleObject(h, u32::MAX);
         }
         debug_log("watchdog: nex exited, helper shutting down");
+        release_mask();
         std::process::exit(0);
     });
 
@@ -1168,7 +1196,7 @@ fn main() {
                 CTRL_DOWN.store(false, Ordering::SeqCst);
                 ALT_DOWN.store(false, Ordering::SeqCst);
                 SHIFT_DOWN.store(false, Ordering::SeqCst);
-                send_mask_up();
+                release_mask();
                 *last_applied = bytes;
                 let g = CFG.read().unwrap();
                 if let Some(cfg) = g.as_ref() {
@@ -1498,5 +1526,16 @@ mod tests {
         assert!(config_changed(b"", b"{\"a\":1}"));
         assert!(!config_changed(b"{\"a\":1}", b"{\"a\":1}"));
         assert!(config_changed(b"{\"a\":1}", b"{\"a\":2}"));
+    }
+
+    #[test]
+    fn mask_hold_release_transitions_once() {
+        MASK_HELD.store(false, Ordering::SeqCst);
+        assert!(hold_mask());
+        assert!(!hold_mask());
+        assert!(release_mask());
+        assert!(!release_mask());
+        assert!(hold_mask());
+        MASK_HELD.store(false, Ordering::SeqCst);
     }
 }

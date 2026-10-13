@@ -8,7 +8,7 @@
 }
 
 :root {
-  --radius: 20px;
+  --radius: 8px;
   --row-radius: 14px;
   --pad-x: 16px;
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;

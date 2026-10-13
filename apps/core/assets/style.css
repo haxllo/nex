@@ -126,10 +126,10 @@ body {
   background:
     linear-gradient(136deg, var(--panel-glint) 0%, transparent 28%, transparent 74%, var(--panel-reflection) 100%),
     var(--panel-surface);
-  border: 1px solid var(--panel-edge);
+  /*border: 1px solid var(--panel-edge);
   border-radius: var(--radius);
   box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.36);
+    0 12px 40px rgba(0, 0, 0, 0.36);*/
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the
      window and margins don't collapse past the measured height. */

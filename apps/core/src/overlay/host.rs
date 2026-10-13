@@ -1006,17 +1006,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack);
+                    // Cloak fallback: if focus is still ours the invisible
+                    // window owns the foreground and typing would land in
+                    // the void — real-hide instead so the OS moves on.
+                    if unsafe { GetForegroundWindow() } == hwnd {
+                        let _ = window.set_visible(false);
+                    }
                     crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
-                    let is_visible = unsafe {
+                    // OS visibility distinguishes cloak (still "visible")
+                    // from fallback real-hide; logical flag is always false
+                    // here by construction.
+                    let os_visible = unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
                     };
                     let win_down = unsafe {
                         windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5B) as u16 & 0x8000 != 0
                     };
                     crate::runtime::log_info(&format!(
-                        "[nex::debug] Hide: fg={:?} visible={} win_down={}",
-                        fg_after, is_visible, win_down,
+                        "[nex::debug] Hide: fg={:?} os_visible={} win_down={}",
+                        fg_after, os_visible, win_down,
                     ));
                     // Delayed keyboard-state check: poll Win key after user
                     // likely released it.  If still pressed, something is stuck.
@@ -1061,6 +1070,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack);
+                    // Same cloak fallback as Hide (see above).
+                    if unsafe { GetForegroundWindow() } == hwnd {
+                        let _ = window.set_visible(false);
+                    }
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
@@ -1219,6 +1232,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView focus (Windows beeps for those unhandled
                         // characters).
                         focus_input(&webview);
+                        // Transparent-hide reversal (order mirrors hide):
+                        // uncloak + child visible before first frame.
+                        set_overlay_cloaked(hwnd, false);
+                        set_webview_child_visible(&window, true);
                         // Single activation path (helper owns foreground;
                         // local force only without helper). Request before
                         // first visible frame so DWM doesn't show Acrylic's
@@ -2570,48 +2587,21 @@ fn apply_window_height(
 /// Runs every resize: transient states heal on the next apply.
 fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
     use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-    struct Search {
-        found: HWND,
-    }
-    unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
-        const WRY_WEBVIEW: &[u16] = &[
-            b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
-            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
-        ];
-        let search = &mut *(param as *mut Search);
-        let mut name = [0u16; 32];
-        let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
-        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
-            search.found = hwnd;
-            return 0;
-        }
-        1
-    }
     // Opaque surfaces need clipping; transparent glass keeps its fringe.
     let clip = opaque;
-    let mut search = Search {
-        found: std::ptr::null_mut(),
-    };
-    unsafe {
-        EnumChildWindows(
-            window.hwnd() as HWND,
-            Some(find_webview),
-            &mut search as *mut Search as isize,
-        );
-    }
-    if search.found.is_null() {
+    let found = find_webview_child(window);
+    if found.is_null() {
         return;
     }
     if !clip {
         // Glass has no region to clear (transparent fringe stays); drop
         // the redraw flag so every resize doesn't force a full child
         // repaint and flash the transparent surface beneath.
-        let key = (search.found as isize, 0, 0, 0, false);
+        let key = (found as isize, 0, 0, 0, false);
         if last_webview_rgn() == Some(key) {
             return;
         }
-        if unsafe { SetWindowRgn(search.found, std::ptr::null_mut(), 0) } != 0 {
+        if unsafe { SetWindowRgn(found, std::ptr::null_mut(), 0) } != 0 {
             cache_webview_rgn(key);
         }
         return;
@@ -2628,7 +2618,7 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
     // Skip redundant region churn: same child, size, and mode as the last
     // apply needs no GDI work (SetWindowRgn with redraw forces a full
     // child repaint on every resize while typing).
-    let key = (search.found as isize, w_px, h_px, d, clip);
+    let key = (found as isize, w_px, h_px, d, clip);
     if last_webview_rgn() == Some(key) {
         return;
     }
@@ -2637,7 +2627,7 @@ fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
         return;
     }
     // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(search.found, rgn, 1) } == 0 {
+    if unsafe { SetWindowRgn(found, rgn, 1) } == 0 {
         unsafe {
             DeleteObject(rgn);
         }
@@ -2886,6 +2876,16 @@ fn hide_overlay_window(
     if let Some(layer) = glass {
         layer.set_visible(false);
     }
+    // Transparent-hide first: cloak + click-through + child hidden.
+    // WS_EX_TRANSPARENT on the parent does not stop hit-testing on the
+    // child HWND, so the page is hidden separately — an invisible page
+    // must never eat clicks (the click-outside hook keys off the panel
+    // rect and would go blind).
+    if set_overlay_cloaked(hwnd, true) {
+        set_webview_child_visible(window, false);
+        return;
+    }
+    // Fallback: classic hide when cloaking is unavailable.
     unsafe {
         SetWindowPos(
             hwnd,
@@ -2898,6 +2898,102 @@ fn hide_overlay_window(
         );
     }
     let _ = window.set_visible(false);
+}
+
+/// Find the WRY_WEBVIEW child HWND (null when the WebView isn't built).
+fn find_webview_child(window: &Window) -> HWND {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+    struct Search {
+        found: HWND,
+    }
+    unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
+        const WRY_WEBVIEW: &[u16] = &[
+            b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
+            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
+        ];
+        let search = &mut *(param as *mut Search);
+        let mut name = [0u16; 32];
+        let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
+        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
+            search.found = hwnd;
+            return 0;
+        }
+        1
+    }
+    let mut search = Search {
+        found: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumChildWindows(
+            window.hwnd() as HWND,
+            Some(find_webview),
+            &mut search as *mut Search as isize,
+        );
+    }
+    search.found
+}
+
+/// Show/hide only the WebView child. Used by transparent-hide: the page
+/// must not eat clicks while invisible, but hiding the child alone keeps
+/// regions, z-order, and renderer state (unlike hiding the parent).
+fn set_webview_child_visible(window: &Window, visible: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNA};
+    let child = find_webview_child(window);
+    if child.is_null() {
+        return;
+    }
+    unsafe {
+        // SW_SHOWNA: reveal without activating — activation belongs to
+        // the foreground flow, not the visibility toggle.
+        ShowWindow(child, if visible { SW_SHOWNA } else { SW_HIDE });
+    }
+}
+
+/// Cloak-based visibility (transparent-hide): DWM stops composing the
+/// window and clicks pass through, but nothing is destroyed — regions,
+/// z-order, and the warm WebView survive, so the next show is a reveal,
+/// not a rebuild. Returns false when cloaking is unavailable (caller
+/// falls back to SW_HIDEWINDOW).
+fn set_overlay_cloaked(hwnd: HWND, cloak: bool) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    const TRANSPARENT_BIT: isize = 0x20; // WS_EX_TRANSPARENT
+    let cloak_int: i32 = if cloak { 1 } else { 0 };
+    if unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK as u32,
+            &cloak_int as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    } < 0
+    {
+        return false;
+    }
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let want = if cloak {
+        exstyle | TRANSPARENT_BIT
+    } else {
+        exstyle & !TRANSPARENT_BIT
+    };
+    if want != exstyle {
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            );
+        }
+    }
+    true
 }
 
 /// Activate the overlay without injecting keyboard input. `AttachThreadInput`

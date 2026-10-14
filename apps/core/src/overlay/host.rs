@@ -1615,6 +1615,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             focus_reassert_used = false;
                             arm_deferred_hide();
                             return;
+                        } else if picker_active && state_vis && !bare_win {
+                            // File picker open long past show: no flap-pair
+                            // risk this late, so an outside click dismisses
+                            // on this event instead of after the 150ms
+                            // settle (the perceptible picker-hide lag).
+                            let foreground_owned = unsafe { GetForegroundWindow() } == hwnd;
+                            let lost = state
+                                .lock()
+                                .map(|s| s.visible && !s.has_focus)
+                                .unwrap_or(false);
+                            if lost && !foreground_owned {
+                                try_send_ui(
+                                    &proxy,
+                                    UiCommand::ChatPickerCancel { dismiss_overlay: true },
+                                );
+                                return;
+                            }
+                            arm_deferred_hide();
                         } else {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] Focused(false): deferring post-quiescence hide (was_focused={} show_pending={} grace={}ms state_vis={})",

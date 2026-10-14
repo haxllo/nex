@@ -354,12 +354,15 @@ body {
 }
 .row:hover::before {
   opacity: 1;
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
 }
 .row.selected::before {
   background: var(--sel);
   opacity: 1;
+}
+/* Blur-behind is glass-only: over opaque panels it only tints flat
+   fill, while the filter layer grayscales hovered/selected text. */
+html[data-native-material="acrylic"] .row:hover::before,
+html[data-native-material="acrylic"] .row.selected::before {
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
 }
@@ -371,7 +374,9 @@ body {
   position: absolute;
   right: 12px;
   top: 50%;
-  transform: translateY(-50%);
+  /* No-transform rule (see #query): margin keeps this off a
+     composited layer. ~half of one 10.5px line. */
+  margin-top: -7px;
   max-width: 45%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -875,8 +880,8 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 @keyframes nexMediaReveal {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Session switcher dots: one per live app, top-right. Hidden unless 2+. */
@@ -1040,7 +1045,8 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  transform: translateY(1px);
+  position: relative;
+  top: 1px;
 }
 
 #media-live.hidden {
@@ -1296,8 +1302,8 @@ html[data-theme="light"] #whats-new-btn:hover {
 }
 
 @keyframes chatReveal {
-  from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .chat-header {
@@ -1482,7 +1488,9 @@ html[data-theme="light"] #whats-new-btn:hover {
 .chat-context-chip button { width: 15px; height: 15px; flex: 0 0 15px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-faint); font: 13px/15px var(--font); cursor: pointer; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); backdrop-filter: blur(16px) saturate(1.08); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+/* Composer blur is glass-only: the filter layer grayscales the input text. */
+html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 /* Grown past a few lines the pill relaxes into a rounded box so the
    corners never pinch the scrolled text. */
 .chat-composer-shell.grown { border-radius: 18px; }

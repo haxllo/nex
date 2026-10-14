@@ -114,6 +114,8 @@
   let chatModelsProvider = "";
   let chatModelsLoading = false;
   let chatModelsTimer = 0;
+  let chatModelsAttempts = 0;
+  let lastModelsPayload = null;
   let chatConnectionTimer = 0;
   let chatConnectTimer = 0;
   let chatDisconnectTimer = 0;
@@ -2378,16 +2380,34 @@
       apiKey: chatApiKeyInput.value,
     };
     setChatModelsLoading(true);
+    chatModelsAttempts = 0;
     chatNotice.textContent = "Loading models from your provider…";
     chatNotice.classList.remove("error");
     renderChatModelOptions(showMenu);
-    post("chatFetchModels", payload);
-    chatModelsTimer = window.setTimeout(() => {
-      setChatModelsLoading(false);
-      closeChatModelOptions();
-      chatNotice.textContent = "Model loading timed out. Check the provider connection and try again.";
-      chatNotice.classList.add("error");
-    }, 30000);
+    lastModelsPayload = payload;
+    requestModels();
+  }
+
+  function requestModels() {
+    if (!lastModelsPayload) return;
+    post("chatFetchModels", lastModelsPayload);
+    window.clearTimeout(chatModelsTimer);
+    chatModelsTimer = window.setTimeout(onModelsTimeout, 30000);
+  }
+
+  function onModelsTimeout() {
+    // Two automatic retries before surfacing the failure.
+    if (chatModelsAttempts < 2) {
+      chatModelsAttempts += 1;
+      chatNotice.textContent = `Model loading timed out. Retrying (${chatModelsAttempts + 1} of 3)…`;
+      chatNotice.classList.remove("error");
+      requestModels();
+      return;
+    }
+    setChatModelsLoading(false);
+    closeChatModelOptions();
+    chatNotice.textContent = "Model loading failed after 3 attempts. Check the provider connection and try again.";
+    chatNotice.classList.add("error");
   }
 
   function setChatModelsLoading(loading) {
@@ -2861,6 +2881,7 @@
     }
     if (state.chatModels) {
       setChatModelsLoading(false);
+      chatModelsAttempts = 0;
       if (state.chatModels.provider === chatProviderInput.value) {
         chatModels = Array.isArray(state.chatModels.models) ? state.chatModels.models : [];
         chatModelsProvider = state.chatModels.provider;

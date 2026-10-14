@@ -1406,7 +1406,7 @@ html[data-native-material="acrylic"] .chat-provider-options, html[data-native-ma
 /* Committed selection reads as bar only; hovered selection reads as
    fill only (later rule wins the specificity tie with transparent). */
 .chat-provider-option[aria-selected="true"]:hover, .chat-model-option[aria-selected="true"]:hover { background: var(--hover); }
-.chat-provider-option[aria-selected="true"]:not(:hover)::before, .chat-model-option[aria-selected="true"]:not(:hover)::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
+.chat-provider-option[aria-selected="true"]::before, .chat-model-option[aria-selected="true"]::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
 .chat-model-picker { position: relative; min-width: 0; }
 #chat-model { display: none; }
 .chat-model-options { max-height: 225px; overflow: hidden; padding: 4px; }
@@ -1426,7 +1426,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-history.scrolling { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 .chat-history.scrolling::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
 .chat-history-item:hover, .chat-history-item[aria-selected="true"] { background: var(--hover); }
-.chat-history-item.active:not(:hover)::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
+.chat-history-item.active::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
 .chat-history-item { width: 100%; min-height: 36px; display: flex; position: relative; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .chat-history-item:hover, .chat-history-item.active { background: var(--hover); }
 .chat-history-item strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }

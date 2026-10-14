@@ -2528,19 +2528,8 @@
     if (!open) closeChatModelOptions();
   });
   chatModelSearch.addEventListener("input", renderChatModelOptions);
-  // Hover-select like result rows: the highlight follows the cursor.
-  function trackMenuHover(container) {
-    container.addEventListener("mousemove", (event) => {
-      const option = event.target.closest ? event.target.closest("button") : null;
-      if (!option || !container.contains(option)) return;
-      for (const item of container.querySelectorAll("button")) {
-        item.setAttribute("aria-selected", String(item === option));
-      }
-    }, { passive: true });
-  }
-  trackMenuHover(chatProviderOptions);
-  trackMenuHover(chatModelResults);
-  trackMenuHover(chatHistory);
+  // Hover fill is pure CSS (:hover). aria-selected stays the committed
+  // choice so accent bars never follow the cursor.
   // History scrollbar stays hidden until actually scrolled.
   let chatHistoryScrollTimer = 0;
   chatHistory.addEventListener("scroll", () => {

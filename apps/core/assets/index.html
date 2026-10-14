@@ -113,7 +113,7 @@
       <section id="chat-view" aria-label="Chat" aria-hidden="true">
         <header class="chat-header">
           <button type="button" id="chat-back" class="chat-icon-button" title="Back to search" aria-label="Back to search">
-            <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6M9 12h11"/></svg>
+            <svg viewBox="0 0 20 20"><path d="m10.5 15-5-5 5-5M5.5 10h9"/></svg>
           </button>
           <div class="chat-title-wrap">
             <div class="chat-title">Chat</div>
@@ -126,7 +126,7 @@
               <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5m4-1v5l3 2"/></svg>
             </button>
             <button type="button" id="chat-new-button" class="chat-icon-button" title="New conversation" aria-label="New conversation">
-              <svg viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg>
+              <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
             </button>
             <button type="button" id="chat-copy-button" class="chat-icon-button" title="Copy transcript" aria-label="Copy transcript">
               <svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
@@ -151,7 +151,11 @@
             </label>
             <label class="chat-model-field">Model
               <div class="chat-model-picker">
-                <input id="chat-model" type="text" maxlength="128" autocomplete="off" placeholder="Choose or enter a model" aria-controls="chat-model-options" />
+                <input id="chat-model" type="hidden" value="" />
+                <button type="button" id="chat-model-select" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-model-options" aria-expanded="false">
+                  <span id="chat-model-choice">Choose a model</span>
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+                </button>
                 <div id="chat-model-options" class="chat-model-options" hidden>
                   <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
                   <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>
@@ -196,7 +200,7 @@
             <textarea id="chat-input" rows="1" maxlength="16000" aria-label="Message Chat" placeholder="Message Nex…"></textarea>
             <div class="chat-composer-tools">
               <button type="button" id="chat-attach-button" class="chat-icon-button" title="Choose up to 3 small text files to share with your next message" aria-label="Attach text files">
-                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
               </button>
               <button type="button" id="chat-pc-info-button" class="chat-icon-button" title="Include basic Windows facts with your next message" aria-label="Include basic PC facts" aria-pressed="false">
                 <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
@@ -205,7 +209,7 @@
                 <svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5m-4 0h8"/></svg>
               </button>
               <button type="button" id="chat-send-button" class="chat-send-button" title="Send message" aria-label="Send message">
-                <svg class="chat-send-icon" viewBox="0 0 24 24"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+                <svg class="chat-send-icon" viewBox="0 0 20 20"><path d="M10 16V4m-6 6 6-6 6 6"/></svg>
                 <svg class="chat-stop-icon" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
               </button>
             </div>
@@ -218,7 +222,7 @@
         <div id="chat-file-picker" class="chat-file-picker" role="dialog" aria-modal="true" aria-labelledby="chat-file-picker-title" hidden>
           <header class="chat-file-picker-header">
             <button type="button" id="chat-file-picker-back" class="chat-icon-button" title="Go to parent folder" aria-label="Go to parent folder">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 15-5-5 5-5" /></svg>
             </button>
             <div class="chat-file-picker-heading">
               <h2 id="chat-file-picker-title" class="chat-file-picker-title">Add text files</h2>
@@ -227,7 +231,7 @@
               </nav>
             </div>
             <button type="button" id="chat-file-picker-close" class="chat-icon-button" title="Close file picker" aria-label="Close file picker">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
             </button>
           </header>
           <div class="chat-file-picker-content">

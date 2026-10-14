@@ -128,9 +128,8 @@ use wry::{WebView, WebViewBuilder};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED,
     DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_DONOTROUND,
+    DWMWCP_DEFAULT,
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -169,7 +168,7 @@ const POST_SHOW_QUIESCENCE_MS: u64 = 2000;
 const SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
 const SETTINGS_JS: &str = include_str!("../../assets/settings.js");
 
-/// Embedded web UI assets (premium Raycast-dark cmdk UI).
+/// Embedded web UI assets (premium dark cmdk UI).
 const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
@@ -380,7 +379,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
     let mut show_arm_at: Option<Instant> = None;
-    let mut previous_foreground: Option<HWND> = None;
+    // Previously-foregrounded windows, newest last (capped). Pushed on
+    // Show and on every genuine focus loss; drained (dead pruned) on
+    // hide. A single slot restores stale windows after multi-window
+    // flows (settings open/close, transient popups).
+    let mut fg_stack: Vec<HWND> = Vec::new();
     let deferred_hide_armed = Arc::new(AtomicBool::new(false));
     // Epoch counter: incremented on every Show so stale deferred-hide
     // threads from a previous cycle can detect they are outdated and
@@ -479,7 +482,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
                             position_window(&window, hwnd);
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
@@ -853,9 +856,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     show_cmd_at = Some(Instant::now());
-                    if previous_foreground.is_none() {
-                        previous_foreground = capture_previous_foreground(hwnd);
-                    }
+                    push_fg_stack(&mut fg_stack, hwnd);
                     if webview.is_none() {
                         ready = false;
                         // Mark the show as pending before building the
@@ -906,7 +907,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     {
                         deferred_hide_armed.store(false, Ordering::SeqCst);
                         deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
-                        force_foreground(hwnd);
+                        request_foreground(hwnd);
                         window.set_focus();
                         focus_input(&webview);
                         return;
@@ -938,7 +939,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                     // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT, should_clip_main(&state), is_opaque_panel(&state));
+                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
                     last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
@@ -975,8 +976,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let visible = state.lock().map(|s| s.visible).unwrap_or(false);
                     if visible {
                         register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
-                        force_foreground(hwnd);
-                        crate::overlay::hotkey::signal_overlay_ready();
+                        request_foreground(hwnd);
                     }
                     window.set_focus();
                     focus_input(&webview);
@@ -1004,18 +1004,27 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_previous_foreground(&mut previous_foreground);
+                    restore_fg_stack(&mut fg_stack);
+                    // Cloak fallback: if focus is still ours the invisible
+                    // window owns the foreground and typing would land in
+                    // the void — real-hide instead so the OS moves on.
+                    if unsafe { GetForegroundWindow() } == hwnd {
+                        let _ = window.set_visible(false);
+                    }
                     crate::overlay::hotkey::release_mask_after_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
-                    let is_visible = unsafe {
+                    // OS visibility distinguishes cloak (still "visible")
+                    // from fallback real-hide; logical flag is always false
+                    // here by construction.
+                    let os_visible = unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd)
                     };
                     let win_down = unsafe {
                         windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x5B) as u16 & 0x8000 != 0
                     };
                     crate::runtime::log_info(&format!(
-                        "[nex::debug] Hide: fg={:?} visible={} win_down={}",
-                        fg_after, is_visible, win_down,
+                        "[nex::debug] Hide: fg={:?} os_visible={} win_down={}",
+                        fg_after, os_visible, win_down,
                     ));
                     // Delayed keyboard-state check: poll Win key after user
                     // likely released it.  If still pressed, something is stuck.
@@ -1059,7 +1068,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_previous_foreground(&mut previous_foreground);
+                    restore_fg_stack(&mut fg_stack);
+                    // Same cloak fallback as Hide (see above).
+                    if unsafe { GetForegroundWindow() } == hwnd {
+                        let _ = window.set_visible(false);
+                    }
                     crate::overlay::hotkey::release_mask_after_hide();
                     pending_resize = None;
                     if ready {
@@ -1110,7 +1123,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -1120,7 +1133,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -1128,7 +1141,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -1146,7 +1159,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h, should_clip_main(&state), is_opaque_panel(&state));
+                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
                         }
                     }
                 }
@@ -1218,9 +1231,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView focus (Windows beeps for those unhandled
                         // characters).
                         focus_input(&webview);
-                        // Activate the hidden window before its first visible
-                        // frame so DWM doesn't show Acrylic's inactive fallback.
-                        force_foreground(hwnd);
+                        // Transparent-hide reversal (order mirrors hide):
+                        // uncloak + child visible before first frame.
+                        set_overlay_cloaked(hwnd, false);
+                        set_webview_child_visible(&window, true);
+                        // Single activation path (helper owns foreground;
+                        // local force only without helper). Request before
+                        // first visible frame so DWM doesn't show Acrylic's
+                        // inactive fallback.
+                        request_foreground(hwnd);
                         window.set_visible(true);
                         // Set focus on the native host after activation, then
                         // restore DOM focus to the WebView's search control.
@@ -1245,9 +1264,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         if let Ok(mut s) = state.lock() {
                             s.has_focus = true;
                         }
-                        // Signal the elevated helper to call SetForegroundWindow
-                        // from High IL (bypasses UIPI for Task Manager scenario).
-                        crate::overlay::hotkey::signal_overlay_ready();
+                        // Helper was already signaled by request_foreground
+                        // above; no second signal needed.
                         // Re-assert topmost Z-position. When the overlay
                         // hides while focused, the focus-sink window
                         // (activated before hide to prevent Explorer
@@ -1308,7 +1326,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // state too; only retake the OS foreground when needed.
                     if visible && (!foreground_owned || !logical_focused) {
                         if !foreground_owned {
-                            force_foreground(hwnd);
+                            crate::runtime::log_info(&format!(
+                                "[nex] FocusReassert: retaking foreground (was {:?})",
+                                unsafe { GetForegroundWindow() }
+                            ));
+                            request_foreground(hwnd);
                             window.set_focus();
                         }
                         focus_input(&webview);
@@ -1472,6 +1494,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = true;
                 }
                 if !focused {
+                    // Track the window that took foreground for the restore
+                    // stack (newest-live-first foreground history). Filtered to
+                    // foreign live non-shell windows inside.
+                    push_fg_stack(&mut fg_stack, hwnd);
                     let picker_active = state
                         .lock()
                         .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
@@ -1563,7 +1589,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 "[nex::debug] Focused(false): re-asserting foreground (grace={}ms)",
                                 grace_ms
                             ));
-                            force_foreground(hwnd);
+                            request_foreground(hwnd);
                             // Put keyboard focus back INTO the webview —
                             // SetForeground alone leaves the page unfocusable
                             // until clicked.
@@ -1589,6 +1615,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             focus_reassert_used = false;
                             arm_deferred_hide();
                             return;
+                        } else if picker_active && state_vis && !bare_win {
+                            // File picker open long past show: no flap-pair
+                            // risk this late, so an outside click dismisses
+                            // on this event instead of after the 150ms
+                            // settle (the perceptible picker-hide lag).
+                            let foreground_owned = unsafe { GetForegroundWindow() } == hwnd;
+                            let lost = state
+                                .lock()
+                                .map(|s| s.visible && !s.has_focus)
+                                .unwrap_or(false);
+                            if lost && !foreground_owned {
+                                try_send_ui(
+                                    &proxy,
+                                    UiCommand::ChatPickerCancel { dismiss_overlay: true },
+                                );
+                                return;
+                            }
+                            arm_deferred_hide();
                         } else {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] Focused(false): deferring post-quiescence hide (was_focused={} show_pending={} grace={}ms state_vis={})",
@@ -1694,6 +1738,11 @@ fn build_webview(
             crate::config::PanelBackground::White => Some((255, 255, 255, 255)),
             crate::config::PanelBackground::Glass => None,
         });
+    // The acrylic CSS override (transparent panel-surface) must also stay
+    // glass-only: injected in an opaque mode it puts all text over a
+    // transparent panel and grayscales everything, voiding the opaque
+    // surface above. Both are creation-time: switching modes needs restart.
+    let glass_css = acrylic_available && opaque_bg.is_none();
     let builder = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
         .with_transparent(opaque_bg.is_none());
@@ -1704,7 +1753,7 @@ fn build_webview(
     let webview = builder
         .with_url("nexasset://localhost/")
         .with_custom_protocol("nexasset".into(), move |_id, request| {
-            serve_asset(request, acrylic_available)
+            serve_asset(request, glass_css)
         })
         .with_ipc_handler(move |req: Request<String>| {
             handle_ipc(req.body(), &ipc_state, &ipc_proxy, &ipc_tx);
@@ -2349,6 +2398,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "bentoView": s.bento_view,
         "completion": s.completion,
         "showPending": show_pending,
+        "contentPending": s.content_pending,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,
@@ -2446,7 +2496,10 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
-    let rounded_corners = DWMWCP_DONOTROUND;
+    // DWM default corners (8px on Win11): the OS owns the silhouette, no
+    // custom GDI regions anywhere. Opaque WebView surfaces and glass both
+    // paint inside it.
+    let rounded_corners = DWMWCP_DEFAULT;
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
@@ -2462,24 +2515,16 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         DWMSBT_TRANSIENTWINDOW
     };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
-    // Win11 draws a 1px DWM border on the square window rect, which pokes
-    // past our rounded panel corners. A COLORREF has no alpha, so first
-    // try removing non-client rendering entirely (borderless custom UI
-    // needs none of it); the dyed border below stays as fallback.
-    let ncr_disabled = DWMNCRP_DISABLED;
-    let _ = set_dwm_attribute(hwnd, DWMWA_NCRENDERING_POLICY, &ncr_disabled);
-    if opaque_panel {
-        let border: u32 = match state
-            .lock()
-            .map(|s| s.panel_background)
-            .unwrap_or(crate::config::PanelBackground::Glass)
-        {
-            crate::config::PanelBackground::White => 0x00FF_FFFF,
-            _ => 0x0000_0000,
-        };
-        let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
-    }
-    let available = if native_backdrop {
+    // Frame rendering stays on: with DEFAULT corners DWM draws the rounded
+    // silhouette and clips the whole window (child included) itself.
+    // No BORDER_COLOR dye: BBGGRR hand values rendered copper, and their
+    // UI leaves the system default border alone. DWM draws it.
+    let available = if opaque_panel {
+        // Opaque panels paint solid over an opaque WebView surface
+        // (ClearType): no backdrop, and no acrylic fallback — any
+        // transparency would void subpixel text.
+        false
+    } else if native_backdrop {
         true
     } else if glass_native {
         crate::logging::warn(
@@ -2494,7 +2539,7 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         };
         window_vibrancy::apply_acrylic(window, tint).is_ok()
     };
-    if !available {
+    if !available && !opaque_panel {
         crate::logging::info("[nex] native acrylic unavailable; using opaque CSS fallback");
     }
     available
@@ -2531,8 +2576,6 @@ fn apply_window_height(
     webview: Option<&WebView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
-    clip_main: bool,
-    opaque_panel: bool,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
@@ -2549,198 +2592,10 @@ fn apply_window_height(
             crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
         );
     }
-    apply_main_round_region(window, h, clip_main);
-    apply_webview_round_region(window, h, opaque_panel);
-}
-
-/// Round the WebView child window to the panel radius. The child HWND
-/// is always rectangular; with an opaque surface its square corners
-/// would poke past the rounded panel. Clipping the child (not the
-/// parent) keeps the main window's shadows and AA fringe intact.
-/// Runs every resize: transient states heal on the next apply.
-fn apply_webview_round_region(window: &Window, h: f64, opaque: bool) {
-    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-    struct Search {
-        found: HWND,
-    }
-    unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
-        const WRY_WEBVIEW: &[u16] = &[
-            b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
-            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
-        ];
-        let search = &mut *(param as *mut Search);
-        let mut name = [0u16; 32];
-        let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
-        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
-            search.found = hwnd;
-            return 0;
-        }
-        1
-    }
-    // Opaque surfaces need clipping; transparent glass keeps its fringe.
-    let clip = opaque;
-    let mut search = Search {
-        found: std::ptr::null_mut(),
-    };
-    unsafe {
-        EnumChildWindows(
-            window.hwnd() as HWND,
-            Some(find_webview),
-            &mut search as *mut Search as isize,
-        );
-    }
-    if search.found.is_null() {
-        return;
-    }
-    if !clip {
-        // Glass has no region to clear (transparent fringe stays); drop
-        // the redraw flag so every resize doesn't force a full child
-        // repaint and flash the transparent surface beneath.
-        let key = (search.found as isize, 0, 0, 0, false);
-        if last_webview_rgn() == Some(key) {
-            return;
-        }
-        if unsafe { SetWindowRgn(search.found, std::ptr::null_mut(), 0) } != 0 {
-            cache_webview_rgn(key);
-        }
-        return;
-    }
-    let scale = window.scale_factor();
-    let w_px = (WINDOW_WIDTH * scale).round() as i32;
-    let h_px = (h * scale).round() as i32;
-    // Panel radius token is 20 logical px; region wants diameters.
-    // Inflated 1px outward all around: the region tucks under the
-    // panel's antialiased edge instead of stair-stepping against it,
-    // so no desktop slivers peek between the two curves. Reads as a
-    // uniform hairline rather than jaggies.
-    let d = ((20.0 * scale * 2.0).round() as i32).max(2) + 2;
-    // Skip redundant region churn: same child, size, and mode as the last
-    // apply needs no GDI work (SetWindowRgn with redraw forces a full
-    // child repaint on every resize while typing).
-    let key = (search.found as isize, w_px, h_px, d, clip);
-    if last_webview_rgn() == Some(key) {
-        return;
-    }
-    let rgn = unsafe { CreateRoundRectRgn(-1, -1, w_px + 2, h_px + 2, d, d) };
-    if rgn.is_null() {
-        return;
-    }
-    // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(search.found, rgn, 1) } == 0 {
-        unsafe {
-            DeleteObject(rgn);
-        }
-    } else {
-        cache_webview_rgn(key);
-    }
-}
-
-/// Last applied WebView child region, to skip redundant GDI churn.
-/// Key: (child HWND, w_px, h_px, diameter, clip). The child HWND in the
-/// key keeps a WebView rebuild (new child, same size) applying fresh.
-/// Only recorded after SetWindowRgn succeeds, so transient failures
-/// keep healing on the next apply.
-static LAST_WEBVIEW_RGN: std::sync::Mutex<Option<(isize, i32, i32, i32, bool)>> =
-    std::sync::Mutex::new(None);
-
-fn last_webview_rgn() -> Option<(isize, i32, i32, i32, bool)> {
-    LAST_WEBVIEW_RGN.lock().ok().and_then(|g| *g)
-}
-
-/// Record a successfully applied WebView child region (see
-/// [`LAST_WEBVIEW_RGN`]).
-fn cache_webview_rgn(key: (isize, i32, i32, i32, bool)) {
-    if let Ok(mut g) = LAST_WEBVIEW_RGN.lock() {
-        *g = Some(key);
-    }
-}
-
-/// Window regions clip shadows and AA fringes — and they confuse
-/// Chromium's viewport math on top. So the main window gets one only
-/// where something square needs shaping and nothing web paints nearby:
-/// the acrylic fallback. Glass and opaque modes draw their own
-/// silhouette and must keep it.
-/// `clip_main=false` removes a stale region instead of leaving one
-/// behind.
-fn should_clip_main(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    !glass_active(state)
-        && !state
-            .lock()
-            .map(|s| s.panel_background.is_opaque())
-            .unwrap_or(false)
-}
-
-/// Opaque WebView surfaces paint square corners; the child clip above
-/// needs to know.
-fn is_opaque_panel(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    state
-        .lock()
-        .map(|s| s.panel_background.is_opaque())
-        .unwrap_or(false)
-}
-
-/// Clip the main window itself to the panel radius. DWM only knows its
-/// own fixed small round, which used to draw a second, smaller corner
-/// curve behind ours — with DWM corners off, our region is the single
-/// silhouette in every mode (glass, opaque, and acrylic fallback).
-/// Last applied main-window region (see [`LAST_WEBVIEW_RGN`] for the
-/// same pattern). Key: (w_px, h_px, diameter, clip). Recorded only after
-/// SetWindowRgn succeeds.
-static LAST_MAIN_RGN: std::sync::Mutex<Option<(i32, i32, i32, bool)>> =
-    std::sync::Mutex::new(None);
-
-fn apply_main_round_region(window: &Window, h: f64, clip_main: bool) {
-    use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-    let hwnd = window.hwnd() as HWND;
-    if !clip_main {
-        // Glass/opaque modes draw their own silhouette: remove any stale
-        // region without a forced repaint — redraw=1 here invalidated the
-        // whole transparent window on every resize (black flash).
-        let key = (0, 0, 0, false);
-        if LAST_MAIN_RGN.lock().map(|g| *g == Some(key)).unwrap_or(false) {
-            return;
-        }
-        if unsafe { SetWindowRgn(hwnd, std::ptr::null_mut(), 0) } != 0 {
-            if let Ok(mut g) = LAST_MAIN_RGN.lock() {
-                *g = Some(key);
-            }
-        }
-        return;
-    }
-    let scale = window.scale_factor();
-    // Size from the requested geometry, not window.inner_size(): tao
-    // applies set_inner_size asynchronously, so reading it back here
-    // yields the stale rect and the region would cut live content.
-    let w_px = (WINDOW_WIDTH * scale).round() as i32;
-    let h_px = (h * scale).round() as i32;
-    // Panel radius token is 20 logical px; region wants diameters.
-    let d = ((20.0 * scale * 2.0).round() as i32).max(2);
-    // Same skip as the child clip: unchanged geometry needs no GDI work.
-    // (The clear path above records (0,0,0,false), so a clip-after-clear
-    // still applies — different key.)
-    let key = (w_px, h_px, d, clip_main);
-    if LAST_MAIN_RGN.lock().map(|g| *g == Some(key)).unwrap_or(false) {
-        return;
-    }
-    let rgn = unsafe {
-        CreateRoundRectRgn(0, 0, w_px + 1, h_px + 1, d, d)
-    };
-    if rgn.is_null() {
-        return;
-    }
-    // Ownership passes to the OS on success; delete only on failure.
-    if unsafe { SetWindowRgn(hwnd, rgn, 1) } == 0 {
-        unsafe {
-            DeleteObject(rgn);
-        }
-    } else if let Ok(mut g) = LAST_MAIN_RGN.lock() {
-        *g = Some(key);
-    }
 }
 
 /// Center the window horizontally on the monitor under the cursor and
-/// anchor it in the upper third (Raycast/Spotlight placement).
+/// anchor it in the upper third (launcher placement).
 fn position_window(window: &Window, _hwnd: HWND) {
     let Some((left, top, right, bottom)) = cursor_monitor_work_area() else {
         return;
@@ -2806,18 +2661,28 @@ fn cursor_monitor_work_area() -> Option<(i32, i32, i32, i32)> {
     Some((r.left, r.top, r.right, r.bottom))
 }
 
-fn capture_previous_foreground(overlay_hwnd: HWND) -> Option<HWND> {
+/// Push the current foreground window for later restore. Skips null,
+/// self, shell, dead, and consecutive-duplicate windows. Called on Show
+/// and on genuine focus loss so the restore target tracks reality
+/// instead of a stale single slot.
+fn push_fg_stack(stack: &mut Vec<HWND>, overlay_hwnd: HWND) {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_null() || foreground == overlay_hwnd {
-        return None;
+        return;
     }
     if unsafe { IsWindow(foreground) } == 0 {
-        return None;
+        return;
     }
     if shell_window().is_some_and(|shell| shell == foreground) {
-        return None;
+        return;
     }
-    Some(foreground)
+    if stack.last().is_some_and(|&top| top == foreground) {
+        return;
+    }
+    stack.push(foreground);
+    while stack.len() > 8 {
+        stack.remove(0);
+    }
 }
 
 fn shell_window() -> Option<HWND> {
@@ -2843,16 +2708,18 @@ fn shell_window() -> Option<HWND> {
     }
 }
 
-fn restore_previous_foreground(previous: &mut Option<HWND>) {
-    let Some(target) = previous
-        .take()
-        .filter(|hwnd| unsafe { IsWindow(*hwnd) } != 0)
-    else {
-        return;
-    };
-    unsafe {
-        SetForegroundWindow(target);
+/// Restore the newest live window from the stack, pruning dead ones.
+/// Clears the rest: each show cycle starts tracking fresh.
+fn restore_fg_stack(stack: &mut Vec<HWND>) {
+    while let Some(target) = stack.pop() {
+        if unsafe { IsWindow(target) } != 0 {
+            unsafe {
+                SetForegroundWindow(target);
+            }
+            break;
+        }
     }
+    stack.clear();
 }
 
 fn hide_overlay_window(
@@ -2864,6 +2731,16 @@ fn hide_overlay_window(
     if let Some(layer) = glass {
         layer.set_visible(false);
     }
+    // Transparent-hide first: cloak + click-through + child hidden.
+    // WS_EX_TRANSPARENT on the parent does not stop hit-testing on the
+    // child HWND, so the page is hidden separately — an invisible page
+    // must never eat clicks (the click-outside hook keys off the panel
+    // rect and would go blind).
+    if set_overlay_cloaked(hwnd, true) {
+        set_webview_child_visible(window, false);
+        return;
+    }
+    // Fallback: classic hide when cloaking is unavailable.
     unsafe {
         SetWindowPos(
             hwnd,
@@ -2876,6 +2753,102 @@ fn hide_overlay_window(
         );
     }
     let _ = window.set_visible(false);
+}
+
+/// Find the WRY_WEBVIEW child HWND (null when the WebView isn't built).
+fn find_webview_child(window: &Window) -> HWND {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+    struct Search {
+        found: HWND,
+    }
+    unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
+        const WRY_WEBVIEW: &[u16] = &[
+            b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
+            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
+        ];
+        let search = &mut *(param as *mut Search);
+        let mut name = [0u16; 32];
+        let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
+        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
+            search.found = hwnd;
+            return 0;
+        }
+        1
+    }
+    let mut search = Search {
+        found: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumChildWindows(
+            window.hwnd() as HWND,
+            Some(find_webview),
+            &mut search as *mut Search as isize,
+        );
+    }
+    search.found
+}
+
+/// Show/hide only the WebView child. Used by transparent-hide: the page
+/// must not eat clicks while invisible, but hiding the child alone keeps
+/// regions, z-order, and renderer state (unlike hiding the parent).
+fn set_webview_child_visible(window: &Window, visible: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNA};
+    let child = find_webview_child(window);
+    if child.is_null() {
+        return;
+    }
+    unsafe {
+        // SW_SHOWNA: reveal without activating — activation belongs to
+        // the foreground flow, not the visibility toggle.
+        ShowWindow(child, if visible { SW_SHOWNA } else { SW_HIDE });
+    }
+}
+
+/// Cloak-based visibility (transparent-hide): DWM stops composing the
+/// window and clicks pass through, but nothing is destroyed — regions,
+/// z-order, and the warm WebView survive, so the next show is a reveal,
+/// not a rebuild. Returns false when cloaking is unavailable (caller
+/// falls back to SW_HIDEWINDOW).
+fn set_overlay_cloaked(hwnd: HWND, cloak: bool) -> bool {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    const TRANSPARENT_BIT: isize = 0x20; // WS_EX_TRANSPARENT
+    let cloak_int: i32 = if cloak { 1 } else { 0 };
+    if unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK as u32,
+            &cloak_int as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    } < 0
+    {
+        return false;
+    }
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    let want = if cloak {
+        exstyle | TRANSPARENT_BIT
+    } else {
+        exstyle & !TRANSPARENT_BIT
+    };
+    if want != exstyle {
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            );
+        }
+    }
+    true
 }
 
 /// Activate the overlay without injecting keyboard input. `AttachThreadInput`
@@ -2935,6 +2908,20 @@ fn force_foreground(hwnd: HWND) {
             // they were never attached.
             AttachThreadInput(cur_tid, fg_tid, 0);
         }
+    }
+}
+
+/// Single activation entry point (mature privilege split): the elevated
+/// helper owns SetForegroundWindow — High IL, UIPI-proof, with its own
+/// verify-and-retry loop. The local AttachThreadInput path runs only
+/// while no helper is active (first run, elevation declined); the
+/// FocusReassert watchdog re-requests if foreground still isn't ours,
+/// and a dead helper clears HELPER_ACTIVE via pipe-EOF so later
+/// requests fall back to local automatically.
+fn request_foreground(hwnd: HWND) {
+    crate::overlay::hotkey::signal_overlay_ready();
+    if !crate::overlay::hotkey::helper_active() {
+        force_foreground(hwnd);
     }
 }
 

@@ -389,8 +389,7 @@ impl NativeOverlayShell {
         self.post(UiCommand::Hide);
     }
 
-    pub fn hide_sync(&self) {
-        self.with_state(|s| {
+    pub fn hide_sync(&self) {        self.with_state(|s| {
             s.visible = false;
             s.has_focus = false;
             s.query.clear();
@@ -405,6 +404,12 @@ impl NativeOverlayShell {
         let (tx, rx) = std::sync::mpsc::channel();
         self.post(UiCommand::HideSync(tx));
         let _ = rx.recv_timeout(Duration::from_millis(500));
+    }
+
+    /// Close the chat file picker without hiding the overlay. The host
+    /// clears the flags and tells the page; no settle delay involved.
+    pub fn cancel_chat_picker(&self) {
+        self.post(UiCommand::ChatPickerCancel { dismiss_overlay: false });
     }
 
     pub fn query_text(&self) -> String {
@@ -642,6 +647,14 @@ impl NativeOverlayShell {
     pub fn set_quick_launch_items(&self, items: Vec<QuickLaunchItem>) {
         self.with_state(|s| {
             s.quick_launch_items = items;
+        });
+    }
+
+    /// Mark first-show content as still incoming (deferred Quick Launch).
+    /// The page holds its instant idle reveal until the rows land.
+    pub fn set_content_pending(&self, pending: bool) {
+        self.with_state(|s| {
+            s.content_pending = pending;
         });
     }
 

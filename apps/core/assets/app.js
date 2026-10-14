@@ -76,6 +76,8 @@
   const chatProviderChoice = $("chat-provider-choice");
   const chatProviderOptions = $("chat-provider-options");
   const chatModelInput = $("chat-model");
+  const chatModelSelect = $("chat-model-select");
+  const chatModelChoice = $("chat-model-choice");
   const chatModelOptions = $("chat-model-options");
   const chatModelSearch = $("chat-model-search");
   const chatModelResults = $("chat-model-results");
@@ -112,6 +114,8 @@
   let chatModelsProvider = "";
   let chatModelsLoading = false;
   let chatModelsTimer = 0;
+  let chatModelsAttempts = 0;
+  let lastModelsPayload = null;
   let chatConnectionTimer = 0;
   let chatConnectTimer = 0;
   let chatDisconnectTimer = 0;
@@ -922,6 +926,54 @@
     });
   }
 
+  // ── delayed hover hints ────────────────────────────────────
+  // [data-tip] shows a custom hint after 200ms; optional
+  // [data-shortcut] renders a kbd chip beside the label.
+  let tipEl = null;
+  let tipTimer = 0;
+  function hideTip() {
+    window.clearTimeout(tipTimer);
+    tipTimer = 0;
+    if (tipEl) {
+      tipEl.remove();
+      tipEl = null;
+    }
+  }
+  function showTip(target) {
+    hideTip();
+    tipEl = document.createElement("div");
+    tipEl.className = "nex-tip";
+    tipEl.textContent = target.dataset.tip || "";
+    const shortcut = target.dataset.shortcut;
+    if (shortcut) {
+      const chip = document.createElement("span");
+      chip.className = "kbd";
+      chip.textContent = shortcut;
+      tipEl.append(" ", chip);
+    }
+    document.body.appendChild(tipEl);
+    const targetRect = target.getBoundingClientRect();
+    const tipRect = tipEl.getBoundingClientRect();
+    const x = Math.max(8, Math.min(
+      targetRect.left + targetRect.width / 2 - tipRect.width / 2,
+      window.innerWidth - tipRect.width - 8,
+    ));
+    let y = targetRect.top - tipRect.height - 6;
+    if (y < 4) y = targetRect.bottom + 6;
+    tipEl.style.left = `${x}px`;
+    tipEl.style.top = `${y}px`;
+  }
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
+    if (!target || target.disabled) return;
+    window.clearTimeout(tipTimer);
+    tipTimer = window.setTimeout(() => showTip(target), 200);
+  });
+  document.addEventListener("mouseout", (event) => {
+    if (event.target && event.target.closest && event.target.closest("[data-tip]")) hideTip();
+  });
+  document.addEventListener("scroll", hideTip, true);
+
   // ── keyboard ─────────────────────────────────────────────
   window.addEventListener(
     "keydown",
@@ -1473,6 +1525,7 @@
         chatConfig.provider = conversation.provider || chatConfig.provider;
         chatConfig.model = conversation.model || chatConfig.model;
         chatModelInput.value = chatConfig.model;
+        syncChatModelChoice();
         setChatHistoryOpen(false);
         renderChatMessages();
         updateChatStreamingState(false);
@@ -1661,7 +1714,7 @@
         const block = document.createElement("div"); block.className = "chat-code-block";
         const head = document.createElement("div"); head.className = "chat-code-header";
         const lang = document.createElement("span"); lang.textContent = language;
-        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy code";
+        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy code";
         copy.addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(source.join("\n")); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
           catch (_) { copy.textContent = "Unavailable"; }
@@ -1814,7 +1867,7 @@
         chatMessagesEl.appendChild(article);
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
-          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy response";
+          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy response";
           copy.addEventListener("click", async () => {
             try { await navigator.clipboard.writeText(message.content); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
             catch (_) { copy.textContent = "Unavailable"; }
@@ -1824,7 +1877,7 @@
             const messageIndex = chatMessages.findIndex((item) => item.id === message.id);
             const precedingUser = chatMessages.slice(0, messageIndex).reverse().find((item) => item.role === "user");
             if (!precedingUser?.localContext?.length) {
-              const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.title = "Try another response";
+              const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.dataset.tip = "Try another response";
               regenerate.disabled = chatStreaming;
               regenerate.addEventListener("click", () => regenerateChatResponse(message.id));
               actions.appendChild(regenerate);
@@ -1883,6 +1936,7 @@
     }
     chatProviderButton.setAttribute("aria-expanded", String(!chatProviderOptions.hidden));
     chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "gpt-4o-mini");
+    syncChatModelChoice();
     chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
     chatEndpointField.hidden = provider !== "openai-compatible";
     chatKeyField.hidden = provider !== "openai-compatible";
@@ -2264,6 +2318,14 @@
     flashChatNotice("Saving provider settings…");
   }
 
+  // Closed-field label: friendly name when listed, raw id for custom
+  // entries, placeholder when empty.
+  function syncChatModelChoice() {
+    const id = (chatModelInput.value || "").trim();
+    const known = chatModels.find((model) => model.id === id);
+    chatModelChoice.textContent = known ? (known.name || known.id) : (id || "Choose a model");
+  }
+
   function renderChatModelOptions(open = !chatModelOptions.hidden) {
     chatModelResults.replaceChildren();
     if (chatModelsLoading) {
@@ -2281,12 +2343,31 @@
     if (!matches.length) {
       const empty = document.createElement("div");
       empty.className = "chat-model-empty";
-      empty.textContent = chatModels.length
-        ? "No matching models. You can still enter a model ID."
-        : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
-          ? "Connect your ChatGPT account to load models."
-          : "Switch provider or save settings to load available models.");
-      chatModelResults.append(empty);
+      // Custom model IDs stay supported: offer the raw query as an entry.
+      if (query && chatModels.length) {
+        const custom = document.createElement("button");
+        custom.type = "button";
+        custom.className = "chat-model-option";
+        custom.setAttribute("role", "option");
+        custom.setAttribute("aria-selected", "false");
+        custom.textContent = `Use "${chatModelSearch.value.trim()}"`;
+        custom.addEventListener("click", () => {
+          chatModelInput.value = chatModelSearch.value.trim();
+          chatConfig.model = chatModelInput.value;
+          syncChatModelChoice();
+          closeChatModelOptions();
+          chatModelSelect.setAttribute("aria-expanded", "false");
+          syncChatConfig();
+        });
+        chatModelResults.append(custom);
+      } else {
+        empty.textContent = chatModels.length
+          ? "No matching models. Type an ID above to use a custom model."
+          : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
+            ? "Connect your ChatGPT account to load models."
+            : "Switch provider or save settings to load available models.");
+        chatModelResults.append(empty);
+      }
       if (open) showChatModelOptions();
       return;
     }
@@ -2300,8 +2381,10 @@
       option.addEventListener("click", () => {
         chatModelInput.value = model.id;
         chatConfig.model = model.id;
-        chatModelInput.focus();
+        syncChatModelChoice();
+        chatModelSelect.focus();
         closeChatModelOptions();
+        chatModelSelect.setAttribute("aria-expanded", "false");
         syncChatConfig();
       });
       chatModelResults.append(option);
@@ -2311,10 +2394,12 @@
 
   function showChatModelOptions() {
     chatModelOptions.hidden = false;
+    chatModelSelect.setAttribute("aria-expanded", "true");
   }
 
   function closeChatModelOptions() {
     chatModelOptions.hidden = true;
+    chatModelSelect.setAttribute("aria-expanded", "false");
   }
 
   function closeChatProviderOptions() {
@@ -2343,16 +2428,34 @@
       apiKey: chatApiKeyInput.value,
     };
     setChatModelsLoading(true);
+    chatModelsAttempts = 0;
     chatNotice.textContent = "Loading models from your provider…";
     chatNotice.classList.remove("error");
     renderChatModelOptions(showMenu);
-    post("chatFetchModels", payload);
-    chatModelsTimer = window.setTimeout(() => {
-      setChatModelsLoading(false);
-      closeChatModelOptions();
-      chatNotice.textContent = "Model loading timed out. Check the provider connection and try again.";
-      chatNotice.classList.add("error");
-    }, 30000);
+    lastModelsPayload = payload;
+    requestModels();
+  }
+
+  function requestModels() {
+    if (!lastModelsPayload) return;
+    post("chatFetchModels", lastModelsPayload);
+    window.clearTimeout(chatModelsTimer);
+    chatModelsTimer = window.setTimeout(onModelsTimeout, 30000);
+  }
+
+  function onModelsTimeout() {
+    // Two automatic retries before surfacing the failure.
+    if (chatModelsAttempts < 2) {
+      chatModelsAttempts += 1;
+      chatNotice.textContent = `Model loading timed out. Retrying (${chatModelsAttempts + 1} of 3)…`;
+      chatNotice.classList.remove("error");
+      requestModels();
+      return;
+    }
+    setChatModelsLoading(false);
+    closeChatModelOptions();
+    chatNotice.textContent = "Model loading failed after 3 attempts. Check the provider connection and try again.";
+    chatNotice.classList.add("error");
   }
 
   function setChatModelsLoading(loading) {
@@ -2411,6 +2514,7 @@
     chatModelInput.value = chatProviderInput.value === "codex"
       ? (chatModels.find((model) => model.default)?.id || chatModels[0]?.id || "gpt-6-luna")
       : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "gpt-4o-mini") : "gpt-4o-mini");
+    syncChatModelChoice();
     chatConfig.provider = chatProviderInput.value;
     chatConfig.model = chatModelInput.value;
     syncChatConfig(); fetchChatModels(false); postChatResize();
@@ -2464,26 +2568,16 @@
   chatCheckButton.addEventListener("click", () => {
     checkChatGPTConnection();
   });
-  chatModelInput.addEventListener("focus", () => {
-    if (chatModelOptions.hidden) {
-      chatModelSearch.value = "";
-      renderChatModelOptions(true);
-    }
+  chatModelSelect.addEventListener("click", () => {
+    const open = chatModelOptions.hidden;
+    closeChatProviderOptions();
+    chatModelSearch.value = "";
+    renderChatModelOptions(open);
+    if (!open) closeChatModelOptions();
   });
   chatModelSearch.addEventListener("input", renderChatModelOptions);
-  // Hover-select like result rows: the highlight follows the cursor.
-  function trackMenuHover(container) {
-    container.addEventListener("mousemove", (event) => {
-      const option = event.target.closest ? event.target.closest("button") : null;
-      if (!option || !container.contains(option)) return;
-      for (const item of container.querySelectorAll("button")) {
-        item.setAttribute("aria-selected", String(item === option));
-      }
-    }, { passive: true });
-  }
-  trackMenuHover(chatProviderOptions);
-  trackMenuHover(chatModelResults);
-  trackMenuHover(chatHistory);
+  // Hover fill is pure CSS (:hover). aria-selected stays the committed
+  // choice so accent bars never follow the cursor.
   // History scrollbar stays hidden until actually scrolled.
   let chatHistoryScrollTimer = 0;
   chatHistory.addEventListener("scroll", () => {
@@ -2654,7 +2748,7 @@
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {
       closeChatModelOptions();
-      chatModelInput.focus();
+      chatModelSelect.focus();
     } else if (!chatProviderOptions.hidden) {
       closeChatProviderOptions();
       chatProviderButton.focus();
@@ -2824,6 +2918,7 @@
     }
     if (state.chatModels) {
       setChatModelsLoading(false);
+      chatModelsAttempts = 0;
       if (state.chatModels.provider === chatProviderInput.value) {
         chatModels = Array.isArray(state.chatModels.models) ? state.chatModels.models : [];
         chatModelsProvider = state.chatModels.provider;
@@ -2833,6 +2928,7 @@
           chatConfig.model = recommended.id;
           post("chatConfigure", { provider: "codex", baseUrl: chatBaseUrlInput.value, model: recommended.id, apiKey: "" });
         } else if (!chatModelInput.value && chatModels.length) chatModelInput.value = chatModels[0].id;
+        syncChatModelChoice();
         renderChatModelOptions();
         flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
       }
@@ -3076,8 +3172,10 @@
         window.clearTimeout(showRevealTimer);
         // Idle show (empty rows, empty query): nothing more is coming
         // until keystrokes, so reveal on the next paint instead of the
-        // 500ms cap. Otherwise the cap covers late-arriving content.
-        if (rows.length === 0 && !(state.query || "").trim()) {
+        // 500ms cap. Deferred Quick Launch (native contentPending) still
+        // has rows incoming — take the cap so input and rows reveal as
+        // one instead of input-first with a split-delayed pop-in.
+        if (rows.length === 0 && !(state.query || "").trim() && !state.contentPending) {
           needsPainted = true;
           showRevealTimer = 0;
         } else {

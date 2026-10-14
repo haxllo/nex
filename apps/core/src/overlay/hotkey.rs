@@ -56,6 +56,27 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// dispatch is gated so the helper and the hook can never double-toggle.
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Outbound command pipe to the helper (simulation transport).
+/// Connected best-effort during helper setup; `None` when down.
+static HELPER_CMD: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Send one allowlisted simulation command (`play_pause`, `copy`, …).
+/// Returns false when the pipe is down.
+pub(crate) fn send_helper_key(cmd: &str) -> bool {
+    let mut line = cmd.to_string();
+    line.push('\n');
+    if let Ok(mut slot) = HELPER_CMD.lock() {
+        if let Some(pipe) = slot.as_mut() {
+            use std::io::Write;
+            if pipe.write_all(line.as_bytes()).is_ok() {
+                return true;
+            }
+        }
+        *slot = None;
+    }
+    false
+}
+
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.
@@ -137,7 +158,6 @@ pub(crate) fn finish_bare_win_press() {
 pub(crate) fn set_suppress_focus_escape(suppress: bool) {
     SUPPRESS_FOCUS_ESCAPE.store(suppress, Ordering::SeqCst);
 }
-
 /// Check if the configured hotkey is currently pressed using
 /// GetAsyncKeyState.  Works regardless of foreground window or thread
 /// context.  Used by the polling fallback thread (runtime_loop) when
@@ -528,14 +548,16 @@ unsafe extern "system" fn mouse_hook_proc(
         };
     }
 
-    // Cursor outside overlay rect → real outside click → send Escape.
+    // Cursor outside overlay rect → real outside click. Dedicated event
+    // (not Escape): keyboard Escape keeps picker-ignore semantics while
+    // a genuine click dismisses at once.
     if cursor.x < rect.left || cursor.x >= rect.right
         || cursor.y < rect.top || cursor.y >= rect.bottom
     {
-        crate::runtime::log_info("[nex::debug] Mouse hook: outside click -> Escape");
+        crate::runtime::log_info("[nex::debug] Mouse hook: outside click");
         let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
         if let Some(sender) = ctx {
-            let _ = sender.send(OverlayEvent::Escape);
+            let _ = sender.send(OverlayEvent::OutsideClick);
         }
     }
 
@@ -589,6 +611,15 @@ impl HotkeyListener {
         let required_mods = modifier_vks_from_names(&parsed.modifiers)?;
         let target_key = vk_from_key(&parsed.key)?;
         let target_is_win = target_key == VK_LWIN;
+        // Dispatch verdict at startup: which path serves this combo and
+        // why. The hook thread logs per-attempt outcomes on top of this.
+        let has_win_mod = required_mods.iter().any(|m| *m == VK_LWIN || *m == VK_RWIN);
+        let startup_reason = dispatch_for(target_key, target_is_win || has_win_mod, !required_mods.is_empty(), false);
+        logging::info(&format!(
+            "[nex] hotkey '{hotkey_str}' dispatches via {}: {}",
+            if startup_reason == DispatchReason::SystemHotkey { "system hotkey + hook" } else { "hook" },
+            dispatch_reason_text(startup_reason),
+        ));
 
         let should_exit = Arc::new(AtomicBool::new(false));
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
@@ -678,8 +709,9 @@ impl HotkeyListener {
                 // foreground window or integrity level.  This ensures the
                 // hotkey works even when elevated/UWP windows (Task Manager,
                 // advanced settings) are foreground.
-                // Only registered for non-Win hotkeys (Win key cannot be
-                // registered via RegisterHotKeyW).
+                // Win combos skip it (raw-input path owns them); numpad and
+                // single-tap bindings demote to the hook with a reason.
+                const ERROR_HOTKEY_ALREADY_IN_USE: u32 = 1409;
                 let mut fallback_id: u32 = 0;
                 // Copy what we need and release HOOK_CTX immediately. The
                 // hook proc locks this same mutex on EVERY keystroke, so a
@@ -705,20 +737,43 @@ impl HotkeyListener {
                     }
                     // Generate a unique hotkey ID that won't collide.
                     fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                    let ok = match register_hotkey {
-                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
-                        None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
-                    };
-                    if ok == 0 {
-                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                        logging::warn(&format!(
-                            "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
-                            err,
+                    let reason = dispatch_for(
+                        target_key_local,
+                        false,
+                        !required_mods_local.is_empty(),
+                        false,
+                    );
+                    if reason != DispatchReason::SystemHotkey {
+                        logging::info(&format!(
+                            "[nex::debug] Hook: dispatches via hook: {}",
+                            dispatch_reason_text(reason),
                         ));
                         fallback_id = 0;
                     } else {
-                        logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
+                        let ok = match register_hotkey {
+                            Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
+                            None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
+                        };
+                        if ok == 0 {
+                            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                            if err == ERROR_HOTKEY_ALREADY_IN_USE {
+                                logging::warn("[nex::debug] Hook: RegisterHotKey refused (already in use): demoted to hook");
+                            } else {
+                                logging::warn(&format!(
+                                    "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
+                                    err,
+                                ));
+                            }
+                            fallback_id = 0;
+                        } else {
+                            logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
+                        }
                     }
+                } else {
+                    logging::info(&format!(
+                        "[nex::debug] Hook: dispatches via hook: {}",
+                        dispatch_reason_text(DispatchReason::WinCombo),
+                    ));
                 }
 
                 let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -762,12 +817,39 @@ impl HotkeyListener {
                                     if ctx.required_mods.contains(&vk) { mods |= flag; }
                                 }
                                 fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                                let ok = match register_hotkey {
-                                    Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
-                                    None => 0,
-                                };
-                                if ok == 0 { fallback_id = 0; logging::warn("[nex::debug] Hook: live re-register FAILED"); }
-                                else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
+                                let reason = dispatch_for(
+                                    ctx.target_key,
+                                    false,
+                                    !ctx.required_mods.is_empty(),
+                                    false,
+                                );
+                                if reason != DispatchReason::SystemHotkey {
+                                    logging::info(&format!(
+                                        "[nex::debug] Hook: live dispatches via hook: {}",
+                                        dispatch_reason_text(reason),
+                                    ));
+                                    fallback_id = 0;
+                                } else {
+                                    let ok = match register_hotkey {
+                                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
+                                        None => 0,
+                                    };
+                                    if ok == 0 {
+                                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                                        if err == ERROR_HOTKEY_ALREADY_IN_USE {
+                                            logging::warn("[nex::debug] Hook: live RegisterHotKey refused (already in use): demoted to hook");
+                                        } else {
+                                            logging::warn("[nex::debug] Hook: live re-register FAILED");
+                                        }
+                                        fallback_id = 0;
+                                    }
+                                    else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
+                                }
+                            } else {
+                                logging::info(&format!(
+                                    "[nex::debug] Hook: live dispatches via hook: {}",
+                                    dispatch_reason_text(DispatchReason::WinCombo),
+                                ));
                             }
                         }
                         drop(g);
@@ -808,13 +890,19 @@ impl HotkeyListener {
                 format!("failed to spawn hotkey thread: {e}")
             })?;
 
-        match ready_rx.recv() {
+        // Bounded wait: a hung hook install must fail startup loudly,
+        // not block it forever. Disconnect still means the thread died.
+        match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Err(e);
             }
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                return Err("hotkey thread start timed out".into());
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 return Err("hotkey thread panicked".into());
             }
@@ -878,8 +966,11 @@ impl HotkeyListener {
                                     // Pipe EOF/error: the helper is gone. Clear the
                                     // flag so the next hotkey change falls back to
                                     // full re-registration instead of signalling a
-                                    // dead process.
+                                    // dead process. Also drop focus-escape
+                                    // suppression: a SUPPRESS_ON without its OFF
+                                    // would stick otherwise.
                                     HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                                    crate::overlay::hotkey::set_suppress_focus_escape(false);
                                     logging::warn(
                                         "[nex] helper pipe closed — live-update path disabled until a new helper connects",
                                     );
@@ -908,6 +999,54 @@ impl HotkeyListener {
                                     ));
                                     kill_helper_process(helper_handle);
                                 }
+                            }
+                            // Auxiliary pipes connect AFTER detection flows:
+                            // best-effort plumbing must never gate the pipe
+                            // reader or HELPER_ACTIVE. Small budgets so a
+                            // missing server costs ~1s, not ~8s.
+                            // Helper command pipe (simulation transport for
+                            // send_helper_key). Server end is inbound, so the
+                            // client opens write-only.
+                            let cmd_pipe_name = format!(
+                                r"\\.\pipe\NexHelperCmd\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&cmd_pipe_name, 0x40000000, 3) {
+                                Ok(cmd_file) => {
+                                    if let Ok(mut slot) = HELPER_CMD.lock() {
+                                        *slot = Some(cmd_file);
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper cmd pipe unavailable: {e}"
+                                )),
+                            }
+                            // Helper log pipe: forward helper
+                            // diagnostics into nex's log.
+                            let log_pipe_name = format!(
+                                r"\\.\pipe\NexHelperLog\{}",
+                                std::process::id()
+                            );
+                            match connect_pipe(&log_pipe_name, 0x80000000, 3) {
+                                Ok(log_file) => {
+                                    match thread::Builder::new()
+                                        .name("NexHelper-log-reader".into())
+                                        .spawn(move || {
+                                            use std::io::BufRead;
+                                            let reader = std::io::BufReader::new(log_file);
+                                            for line in reader.lines().flatten() {
+                                                logging::info(&format!("[helper] {line}"));
+                                            }
+                                        }) {
+                                        Ok(_) => {}
+                                        Err(e) => logging::warn(&format!(
+                                            "[nex] helper log reader spawn failed: {e}"
+                                        )),
+                                    }
+                                }
+                                Err(e) => logging::warn(&format!(
+                                    "[nex] helper log pipe unavailable: {e}"
+                                )),
                             }
                         }
                         Err(e) => {
@@ -1086,6 +1225,12 @@ fn create_overlay_event() -> String {
     name
 }
 
+/// Whether the elevated helper currently owns detection (and
+/// activation). Gates the single-activation path in host.rs.
+pub(crate) fn helper_active() -> bool {
+    HELPER_ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Signal the elevated helper that the overlay is now visible.  Called
 /// from host.rs's Painted handler after force_foreground().
 pub(crate) fn signal_overlay_ready() {
@@ -1153,7 +1298,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     let parsed = match parse_hotkey(hotkey_str) {
         Ok(p) => p,
         Err(e) => {
-            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
             return false;
         }
     };
@@ -1164,7 +1309,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
         match vk_from_key(&parsed.key) {
             Ok(vk) => vk,
             Err(e) => {
-                logging::warn(&format!("[nex] live hotkey update: {e}"));
+                logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
                 return false;
             }
         }
@@ -1172,7 +1317,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
         Ok(m) => m,
         Err(e) => {
-            logging::warn(&format!("[nex] live hotkey update: {e}"));
+            logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
             return false;
         }
     };
@@ -1265,7 +1410,7 @@ fn spawn_and_connect_helper(
     run_helper_task()?;
 
     // 5. Connect to the helper's named pipe (retry — helper may still be starting)
-    let pipe_file = connect_pipe(&pipe_name)?;
+    let pipe_file = connect_pipe(&pipe_name, 0x80000000, 10)?;
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))
@@ -1320,7 +1465,7 @@ fn write_helper_config(
     }
 
     let json = format!(
-        r#"{{"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
+        r#"{{"proto":1,"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
         pipe_name,
         pid,
         target_key,
@@ -1558,7 +1703,11 @@ fn run_helper_task() -> Result<(), String> {
 }
 
 /// Connect to an existing named pipe (client side, read-only).
-fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
+/// Connect to a helper pipe. `desired_access` must match the server end
+/// (outbound server → GENERIC_READ, inbound server → GENERIC_WRITE);
+/// a wrong direction fails every attempt, so auxiliaries pass a small
+/// `attempts` budget and never gate detection flow.
+fn connect_pipe(pipe_name: &str, desired_access: u32, attempts: u32) -> Result<std::fs::File, String> {
     let wide = to_wide(pipe_name);
 
     #[link(name = "kernel32")]
@@ -1575,15 +1724,16 @@ fn connect_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
     }
 
     const GENERIC_READ: u32 = 0x80000000;
+    const GENERIC_WRITE: u32 = 0x40000000;
     const FILE_SHARE_READ: u32 = 0x00000001;
     const FILE_SHARE_WRITE: u32 = 0x00000002;
     const OPEN_EXISTING: u32 = 3;
 
-    for attempt in 0..10 {
+    for attempt in 0..attempts {
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ,
+                desired_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 std::ptr::null_mut(),
                 OPEN_EXISTING,
@@ -1653,6 +1803,55 @@ fn vk_from_key(key: &str) -> Result<u32, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch decision: RegisterHotKey vs keyboard hook, with reasons
+// ---------------------------------------------------------------------------
+
+/// Why a binding goes to the hook instead of RegisterHotKey.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchReason {
+    /// Win in the combo: Start-menu conflicts need the raw-input path.
+    WinCombo,
+    /// Numpad keys: the OS can't tell them apart from dedicated keys.
+    NumpadKey,
+    /// No modifiers: single-tap needs press/release tracking the hook owns.
+    SingleTap,
+    /// RegisterHotKey refused (already registered elsewhere): demoted.
+    RefusedDemoted,
+    /// Default: RegisterHotKey delivers it.
+    SystemHotkey,
+}
+
+/// Numpad virtual-key range (VK_NUMPAD0..VK_DIVIDE).
+fn is_numpad_vk(vk: u32) -> bool {
+    (0x60..=0x6F).contains(&vk)
+}
+
+/// Decide dispatch for one binding. Pure: same inputs, same answer.
+fn dispatch_for(vk: u32, has_win_mod: bool, has_any_mod: bool, refused: bool) -> DispatchReason {
+    if refused {
+        DispatchReason::RefusedDemoted
+    } else if has_win_mod {
+        DispatchReason::WinCombo
+    } else if is_numpad_vk(vk) {
+        DispatchReason::NumpadKey
+    } else if !has_any_mod {
+        DispatchReason::SingleTap
+    } else {
+        DispatchReason::SystemHotkey
+    }
+}
+
+fn dispatch_reason_text(reason: DispatchReason) -> &'static str {
+    match reason {
+        DispatchReason::WinCombo => "Win combo needs the raw-input path",
+        DispatchReason::NumpadKey => "numpad keys are indistinguishable to RegisterHotKey",
+        DispatchReason::SingleTap => "single-tap needs hook press/release tracking",
+        DispatchReason::RefusedDemoted => "RegisterHotKey refused the combination",
+        DispatchReason::SystemHotkey => "RegisterHotKey delivers it",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1665,4 +1864,12 @@ mod tests {
     #[test] fn vk_single_letter() { assert_eq!(vk_from_key("A").unwrap(), b'A' as u32); }
     #[test] fn vk_win_key() { assert_eq!(vk_from_key("Win").unwrap(), VK_LWIN); }
     #[test] fn modifier_vks() { let mods = modifier_vks_from_names(&["Ctrl".into(), "Shift".into()]).unwrap(); assert_eq!(mods, vec![VK_CTRL, VK_SHIFT]); }
+    #[test] fn dispatch_win_goes_hook() { assert_eq!(dispatch_for(0x20, true, true, false), DispatchReason::WinCombo); }
+    #[test] fn dispatch_numpad_goes_hook() { assert_eq!(dispatch_for(0x60, false, true, false), DispatchReason::NumpadKey); }
+    #[test] fn dispatch_single_tap_goes_hook() { assert_eq!(dispatch_for(0x70, false, false, false), DispatchReason::SingleTap); }
+    #[test] fn dispatch_refused_demotes() { assert_eq!(dispatch_for(0x20, false, true, true), DispatchReason::RefusedDemoted); }
+    #[test] fn dispatch_plain_combo_uses_system() { assert_eq!(dispatch_for(0x20, false, true, false), DispatchReason::SystemHotkey); }
+    #[test] fn dispatch_numpad_bounds() { assert_eq!(dispatch_for(0x6F, false, true, false), DispatchReason::NumpadKey); assert_eq!(dispatch_for(0x5F, false, true, false), DispatchReason::SystemHotkey); assert_eq!(dispatch_for(0x70, false, true, false), DispatchReason::SystemHotkey); }
+    #[test] fn dispatch_refused_wins_over_win() { assert_eq!(dispatch_for(0x20, true, true, true), DispatchReason::RefusedDemoted); }
+    #[test] fn send_helper_key_down_without_pipe() { assert!(!send_helper_key("play_pause")); }
 }

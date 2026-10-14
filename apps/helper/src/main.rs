@@ -16,7 +16,8 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,7 @@ unsafe extern "system" {
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
+const PIPE_ACCESS_INBOUND: u32 = 0x00000001;
 const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
 const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
@@ -373,12 +375,160 @@ fn send_mask_up() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
+/// Whether this process currently holds the mask down. Centralizes the
+/// pairing so a missed key-up path can't double-hold or leak the hold.
+static MASK_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold the mask unless already held. Returns true on transition.
+fn hold_mask() -> bool {
+    if MASK_HELD.swap(true, Ordering::SeqCst) {
+        false
+    } else {
+        send_mask_down();
+        true
+    }
+}
+
+/// Release the mask if held. Returns true on transition.
+fn release_mask() -> bool {
+    if MASK_HELD.swap(false, Ordering::SeqCst) {
+        send_mask_up();
+        true
+    } else {
+        false
+    }
+}
+
 /// Write "HOTKEY\n" to the pipe. Returns Err on failure (client disconnected).
 fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
     debug_log("firing HOTKEY to nex");
     pipe.write_all(b"HOTKEY\n")?;
     pipe.flush()?;
     Ok(())
+}
+
+/// Inbound command pipe (nex writes, helper executes). Same per-pid
+/// scoping as the log pipe.
+
+/// `\\.\pipe\nex-hotkey\<pid>` -> `\\.\pipe\NexHelperCmd\<pid>`.
+fn cmd_pipe_for(pipe_path: &str) -> String {
+    match pipe_path.rsplit_once('\\') {
+        Some((_, pid)) if !pid.is_empty() => format!("\\\\.\\pipe\\NexHelperCmd\\{pid}"),
+        _ => format!("{pipe_path}-cmd"),
+    }
+}
+
+/// One synthetic key tap, optionally with Ctrl held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SimTap {
+    vk: u32,
+    ctrl: bool,
+}
+
+/// Allowlisted simulation commands. Media keys tap blind; edit chords
+/// hold Ctrl. Anything else is rejected before touching input.
+fn sim_action(cmd: &str) -> Option<SimTap> {
+    let ctrl_tap = |vk: u32| SimTap { vk, ctrl: true };
+    let tap = |vk: u32| SimTap { vk, ctrl: false };
+    Some(match cmd {
+        "play_pause" => tap(0xB3),
+        "next" => tap(0xB0),
+        "prev" => tap(0xB1),
+        "stop" => tap(0xB2),
+        "mute" => tap(0xAD),
+        "vol_up" => tap(0xAF),
+        "vol_down" => tap(0xAE),
+        "copy" => ctrl_tap(0x43),
+        "paste" => ctrl_tap(0x56),
+        "cut" => ctrl_tap(0x58),
+        "select_all" => ctrl_tap(0x41),
+        "undo" => ctrl_tap(0x5A),
+        _ => return None,
+    })
+}
+
+fn exec_sim(action: SimTap) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut seq: Vec<INPUT> = Vec::with_capacity(4);
+    let mut key = |vk: u32, up: bool| {
+        let mut input: INPUT = unsafe { std::mem::zeroed() };
+        input.r#type = INPUT_KEYBOARD;
+        input.Anonymous.ki = KEYBDINPUT {
+            wVk: vk as u16,
+            wScan: 0,
+            dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        seq.push(input);
+    };
+    if action.ctrl {
+        key(0x11, false);
+    }
+    key(action.vk, false);
+    key(action.vk, true);
+    if action.ctrl {
+        key(0x11, true);
+    }
+    let _ = unsafe {
+        SendInput(
+            seq.len() as u32,
+            seq.as_mut_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
+/// Parked thread: serve the command pipe, execute allowlisted lines.
+fn spawn_cmd_pipe_server(cmd_path: String) {
+    std::thread::Builder::new()
+        .name("NexHelper-cmd-pipe".into())
+        .spawn(move || {
+            let wide = to_wide(&cmd_path);
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide.as_ptr(),
+                    PIPE_ACCESS_INBOUND,
+                    PIPE_TYPE_MESSAGE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                debug_log("cmd pipe create failed");
+                return;
+            }
+            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
+            if wait_for_client(&file).is_err() {
+                return;
+            }
+            debug_log("cmd pipe client connected");
+            // Single buffered reader for the session: recreating it per
+            // line would drop buffered bytes with it.
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(file);
+            loop {
+                let mut buf = String::new();
+                match reader.read_line(&mut buf) {
+                    Ok(0) | Err(_) => return, // client gone
+                    Ok(_) => {}
+                }
+                let cmd = buf.trim().to_string();
+                match sim_action(&cmd) {
+                    Some(action) => {
+                        debug_log(&format!("sim exec: {cmd}"));
+                        exec_sim(action);
+                    }
+                    None => debug_log(&format!("sim rejected: {cmd}")),
+                }
+            }
+        })
+        .ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +589,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    send_mask_down();
+                    hold_mask();
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
             }
@@ -447,7 +597,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
                 if consumed_vk != 0 {
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    send_mask_up();
+                    release_mask();
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
@@ -469,7 +619,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         {
             // Chord detected — release the mask so the OS handles Win+X.
             CHORD_DETECTED.store(true, Ordering::SeqCst);
-            send_mask_up();
+            release_mask();
             CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
         }
     }
@@ -493,7 +643,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);
-                send_mask_down();
+                hold_mask();
             }
             // DO NOT EAT — pass Win through so Win+ chords work
             return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -650,9 +800,67 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
 // Overlay foreground helper (called from message loop on event signal)
 // ---------------------------------------------------------------------------
 
+/// Monotonic activation generation. Each overlay-ready signal claims the
+/// next number; a retry loop whose number is stale abandons instead of
+/// fighting the newer activation (a newer signal always wins).
+static FG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// True when a newer activation superseded `seq`.
+fn is_superseded(seq: u64) -> bool {
+    FG_SEQ.load(Ordering::SeqCst) != seq
+}
+
+/// Best-effort `hwnd=0x.. title='..' pid=.. proc='..'` snapshot.
+/// Never panics; unknown fields render as `?`.
+fn describe_window(hwnd: isize) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let mut pid = 0u32;
+    let _ = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd as _,
+            &mut pid,
+        )
+    };
+    let mut title = String::from("?");
+    if hwnd != 0 {
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(hwnd as _, buf.as_mut_ptr(), buf.len() as i32) };
+        if n > 0 {
+            title = String::from_utf16_lossy(&buf[..n as usize]);
+            title = title.chars().take(80).collect();
+        }
+    }
+    let mut proc = String::from("?");
+    if pid != 0 {
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h as isize != 0 {
+            let mut buf = [0u16; 260];
+            let mut len = buf.len() as u32;
+            if unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) } != 0 {
+                let full = String::from_utf16_lossy(&buf[..len as usize]);
+                proc = full.rsplit(['\\', '/']).next().unwrap_or("?").to_string();
+            }
+            unsafe {
+                CloseHandle(h);
+            }
+        }
+    }
+    format!("hwnd=0x{hwnd:x} title='{title}' pid={pid} proc='{proc}'")
+}
+
+/// One-line activation report: `force_activate_window: <outcome> target=.. actual=..`.
+fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String {
+    format!("force_activate_window: {outcome} target={target} actual={actual}")
+}
+
 /// Write a diagnostic line to the helper debug log.
 /// The helper has no console (windows_subsystem = "windows"), so file logging
-/// is the only way to observe failures.
+/// is the only way to observe failures. Lines also fan out to the log pipe
+/// (when nex connected) so they land in nex's own log.
 fn debug_log(msg: &str) {
     let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
@@ -663,6 +871,162 @@ fn debug_log(msg: &str) {
         let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
         let _ = f.flush();
     }
+    if let Ok(mut slot) = LOG_PIPE.lock() {
+        if let Some(pipe) = slot.as_mut() {
+            use std::io::Write;
+            if writeln!(pipe, "{msg}").is_err() {
+                *slot = None; // reader gone; file log continues
+            } else {
+                let _ = pipe.flush();
+            }
+        }
+    }
+}
+
+/// Outbound log pipe (helper serves, nex reads), same per-pid scoping
+/// as the hotkey pipe.
+/// Naming convention for new nex processes: future binaries are
+/// `Nex.<Role>.exe`, e.g. `Nex.Elevated.exe`; pipes stay
+/// `\\.\pipe\<Name>\<pid>`.
+static LOG_PIPE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// `\\.\pipe\nex-hotkey\<pid>` -> `\\.\pipe\NexHelperLog\<pid>`.
+/// nex.exe mirrors this rule to connect; pure so both ends agree.
+fn log_pipe_for(pipe_path: &str) -> String {
+    match pipe_path.rsplit_once('\\') {
+        Some((_, pid)) if !pid.is_empty() => format!("\\\\.\\pipe\\NexHelperLog\\{pid}"),
+        _ => format!("{pipe_path}-log"),
+    }
+}
+
+/// Parked thread: serve the log pipe, then hold it for debug_log fan-out.
+fn spawn_log_pipe_server(log_path: String) {
+    std::thread::Builder::new()
+        .name("NexHelper-log-pipe".into())
+        .spawn(move || {
+            let pipe = match create_named_pipe(&log_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    debug_log(&format!("log pipe create failed: {e}"));
+                    return;
+                }
+            };
+            if wait_for_client(&pipe).is_err() {
+                return;
+            }
+            debug_log("log pipe client connected");
+            if let Ok(mut slot) = LOG_PIPE.lock() {
+                *slot = Some(pipe);
+            }
+        })
+        .ok();
+}
+
+/// True when the config bytes differ from the last applied ones.
+/// Pure: the event doorbell and the mtime safety-net funnel through one
+/// reload so a single write applies exactly once.
+fn config_changed(last_applied: &[u8], next: &[u8]) -> bool {
+    last_applied != next
+}
+
+// ---------------------------------------------------------------------------
+// Startup privilege self-check: elevation, integrity, UI access.
+// ---------------------------------------------------------------------------
+
+/// Integrity-level RID to name (SECURITY_MANDATORY_*_RID).
+fn integrity_label(rid: u32) -> &'static str {
+    match rid {
+        0x1000 => "Low",
+        0x2000 => "Medium",
+        0x2100 => "MediumPlus",
+        0x3000 => "High",
+        0x4000 => "System",
+        _ => "Unknown",
+    }
+}
+
+/// TOKEN_ELEVATION_TYPE value to name.
+fn elevation_label(t: u32) -> &'static str {
+    match t {
+        1 => "Default",
+        2 => "Full",
+        3 => "Limited",
+        _ => "Unknown",
+    }
+}
+
+fn format_startup_report(elev: &str, integrity: &str, ui_access: bool) -> String {
+    format!("privilege: elevation={elev} integrity={integrity} uiaccess={ui_access}")
+}
+
+/// Best-effort current-process privilege snapshot. Unknowns render as `?`.
+fn startup_privilege_report() -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenElevationType,
+        TokenIntegrityLevel, TokenUIAccess, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut elev = String::from("?");
+    let mut integrity = String::from("?");
+    let mut ui_access = false;
+    let mut ui_known = false;
+    unsafe {
+        let mut tok = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) != 0 {
+            let mut val = 0u32;
+            let mut len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenElevationType,
+                &mut val as *mut u32 as *mut _,
+                4,
+                &mut len,
+            ) != 0
+            {
+                elev = elevation_label(val).to_string();
+            }
+            let mut tml = [0u64; 8];
+            let mut tml_len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenIntegrityLevel,
+                tml.as_mut_ptr() as *mut _,
+                (tml.len() * 8) as u32,
+                &mut tml_len,
+            ) != 0
+            {
+                let sid = *(tml.as_ptr() as *const *mut core::ffi::c_void);
+                let n = *GetSidSubAuthorityCount(sid);
+                if n > 0 {
+                    let rid = *GetSidSubAuthority(sid, (n - 1) as u32);
+                    integrity = integrity_label(rid).to_string();
+                }
+            }
+            let mut ui_val = 0u32;
+            let mut ui_len = 0u32;
+            if GetTokenInformation(
+                tok,
+                TokenUIAccess,
+                &mut ui_val as *mut u32 as *mut _,
+                4,
+                &mut ui_len,
+            ) != 0
+            {
+                ui_access = ui_val != 0;
+                ui_known = true;
+            }
+            CloseHandle(tok);
+        }
+    }
+    let ui = if ui_known {
+        ui_access.to_string()
+    } else {
+        String::from("?")
+    };
+    format!(
+        "privilege: elevation={elev} integrity={integrity} uiaccess={ui}"
+    )
 }
 
 /// Called when nex.exe signals that the overlay is now visible.
@@ -672,7 +1036,10 @@ fn debug_log(msg: &str) {
 /// 1. Attach to the current foreground thread (same High IL, no UIPI),
 ///    then call SetForegroundWindow so the system grants the call.
 /// 2. Also grant nex.exe foreground permission as a backup.
-fn set_overlay_foreground() {
+///
+/// `seq` is this activation's generation: the retry loop abandons when a
+/// newer overlay-ready signal supersedes it instead of stealing focus back.
+fn set_overlay_foreground(seq: u64) {
     let class = to_wide("NexOverlayWindowClass\0");
     let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
     if hwnd as isize == 0 {
@@ -689,6 +1056,16 @@ fn set_overlay_foreground() {
             SetForegroundWindow,
         };
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+
+        // Already foreground: nothing to do.
+        if GetForegroundWindow() == hwnd {
+            debug_log(&format_activation_report(
+                "already foreground",
+                &describe_window(hwnd as isize),
+                &describe_window(hwnd as isize),
+            ));
+            return;
+        }
 
         // 1. Grant nex.exe foreground permission (backup path)
         if let Some(cfg) = CFG.read().unwrap().as_ref() {
@@ -734,8 +1111,18 @@ fn set_overlay_foreground() {
         // until the overlay actually owns the foreground (bounded).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while unsafe { GetForegroundWindow() } != hwnd {
+            if is_superseded(seq) {
+                debug_log(&format!(
+                    "force_activate_window: abandoning superseded activation seq={seq}"
+                ));
+                return;
+            }
             if std::time::Instant::now() > deadline {
-                debug_log("foreground verify: overlay did not win focus within 600ms");
+                debug_log(&format_activation_report(
+                    "failed",
+                    &describe_window(hwnd as isize),
+                    &describe_window(unsafe { GetForegroundWindow() } as isize),
+                ));
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -761,7 +1148,11 @@ fn set_overlay_foreground() {
                 AttachThreadInput(helper_tid, fg_tid, 0);
             }
         }
-        debug_log("foreground verified: overlay owns focus");
+        debug_log(&format_activation_report(
+            "verified",
+            &describe_window(hwnd as isize),
+            &describe_window(hwnd as isize),
+        ));
     }
 }
 
@@ -772,6 +1163,9 @@ fn set_overlay_foreground() {
 fn main() {
     // Log startup immediately (before anything can fail)
     debug_log("helper started");
+    // Orphan release: a dead predecessor may have held the mask down
+    // across its death. Raw key-up is a no-op otherwise.
+    send_mask_up();
 
     let cfg = match parse_args() {
         Ok(c) => c,
@@ -811,8 +1205,13 @@ fn main() {
             windows_sys::Win32::System::Threading::WaitForSingleObject(h, u32::MAX);
         }
         debug_log("watchdog: nex exited, helper shutting down");
+        release_mask();
         std::process::exit(0);
     });
+
+    debug_log(&startup_privilege_report());
+    spawn_log_pipe_server(log_pipe_for(&pipe_path));
+    spawn_cmd_pipe_server(cmd_pipe_for(&pipe_path));
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 
@@ -870,8 +1269,81 @@ fn main() {
     }
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
+    /// Reason a binding skips RegisterHotKey, or None when the system
+    /// hotkey path serves it. Pure so both registration sites agree.
+    fn fallback_demoted(vk: u32, any_mod: bool) -> Option<&'static str> {
+        if (0x60..=0x6F).contains(&vk) {
+            Some("numpad keys are indistinguishable to RegisterHotKey")
+        } else if !any_mod {
+            Some("single-tap needs hook press/release tracking")
+        } else {
+            None
+        }
+    }
+
+    /// Re-read the config file, republish hook atomics, reset transient
+    /// key state, and swap the RegisterHotKeyW fallback. Skips when the
+    /// file bytes match the last applied reload.
+    fn reload_hotkey_config(
+        config_file_path: &str,
+        fallback_id: &mut i32,
+        last_applied: &mut Vec<u8>,
+    ) {
+        let bytes = std::fs::read(config_file_path).unwrap_or_default();
+        if !config_changed(last_applied, &bytes) {
+            debug_log("reload skipped: config unchanged");
+            return;
+        }
+        if *fallback_id != 0 {
+            unsafe {
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), *fallback_id);
+            }
+            *fallback_id = 0;
+        }
+        if config_file_path.is_empty() {
+            return;
+        }
+        match parse_config_file(config_file_path) {
+            Ok(next) => {
+                debug_log(&format!(
+                    "reloaded hotkey='{}' vk={} is_win={}",
+                    next.hotkey_desc, next.target_vk, next.target_is_win,
+                ));
+                publish_hotkey_atomics(&next);
+                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
+                // Reset the hook's transient state. A stale
+                // CONSUMED_WIN_VK (Win key-down whose key-up was
+                // eaten by RIDEV_NOHOTKEYS) or a mask key left held
+                // by the old Win path makes the new combo undetectable.
+                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+                CHORD_DETECTED.store(false, Ordering::SeqCst);
+                HOTKEY_FIRED.store(false, Ordering::SeqCst);
+                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
+                CTRL_DOWN.store(false, Ordering::SeqCst);
+                ALT_DOWN.store(false, Ordering::SeqCst);
+                SHIFT_DOWN.store(false, Ordering::SeqCst);
+                release_mask();
+                *last_applied = bytes;
+                let g = CFG.read().unwrap();
+                if let Some(cfg) = g.as_ref() {
+                    *fallback_id = register_fallback(cfg);
+                }
+            }
+            Err(e) => debug_log(&format!("reload failed: {e}")),
+        }
+    }
+
     fn register_fallback(ctx: &HotkeyConfig) -> i32 {
         if ctx.target_is_win || !ctx.detect_enabled { return 0; }
+        // Demote bindings RegisterHotKey can't serve well; the hook stays
+        // the detector. Same table as the unit-tested nex-side decision.
+        if let Some(reason) = fallback_demoted(
+            ctx.target_vk,
+            ctx.mod_ctrl || ctx.mod_alt || ctx.mod_shift || ctx.mod_win,
+        ) {
+            debug_log(&format!("dispatches via hook: {reason}"));
+            return 0;
+        }
         let mut mods: u32 = 0;
         if ctx.mod_ctrl {
             mods |= 0x0002; // MOD_CONTROL
@@ -897,7 +1369,11 @@ fn main() {
         };
         if ok == 0 {
             let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
+            if err == 1409 {
+                debug_log("RegisterHotKey refused (already in use): demoted to hook");
+            } else {
+                eprintln!("NexHelper: RegisterHotKeyW failed err={err} (fallback disabled)");
+            }
             return 0;
         }
         id
@@ -977,6 +1453,7 @@ fn main() {
     const WAIT_SLICE_MS: u32 = 250;
     let mut last_config_mtime: Option<std::time::SystemTime> =
         std::fs::metadata(&config_file_path).ok().and_then(|m| m.modified().ok());
+    let mut last_applied_config: Vec<u8> = Vec::new();
 
     loop {
 
@@ -1002,7 +1479,8 @@ fn main() {
             // now set foreground from High IL.
             // (Event is auto-reset, so it returns to nonsignaled automatically.)
             debug_log("overlay-ready event received, calling set_overlay_foreground");
-            set_overlay_foreground();
+            let seq = FG_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            set_overlay_foreground(seq);
             debug_log("set_overlay_foreground returned");
         }
         // WAIT_OBJECT_0 + 1 = nex process handle signaled (nex exited)
@@ -1015,73 +1493,18 @@ fn main() {
         // RegisterHotKeyW fallback. No respawn, no cross-IL writes.
         if wait_result == rehotkey_wake {
             debug_log("config event received, reloading hotkey");
-            if fallback_id != 0 {
-                unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
-                }
-                fallback_id = 0;
-            }
-            if !config_file_path.is_empty() {
-                match parse_config_file(&config_file_path) {
-                    Ok(next) => {
-                        debug_log(&format!(
-                            "config event: reloaded hotkey='{}' vk={} is_win={}",
-                            next.hotkey_desc, next.target_vk, next.target_is_win,
-                        ));
-                        publish_hotkey_atomics(&next);
-                        *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
-                        // Reset the hook's transient state. A stale
-                        // CONSUMED_WIN_VK (Win key-down whose key-up was
-                        // eaten by RIDEV_NOHOTKEYS) or a mask key left held
-                        // by the old Win path makes the new combo undetectable.
-                        CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-                        CHORD_DETECTED.store(false, Ordering::SeqCst);
-                        HOTKEY_FIRED.store(false, Ordering::SeqCst);
-                        WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
-                        CTRL_DOWN.store(false, Ordering::SeqCst);
-                        ALT_DOWN.store(false, Ordering::SeqCst);
-                        SHIFT_DOWN.store(false, Ordering::SeqCst);
-                        send_mask_up();
-                    }
-                    Err(e) => debug_log(&format!("config event: reload failed: {e}")),
-                }
-            }
-            let g = CFG.read().unwrap();
-            if let Some(cfg) = g.as_ref() {
-                fallback_id = register_fallback(cfg);
-            }
+            reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
         }
 
         // Mtime safety-net: catches a missed doorbell signal within one
-        // wait slice (250ms) no matter what.
+        // wait slice (250ms) no matter what. Content-skipped when the
+        // event path already applied the same bytes.
         if let Ok(m) = std::fs::metadata(&config_file_path) {
             if let Ok(modt) = m.modified() {
                 if Some(modt) != last_config_mtime {
                     last_config_mtime = Some(modt);
                     debug_log("mtime changed, reloading hotkey");
-                    if fallback_id != 0 {
-                        unsafe {
-                            windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), fallback_id);
-                        }
-                        fallback_id = 0;
-                    }
-                    if !config_file_path.is_empty() {
-                        match parse_config_file(&config_file_path) {
-                            Ok(next) => {
-                                publish_hotkey_atomics(&next);
-                                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
-                                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-                                CHORD_DETECTED.store(false, Ordering::SeqCst);
-                                HOTKEY_FIRED.store(false, Ordering::SeqCst);
-                                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
-                                CTRL_DOWN.store(false, Ordering::SeqCst);
-                                ALT_DOWN.store(false, Ordering::SeqCst);
-                                SHIFT_DOWN.store(false, Ordering::SeqCst);
-                                send_mask_up();
-                            }
-                            Err(e) => debug_log(&format!("reload failed: {e}")),
-                        }
-                    }
+                    reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
                 }
             }
         }
@@ -1162,5 +1585,108 @@ fn main() {
                 fallback_id,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn superseded_only_when_newer_claimed() {
+        FG_SEQ.store(7, Ordering::SeqCst);
+        assert!(!is_superseded(7));
+        assert!(is_superseded(6));
+        FG_SEQ.store(8, Ordering::SeqCst);
+        assert!(is_superseded(7));
+    }
+
+    #[test]
+    fn activation_report_carries_both_ends() {
+        let r = format_activation_report(
+            "failed",
+            "hwnd=0x1 title='Nex' pid=1 proc='nex.exe'",
+            "hwnd=0x2 title='Task' pid=2 proc='taskmgr.exe'",
+        );
+        assert!(r.starts_with("force_activate_window: failed"));
+        assert!(r.contains("target=hwnd=0x1"));
+        assert!(r.contains("actual=hwnd=0x2"));
+    }
+
+    #[test]
+    fn describe_null_window_never_panics() {
+        let d = describe_window(0);
+        assert!(d.contains("hwnd=0x0"));
+        assert!(d.contains("pid=0"));
+    }
+
+    #[test]
+    fn log_pipe_mirrors_pid() {
+        assert_eq!(
+            log_pipe_for(r"\\.\pipe\nex-hotkey\1234"),
+            r"\\.\pipe\NexHelperLog\1234"
+        );
+        assert_eq!(log_pipe_for("odd"), "odd-log");
+    }
+
+    #[test]
+    fn privilege_labels_cover_known_values() {
+        assert_eq!(integrity_label(0x2000), "Medium");
+        assert_eq!(integrity_label(0x3000), "High");
+        assert_eq!(integrity_label(0x4000), "System");
+        assert_eq!(integrity_label(0x9999), "Unknown");
+        assert_eq!(elevation_label(2), "Full");
+        assert_eq!(elevation_label(3), "Limited");
+        assert_eq!(elevation_label(9), "Unknown");
+    }
+
+    #[test]
+    fn startup_report_is_one_line() {
+        let r = format_startup_report("Full", "High", false);
+        assert_eq!(r, "privilege: elevation=Full integrity=High uiaccess=false");
+        assert!(!r.contains('\n'));
+    }
+
+    #[test]
+    fn config_changed_detects_new_bytes() {
+        assert!(config_changed(b"", b"{\"a\":1}"));
+        assert!(!config_changed(b"{\"a\":1}", b"{\"a\":1}"));
+        assert!(config_changed(b"{\"a\":1}", b"{\"a\":2}"));
+    }
+
+    #[test]
+    fn sim_allowlist_maps_known_commands() {
+        assert_eq!(sim_action("play_pause"), Some(SimTap { vk: 0xB3, ctrl: false }));
+        assert_eq!(sim_action("next"), Some(SimTap { vk: 0xB0, ctrl: false }));
+        assert_eq!(sim_action("copy"), Some(SimTap { vk: 0x43, ctrl: true }));
+        assert_eq!(sim_action("select_all"), Some(SimTap { vk: 0x41, ctrl: true }));
+        assert_eq!(sim_action("vol_up"), Some(SimTap { vk: 0xAF, ctrl: false }));
+    }
+
+    #[test]
+    fn sim_allowlist_rejects_unknown() {
+        assert_eq!(sim_action(""), None);
+        assert_eq!(sim_action("format_c:"), None);
+        assert_eq!(sim_action("PLAY_PAUSE"), None);
+        assert_eq!(sim_action("copy "), None);
+    }
+
+    #[test]
+    fn cmd_pipe_mirrors_pid() {
+        assert_eq!(
+            cmd_pipe_for(r"\\.\pipe\nex-hotkey\1234"),
+            r"\\.\pipe\NexHelperCmd\1234"
+        );
+    }
+
+    #[test]
+    fn mask_hold_release_transitions_once() {
+        MASK_HELD.store(false, Ordering::SeqCst);
+        assert!(hold_mask());
+        assert!(!hold_mask());
+        assert!(release_mask());
+        assert!(!release_mask());
+        assert!(hold_mask());
+        MASK_HELD.store(false, Ordering::SeqCst);
     }
 }

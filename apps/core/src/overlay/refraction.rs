@@ -92,7 +92,7 @@ pub fn enabled() -> bool {
 const BLUR_STDDEV: f32 = 3.0;
 const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
-const CORNER_RADIUS: f32 = 20.0;
+const CORNER_RADIUS: f32 = 8.0;
 const TINT_ALPHA: f32 = 56.0 / 255.0;
 /// Extra desktop pixels around the panel keep the blur kernel away from
 /// the capture boundary. Matches the reference renderer's 3σ + 2 pad.
@@ -404,14 +404,13 @@ impl GlassWindow {
     /// Match the panel's rounded corners so sharp desktop slivers never
     /// peek past the glass. Skips identical regions: re-setting the same
     /// region forces a repaint/recompose of the flip window (flash).
-    fn apply_round_region(&self, w_px: u32, h_px: u32, scale: f64) {
-        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+    fn apply_round_region(&self, w_px: u32, h_px: u32, scale: f64) {        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
         let key = (w_px, h_px, scale.to_bits());
         if self.last_region.get() == Some(key) {
             return;
         }
-        // Panel radius token is 20 logical px; region wants diameters.
-        let d = ((20.0 * scale * 2.0).round() as i32).max(2);
+        // Panel radius token is 8 logical px; region wants diameters.
+        let d = ((8.0 * scale * 2.0).round() as i32).max(2);
         let rgn = unsafe {
             CreateRoundRectRgn(0, 0, w_px as i32 + 1, h_px as i32 + 1, d, d)
         };

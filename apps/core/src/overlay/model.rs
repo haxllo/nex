@@ -55,6 +55,10 @@ pub enum OverlayEvent {
     MoveSelection(i32),
     Submit,
     Escape,
+    /// Genuine mouse click outside the overlay rect. Unlike keyboard
+    /// Escape it bypasses the picker-ignore and settle delays: a click
+    /// is never a focus flap.
+    OutsideClick,
     ExternalShow,
     ExternalQuit,
     TrayToggleGameMode,

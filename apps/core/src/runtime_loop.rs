@@ -1000,6 +1000,40 @@ impl RuntimeWorker {
         self.show_idle_or_quick_launch();
     }
 
+    /// Shared keyboard-Escape / outside-click dismissal.
+    fn dismiss_overlay(&mut self) {
+        let before_shim = self.overlay.is_visible();
+        let before_overlay = self.overlay_state.is_visible();
+        let action = self.overlay_state.on_escape();
+        log_info(&format!(
+            "[nex::debug] Escape: before(shim={} overlay={}) on_escape={}",
+            before_shim, before_overlay, action,
+        ));
+        if action {
+            self.overlay.hide();
+            self.bento_query = None;
+            let after_shim = self.overlay.is_visible();
+            let after_overlay = self.overlay_state.is_visible();
+            log_info(&format!(
+                "[nex::debug] Escape: after(shim={} overlay={})",
+                after_shim, after_overlay,
+            ));
+            reset_overlay_session(
+                &self.overlay,
+                &mut self.current_results,
+                &mut self.selected_index,
+            );
+            self.pending_confirmation = None;
+            self.apps_expanded = None;
+            self.pending_show_all = None;
+            self.last_query.clear();
+            self.last_sent_generation = 0;
+            self.search_session.clear();
+            self.search_worker.clear_session();
+            while self.search_worker.try_recv().is_some() {}
+        }
+    }
+
     /// Show Quick Launch items in idle state if available.
     fn show_idle_or_quick_launch(&mut self) {
         if self.runtime_config.quick_launch.enabled
@@ -2189,36 +2223,16 @@ impl RuntimeWorker {
                     log_info("[nex] ignored overlay dismissal while native chat file picker is active");
                     return;
                 }
-                let before_shim = self.overlay.is_visible();
-                let before_overlay = self.overlay_state.is_visible();
-                let action = self.overlay_state.on_escape();
-                log_info(&format!(
-                    "[nex::debug] Escape: before(shim={} overlay={}) on_escape={}",
-                    before_shim, before_overlay, action,
-                ));
-                if action {
-                    self.overlay.hide();
-                    self.bento_query = None;
-                    let after_shim = self.overlay.is_visible();
-                    let after_overlay = self.overlay_state.is_visible();
-                    log_info(&format!(
-                        "[nex::debug] Escape: after(shim={} overlay={})",
-                        after_shim, after_overlay,
-                    ));
-                    reset_overlay_session(
-                        &self.overlay,
-                        &mut self.current_results,
-                        &mut self.selected_index,
-                    );
-                    self.pending_confirmation = None;
-                    self.apps_expanded = None;
-                    self.pending_show_all = None;
-                    self.last_query.clear();
-                    self.last_sent_generation = 0;
-                    self.search_session.clear();
-                    self.search_worker.clear_session();
-                    while self.search_worker.try_recv().is_some() {}
+                self.dismiss_overlay();
+            }
+            OverlayEvent::OutsideClick => {
+                // Genuine click, never a flap: close a stale picker and
+                // hide on this event, no settle delays.
+                if self.overlay.is_chat_file_picker_active() {
+                    log_info("[nex] outside click: closing picker and hiding at once");
+                    self.overlay.cancel_chat_picker();
                 }
+                self.dismiss_overlay();
             }
             OverlayEvent::QueryChanged(query) => {
                 let trimmed = query.trim();

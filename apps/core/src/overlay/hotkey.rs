@@ -548,14 +548,16 @@ unsafe extern "system" fn mouse_hook_proc(
         };
     }
 
-    // Cursor outside overlay rect → real outside click → send Escape.
+    // Cursor outside overlay rect → real outside click. Dedicated event
+    // (not Escape): keyboard Escape keeps picker-ignore semantics while
+    // a genuine click dismisses at once.
     if cursor.x < rect.left || cursor.x >= rect.right
         || cursor.y < rect.top || cursor.y >= rect.bottom
     {
-        crate::runtime::log_info("[nex::debug] Mouse hook: outside click -> Escape");
+        crate::runtime::log_info("[nex::debug] Mouse hook: outside click");
         let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
         if let Some(sender) = ctx {
-            let _ = sender.send(OverlayEvent::Escape);
+            let _ = sender.send(OverlayEvent::OutsideClick);
         }
     }
 

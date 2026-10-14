@@ -2011,7 +2011,7 @@ html.glass-native .row .icon.placeholder {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border-strong);
+  border: none;
   border-radius: inherit;
   background: var(--bg);
   color: var(--text);

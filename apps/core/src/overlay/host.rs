@@ -128,7 +128,7 @@ use wry::{WebView, WebViewBuilder};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_BORDER_COLOR, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DEFAULT,
 };
 use windows_sys::Win32::UI::Input::{
@@ -2499,21 +2499,8 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
     // Frame rendering stays on: with DEFAULT corners DWM draws the rounded
     // silhouette and clips the whole window (child included) itself.
-    // Dye the 1px DWM border in every mode: the default black reads
-    // harsh against glass. Opaque modes match their panel; glass
-    // matches its acrylic tint (COLORREF is 0x00BBGGRR, no alpha).
-    let panel = state.lock().map(|s| s.panel_background).unwrap_or(crate::config::PanelBackground::Glass);
-    let dark = state.lock().map(|s| s.theme == crate::overlay::model::Theme::Dark).unwrap_or(true);
-    // Slight 1px DWM edge: near-panel tones, never stark. Their own
-    // UI leaves the system border alone; ours is dyed just enough to
-    // read against any desktop.
-    let border: u32 = match panel {
-        crate::config::PanelBackground::White => 0x00E8_E8E8,
-        crate::config::PanelBackground::Black => 0x001A_1D21,
-        crate::config::PanelBackground::Glass if dark => 0x002A_2E35,
-        crate::config::PanelBackground::Glass => 0x00E2_E5E9,
-    };
-    let _ = set_dwm_attribute(hwnd, DWMWA_BORDER_COLOR, &border);
+    // No BORDER_COLOR dye: BBGGRR hand values rendered copper, and their
+    // UI leaves the system default border alone. DWM draws it.
     let available = if opaque_panel {
         // Opaque panels paint solid over an opaque WebView surface
         // (ClearType): no backdrop, and no acrylic fallback — any

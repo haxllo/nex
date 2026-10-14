@@ -926,6 +926,54 @@
     });
   }
 
+  // ── delayed hover hints ────────────────────────────────────
+  // [data-tip] shows a custom hint after 200ms; optional
+  // [data-shortcut] renders a kbd chip beside the label.
+  let tipEl = null;
+  let tipTimer = 0;
+  function hideTip() {
+    window.clearTimeout(tipTimer);
+    tipTimer = 0;
+    if (tipEl) {
+      tipEl.remove();
+      tipEl = null;
+    }
+  }
+  function showTip(target) {
+    hideTip();
+    tipEl = document.createElement("div");
+    tipEl.className = "nex-tip";
+    tipEl.textContent = target.dataset.tip || "";
+    const shortcut = target.dataset.shortcut;
+    if (shortcut) {
+      const chip = document.createElement("span");
+      chip.className = "kbd";
+      chip.textContent = shortcut;
+      tipEl.append(" ", chip);
+    }
+    document.body.appendChild(tipEl);
+    const targetRect = target.getBoundingClientRect();
+    const tipRect = tipEl.getBoundingClientRect();
+    const x = Math.max(8, Math.min(
+      targetRect.left + targetRect.width / 2 - tipRect.width / 2,
+      window.innerWidth - tipRect.width - 8,
+    ));
+    let y = targetRect.top - tipRect.height - 6;
+    if (y < 4) y = targetRect.bottom + 6;
+    tipEl.style.left = `${x}px`;
+    tipEl.style.top = `${y}px`;
+  }
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
+    if (!target || target.disabled) return;
+    window.clearTimeout(tipTimer);
+    tipTimer = window.setTimeout(() => showTip(target), 200);
+  });
+  document.addEventListener("mouseout", (event) => {
+    if (event.target && event.target.closest && event.target.closest("[data-tip]")) hideTip();
+  });
+  document.addEventListener("scroll", hideTip, true);
+
   // ── keyboard ─────────────────────────────────────────────
   window.addEventListener(
     "keydown",
@@ -1666,7 +1714,7 @@
         const block = document.createElement("div"); block.className = "chat-code-block";
         const head = document.createElement("div"); head.className = "chat-code-header";
         const lang = document.createElement("span"); lang.textContent = language;
-        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy code";
+        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy code";
         copy.addEventListener("click", async () => {
           try { await navigator.clipboard.writeText(source.join("\n")); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
           catch (_) { copy.textContent = "Unavailable"; }
@@ -1819,7 +1867,7 @@
         chatMessagesEl.appendChild(article);
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
-          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.title = "Copy response";
+          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy response";
           copy.addEventListener("click", async () => {
             try { await navigator.clipboard.writeText(message.content); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
             catch (_) { copy.textContent = "Unavailable"; }
@@ -1829,7 +1877,7 @@
             const messageIndex = chatMessages.findIndex((item) => item.id === message.id);
             const precedingUser = chatMessages.slice(0, messageIndex).reverse().find((item) => item.role === "user");
             if (!precedingUser?.localContext?.length) {
-              const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.title = "Try another response";
+              const regenerate = document.createElement("button"); regenerate.type = "button"; regenerate.textContent = "Regenerate"; regenerate.dataset.tip = "Try another response";
               regenerate.disabled = chatStreaming;
               regenerate.addEventListener("click", () => regenerateChatResponse(message.id));
               actions.appendChild(regenerate);

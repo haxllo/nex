@@ -1460,7 +1460,8 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 [data-theme="light"] .chat-message.user { background: rgba(0,0,0,0.055); }
 .chat-message.assistant { align-self: flex-start; max-width: min(95%, 590px); }
 .chat-message.error { align-self: stretch; max-width: none; padding: 9px 11px; border-radius: 7px; color: var(--text-dim); background: rgba(220,90,90,0.09); }
-.chat-message-actions { display: flex; gap: 4px; margin-top: 3px; opacity: .72; }
+.chat-message-actions { display: flex; gap: 4px; margin-top: 3px; opacity: 0; transition: opacity 150ms ease; }
+.chat-message:hover .chat-message-actions, .chat-message:focus-within .chat-message-actions { opacity: 1; }
 .chat-message-actions button { min-height: 28px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
 .chat-message-actions button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .chat-message-actions button:disabled { opacity: .45; cursor: default; }
@@ -1491,6 +1492,10 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-table th, .chat-table td { min-width: 70px; padding: 5px 8px; border-bottom: 1px solid var(--divider); text-align: left; }
 .chat-table th { color: var(--text-dim); font-weight: 600; }
 
+/* Delayed hover hints: label plus optional kbd shortcut chip. */
+.nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg-opaque) 92%, transparent); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0,0,0,.22); color: var(--text); font-size: 11px; line-height: 1.3; pointer-events: none; }
+.nex-tip .kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 3px; background: var(--kbd-cap-bg); border: 1px solid var(--kbd-cap-border); font-size: 10px; font-weight: 500; line-height: 1; color: var(--text); }
+
 .chat-live-status { min-height: 16px; max-width: 590px; margin: 6px auto 0; color: var(--text-faint); font-size: 10px; }
 .chat-live-status:empty { display: none; }
 .chat-composer-wrap { flex: 0 0 auto; padding: 7px 22px 15px; }
@@ -1498,15 +1503,13 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-context-selection[hidden] { display: none !important; }
 .chat-context-chip { max-width: 100%; display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text-dim); font: 10px var(--font); }
 .chat-context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-context-chip button { width: 15px; height: 15px; flex: 0 0 15px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-faint); font: 13px/15px var(--font); cursor: pointer; }
+.chat-context-chip button { width: 15px; height: 15px; flex: 0 0 15px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-faint); font: 13px/15px var(--font); cursor: pointer; opacity: 0; transition: opacity 150ms ease; }
+.chat-context-chip:hover button, .chat-context-chip:focus-within button { opacity: 1; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { max-width: 590px; display: flex; align-items: flex-end; gap: 7px; margin: 0 auto; padding: 3px 4px 3px 12px; border: 1px solid var(--border-strong); border-radius: 8px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
 /* Composer blur is glass-only: the filter layer grayscales the input text. */
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
-/* Grown past a few lines the pill relaxes into a rounded box so the
-   corners never pinch the scrolled text. */
-.chat-composer-shell.grown { border-radius: 18px; }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }
 .chat-composer-shell:focus-within { border-color: var(--border-strong); box-shadow: 0 7px 20px rgba(0,0,0,.07); }
 #chat-input { width: 0; min-width: 0; flex: 1 1 auto; max-height: 112px; min-height: 27px; display: block; resize: none; overflow-y: auto; margin: auto 0; padding: 5px 1px 4px; border: 0; outline: 0; background: transparent; color: var(--text); font: 12px/18px var(--font); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }

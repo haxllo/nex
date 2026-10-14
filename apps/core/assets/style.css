@@ -1427,8 +1427,9 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-history.scrolling::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
 .chat-history-item:hover, .chat-history-item[aria-selected="true"] { background: var(--hover); }
 .chat-history-item.active::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
-.chat-history-item { width: 100%; min-height: 36px; display: flex; position: relative; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-.chat-history-item:hover, .chat-history-item.active { background: var(--hover); }
+.chat-history-item { width: 100%; min-height: 32px; display: flex; position: relative; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.chat-history-item:hover { background: var(--hover); }
+.chat-history-item.active { background: transparent; }
 .chat-history-item strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .chat-history-item .chat-date { flex: 0 0 auto; color: var(--text-faint); font-size: 11px; }
 .chat-history-item .chat-delete { flex: 0 0 auto; display: none; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); cursor: pointer; }

@@ -1403,11 +1403,9 @@ html[data-native-material="acrylic"] .chat-provider-options, html[data-native-ma
 /* Fill on hover only; selection reads as a left accent bar. */
 .chat-provider-option:hover, .chat-model-option:hover { background: var(--hover); color: var(--text); }
 .chat-provider-option[aria-selected="true"], .chat-model-option[aria-selected="true"] { background: transparent; color: var(--text); }
-.chat-provider-option[aria-selected="true"]::before, .chat-model-option[aria-selected="true"]::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
-.chat-model-picker { display: flex; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--bg-opaque) 22%, transparent); }
-.chat-model-picker:focus-within { border-color: var(--border-strong); box-shadow: none; }
-.chat-model-picker > #chat-model { flex: 1 1 auto; width: 0; height: 30px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; box-shadow: none; }
-.chat-model-picker > #chat-model:focus { border: 0; box-shadow: none; }
+.chat-provider-option[aria-selected="true"]:not(:hover)::before, .chat-model-option[aria-selected="true"]:not(:hover)::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
+.chat-model-picker { position: relative; min-width: 0; }
+#chat-model { display: none; }
 .chat-model-options { max-height: 225px; overflow: hidden; padding: 4px; }
 .chat-model-search { height: 30px !important; margin-bottom: 4px; border: 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--bg-opaque) 30%, transparent) !important; box-shadow: none !important; font-size: 12px !important; }
 .chat-model-results { max-height: 160px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
@@ -1425,7 +1423,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-history.scrolling { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 .chat-history.scrolling::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
 .chat-history-item:hover, .chat-history-item[aria-selected="true"] { background: var(--hover); }
-.chat-history-item.active::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
+.chat-history-item.active:not(:hover)::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--accent); }
 .chat-history-item { width: 100%; min-height: 36px; display: flex; position: relative; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .chat-history-item:hover, .chat-history-item.active { background: var(--hover); }
 .chat-history-item strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }

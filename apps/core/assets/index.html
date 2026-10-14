@@ -151,7 +151,11 @@
             </label>
             <label class="chat-model-field">Model
               <div class="chat-model-picker">
-                <input id="chat-model" type="text" maxlength="128" autocomplete="off" placeholder="Choose or enter a model" aria-controls="chat-model-options" />
+                <input id="chat-model" type="hidden" value="" />
+                <button type="button" id="chat-model-select" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-model-options" aria-expanded="false">
+                  <span id="chat-model-choice">Choose a model</span>
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+                </button>
                 <div id="chat-model-options" class="chat-model-options" hidden>
                   <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
                   <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>

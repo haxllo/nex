@@ -76,6 +76,8 @@
   const chatProviderChoice = $("chat-provider-choice");
   const chatProviderOptions = $("chat-provider-options");
   const chatModelInput = $("chat-model");
+  const chatModelSelect = $("chat-model-select");
+  const chatModelChoice = $("chat-model-choice");
   const chatModelOptions = $("chat-model-options");
   const chatModelSearch = $("chat-model-search");
   const chatModelResults = $("chat-model-results");
@@ -1473,6 +1475,7 @@
         chatConfig.provider = conversation.provider || chatConfig.provider;
         chatConfig.model = conversation.model || chatConfig.model;
         chatModelInput.value = chatConfig.model;
+        syncChatModelChoice();
         setChatHistoryOpen(false);
         renderChatMessages();
         updateChatStreamingState(false);
@@ -1883,6 +1886,7 @@
     }
     chatProviderButton.setAttribute("aria-expanded", String(!chatProviderOptions.hidden));
     chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "gpt-4o-mini");
+    syncChatModelChoice();
     chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
     chatEndpointField.hidden = provider !== "openai-compatible";
     chatKeyField.hidden = provider !== "openai-compatible";
@@ -2264,6 +2268,14 @@
     flashChatNotice("Saving provider settings…");
   }
 
+  // Closed-field label: friendly name when listed, raw id for custom
+  // entries, placeholder when empty.
+  function syncChatModelChoice() {
+    const id = (chatModelInput.value || "").trim();
+    const known = chatModels.find((model) => model.id === id);
+    chatModelChoice.textContent = known ? (known.name || known.id) : (id || "Choose a model");
+  }
+
   function renderChatModelOptions(open = !chatModelOptions.hidden) {
     chatModelResults.replaceChildren();
     if (chatModelsLoading) {
@@ -2281,12 +2293,31 @@
     if (!matches.length) {
       const empty = document.createElement("div");
       empty.className = "chat-model-empty";
-      empty.textContent = chatModels.length
-        ? "No matching models. You can still enter a model ID."
-        : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
-          ? "Connect your ChatGPT account to load models."
-          : "Switch provider or save settings to load available models.");
-      chatModelResults.append(empty);
+      // Custom model IDs stay supported: offer the raw query as an entry.
+      if (query && chatModels.length) {
+        const custom = document.createElement("button");
+        custom.type = "button";
+        custom.className = "chat-model-option";
+        custom.setAttribute("role", "option");
+        custom.setAttribute("aria-selected", "false");
+        custom.textContent = `Use "${chatModelSearch.value.trim()}"`;
+        custom.addEventListener("click", () => {
+          chatModelInput.value = chatModelSearch.value.trim();
+          chatConfig.model = chatModelInput.value;
+          syncChatModelChoice();
+          closeChatModelOptions();
+          chatModelSelect.setAttribute("aria-expanded", "false");
+          syncChatConfig();
+        });
+        chatModelResults.append(custom);
+      } else {
+        empty.textContent = chatModels.length
+          ? "No matching models. Type an ID above to use a custom model."
+          : (chatProviderInput.value === "codex" && !chatConfig.accountConnected
+            ? "Connect your ChatGPT account to load models."
+            : "Switch provider or save settings to load available models.");
+        chatModelResults.append(empty);
+      }
       if (open) showChatModelOptions();
       return;
     }
@@ -2300,8 +2331,10 @@
       option.addEventListener("click", () => {
         chatModelInput.value = model.id;
         chatConfig.model = model.id;
-        chatModelInput.focus();
+        syncChatModelChoice();
+        chatModelSelect.focus();
         closeChatModelOptions();
+        chatModelSelect.setAttribute("aria-expanded", "false");
         syncChatConfig();
       });
       chatModelResults.append(option);
@@ -2311,10 +2344,12 @@
 
   function showChatModelOptions() {
     chatModelOptions.hidden = false;
+    chatModelSelect.setAttribute("aria-expanded", "true");
   }
 
   function closeChatModelOptions() {
     chatModelOptions.hidden = true;
+    chatModelSelect.setAttribute("aria-expanded", "false");
   }
 
   function closeChatProviderOptions() {
@@ -2411,6 +2446,7 @@
     chatModelInput.value = chatProviderInput.value === "codex"
       ? (chatModels.find((model) => model.default)?.id || chatModels[0]?.id || "gpt-6-luna")
       : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "gpt-4o-mini") : "gpt-4o-mini");
+    syncChatModelChoice();
     chatConfig.provider = chatProviderInput.value;
     chatConfig.model = chatModelInput.value;
     syncChatConfig(); fetchChatModels(false); postChatResize();
@@ -2464,11 +2500,12 @@
   chatCheckButton.addEventListener("click", () => {
     checkChatGPTConnection();
   });
-  chatModelInput.addEventListener("focus", () => {
-    if (chatModelOptions.hidden) {
-      chatModelSearch.value = "";
-      renderChatModelOptions(true);
-    }
+  chatModelSelect.addEventListener("click", () => {
+    const open = chatModelOptions.hidden;
+    closeChatProviderOptions();
+    chatModelSearch.value = "";
+    renderChatModelOptions(open);
+    if (!open) closeChatModelOptions();
   });
   chatModelSearch.addEventListener("input", renderChatModelOptions);
   // Hover-select like result rows: the highlight follows the cursor.
@@ -2654,7 +2691,7 @@
     if (event.key !== "Escape") return;
     if (!chatModelOptions.hidden) {
       closeChatModelOptions();
-      chatModelInput.focus();
+      chatModelSelect.focus();
     } else if (!chatProviderOptions.hidden) {
       closeChatProviderOptions();
       chatProviderButton.focus();
@@ -2833,6 +2870,7 @@
           chatConfig.model = recommended.id;
           post("chatConfigure", { provider: "codex", baseUrl: chatBaseUrlInput.value, model: recommended.id, apiKey: "" });
         } else if (!chatModelInput.value && chatModels.length) chatModelInput.value = chatModels[0].id;
+        syncChatModelChoice();
         renderChatModelOptions();
         flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
       }

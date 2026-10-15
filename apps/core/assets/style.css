@@ -1501,8 +1501,8 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 /* Status surfaces off: no equivalent in their UI; elements and logic
    stay for later. */
 .chat-live-status, .chat-composer-footer, .chat-notice { display: none !important; }
-.chat-composer-wrap { flex: 0 0 auto; padding: 7px 22px 15px; }
-.chat-context-selection { max-width: 590px; display: flex; flex-wrap: wrap; gap: 5px; margin: 0 auto 5px; }
+.chat-composer-wrap { flex: 0 0 auto; padding: 7px 0 0; }
+.chat-context-selection { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 5px; padding: 0 12px; }
 .chat-context-selection[hidden] { display: none !important; }
 .chat-context-chip { max-width: 100%; display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 999px; background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text-dim); font: 10px var(--font); }
 .chat-context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1510,7 +1510,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-context-chip:hover button, .chat-context-chip:focus-within button { opacity: 1; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { max-width: 590px; min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: end; gap: 6px; margin: 0 auto; padding: 4px 4px 4px 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: 0 7px 20px rgba(0,0,0,.06); transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: end; gap: 6px; margin: 0; padding: 4px 4px 4px 8px; border: 0; border-top: 1px solid var(--divider); border-radius: 0; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
 /* Composer blur is glass-only: the filter layer grayscales the input text. */
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }

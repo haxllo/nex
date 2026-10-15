@@ -928,7 +928,12 @@
 
   // ── delayed hover hints ────────────────────────────────────
   // [data-tip] shows a custom hint after 200ms; optional
-  // [data-shortcut] renders a kbd chip beside the label.
+  // [data-shortcut] renders a kbd chip beside the label. Static
+  // [title] attributes migrate here so every hint shares one look.
+  for (const el of document.querySelectorAll("[title]")) {
+    el.dataset.tip = el.title;
+    el.removeAttribute("title");
+  }
   let tipEl = null;
   let tipTimer = 0;
   function hideTip() {

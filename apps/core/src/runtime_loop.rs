@@ -251,18 +251,23 @@ pub(crate) fn run_windows_runtime(
     std::thread::Builder::new()
         .name("nex-startup-update-check".into())
         .spawn(move || {
-            let available = crate::updater::check_update_available(
+            let (available, latest) = crate::updater::check_update_available(
                 crate::updater::UpdateChannel::Stable
-            ).unwrap_or(false);
-            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable(available));
+            ).unwrap_or((false, None));
+            let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable { available, latest });
         })
         .ok();
 
-    // Post-update hook: if the app was updated since the user last saw
-    // release notes, arm the What's New entry point (once per version).
+    // Post-update hook: no pill for the version just installed (record
+    // silently); older unseen notes still surface once with the
+    // detected-version logic above refreshing them on update checks.
     if let Some(pending) = crate::whats_new::check_pending() {
-        log_info(&format!("[nex] whats-new pending for v{pending}"));
-        overlay.set_whats_new_pending(pending);
+        if pending == env!("CARGO_PKG_VERSION") {
+            crate::whats_new::mark_seen(&pending);
+        } else {
+            log_info(&format!("[nex] whats-new pending for v{pending}"));
+            overlay.set_whats_new_pending(pending);
+        }
     }
 
     // The power popup is initialized by the overlay host after its own
@@ -1928,9 +1933,23 @@ impl RuntimeWorker {
                     })
                     .ok();
             }
-            OverlayEvent::UpdateAvailable(available) => {
+            OverlayEvent::UpdateAvailable { available, latest } => {
                 self.overlay.set_update_available(available);
                 log_info(&format!("[nex] update_available={}", available));
+                // The pill always names the detected version: a stale
+                // post-update pending would otherwise show old notes for
+                // a newly detected release.
+                if available {
+                    if let Some(version) = latest {
+                        self.overlay.set_whats_new_pending(version);
+                    }
+                } else if self.overlay.whats_new_pending().as_deref()
+                    == Some(env!("CARGO_PKG_VERSION"))
+                {
+                    // Post-update boot: nothing to show, record silently.
+                    crate::whats_new::mark_seen(env!("CARGO_PKG_VERSION"));
+                    self.overlay.clear_whats_new_pending();
+                }
             }
             OverlayEvent::WhatsNew => {
                 // The view is opening — this counts as seen even if the

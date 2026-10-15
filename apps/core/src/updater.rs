@@ -130,8 +130,8 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
 }
 
 /// Check if an update is available by running the updater in capture mode
-/// and parsing the output. Returns true if an update is available.
-pub fn check_update_available(channel: UpdateChannel) -> Result<bool, UpdateLaunchError> {
+/// and parsing the output. Returns (available, detected version).
+pub fn check_update_available(channel: UpdateChannel) -> Result<(bool, Option<String>), UpdateLaunchError> {
     let script_path = resolve_updater_script()?;
     let output = run_updater_script_check_only(script_path.as_path(), channel)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -152,12 +152,16 @@ pub fn check_update_available(channel: UpdateChannel) -> Result<bool, UpdateLaun
                         "[nex] update check aborted: {message}"
                     ));
                 }
-                return Ok(status == "update-available");
+                let version = value
+                    .get("version")
+                    .and_then(|field| field.as_str())
+                    .map(str::to_string);
+                return Ok((status == "update-available", version));
             }
         }
     }
     // If we can't parse the result, assume no update is available
-    Ok(false)
+    Ok((false, None))
 }
 
 fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {

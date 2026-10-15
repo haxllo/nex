@@ -258,16 +258,11 @@ pub(crate) fn run_windows_runtime(
         })
         .ok();
 
-    // Post-update hook: no pill for the version just installed (record
-    // silently); older unseen notes still surface once with the
-    // detected-version logic above refreshing them on update checks.
+    // Post-update hook: if the app was updated since the user last saw
+    // release notes, arm the What's New entry point (once per version).
     if let Some(pending) = crate::whats_new::check_pending() {
-        if pending == env!("CARGO_PKG_VERSION") {
-            crate::whats_new::mark_seen(&pending);
-        } else {
-            log_info(&format!("[nex] whats-new pending for v{pending}"));
-            overlay.set_whats_new_pending(pending);
-        }
+        log_info(&format!("[nex] whats-new pending for v{pending}"));
+        overlay.set_whats_new_pending(pending);
     }
 
     // The power popup is initialized by the overlay host after its own
@@ -1943,12 +1938,6 @@ impl RuntimeWorker {
                     if let Some(version) = latest {
                         self.overlay.set_whats_new_pending(version);
                     }
-                } else if self.overlay.whats_new_pending().as_deref()
-                    == Some(env!("CARGO_PKG_VERSION"))
-                {
-                    // Post-update boot: nothing to show, record silently.
-                    crate::whats_new::mark_seen(env!("CARGO_PKG_VERSION"));
-                    self.overlay.clear_whats_new_pending();
                 }
             }
             OverlayEvent::WhatsNew => {

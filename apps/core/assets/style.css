@@ -1510,7 +1510,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-context-chip:hover button, .chat-context-chip:focus-within button { opacity: 1; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: end; gap: 6px; margin: 0; padding: 4px 4px 4px 8px; border: 0; border-top: 1px solid var(--divider); border-radius: 0; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; margin: 0; padding: 4px 4px 4px 8px; border: 0; border-top: 1px solid var(--divider); border-radius: 0; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
 /* Composer blur is glass-only: the filter layer grayscales the input text. */
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }
@@ -1520,7 +1520,7 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 #chat-input::-webkit-scrollbar-track { background: transparent; }
 #chat-input::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
 #chat-input::placeholder { color: var(--text-faint); }
-.chat-composer-tools { display: flex; flex: 0 0 auto; align-items: center; align-self: flex-end; gap: 3px; }
+.chat-composer-tools { display: flex; flex: 0 0 auto; align-items: center; align-self: center; gap: 3px; }
 .chat-composer-footer { max-width: 590px; min-height: 16px; display: flex; align-items: center; gap: 12px; margin: 3px auto 0; }
 .chat-send-button { width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer; transition: opacity 120ms ease, transform 120ms ease; }
 .chat-send-button:disabled { opacity: .42; cursor: default; }

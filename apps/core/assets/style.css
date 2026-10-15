@@ -1515,7 +1515,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }
 .chat-composer-shell:focus-within { border-color: var(--border-strong); box-shadow: 0 7px 20px rgba(0,0,0,.07); }
-#chat-input { min-width: 0; max-height: 112px; min-height: 27px; display: block; resize: none; overflow-y: auto; margin: auto 0; padding: 10px 1px; border: 0; outline: 0; background: transparent; color: var(--text); font: 12px/20px var(--font); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+#chat-input { min-width: 0; max-height: 112px; min-height: 27px; display: block; resize: none; overflow-y: auto; margin: auto 0; padding: 10px 8px 10px 1px; border: 0; outline: 0; background: transparent; color: var(--text); font: 12px/20px var(--font); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 #chat-input::-webkit-scrollbar { width: 8px; }
 #chat-input::-webkit-scrollbar-track { background: transparent; }
 #chat-input::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }

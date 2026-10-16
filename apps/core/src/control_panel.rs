@@ -157,5 +157,39 @@ mod tests {
             cache.png_bytes(&appwiz.path).is_some(),
             "appwiz icon extracts"
         );
+        // .msc files carry no icon resource: the MMC host icon serves.
+        let services = items
+            .iter()
+            .find(|item| item.title == "Services")
+            .expect("services.msc");
+        let png = cache.png_bytes(&services.path).expect("mmc icon extracts");
+        let img = image::load_from_memory(&png).expect("mmc png decodes");
+        assert_eq!(img.into_rgba8().dimensions(), (128, 128));
+    }
+
+    #[test]
+    fn probe_msc_icon_stages() {
+        let cache = crate::overlay::icons::IconCache::new(8, 60_000);
+        for name in ["devmgmt.msc", "diskmgmt.msc", "services.msc", "appwiz.cpl", "mmc.exe"] {
+            let path = format!("C:\\Windows\\System32\\{name}");
+            let direct = cache.png_bytes(&path);
+            match direct {
+                Some(b) => match image::load_from_memory(&b) {
+                    Ok(img) => {
+                        let rgba = img.into_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        let total = (w * h) as f64;
+                        let content = rgba.pixels().filter(|p| p[3] > 8).count() as f64;
+                        println!(
+                            "msc stage probe [{name}]: dims={w}x{h} fill={:.1}% {} bytes",
+                            content / total * 100.0,
+                            b.len(),
+                        );
+                    }
+                    Err(e) => println!("msc stage probe [{name}]: decode failed: {e}"),
+                },
+                None => println!("msc stage probe [{name}]: None"),
+            }
+        }
     }
 }

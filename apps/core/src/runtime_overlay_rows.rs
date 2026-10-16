@@ -576,11 +576,24 @@ pub(crate) fn overlay_subtitle(item: &SearchItem, command_mode: bool) -> String 
     if item.kind.eq_ignore_ascii_case("action") {
         if path.is_empty() {
             return "Nex action".to_string();
-        }
-        return path.to_string();
+        }        return path.to_string();
     }
     if is_shell {
         return String::new();
+    }
+    // Control Panel rows carry a human description as subtitle; the
+    // file path underneath adds nothing.
+    if item.kind.eq_ignore_ascii_case("control-panel") {
+        let s = item.subtitle.trim();
+        if s.is_empty()
+            || s.contains('\\')
+            || s.contains('/')
+            || s.contains(':')
+            || s.eq_ignore_ascii_case(item.title.trim())
+        {
+            return String::new();
+        }
+        return s.to_string();
     }
     // ms-settings: URIs and Control Panel .cpl dialogs are launch
     // targets, not display paths.

@@ -243,6 +243,16 @@ fn decode_png(path: &PathBuf) -> Option<Vec<u8>> {
         return Some(png);
     }
 
+    // .msc consoles carry no icon resource (generic white page); the
+    // MMC host executable owns the real admin icon.
+    if path_str.to_ascii_lowercase().ends_with(".msc") {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let mmc = PathBuf::from(format!("{windir}\\System32\\mmc.exe"));
+        if mmc.is_file() {
+            return extract_shell_icon_png(&mmc.to_string_lossy());
+        }
+    }
+
     // Everything else: extract the shell icon.
     #[cfg(target_os = "windows")]
     {

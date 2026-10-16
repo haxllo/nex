@@ -41,11 +41,62 @@ pub fn settings_page_items() -> Vec<SearchItem> {
 /// Glyph for a settings page (`ms-settings:{uri}` suffix), falling back
 /// to the gear when the page has no dedicated glyph.
 pub fn settings_glyph(uri: &str) -> u16 {
+    if let Some((_, code)) = official_glyph(uri) {
+        return code;
+    }
     SETTINGS_PAGES
         .iter()
         .find(|page| page.uri == uri)
         .map(|page| page.glyph)
         .unwrap_or(GLYPH_GEAR)
+}
+
+/// True when the page's official glyph lives in the SettingsIcons.ttf
+/// private font rather than the Segoe system fonts.
+pub fn settings_glyph_is_file_font(uri: &str) -> bool {
+    official_glyph(uri).map(|(file_font, _)| file_font).unwrap_or(false)
+}
+
+/// Official per-page glyphs scraped from the system's own settings
+/// search index (`ImmersiveControlPanel/.../AllSystemSettings_*.xml`,
+/// first Page node per entry joined to our URIs). Entries absent here
+/// keep the curated Segoe codepoints above.
+fn official_glyph(uri: &str) -> Option<(bool, u16)> {
+    const TABLE: &[(&str, bool, u16)] = &[
+        ("display", true, 0xE770),
+        ("sound", false, 0xE767),
+        ("notifications", true, 0xEA8F),
+        ("multitasking", false, 0xEE40),
+        ("bluetooth", false, 0xE772),
+        ("network-airplanemode", false, 0xE709),
+        ("personalization-background", false, 0xEB9F),
+        ("personalization-colors", false, 0xE2B1),
+        ("personalization-start", true, 0xE8FC),
+        ("signinoptions", false, 0xE8D7),
+        ("windowsupdate", false, 0xE895),
+        ("storagesense", false, 0xEDA2),
+        ("network-advancedsettings", false, 0xEDA3),
+        ("otherusers", false, 0xE8FA),
+        ("focus", true, 0xE5C4),
+        ("clipboard", false, 0xE77F),
+        ("about", false, 0xE946),
+        ("devices", false, 0xE772),
+        ("devices-touchpad", false, 0xEFA5),
+        ("devices-printers", false, 0xE749),
+        ("network-ethernet", false, 0xE839),
+        ("network-proxy", false, 0xE968),
+        ("taskbar", false, 0xE90E),
+        ("privacy-microphone", false, 0xE720),
+        ("troubleshoot", false, 0xE90F),
+        ("speech", true, 0xEFA9),
+        ("privacy-general", true, 0xF4DD),
+        ("privacy-location", true, 0xE37A),
+        ("privacy-notifications", true, 0xEA8F),
+        ("privacy-documents", true, 0xE8A5),
+        ("privacy-pictures", false, 0xEB9F),
+        ("privacy-videos", false, 0xE8B2),
+    ];
+    TABLE.iter().find(|(u, _, _)| *u == uri).map(|(_, f, c)| (*f, *c))
 }
 
 pub const GLYPH_GEAR: u16 = 0xE713;

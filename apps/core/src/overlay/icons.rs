@@ -776,6 +776,25 @@ fn icon_to_rgba_png(_hicon: *mut std::ffi::c_void, _size: i32) -> Option<Vec<u8>
     None
 }
 
+/// Install the official Settings icons font privately (once per
+/// process, never system-visible). Best-effort: failure just falls
+/// back to the Segoe families in the render path.
+#[cfg(target_os = "windows")]
+fn ensure_settings_icons_installed() {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Graphics::Gdi::{AddFontResourceExW, FR_PRIVATE};
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+    let _ = INSTALLED.get_or_init(|| {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        let path = format!(
+            "{windir}\\SystemResources\\Windows.UI.SettingsAppThreshold\\SystemSettings\\Assets\\Fonts\\SettingsIcons.ttf"
+        );
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let added = unsafe { AddFontResourceExW(wide.as_ptr(), FR_PRIVATE, std::ptr::null_mut()) };
+        added != 0
+    });
+}
+
 /// Render a Settings page glyph (`ms-settings:{uri}`) as a white
 /// Segoe Fluent Icons / Segoe MDL2 Assets glyph on a transparent
 /// 128px canvas, normalized to PNG. The overlay tints it per theme
@@ -791,6 +810,7 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
 
     const SIZE: i32 = 128;
     let glyph: u16 = crate::settings_catalog::settings_glyph(uri);
+    let file_font = crate::settings_catalog::settings_glyph_is_file_font(uri);
     let text = [glyph, 0u16];
     let fail = |msg: &str| {
         crate::logging::warn(&format!("[nex] settings glyph '{uri}' U+{glyph:04X}: {msg}"));
@@ -829,37 +849,58 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         let pixel_count = (SIZE * SIZE) as usize;
         std::ptr::write_bytes(bits, 0, pixel_count * 4);
 
-        // Segoe Fluent Icons on Win11; Segoe MDL2 Assets on Win10.
-        let mut font_name = "Segoe Fluent Icons".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-        let mut hfont = CreateFontW(
-            -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, font_name.as_ptr(),
+        // Official SettingsIcons.ttf for file-font pages (privately
+        // installed, never system-visible); Segoe families otherwise.
+        // Order: official file, Segoe Fluent, Segoe MDL2.
+        let mut families: Vec<Vec<u16>> = Vec::new();
+        if file_font {
+            ensure_settings_icons_installed();
+            families.push(
+                "Settings Fluent Icons".encode_utf16().chain(std::iter::once(0)).collect(),
+            );
+        }
+        families.push(
+            "Segoe Fluent Icons".encode_utf16().chain(std::iter::once(0)).collect(),
         );
-        if !hfont.is_null() {
+        families.push(
+            "Segoe MDL2 Assets".encode_utf16().chain(std::iter::once(0)).collect(),
+        );
+        let mut hfont = std::ptr::null_mut();
+        for family in &families {
+            let candidate = CreateFontW(
+                -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, family.as_ptr(),
+            );
+            if candidate.is_null() {
+                continue;
+            }
             // Confirm the face actually resolved (missing font → GDI
             // substitutes and the glyph renders as a tofu box).
             let mut face = [0u16; 64];
-            let old_font = SelectObject(hdc, hfont as _);
+            let old_font = SelectObject(hdc, candidate as _);
             let face_len = GetTextFaceW(hdc, face.len() as i32, face.as_mut_ptr());
-            let resolved = face_len > 0
-                && face[..face_len as usize]
-                    == "Segoe Fluent Icons".encode_utf16().collect::<Vec<u16>>()[..];
-            SelectObject(hdc, old_font);
-            if !resolved {
-                DeleteObject(hfont as _);
-                hfont = std::ptr::null_mut();
+            let want: Vec<u16> = family.iter().copied().take_while(|&c| c != 0).collect();
+            let mut got: &[u16] = &face[..face_len.max(0) as usize];
+            if got.last() == Some(&0) {
+                got = &got[..got.len() - 1];
             }
-        }
-        if hfont.is_null() {
-            font_name = "Segoe MDL2 Assets".encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
-            hfont = CreateFontW(
-                -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, font_name.as_ptr(),
-            );
+            let matches = got.len() == want.len()
+                && got.iter().zip(want.iter()).all(|(a, b)| {
+                    char::from_u32(*a as u32)
+                        .map(|c| c.to_ascii_lowercase())
+                        == char::from_u32(*b as u32).map(|c| c.to_ascii_lowercase())
+                });
+            SelectObject(hdc, old_font);
+            if matches {
+                hfont = candidate;
+                break;
+            }
+            DeleteObject(candidate as _);
         }
         if hfont.is_null() {
             SelectObject(hdc, old_bmp);
             DeleteObject(hbmp as _);
             DeleteDC(hdc);
-            return fail("no icon font available (Segoe Fluent Icons / Segoe MDL2 Assets)");
+            return fail("no icon font available (SettingsIcons / Segoe Fluent / Segoe MDL2)");
         }
 
         let old_font = SelectObject(hdc, hfont as _);
@@ -1989,6 +2030,67 @@ mod probe_magnifier {
                 },
                 None => println!("mssettings probe [{uri}]: None"),
             }
+        }
+    }
+
+    /// Every catalog page renders a present 128px glyph (official file
+    /// font or Segoe fallback — no tofu, no blanks).    #[test]
+    fn probe_settings_catalog_renders() {
+        for page in crate::settings_catalog::SETTINGS_PAGES {
+            let uri = page.uri;
+            match settings_glyph_png(uri) {
+                Some(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => {
+                        let rgba = img.into_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        assert_eq!((w, h), (128, 128), "settings {uri}");
+                        let total = (w * h) as f64;
+                        let content = rgba.pixels().filter(|p| p[3] > 8).count() as f64;
+                        assert!(
+                            content / total > 0.02,
+                            "settings {uri} glyph present"
+                        );
+                    }
+                    Err(e) => panic!("settings {uri} PNG must decode: {e}"),
+                },
+                None => panic!("settings {uri} must render"),
+            }
+        }
+    }
+
+    /// Proves the private SettingsIcons install resolves by family name
+    /// (not a system font — see Fonts registry). The render path uses
+    /// the same verify-then-select logic.
+    #[test]
+    fn probe_settings_icons_private_install() {
+        ensure_settings_icons_installed();
+        unsafe {
+            use windows_sys::Win32::Graphics::Gdi::{
+                CreateCompatibleDC, CreateFontW, DeleteDC, DeleteObject, GetTextFaceW,
+                SelectObject,
+            };
+            let hdc = CreateCompatibleDC(std::ptr::null_mut());
+            assert!(!hdc.is_null());
+            let name: Vec<u16> = "Settings Fluent Icons"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let hfont = CreateFontW(
+                -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, name.as_ptr(),
+            );
+            assert!(!hfont.is_null());
+            let old = SelectObject(hdc, hfont as _);
+            let mut face = [0u16; 64];
+            let len = GetTextFaceW(hdc, face.len() as i32, face.as_mut_ptr());
+            SelectObject(hdc, old);
+            DeleteObject(hfont as _);
+            DeleteDC(hdc);
+            let mut got = &face[..len.max(0) as usize];
+            if got.last() == Some(&0) {
+                got = &got[..got.len() - 1];
+            }
+            let face_name = String::from_utf16_lossy(got);
+            assert_eq!(face_name, "Settings Fluent Icons");
         }
     }
 

@@ -219,6 +219,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
                 items.extend(registered_apps);
             }
             items.extend(crate::settings_catalog::settings_page_items());
+            items.extend(crate::control_panel::control_panel_items());
             Ok(dedupe_apps_by_title(items))
         }
     }
@@ -226,7 +227,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "10";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "11";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)

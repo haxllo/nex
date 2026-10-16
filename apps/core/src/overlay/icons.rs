@@ -1023,7 +1023,7 @@ fn extraction_size_for_path(path: &str) -> i32 {
 /// Returns HBITMAP that we render into an RGBA buffer via GDI.
 /// Works for all shell types: .exe, .lnk, .ico, shell:AppsFolder\...
 #[cfg(target_os = "windows")]
-fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
+pub(crate) fn shell_item_image_factory_png(shell_path: &str) -> Option<Vec<u8>> {
     use windows_sys::Win32::Graphics::Gdi::{
         DeleteObject, HBITMAP,
     };
@@ -1176,7 +1176,7 @@ fn hbitmap_to_rgba_png(hbmp: windows_sys::Win32::Graphics::Gdi::HBITMAP, target_
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell_item_image_factory_png(_shell_path: &str) -> Option<Vec<u8>> {
+pub(crate) fn shell_item_image_factory_png(_shell_path: &str) -> Option<Vec<u8>> {
     None
 }
 
@@ -1305,7 +1305,7 @@ fn private_extract_icons_png(path: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "windows")]
-fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
+pub(crate) fn extract_shell_icon_fallback(shell_path: &str) -> Option<Vec<u8>> {
     use windows_sys::Win32::UI::Shell::{
         SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW,
         SHGFI_ICON, SHGFI_LARGEICON, SHGFI_PIDL,

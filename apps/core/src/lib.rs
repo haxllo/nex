@@ -12,6 +12,7 @@ pub mod config;
 #[cfg(target_os = "windows")]
 pub(crate) mod console_signal;
 pub mod contract;
+pub mod control_panel;
 pub mod core_service;
 pub mod discovery;
 #[cfg(target_os = "windows")]

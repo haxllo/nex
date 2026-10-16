@@ -1963,6 +1963,39 @@ mod probe_magnifier {
     /// Regression: the sparse factory bitmap must be rejected so the
     /// chain serves the dense fallback.
     #[test]
+    fn probe_mssettings_page_icons() {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows_sys::Win32::System::Com::CoInitializeEx(
+                std::ptr::null(),
+                0,
+            );
+        }
+        for uri in ["ms-settings:display", "ms-settings:bluetooth", "ms-settings:windowsupdate"] {
+            match shell_item_image_factory_png(uri) {
+                Some(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => {
+                        let rgba = img.into_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        let total = (w * h) as f64;
+                        let content = rgba.pixels().filter(|p| p[3] > 8).count() as f64;
+                        println!(
+                            "mssettings probe [{uri}]: dims={w}x{h} fill={:.1}% bytes={}",
+                            content / total * 100.0,
+                            bytes.len(),
+                        );
+                    }
+                    Err(e) => println!("mssettings probe [{uri}]: decode failed: {e}"),
+                },
+                None => println!("mssettings probe [{uri}]: None"),
+            }
+        }
+    }
+
+    /// Stage probe: factory vs SHGetFileInfo fallback for sparse shell items.
+    /// Regression: the sparse factory bitmap must be rejected so the
+    /// chain serves the dense fallback.
+    #[test]
     fn probe_sparse_fallback_stages() {
         #[cfg(target_os = "windows")]
         unsafe {

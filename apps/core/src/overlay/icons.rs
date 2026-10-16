@@ -2034,7 +2034,8 @@ mod probe_magnifier {
     }
 
     /// Every catalog page renders a present 128px glyph (official file
-    /// font or Segoe fallback — no tofu, no blanks).    #[test]
+    /// font or Segoe fallback — no tofu, no blanks).
+    #[test]
     fn probe_settings_catalog_renders() {
         for page in crate::settings_catalog::SETTINGS_PAGES {
             let uri = page.uri;

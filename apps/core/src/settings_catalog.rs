@@ -140,7 +140,7 @@ pub const SETTINGS_PAGES: &[SettingsPage] = &[
     SettingsPage { title: "Focus assist", uri: "focus", glyph: 0xE915 },
     SettingsPage { title: "Power & battery", uri: "power", glyph: 0xE850 },
     SettingsPage { title: "Battery saver", uri: "battery-saver", glyph: 0xE850 },
-    SettingsPage { title: "Storage", uri: "storage", glyph: 0xE74E },
+    SettingsPage { title: "Storage", uri: "storage", glyph: 0xEDA2 },
     SettingsPage { title: "Multitasking", uri: "multitasking", glyph: 0xE713 },
     SettingsPage { title: "Clipboard", uri: "clipboard", glyph: 0xE7BA },
     SettingsPage { title: "About", uri: "about", glyph: 0xE713 },

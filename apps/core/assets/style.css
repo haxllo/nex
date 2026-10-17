@@ -2009,7 +2009,10 @@ html.glass-native #panel::after {
 
 /* Interior glint: the diagonal sheen the opaque modes keep in the
    panel background, reinstated under page content (glass drops the
-   painted background). Sits below z-indexed rows. */
+   painted background). Sits below z-indexed rows. A fine noise layer
+   dithers the 8-bit alpha ramp — without it the sheen reads as banding
+   stripes over smooth backdrops, and every stop fades to the same hue
+   at zero alpha so the ramp never passes through black. */
 html.glass-native #panel::before {
   content: "";
   position: absolute;
@@ -2017,12 +2020,18 @@ html.glass-native #panel::before {
   border-radius: inherit;
   pointer-events: none;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 10%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E")
+      repeat,
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.05),
+      rgba(255, 255, 255, 0) 10%
+    ),
     linear-gradient(
       136deg,
       var(--panel-glint) 0%,
-      transparent 28%,
-      transparent 74%,
+      rgba(255, 255, 255, 0) 28%,
+      rgba(255, 255, 255, 0) 74%,
       var(--panel-reflection) 100%
     );
 }

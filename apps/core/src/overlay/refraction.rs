@@ -34,8 +34,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_SATURATION_PROP_SATURATION,
     D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R,
-    CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
+    CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, ID2D1Bitmap1,
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
     ID2D1SolidColorBrush,
 };
@@ -88,27 +89,38 @@ pub fn enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Match the reference liquid-glass renderer at 96 DPI.
-const BLUR_STDDEV: f32 = 3.0;
+/// Match the reference liquid-glass renderer at 96 DPI. The frost is
+/// deliberately heavy — a light blur reads as acrylic, not glass.
+const BLUR_STDDEV: f32 = 10.0;
+/// Backdrop vibrancy: the refracted image is lifted slightly so it does
+/// not read as greyed out behind the tint.
+const SATURATION: f32 = 1.2;
 const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
 /// Material follows the backdrop, like Apple's vibrancy: a bright scene
 /// gets a light surface with dark text, a dark scene the reverse, so
 /// the text colour never fights what is behind the glass. Alpha is the
-/// wash at the material's own extreme; hysteresis stops flapping when
-/// the backdrop sits near the switch.
+/// wash at the material's own extreme; hysteresis (plus the dwell below)
+/// stops flapping when the backdrop sits near the switch.
 const TINT_MIN_ALPHA: f32 = 0.13;
 const TINT_MAX_ALPHA: f32 = 0.34;
 const MATERIAL_SWITCH: f32 = 0.55;
-const MATERIAL_HYSTERESIS: f32 = 0.10;
+const MATERIAL_HYSTERESIS: f32 = 0.18;
+/// Consecutive frames past the switch before the material flips. Scene
+/// cuts and fast scrolling cross it for a frame or two; without this the
+/// palette flashes.
+const MATERIAL_DWELL: u32 = 8;
 const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
 const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
 /// Per-frame exponential smoothing on backdrop luminance (~150ms at
 /// 60fps) so a scene cut eases the tint instead of snapping it.
 const LUMA_EMA: f32 = 0.10;
 /// Extra desktop pixels around the panel keep the blur kernel away from
-/// the capture boundary. Matches the reference renderer's 3σ + 2 pad.
+/// the capture boundary: 3σ + 2, the reference renderer's rule, now
+/// scaled up with the blur. The panel must sit this far inside the
+/// monitor or the crop clamps and the worker drops frames, so the pad
+/// is kept to the blur's actual reach rather than padded for comfort.
 const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 
 /// Render cap: live frames present at most this often.
@@ -472,6 +484,8 @@ struct Engine {
     /// bitmaps underneath via SetInput, so a panel resize costs two
     /// bitmap creates instead of a full graph rebuild.
     blur: ID2D1Effect,
+    /// Backdrop vibrancy: blur output lifted before the bend.
+    saturate: ID2D1Effect,
     displace: ID2D1Effect,
     source: Option<ID2D1Bitmap1>,
     map: Option<ID2D1Bitmap1>,
@@ -577,7 +591,7 @@ impl Engine {
 
         let d2d = d2d_setup(&device)?;
         crate::logging::info(&format!(
-            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} bend={BEND_SCALE} margin={BEZEL_MARGIN}px"
+            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} sat={SATURATION} bend={BEND_SCALE} margin={BEZEL_MARGIN}px pad={BLUR_PAD}"
         ));
         let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
@@ -603,6 +617,19 @@ impl Engine {
                     &BLUR_STDDEV.to_ne_bytes(),
                 )
                 .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
+        }
+        let saturate: ID2D1Effect = unsafe {
+            d2d.CreateEffect(&CLSID_D2D1Saturation as *const _)
+                .map_err(|e| format!("saturation CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            saturate
+                .SetValue(
+                    D2D1_SATURATION_PROP_SATURATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &SATURATION.to_ne_bytes(),
+                )
+                .map_err(|e| format!("saturation SetValue failed: {e:?}"))?;
         }
         let displace: ID2D1Effect = unsafe {
             d2d.CreateEffect(&CLSID_D2D1DisplacementMap as *const _)
@@ -648,6 +675,7 @@ impl Engine {
             panel_w,
             panel_h,
             blur,
+            saturate,
             displace,
         };
         engine.rebuild_content()?;
@@ -706,7 +734,8 @@ impl Engine {
         // are size-agnostic; only the bitmaps track the panel.
         unsafe {
             self.blur.SetInput(0, &source, true);
-            self.displace.SetInput(0, &blur_output(&self.blur)?, true);
+            self.saturate.SetInput(0, &effect_output(&self.blur)?, true);
+            self.displace.SetInput(0, &effect_output(&self.saturate)?, true);
             self.displace.SetInput(1, &map, true);
         }
         self.source = Some(source);
@@ -789,7 +818,7 @@ impl Engine {
                 bottom: (BLUR_PAD + self.panel_h) as f32,
             };
             self.d2d.DrawImage(
-                &blur_output(displace)?,
+                &effect_output(displace)?,
                 None,
                 Some(&source_rect as *const _),
                 D2D1_INTERPOLATION_MODE_LINEAR,
@@ -907,9 +936,10 @@ fn bitmap_props_with_alpha(
 
 /// Output image of an effect. Effects derive from ID2D1Properties, not
 /// ID2D1Image, so chaining and drawing go through GetOutput.
-fn blur_output(blur: &ID2D1Effect) -> Result<ID2D1Image, String> {
+fn effect_output(effect: &ID2D1Effect) -> Result<ID2D1Image, String> {
     unsafe {
-        blur.GetOutput()
+        effect
+            .GetOutput()
             .map_err(|e| format!("effect GetOutput failed: {e:?}"))
     }
 }
@@ -1007,6 +1037,7 @@ fn worker_main(
     let mut material = Material {
         luma: None,
         light: false,
+        dwell: 0,
     };
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
@@ -1041,6 +1072,7 @@ fn worker_main(
                 // it per frame. A static desktop may not send another
                 // frame, so apply the seed tint immediately.
                 material.light = !dark;
+                material.dwell = 0;
                 if let Some(e) = engine.as_ref() {
                     e.set_tint(material.alpha(), material.light);
                 }
@@ -1528,6 +1560,8 @@ struct Material {
     luma: Option<f32>,
     /// Light surface + dark text (true) or dark surface + light text.
     light: bool,
+    /// Consecutive frames the backdrop has sat past the switch.
+    dwell: u32,
 }
 
 impl Material {
@@ -1540,14 +1574,25 @@ impl Material {
             None => luma,
         };
         self.luma = Some(ema);
-        let before = self.light;
         let switch = if self.light {
             MATERIAL_SWITCH - MATERIAL_HYSTERESIS
         } else {
             MATERIAL_SWITCH
         };
+        if (ema > switch) == self.light {
+            self.dwell = 0;
+            return false;
+        }
+        // Past the switch — but only flip once the backdrop has stayed
+        // there a moment, so a scene cut or a fast scroll cannot flash
+        // the palette.
+        self.dwell += 1;
+        if self.dwell < MATERIAL_DWELL {
+            return false;
+        }
+        self.dwell = 0;
         self.light = ema > switch;
-        before != self.light
+        true
     }
 
     /// Tint blend for the current material.
@@ -1713,6 +1758,11 @@ mod tests {
         bgra(level, level, level, pixels)
     }
 
+    /// Feed frames at one level; returns how many flips were reported.
+    fn warm(m: &mut Material, level: u8, frames: usize) -> usize {
+        (0..frames).filter(|_| m.update(&gray(level, 64))).count()
+    }
+
     #[test]
     fn luma_bounds_and_weighting() {
         assert_eq!(frame_luma(&[]), 0.5);
@@ -1729,29 +1779,23 @@ mod tests {
         let mut m = Material {
             luma: None,
             light: false,
+            dwell: 0,
         };
-        // First frame decides immediately; the surface turns light over
-        // a bright scene and reports the flip exactly once.
-        assert!(m.update(&gray(255, 256)));
+        // A bright scene turns the surface light — reported exactly once.
+        assert_eq!(warm(&mut m, 255, 60), 1);
         assert!(m.light);
-        let mut flips = 0;
-        for _ in 0..200 {
-            flips += usize::from(m.update(&gray(255, 256)));
-        }
-        assert_eq!(flips, 0, "steady backdrop must not re-report flips");
-        // Dark scene takes it back (EMA needs a few frames to converge).
-        for _ in 0..200 {
-            m.update(&gray(0, 256));
-        }
+        // A dark scene takes it back — also exactly once.
+        assert_eq!(warm(&mut m, 0, 60), 1);
         assert!(!m.light);
-        // Every material keeps the tint inside the tuned band.
+        // Neither material ever leaves the tuned tint band.
         for level in [0u8, 64, 128, 200, 255] {
             for light in [true, false] {
                 let mut m = Material {
                     luma: None,
                     light,
+                    dwell: 0,
                 };
-                m.update(&gray(level, 64));
+                warm(&mut m, level, 60);
                 let a = m.alpha();
                 assert!(
                     (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
@@ -1762,6 +1806,23 @@ mod tests {
     }
 
     #[test]
+    fn dwell_swallows_transient_backdrops() {
+        // One bright frame past the switch counts, but does not flip;
+        // the next frame back under the switch resets the count.
+        let mut m = Material {
+            luma: Some(0.54),
+            light: false,
+            dwell: 0,
+        };
+        assert!(!m.update(&gray(255, 64)));
+        assert!(!m.light);
+        assert_eq!(m.dwell, 1, "a crossing frame starts the dwell count");
+        assert!(!m.update(&gray(20, 64)));
+        assert_eq!(m.dwell, 0, "a frame back under the switch resets it");
+        assert!(!m.light);
+    }
+
+    #[test]
     fn material_hysteresis_holds_between_thresholds() {
         // Mid-gray sits above the light-stay floor and below the
         // dark-to-light switch: neither material should flip on it.
@@ -1769,22 +1830,15 @@ mod tests {
         let mut m = Material {
             luma: None,
             light: false,
+            dwell: 0,
         };
-        for _ in 0..300 {
-            assert!(!m.update(&gray(mid, 64)));
-        }
+        assert_eq!(warm(&mut m, mid, 300), 0);
         assert!(!m.light);
-        for _ in 0..300 {
-            m.update(&gray(255, 64));
-        }
+        assert_eq!(warm(&mut m, 255, 300), 1);
         assert!(m.light);
-        for _ in 0..300 {
-            assert!(!m.update(&gray(mid, 64)), "hysteresis must hold the material");
-        }
+        assert_eq!(warm(&mut m, mid, 300), 0, "hysteresis must hold the material");
         assert!(m.light);
-        for _ in 0..300 {
-            m.update(&gray(0, 64));
-        }
+        assert_eq!(warm(&mut m, 0, 300), 1);
         assert!(!m.light);
     }
 }

@@ -93,7 +93,15 @@ const BLUR_STDDEV: f32 = 3.0;
 const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
-const TINT_ALPHA: f32 = 56.0 / 255.0;
+/// Tint adapts to backdrop luminance: a heavier wash over light
+/// backdrops (keeps light text legible), a light one over dark
+/// backdrops (lets the backdrop show through, like real glass).
+const TINT_MIN_ALPHA: f32 = 0.13;
+const TINT_MAX_ALPHA: f32 = 0.34;
+const TINT_COLOR: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
+/// Per-frame exponential smoothing on backdrop luminance (~150ms at
+/// 60fps) so a scene cut eases the tint instead of snapping it.
+const LUMA_EMA: f32 = 0.10;
 /// Extra desktop pixels around the panel keep the blur kernel away from
 /// the capture boundary. Matches the reference renderer's 3σ + 2 pad.
 const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
@@ -550,10 +558,10 @@ impl Engine {
         let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 12.0 / 255.0,
-                    g: 14.0 / 255.0,
-                    b: 20.0 / 255.0,
-                    a: TINT_ALPHA,
+                    r: TINT_COLOR.0,
+                    g: TINT_COLOR.1,
+                    b: TINT_COLOR.2,
+                    a: TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * 0.5,
                 },
                 None,
             )
@@ -701,6 +709,39 @@ impl Engine {
                 .map_err(|e| format!("CopyFromMemory failed: {e:?}"))?;
         }
         Ok(())
+    }
+
+    /// Upload and present one frame, adapting the tint to the frame's
+    /// average luminance first. The EMA is caller-owned so it survives
+    /// hides: the next show eases in from the last known backdrop
+    /// instead of snapping.
+    fn present_frame(
+        &self,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+        luma_ema: &mut Option<f32>,
+    ) -> Result<(), String> {
+        let luma = frame_luma(pixels);
+        let ema = match *luma_ema {
+            Some(prev) => prev + (luma - prev) * LUMA_EMA,
+            None => luma,
+        };
+        *luma_ema = Some(ema);
+        self.set_tint_alpha(TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * ema);
+        self.ingest_frame(pixels, w, h)?;
+        self.render_frame()
+    }
+
+    fn set_tint_alpha(&self, alpha: f32) {
+        unsafe {
+            self.tint_brush.SetColor(&D2D1_COLOR_F {
+                r: TINT_COLOR.0,
+                g: TINT_COLOR.1,
+                b: TINT_COLOR.2,
+                a: alpha.clamp(0.0, 1.0),
+            });
+        }
     }
 
     /// Draw the effect into the current backbuffer and present it. The
@@ -942,6 +983,9 @@ fn worker_main(
     // Full-frame staging mirror valid yet (fresh capture starts
     // uninitialized; first mirrored frame arms it).
     let mut staged = false;
+    // Smoothed backdrop luminance driving the adaptive tint (None until
+    // the first frame; survives hides so the tint never snaps).
+    let mut luma_ema: Option<f32> = None;
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1071,10 +1115,7 @@ fn worker_main(
                     None
                 };
                 if let Some((fresh, fw, fh)) = exact {
-                    match e
-                        .ingest_frame(&fresh, fw, fh)
-                        .and_then(|_| e.render_frame())
-                    {
+                    match e.present_frame(&fresh, fw, fh, &mut luma_ema) {
                         Ok(()) => {
                             n_pre += 1;
                             last_present = Instant::now();
@@ -1092,10 +1133,7 @@ fn worker_main(
                     let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
                     if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
                         let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e
-                            .ingest_frame(&stretched, ew, eh)
-                            .and_then(|_| e.render_frame())
-                        {
+                        match e.present_frame(&stretched, ew, eh, &mut luma_ema) {
                             Ok(()) => {
                                 n_pre += 1;
                                 last_present = Instant::now();
@@ -1226,8 +1264,7 @@ fn worker_main(
             )?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
-            eng.ingest_frame(&pixels, bw, bh)?;
-            eng.render_frame()?;
+            eng.present_frame(&pixels, bw, bh, &mut luma_ema)?;
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             Ok((us, render_us, pixels))
@@ -1440,6 +1477,31 @@ fn crop_staging(
     Ok(pixels)
 }
 
+/// Average luminance (BT.709) of a BGRA frame, sampled every 16th
+/// pixel: plenty for a tint response, ~free next to the crop.
+fn frame_luma(pixels: &[u8]) -> f32 {
+    const STEP_BYTES: usize = 64; // 16 BGRA pixels
+    let mut sum = 0.0f32;
+    let mut n = 0.0f32;
+    let mut i = 0usize;
+    while i + 2 < pixels.len() {
+        let (b, g, r) = (
+            pixels[i] as f32,
+            pixels[i + 1] as f32,
+            pixels[i + 2] as f32,
+        );
+        sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        n += 1.0;
+        i += STEP_BYTES;
+    }
+    if n == 0.0 {
+        // No pixels (shouldn't happen): mid gray keeps the tint neutral.
+        0.5
+    } else {
+        (sum / n / 255.0).clamp(0.0, 1.0)
+    }
+}
+
 /// Nearest-neighbor BGRA stretch: fallback only, when the staging
 fn stretch_bgra_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
@@ -1553,4 +1615,24 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
         (client.bottom - client.top).max(1),
     );
     Some((origin.x, origin.y, w as u32, h as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{frame_luma, TINT_MAX_ALPHA, TINT_MIN_ALPHA};
+
+    fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
+        (0..pixels).flat_map(|_| [b, g, r, 255]).collect()
+    }
+
+    #[test]
+    fn luma_bounds_and_weighting() {
+        assert_eq!(frame_luma(&[]), 0.5);
+        assert!(frame_luma(&bgra(0, 0, 0, 4096)) < 0.01);
+        assert!(frame_luma(&bgra(255, 255, 255, 4096)) > 0.99);
+        // BT.709: green reads brighter than an equal-valued blue.
+        assert!(frame_luma(&bgra(0, 255, 0, 4096)) > frame_luma(&bgra(255, 0, 0, 4096)));
+        // The tint range is monotone and inside the brush's legal range.
+        assert!(0.0 < TINT_MIN_ALPHA && TINT_MIN_ALPHA < TINT_MAX_ALPHA && TINT_MAX_ALPHA <= 1.0);
+    }
 }

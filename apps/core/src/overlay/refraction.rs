@@ -93,12 +93,14 @@ const BLUR_STDDEV: f32 = 3.0;
 const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
-/// Tint adapts to backdrop luminance: a heavier wash over light
-/// backdrops (keeps light text legible), a light one over dark
-/// backdrops (lets the backdrop show through, like real glass).
+/// Tint adapts to backdrop luminance so the surface always keeps text
+/// contrast. Direction follows the text theme: dark theme (light text)
+/// darkens as the backdrop brightens; light theme (dark text) lightens
+/// as the backdrop darkens. Alpha is the blend amount at that extreme.
 const TINT_MIN_ALPHA: f32 = 0.13;
 const TINT_MAX_ALPHA: f32 = 0.34;
-const TINT_COLOR: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
+const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
+const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
 /// Per-frame exponential smoothing on backdrop luminance (~150ms at
 /// 60fps) so a scene cut eases the tint instead of snapping it.
 const LUMA_EMA: f32 = 0.10;
@@ -118,6 +120,8 @@ struct GlassConfig {
     /// instead of polling the window rect, so content tracks the region
     /// on the same tick — no frame of stale rows on growth.
     panel_wh: Option<(u32, u32)>,
+    /// Text theme driving the tint direction (see present_frame).
+    theme_dark: Option<bool>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -216,6 +220,7 @@ impl GlassLayer {
             main_sys,
             max_wh: Some((max_w_px, max_h_px)),
             panel_wh: Some((w, h)),
+            theme_dark: None,
         });
     }
 
@@ -229,6 +234,21 @@ impl GlassLayer {
             main_sys: 0,
             max_wh: None,
             panel_wh: None,
+            theme_dark: None,
+        });
+    }
+
+    /// Text theme: picks the tint direction so the surface always moves
+    /// away from the text colour (dark theme darkens, light theme
+    /// lightens). Sent on create and on every show, where the host
+    /// re-detects the system theme.
+    pub fn set_theme(&self, dark: bool) {
+        let _ = self.tx.send(GlassConfig {
+            visible: None,
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: Some(dark),
         });
     }
 
@@ -558,9 +578,9 @@ impl Engine {
         let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: TINT_COLOR.0,
-                    g: TINT_COLOR.1,
-                    b: TINT_COLOR.2,
+                    r: TINT_DARK.0,
+                    g: TINT_DARK.1,
+                    b: TINT_DARK.2,
                     a: TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * 0.5,
                 },
                 None,
@@ -721,6 +741,7 @@ impl Engine {
         w: u32,
         h: u32,
         luma_ema: &mut Option<f32>,
+        theme_dark: bool,
     ) -> Result<(), String> {
         let luma = frame_luma(pixels);
         let ema = match *luma_ema {
@@ -728,17 +749,19 @@ impl Engine {
             None => luma,
         };
         *luma_ema = Some(ema);
-        self.set_tint_alpha(TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * ema);
+        self.set_tint(tint_alpha(ema, theme_dark), theme_dark);
         self.ingest_frame(pixels, w, h)?;
         self.render_frame()
     }
 
-    fn set_tint_alpha(&self, alpha: f32) {
+    /// Blend amount + colour for a backdrop luminance and text theme.
+    fn set_tint(&self, alpha: f32, dark: bool) {
+        let (r, g, b) = if dark { TINT_DARK } else { TINT_LIGHT };
         unsafe {
             self.tint_brush.SetColor(&D2D1_COLOR_F {
-                r: TINT_COLOR.0,
-                g: TINT_COLOR.1,
-                b: TINT_COLOR.2,
+                r,
+                g,
+                b,
                 a: alpha.clamp(0.0, 1.0),
             });
         }
@@ -986,6 +1009,8 @@ fn worker_main(
     // Smoothed backdrop luminance driving the adaptive tint (None until
     // the first frame; survives hides so the tint never snaps).
     let mut luma_ema: Option<f32> = None;
+    // Text theme: tint direction. Dark until the host says otherwise.
+    let mut theme_dark = true;
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1006,6 +1031,14 @@ fn worker_main(
             }
             if let Some(p) = cfg.panel_wh {
                 cfg_panel = Some(p);
+            }
+            if let Some(dark) = cfg.theme_dark {
+                theme_dark = dark;
+                // Apply at once: a theme flip under a static desktop
+                // would otherwise wait for the next captured frame.
+                if let Some(e) = engine.as_ref() {
+                    e.set_tint(tint_alpha(luma_ema.unwrap_or(0.5), dark), dark);
+                }
             }
         }
         if main_sys == 0 {
@@ -1115,7 +1148,7 @@ fn worker_main(
                     None
                 };
                 if let Some((fresh, fw, fh)) = exact {
-                    match e.present_frame(&fresh, fw, fh, &mut luma_ema) {
+                    match e.present_frame(&fresh, fw, fh, &mut luma_ema, theme_dark) {
                         Ok(()) => {
                             n_pre += 1;
                             last_present = Instant::now();
@@ -1133,7 +1166,7 @@ fn worker_main(
                     let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
                     if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
                         let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e.present_frame(&stretched, ew, eh, &mut luma_ema) {
+                        match e.present_frame(&stretched, ew, eh, &mut luma_ema, theme_dark) {
                             Ok(()) => {
                                 n_pre += 1;
                                 last_present = Instant::now();
@@ -1264,7 +1297,7 @@ fn worker_main(
             )?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
-            eng.present_frame(&pixels, bw, bh, &mut luma_ema)?;
+            eng.present_frame(&pixels, bw, bh, &mut luma_ema, theme_dark)?;
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             Ok((us, render_us, pixels))
@@ -1477,6 +1510,14 @@ fn crop_staging(
     Ok(pixels)
 }
 
+/// Tint blend for a backdrop luminance and text theme: the surface
+/// always moves away from the text colour, so contrast never depends
+/// on what happens to be behind the glass.
+fn tint_alpha(luma: f32, theme_dark: bool) -> f32 {
+    let push = if theme_dark { luma } else { 1.0 - luma };
+    TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push.clamp(0.0, 1.0)
+}
+
 /// Average luminance (BT.709) of a BGRA frame, sampled every 16th
 /// pixel: plenty for a tint response, ~free next to the crop.
 fn frame_luma(pixels: &[u8]) -> f32 {
@@ -1619,7 +1660,7 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_luma, TINT_MAX_ALPHA, TINT_MIN_ALPHA};
+    use super::{frame_luma, tint_alpha, TINT_MAX_ALPHA, TINT_MIN_ALPHA};
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
         (0..pixels).flat_map(|_| [b, g, r, 255]).collect()
@@ -1634,5 +1675,22 @@ mod tests {
         assert!(frame_luma(&bgra(0, 255, 0, 4096)) > frame_luma(&bgra(255, 0, 0, 4096)));
         // The tint range is monotone and inside the brush's legal range.
         assert!(0.0 < TINT_MIN_ALPHA && TINT_MIN_ALPHA < TINT_MAX_ALPHA && TINT_MAX_ALPHA <= 1.0);
+    }
+
+    #[test]
+    fn tint_moves_away_from_the_text_colour() {
+        // Dark theme: bright backdrop gets the heavier dark wash.
+        assert!(tint_alpha(1.0, true) > tint_alpha(0.0, true));
+        // Light theme: dark backdrop gets the heavier light wash.
+        assert!(tint_alpha(0.0, false) > tint_alpha(1.0, false));
+        // Both stay inside the tuned band, so glass never goes opaque.
+        for luma in [0.0, 0.5, 1.0] {
+            for dark in [true, false] {
+                let a = tint_alpha(luma, dark);
+                assert!((TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a), "alpha {a} out of band");
+            }
+        }
+        // Opposite themes pull the surface in opposite directions.
+        assert_ne!(tint_alpha(0.0, true), tint_alpha(0.0, false));
     }
 }

@@ -328,6 +328,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     if let Ok(mut s) = state.lock() {
         s.glass_native = glass_layer.is_some();
     }
+    // Tint direction follows the text theme; send it before first show.
+    if let Some(layer) = glass_layer.as_ref() {
+        let dark = state
+            .lock()
+            .map(|s| s.theme == Theme::Dark)
+            .unwrap_or(true);
+        layer.set_theme(dark);
+    }
     unsafe {
         install_instance_signal_subclass(hwnd, &event_tx);
     }
@@ -950,6 +958,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Ok(mut s) = state.lock() {
                         s.accent_color = crate::overlay::platform::detect_accent_color();
                         s.theme = crate::overlay::platform::detect_system_theme();
+                    }
+                    // Theme may have flipped while hidden: the tint
+                    // direction has to follow it.
+                    if let Some(layer) = glass_layer.as_ref() {
+                        let dark = state
+                            .lock()
+                            .map(|s| s.theme == Theme::Dark)
+                            .unwrap_or(true);
+                        layer.set_theme(dark);
                     }
                     apply_window_chrome(&window, &state);
                     // Push state with show_pending so the JS side sends

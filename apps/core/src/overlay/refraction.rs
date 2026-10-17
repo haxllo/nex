@@ -93,12 +93,15 @@ const BLUR_STDDEV: f32 = 3.0;
 const BEND_SCALE: f32 = 10.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
-/// Tint adapts to backdrop luminance so the surface always keeps text
-/// contrast. Direction follows the text theme: dark theme (light text)
-/// darkens as the backdrop brightens; light theme (dark text) lightens
-/// as the backdrop darkens. Alpha is the blend amount at that extreme.
+/// Material follows the backdrop, like Apple's vibrancy: a bright scene
+/// gets a light surface with dark text, a dark scene the reverse, so
+/// the text colour never fights what is behind the glass. Alpha is the
+/// wash at the material's own extreme; hysteresis stops flapping when
+/// the backdrop sits near the switch.
 const TINT_MIN_ALPHA: f32 = 0.13;
 const TINT_MAX_ALPHA: f32 = 0.34;
+const MATERIAL_SWITCH: f32 = 0.55;
+const MATERIAL_HYSTERESIS: f32 = 0.10;
 const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
 const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
 /// Per-frame exponential smoothing on backdrop luminance (~150ms at
@@ -120,7 +123,9 @@ struct GlassConfig {
     /// instead of polling the window rect, so content tracks the region
     /// on the same tick — no frame of stale rows on growth.
     panel_wh: Option<(u32, u32)>,
-    /// Text theme driving the tint direction (see present_frame).
+    /// Text theme. Seeds the material before the first frame (a light
+    /// theme opens on a light surface); every frame then re-decides
+    /// from the backdrop.
     theme_dark: Option<bool>,
 }
 
@@ -238,10 +243,9 @@ impl GlassLayer {
         });
     }
 
-    /// Text theme: picks the tint direction so the surface always moves
-    /// away from the text colour (dark theme darkens, light theme
-    /// lightens). Sent on create and on every show, where the host
-    /// re-detects the system theme.
+    /// Text theme. Seeds the material (light surface + dark text, or
+    /// the reverse) until a captured frame can decide from the backdrop
+    /// itself. Sent on create and on every show.
     pub fn set_theme(&self, dark: bool) {
         let _ = self.tx.send(GlassConfig {
             visible: None,
@@ -731,25 +735,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Upload and present one frame, adapting the tint to the frame's
-    /// average luminance first. The EMA is caller-owned so it survives
-    /// hides: the next show eases in from the last known backdrop
-    /// instead of snapping.
+    /// Upload and present one frame with the current material's tint.
+    /// Uploading also refreshes the source bitmap after a resize.
     fn present_frame(
         &self,
         pixels: &[u8],
         w: u32,
         h: u32,
-        luma_ema: &mut Option<f32>,
-        theme_dark: bool,
+        material: &Material,
     ) -> Result<(), String> {
-        let luma = frame_luma(pixels);
-        let ema = match *luma_ema {
-            Some(prev) => prev + (luma - prev) * LUMA_EMA,
-            None => luma,
-        };
-        *luma_ema = Some(ema);
-        self.set_tint(tint_alpha(ema, theme_dark), theme_dark);
+        self.set_tint(material.alpha(), material.light);
         self.ingest_frame(pixels, w, h)?;
         self.render_frame()
     }
@@ -1006,11 +1001,15 @@ fn worker_main(
     // Full-frame staging mirror valid yet (fresh capture starts
     // uninitialized; first mirrored frame arms it).
     let mut staged = false;
-    // Smoothed backdrop luminance driving the adaptive tint (None until
-    // the first frame; survives hides so the tint never snaps).
-    let mut luma_ema: Option<f32> = None;
-    // Text theme: tint direction. Dark until the host says otherwise.
-    let mut theme_dark = true;
+    // Backdrop-driven material (surface appearance + page palette).
+    // Seeded dark; the host sends the text theme on create and on each
+    // show, and every captured frame re-decides from the backdrop.
+    let mut material = Material {
+        luma: None,
+        light: false,
+    };
+    // Last material the page was told about; None forces a re-send.
+    let mut palette_sent: Option<bool> = None;
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1021,6 +1020,11 @@ fn worker_main(
     loop {
         while let Ok(cfg) = rx.try_recv() {
             if let Some(v) = cfg.visible {
+                if v && !visible {
+                    // Fresh show: re-announce the material, the page may
+                    // have re-seeded its palette to the system theme.
+                    palette_sent = None;
+                }
                 visible = v;
             }
             if cfg.main_sys != 0 {
@@ -1033,11 +1037,12 @@ fn worker_main(
                 cfg_panel = Some(p);
             }
             if let Some(dark) = cfg.theme_dark {
-                theme_dark = dark;
-                // Apply at once: a theme flip under a static desktop
-                // would otherwise wait for the next captured frame.
+                // Theme only seeds the material; the backdrop overrides
+                // it per frame. A static desktop may not send another
+                // frame, so apply the seed tint immediately.
+                material.light = !dark;
                 if let Some(e) = engine.as_ref() {
-                    e.set_tint(tint_alpha(luma_ema.unwrap_or(0.5), dark), dark);
+                    e.set_tint(material.alpha(), material.light);
                 }
             }
         }
@@ -1148,7 +1153,7 @@ fn worker_main(
                     None
                 };
                 if let Some((fresh, fw, fh)) = exact {
-                    match e.present_frame(&fresh, fw, fh, &mut luma_ema, theme_dark) {
+                    match e.present_frame(&fresh, fw, fh, &material) {
                         Ok(()) => {
                             n_pre += 1;
                             last_present = Instant::now();
@@ -1166,7 +1171,7 @@ fn worker_main(
                     let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
                     if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
                         let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e.present_frame(&stretched, ew, eh, &mut luma_ema, theme_dark) {
+                        match e.present_frame(&stretched, ew, eh, &material) {
                             Ok(()) => {
                                 n_pre += 1;
                                 last_present = Instant::now();
@@ -1297,7 +1302,12 @@ fn worker_main(
             )?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
-            eng.present_frame(&pixels, bw, bh, &mut luma_ema, theme_dark)?;
+            let flipped = material.update(&pixels);
+            eng.present_frame(&pixels, bw, bh, &material)?;
+            if flipped || palette_sent != Some(material.light) {
+                palette_sent = Some(material.light);
+                let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
+            }
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             Ok((us, render_us, pixels))
@@ -1510,12 +1520,42 @@ fn crop_staging(
     Ok(pixels)
 }
 
-/// Tint blend for a backdrop luminance and text theme: the surface
-/// always moves away from the text colour, so contrast never depends
-/// on what happens to be behind the glass.
-fn tint_alpha(luma: f32, theme_dark: bool) -> f32 {
-    let push = if theme_dark { luma } else { 1.0 - luma };
-    TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push.clamp(0.0, 1.0)
+/// Backdrop-driven material: smoothed luminance picks a light or dark
+/// surface (with hysteresis), and the tint always pushes the surface
+/// toward that material's own extreme so text keeps its contrast.
+struct Material {
+    /// Smoothed backdrop luminance; None until the first frame.
+    luma: Option<f32>,
+    /// Light surface + dark text (true) or dark surface + light text.
+    light: bool,
+}
+
+impl Material {
+    /// Fold in one captured frame. Returns true when the material
+    /// flipped — the caller tells the page, which swaps its palette.
+    fn update(&mut self, pixels: &[u8]) -> bool {
+        let luma = frame_luma(pixels);
+        let ema = match self.luma {
+            Some(prev) => prev + (luma - prev) * LUMA_EMA,
+            None => luma,
+        };
+        self.luma = Some(ema);
+        let before = self.light;
+        let switch = if self.light {
+            MATERIAL_SWITCH - MATERIAL_HYSTERESIS
+        } else {
+            MATERIAL_SWITCH
+        };
+        self.light = ema > switch;
+        before != self.light
+    }
+
+    /// Tint blend for the current material.
+    fn alpha(&self) -> f32 {
+        let luma = self.luma.unwrap_or(0.5);
+        let push = if self.light { luma } else { 1.0 - luma };
+        TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push.clamp(0.0, 1.0)
+    }
 }
 
 /// Average luminance (BT.709) of a BGRA frame, sampled every 16th
@@ -1660,10 +1700,17 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_luma, tint_alpha, TINT_MAX_ALPHA, TINT_MIN_ALPHA};
+    use super::{
+        frame_luma, Material, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, TINT_MAX_ALPHA,
+        TINT_MIN_ALPHA,
+    };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
         (0..pixels).flat_map(|_| [b, g, r, 255]).collect()
+    }
+
+    fn gray(level: u8, pixels: usize) -> Vec<u8> {
+        bgra(level, level, level, pixels)
     }
 
     #[test]
@@ -1678,19 +1725,66 @@ mod tests {
     }
 
     #[test]
-    fn tint_moves_away_from_the_text_colour() {
-        // Dark theme: bright backdrop gets the heavier dark wash.
-        assert!(tint_alpha(1.0, true) > tint_alpha(0.0, true));
-        // Light theme: dark backdrop gets the heavier light wash.
-        assert!(tint_alpha(0.0, false) > tint_alpha(1.0, false));
-        // Both stay inside the tuned band, so glass never goes opaque.
-        for luma in [0.0, 0.5, 1.0] {
-            for dark in [true, false] {
-                let a = tint_alpha(luma, dark);
-                assert!((TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a), "alpha {a} out of band");
+    fn material_follows_the_backdrop() {
+        let mut m = Material {
+            luma: None,
+            light: false,
+        };
+        // First frame decides immediately; the surface turns light over
+        // a bright scene and reports the flip exactly once.
+        assert!(m.update(&gray(255, 256)));
+        assert!(m.light);
+        let mut flips = 0;
+        for _ in 0..200 {
+            flips += usize::from(m.update(&gray(255, 256)));
+        }
+        assert_eq!(flips, 0, "steady backdrop must not re-report flips");
+        // Dark scene takes it back (EMA needs a few frames to converge).
+        for _ in 0..200 {
+            m.update(&gray(0, 256));
+        }
+        assert!(!m.light);
+        // Every material keeps the tint inside the tuned band.
+        for level in [0u8, 64, 128, 200, 255] {
+            for light in [true, false] {
+                let mut m = Material {
+                    luma: None,
+                    light,
+                };
+                m.update(&gray(level, 64));
+                let a = m.alpha();
+                assert!(
+                    (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
+                    "alpha {a} out of band at level {level}"
+                );
             }
         }
-        // Opposite themes pull the surface in opposite directions.
-        assert_ne!(tint_alpha(0.0, true), tint_alpha(0.0, false));
+    }
+
+    #[test]
+    fn material_hysteresis_holds_between_thresholds() {
+        // Mid-gray sits above the light-stay floor and below the
+        // dark-to-light switch: neither material should flip on it.
+        let mid = (((MATERIAL_SWITCH + MATERIAL_SWITCH - MATERIAL_HYSTERESIS) / 2.0) * 255.0) as u8;
+        let mut m = Material {
+            luma: None,
+            light: false,
+        };
+        for _ in 0..300 {
+            assert!(!m.update(&gray(mid, 64)));
+        }
+        assert!(!m.light);
+        for _ in 0..300 {
+            m.update(&gray(255, 64));
+        }
+        assert!(m.light);
+        for _ in 0..300 {
+            assert!(!m.update(&gray(mid, 64)), "hysteresis must hold the material");
+        }
+        assert!(m.light);
+        for _ in 0..300 {
+            m.update(&gray(0, 64));
+        }
+        assert!(!m.light);
     }
 }

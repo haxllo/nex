@@ -233,6 +233,9 @@ pub(crate) enum UiCommand {
     Painted,
     /// The first native glass frame was presented and can be revealed.
     GlassReady,
+    /// The glass material changed appearance (light surface + dark text,
+    /// or the reverse). The page swaps its palette to follow.
+    GlassPalette(bool),
     /// The page measured its content height (CSS px); resize to hug it.
     Resize {
         h: f64,
@@ -327,8 +330,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // whenever the saved config was opaque.)
     if let Ok(mut s) = state.lock() {
         s.glass_native = glass_layer.is_some();
+        // Material/palette seed from the theme; the backdrop overrides
+        // both per frame (the worker reports back via GlassPalette).
+        s.glass_light = s.theme == Theme::Light;
     }
-    // Tint direction follows the text theme; send it before first show.
+    // The worker seeds its material from the same theme before the
+    // first frame, so page palette and native tint start in step.
     if let Some(layer) = glass_layer.as_ref() {
         let dark = state
             .lock()
@@ -507,6 +514,21 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.show_ready_frame();
                             }
+                        }
+                    }
+                    UiCommand::GlassPalette(light) => {
+                        // Recorded even while hidden: the state is the
+                        // page's source of truth, so the next push (the
+                        // one at show) already carries the right palette.
+                        let visible = match state.lock() {
+                            Ok(mut s) => {
+                                s.glass_light = light;
+                                s.visible
+                            }
+                            Err(_) => false,
+                        };
+                        if ready && visible {
+                            push_state(&webview, &state, &icon_cache, false);
                         }
                     }
                 UiCommand::Apply => {
@@ -958,6 +980,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Ok(mut s) = state.lock() {
                         s.accent_color = crate::overlay::platform::detect_accent_color();
                         s.theme = crate::overlay::platform::detect_system_theme();
+                        // Re-seed the palette for the show; the worker
+                        // re-seeds its material from the same theme in
+                        // the same breath, and a contradicting backdrop
+                        // flips both a frame later.
+                        s.glass_light = s.theme == Theme::Light;
                     }
                     // Theme may have flipped while hidden: the tint
                     // direction has to follow it.
@@ -2423,6 +2450,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "overlayVisible": s.visible,
         "panelBackground": s.panel_background.as_str(),
         "glassNative": s.glass_native && !s.panel_background.is_opaque(),
+        "glassLight": s.glass_native && s.glass_light,
     })
     .to_string()
 }

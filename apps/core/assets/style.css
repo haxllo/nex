@@ -1975,7 +1975,20 @@ html[data-native-material="acrylic"] #context-menu {
 html.glass-native #panel {
   background: transparent;
   box-shadow: none;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  /* Subtitle-style legibility: a tight near-opaque shadow carries text
+     over any backdrop, the soft one keeps the edge from reading as a
+     stroke. The tint alone cannot guarantee contrast — partial
+     transmission leaves a mid-luminance surface in bright scenes. */
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.8),
+    0 1px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Light theme: dark text needs the halo inverted. */
+html[data-theme="light"].glass-native #panel {
+  text-shadow:
+    0 1px 2px rgba(255, 255, 255, 0.9),
+    0 1px 8px rgba(255, 255, 255, 0.5);
 }
 
 /* Specular rim: gradient edge light over the refracted backdrop —

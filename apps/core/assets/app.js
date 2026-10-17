@@ -3138,6 +3138,14 @@
         document.documentElement.classList.toggle("glass-native", state.glassNative);
       }
 
+      // Vibrancy: the material picks the palette, not the system theme,
+      // so text stays dark on a light surface and light on a dark one.
+      if (typeof state.glassLight === "boolean") {
+        const root = document.documentElement;
+        root.classList.toggle("glass-light", state.glassLight);
+        root.classList.toggle("glass-dark", !state.glassLight);
+      }
+
       // Track QL presence before overwriting rows — used to detect
       // quick-launch → results transition for immediate resize.
       const prevHadQuickLaunch = rows.some(r => r.role === "quick_launch");

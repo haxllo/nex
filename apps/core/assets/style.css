@@ -1984,11 +1984,68 @@ html.glass-native #panel {
     0 1px 8px rgba(0, 0, 0, 0.4);
 }
 
-/* Light theme: dark text needs the halo inverted. */
-html[data-theme="light"].glass-native #panel {
+/* Light material (dark text): the halo inverts with the surface. */
+html.glass-native.glass-light #panel {
   text-shadow:
     0 1px 2px rgba(255, 255, 255, 0.9),
     0 1px 8px rgba(255, 255, 255, 0.5);
+}
+
+/* Vibrancy: the text follows the material, not the system theme, so a
+   bright backdrop hands the panel a light surface with dark text.
+   Text, surfaces and hairlines flip together — a half-flipped palette
+   would put dark text on a dark menu. Accent and action colours stay:
+   they are picked to read on either surface. */
+html.glass-native.glass-light {
+  --bg: #ffffff;
+  --bg-opaque: #ffffff;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.28);
+  --panel-highlight: rgba(255, 255, 255, 0.65);
+  --panel-edge: rgba(0, 0, 0, 0.1);
+  --panel-glint: rgba(255, 255, 255, 0.25);
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text: #16161a;
+  --text-dim: #4b515c;
+  --text-faint: #68717e;
+  --sel: rgba(0, 0, 0, 0.06);
+  --sel-border: rgba(0, 0, 0, 0.06);
+  --hover: rgba(0, 0, 0, 0.11);
+  --divider: rgba(0, 0, 0, 0.07);
+  --kbd-bg: rgba(0, 0, 0, 0.06);
+  --kbd-cap-bg: #ffffff;
+  --kbd-cap-border: rgba(0, 0, 0, 0.15);
+  --icon-bg: rgba(0, 0, 0, 0.05);
+  --text-select: rgba(0, 0, 0, 0.18);
+}
+
+html.glass-native.glass-dark {
+  --bg: #1e1e1e;
+  --bg-opaque: #1e1e1e;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
+  --panel-highlight: rgba(255, 255, 255, 0.12);
+  --panel-edge: rgba(255, 255, 255, 0.12);
+  --panel-glint: rgba(255, 255, 255, 0.12);
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #f4f4f6;
+  --text-dim: #c3c9d2;
+  --text-faint: #aeb6c2;
+  --sel: rgba(255, 255, 255, 0.07);
+  --sel-border: rgba(255, 255, 255, 0.08);
+  --hover: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.06);
+  --kbd-bg: rgba(255, 255, 255, 0.08);
+  --kbd-cap-bg: rgba(255, 255, 255, 0.1);
+  --kbd-cap-border: rgba(0, 0, 0, 0.35);
+  --icon-bg: rgba(255, 255, 255, 0.06);
+  --text-select: rgba(255, 255, 255, 0.28);
 }
 
 /* Specular rim: gradient edge light over the refracted backdrop —

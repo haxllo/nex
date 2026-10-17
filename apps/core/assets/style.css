@@ -122,6 +122,9 @@ body {
 }
 
 #panel {
+  /* Anchors the glass rim/glint pseudo-elements. The panel fills the
+     client area, so absolute children keep their current place. */
+  position: relative;
   width: 100%;
   background:
     linear-gradient(136deg, var(--panel-glint) 0%, transparent 28%, transparent 74%, var(--panel-reflection) 100%),
@@ -1973,6 +1976,55 @@ html.glass-native #panel {
   background: transparent;
   box-shadow: none;
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+
+/* Specular rim: gradient edge light over the refracted backdrop —
+   bright where the light falls (top-left), dim opposite, instead of a
+   flat uniform ring. Radius inherited (no fourth radius owner). */
+html.glass-native #panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  padding: 1px;
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0.09) 22%,
+    rgba(255, 255, 255, 0.03) 52%,
+    rgba(255, 255, 255, 0.07) 76%,
+    rgba(255, 255, 255, 0.28) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* Interior glint: the diagonal sheen the opaque modes keep in the
+   panel background, reinstated under page content (glass drops the
+   painted background). Sits below z-indexed rows. */
+html.glass-native #panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 10%),
+    linear-gradient(
+      136deg,
+      var(--panel-glint) 0%,
+      transparent 28%,
+      transparent 74%,
+      var(--panel-reflection) 100%
+    );
 }
 
 html.glass-native #divider {

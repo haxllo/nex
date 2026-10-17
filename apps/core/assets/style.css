@@ -2048,6 +2048,22 @@ html.glass-native.glass-dark {
   --text-select: rgba(255, 255, 255, 0.28);
 }
 
+/* The material flip above is a step change in the palette; ease the
+   properties that consume it so a flip reads as a fade rather than a
+   flash. Scoped to the swap window (html.glass-fading is armed by the
+   page for ~300ms) so it never overrides the hover and selection
+   transitions of the base rules. */
+html.glass-fading #panel,
+html.glass-fading #panel * {
+  transition:
+    color 260ms ease,
+    background-color 260ms ease,
+    border-color 260ms ease,
+    fill 260ms ease,
+    stroke 260ms ease,
+    text-shadow 260ms ease;
+}
+
 /* Specular rim: gradient edge light over the refracted backdrop —
    bright where the light falls (top-left), dim opposite, instead of a
    flat uniform ring. Radius inherited (no fourth radius owner). */

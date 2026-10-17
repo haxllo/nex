@@ -89,9 +89,10 @@ pub fn enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Match the reference liquid-glass renderer at 96 DPI. The frost is
-/// deliberately heavy — a light blur reads as acrylic, not glass.
-const BLUR_STDDEV: f32 = 10.0;
+/// Match the reference liquid-glass renderer at 96 DPI. Heavy enough to
+/// read as frost rather than acrylic, light enough to keep the bezel
+/// bend legible.
+const BLUR_STDDEV: f32 = 8.0;
 /// Backdrop vibrancy: the refracted image is lifted slightly so it does
 /// not read as greyed out behind the tint.
 const SATURATION: f32 = 1.2;
@@ -773,20 +774,20 @@ impl Engine {
         h: u32,
         material: &Material,
     ) -> Result<(), String> {
-        self.set_tint(material.alpha(), material.light);
+        self.set_tint(material.wash());
         self.ingest_frame(pixels, w, h)?;
         self.render_frame()
     }
 
-    /// Blend amount + colour for a backdrop luminance and text theme.
-    fn set_tint(&self, alpha: f32, dark: bool) {
-        let (r, g, b) = if dark { TINT_DARK } else { TINT_LIGHT };
+    /// Wash colour + alpha over the refracted backdrop.
+    fn set_tint(&self, wash: (f32, f32, f32, f32)) {
+        let (r, g, b, a) = wash;
         unsafe {
             self.tint_brush.SetColor(&D2D1_COLOR_F {
                 r,
                 g,
                 b,
-                a: alpha.clamp(0.0, 1.0),
+                a: a.clamp(0.0, 1.0),
             });
         }
     }
@@ -1074,7 +1075,7 @@ fn worker_main(
                 material.light = !dark;
                 material.dwell = 0;
                 if let Some(e) = engine.as_ref() {
-                    e.set_tint(material.alpha(), material.light);
+                    e.set_tint(material.wash());
                 }
             }
         }
@@ -1595,11 +1596,26 @@ impl Material {
         true
     }
 
-    /// Tint blend for the current material.
-    fn alpha(&self) -> f32 {
-        let luma = self.luma.unwrap_or(0.5);
-        let push = if self.light { luma } else { 1.0 - luma };
-        TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push.clamp(0.0, 1.0)
+    /// Wash (r, g, b, a) over the current backdrop. Colour and alpha ease
+    /// across the hysteresis band rather than stepping when the palette
+    /// flips, so the composite under the text never jumps; `light` only
+    /// picks the page palette.
+    fn wash(&self) -> (f32, f32, f32, f32) {
+        let luma = self.luma.unwrap_or(0.5).clamp(0.0, 1.0);
+        let floor = MATERIAL_SWITCH - MATERIAL_HYSTERESIS;
+        let t = ((luma - floor) / (2.0 * MATERIAL_HYSTERESIS)).clamp(0.0, 1.0);
+        // A dark material washes a bright backdrop and follows the
+        // backdrop; a light one is the mirror of it. Blend both across
+        // the band so the crossover is continuous.
+        let alpha = |push: f32| TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push;
+        let a = alpha(1.0 - luma) * (1.0 - t) + alpha(luma) * t;
+        let mix = |dark: f32, light: f32| dark + (light - dark) * t;
+        (
+            mix(TINT_DARK.0, TINT_LIGHT.0),
+            mix(TINT_DARK.1, TINT_LIGHT.1),
+            mix(TINT_DARK.2, TINT_LIGHT.2),
+            a,
+        )
     }
 }
 
@@ -1787,22 +1803,34 @@ mod tests {
         // A dark scene takes it back — also exactly once.
         assert_eq!(warm(&mut m, 0, 60), 1);
         assert!(!m.light);
-        // Neither material ever leaves the tuned tint band.
-        for level in [0u8, 64, 128, 200, 255] {
-            for light in [true, false] {
-                let mut m = Material {
-                    luma: None,
-                    light,
-                    dwell: 0,
-                };
-                warm(&mut m, level, 60);
-                let a = m.alpha();
-                assert!(
-                    (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
-                    "alpha {a} out of band at level {level}"
-                );
-            }
+    }
+
+    /// Luminance of the glass: the wash composited over the backdrop.
+    fn composite(wash: (f32, f32, f32, f32), luma: f32) -> f32 {
+        let tint = 0.2126 * wash.0 + 0.7152 * wash.1 + 0.0722 * wash.2;
+        wash.3 * tint + (1.0 - wash.3) * luma
+    }
+
+    #[test]
+    fn wash_stays_in_band_and_crosses_the_switch_smoothly() {
+        let at = |luma: f32| Material {
+            luma: Some(luma),
+            light: false,
+            dwell: 0,
         }
+        .wash();
+        for luma in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let a = at(luma).3;
+            assert!(
+                (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
+                "alpha {a} out of band at {luma}"
+            );
+        }
+        // The palette flips at the switch: the glass itself must not.
+        let lo = MATERIAL_SWITCH - 0.001;
+        let hi = MATERIAL_SWITCH + 0.001;
+        let jump = (composite(at(hi), hi) - composite(at(lo), lo)).abs();
+        assert!(jump < 0.01, "wetness jumped {jump} across the switch");
     }
 
     #[test]

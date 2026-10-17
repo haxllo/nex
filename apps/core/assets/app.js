@@ -142,6 +142,8 @@
   // dedicated view instead of running an update check.
   let updateAvailable = false;
   let updateConfirmTimer = 0;
+  // Window during which a glass material flip eases instead of snapping.
+  let glassFadeTimer = 0;
   let whatsNewPending = null;
   let whatsNewOpen = false;
   let whatsNewContent = null;
@@ -3142,8 +3144,17 @@
       // so text stays dark on a light surface and light on a dark one.
       if (typeof state.glassLight === "boolean") {
         const root = document.documentElement;
-        root.classList.toggle("glass-light", state.glassLight);
-        root.classList.toggle("glass-dark", !state.glassLight);
+        const isLight = state.glassLight;
+        // Material flips are a step change; ramp the palette so the
+        // panel eases between surfaces instead of flashing. The class
+        // only arms transitions for the length of the swap.
+        if (root.classList.contains("glass-light") !== isLight) {
+          root.classList.add("glass-fading");
+          clearTimeout(glassFadeTimer);
+          glassFadeTimer = setTimeout(() => root.classList.remove("glass-fading"), 300);
+        }
+        root.classList.toggle("glass-light", isLight);
+        root.classList.toggle("glass-dark", !isLight);
       }
 
       // Track QL presence before overwriting rows — used to detect

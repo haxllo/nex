@@ -1039,6 +1039,7 @@ fn worker_main(
         luma: None,
         light: false,
         dwell: 0,
+        fresh: false,
     };
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
@@ -1056,6 +1057,11 @@ fn worker_main(
                     // Fresh show: re-announce the material, the page may
                     // have re-seeded its palette to the system theme.
                     palette_sent = None;
+                    // And let the first frame decide outright, so the
+                    // page palette lands with the glass instead of
+                    // waiting for the desktop to change eight times.
+                    material.fresh = true;
+                    material.dwell = 0;
                 }
                 visible = v;
             }
@@ -1069,9 +1075,9 @@ fn worker_main(
                 cfg_panel = Some(p);
             }
             if let Some(dark) = cfg.theme_dark {
-                // Theme only seeds the material; the backdrop overrides
-                // it per frame. A static desktop may not send another
-                // frame, so apply the seed tint immediately.
+                // Theme seeds the material's starting state only: the
+                // first frame after a show decides from the backdrop,
+                // and the wash tracks the backdrop luminance.
                 material.light = !dark;
                 material.dwell = 0;
                 if let Some(e) = engine.as_ref() {
@@ -1563,17 +1569,25 @@ struct Material {
     light: bool,
     /// Consecutive frames the backdrop has sat past the switch.
     dwell: u32,
+    /// The next frame decides outright - no smoothing, no dwell. Set by
+    /// every fresh show: dwell guards against the backdrop changing
+    /// while the panel is open, and frames only arrive when the desktop
+    /// changes, so settling on open would leave the page palette
+    /// seconds behind the glass.
+    fresh: bool,
 }
 
 impl Material {
     /// Fold in one captured frame. Returns true when the material
-    /// flipped — the caller tells the page, which swaps its palette.
+    /// flipped - the caller tells the page, which swaps its palette.
     fn update(&mut self, pixels: &[u8]) -> bool {
         let luma = frame_luma(pixels);
         let ema = match self.luma {
-            Some(prev) => prev + (luma - prev) * LUMA_EMA,
-            None => luma,
+            Some(prev) if !self.fresh => prev + (luma - prev) * LUMA_EMA,
+            _ => luma,
         };
+        let settle = self.fresh;
+        self.fresh = false;
         self.luma = Some(ema);
         let switch = if self.light {
             MATERIAL_SWITCH - MATERIAL_HYSTERESIS
@@ -1584,12 +1598,14 @@ impl Material {
             self.dwell = 0;
             return false;
         }
-        // Past the switch — but only flip once the backdrop has stayed
+        // Past the switch - but only flip once the backdrop has stayed
         // there a moment, so a scene cut or a fast scroll cannot flash
         // the palette.
-        self.dwell += 1;
-        if self.dwell < MATERIAL_DWELL {
-            return false;
+        if !settle {
+            self.dwell += 1;
+            if self.dwell < MATERIAL_DWELL {
+                return false;
+            }
         }
         self.dwell = 0;
         self.light = ema > switch;
@@ -1796,6 +1812,7 @@ mod tests {
             luma: None,
             light: false,
             dwell: 0,
+            fresh: false,
         };
         // A bright scene turns the surface light — reported exactly once.
         assert_eq!(warm(&mut m, 255, 60), 1);
@@ -1817,6 +1834,7 @@ mod tests {
             luma: Some(luma),
             light: false,
             dwell: 0,
+            fresh: false,
         }
         .wash();
         for luma in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
@@ -1841,12 +1859,38 @@ mod tests {
             luma: Some(0.54),
             light: false,
             dwell: 0,
+            fresh: false,
         };
         assert!(!m.update(&gray(255, 64)));
         assert!(!m.light);
         assert_eq!(m.dwell, 1, "a crossing frame starts the dwell count");
         assert!(!m.update(&gray(20, 64)));
         assert_eq!(m.dwell, 0, "a frame back under the switch resets it");
+        assert!(!m.light);
+    }
+
+    #[test]
+    fn a_fresh_show_decides_on_its_first_frame() {
+        // Panel was open over a dark backdrop, reopens over a bright one:
+        // the first frame must flip the palette, not the eighth. Frames
+        // only arrive when the desktop changes, so waiting to settle
+        // would leave the page palette seconds behind the glass.
+        let mut m = Material {
+            luma: Some(0.1),
+            light: false,
+            dwell: 0,
+            fresh: true,
+        };
+        assert!(m.update(&gray(255, 64)));
+        assert!(m.light);
+        // Settling is back on for the frames after the open.
+        let mut m = Material {
+            luma: Some(0.54),
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        assert!(!m.update(&gray(255, 64)), "dwell must still gate later flips");
         assert!(!m.light);
     }
 
@@ -1859,6 +1903,7 @@ mod tests {
             luma: None,
             light: false,
             dwell: 0,
+            fresh: false,
         };
         assert_eq!(warm(&mut m, mid, 300), 0);
         assert!(!m.light);

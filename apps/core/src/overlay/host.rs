@@ -137,9 +137,9 @@ use windows_sys::Win32::UI::Input::{
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GetForegroundWindow, GetShellWindow, IsWindow, RegisterWindowMessageW,
-    SetForegroundWindow, SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, WM_INPUT,
+    FindWindowW, GetClassNameW, GetForegroundWindow, GetShellWindow, IsWindow,
+    RegisterWindowMessageW, SetForegroundWindow, SetWindowPos, HWND_BOTTOM, HWND_TOPMOST,
+    SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WM_INPUT,
 };
 
 use crate::overlay::icons::IconCache;
@@ -1004,7 +1004,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_fg_stack(&mut fg_stack);
+                    restore_fg_stack(&mut fg_stack, hwnd);
                     // Cloak fallback: if focus is still ours the invisible
                     // window owns the foreground and typing would land in
                     // the void — real-hide instead so the OS moves on.
@@ -1068,7 +1068,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
                     hide_overlay_window(hwnd, &window, &glass_layer);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
-                    restore_fg_stack(&mut fg_stack);
+                    restore_fg_stack(&mut fg_stack, hwnd);
                     // Same cloak fallback as Hide (see above).
                     if unsafe { GetForegroundWindow() } == hwnd {
                         let _ = window.set_visible(false);
@@ -2673,7 +2673,7 @@ fn push_fg_stack(stack: &mut Vec<HWND>, overlay_hwnd: HWND) {
     if unsafe { IsWindow(foreground) } == 0 {
         return;
     }
-    if shell_window().is_some_and(|shell| shell == foreground) {
+    if is_shell_surface(foreground) {
         return;
     }
     if stack.last().is_some_and(|&top| top == foreground) {
@@ -2683,6 +2683,23 @@ fn push_fg_stack(stack: &mut Vec<HWND>, overlay_hwnd: HWND) {
     while stack.len() > 8 {
         stack.remove(0);
     }
+}
+
+/// Identify Explorer's desktop and taskbar surfaces by their window class.
+/// The shell identity check also covers the shell window if its class changes.
+fn is_shell_surface(hwnd: HWND) -> bool {
+    if shell_window().is_some_and(|shell| shell == hwnd) {
+        return true;
+    }
+
+    let mut class_name = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32) };
+    if len <= 0 || len as usize > class_name.len() {
+        return false;
+    }
+    ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"]
+        .iter()
+        .any(|name| class_name[..len as usize].iter().copied().eq(name.encode_utf16()))
 }
 
 fn shell_window() -> Option<HWND> {
@@ -2710,16 +2727,28 @@ fn shell_window() -> Option<HWND> {
 
 /// Restore the newest live window from the stack, pruning dead ones.
 /// Clears the rest: each show cycle starts tracking fresh.
-fn restore_fg_stack(stack: &mut Vec<HWND>) {
+fn restore_fg_stack(stack: &mut Vec<HWND>, overlay_hwnd: HWND) {
+    let mut restored = false;
     while let Some(target) = stack.pop() {
-        if unsafe { IsWindow(target) } != 0 {
-            unsafe {
-                SetForegroundWindow(target);
+        if unsafe { IsWindow(target) } != 0 && !is_shell_surface(target) {
+            if unsafe { SetForegroundWindow(target) } != 0 {
+                restored = true;
+                break;
             }
-            break;
         }
     }
     stack.clear();
+    let foreground = unsafe { GetForegroundWindow() };
+    if !restored
+        && (foreground == overlay_hwnd
+            || (!foreground.is_null() && is_shell_surface(foreground)))
+    {
+        if let Some(shell) = shell_window() {
+            unsafe {
+                SetForegroundWindow(shell);
+            }
+        }
+    }
 }
 
 fn hide_overlay_window(

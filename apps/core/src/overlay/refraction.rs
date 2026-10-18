@@ -108,8 +108,8 @@ const CORNER_RADIUS: f32 = 8.0;
 /// the text colour never fights what is behind the glass. Alpha is the
 /// wash at the material's own extreme; hysteresis (plus the dwell below)
 /// stops flapping when the backdrop sits near the switch.
-const TINT_MIN_ALPHA: f32 = 0.13;
-const TINT_MAX_ALPHA: f32 = 0.34;
+const TINT_MIN_ALPHA: f32 = 0.10;
+const TINT_MAX_ALPHA: f32 = 0.28;
 const MATERIAL_SWITCH: f32 = 0.55;
 const MATERIAL_HYSTERESIS: f32 = 0.18;
 /// Consecutive frames past the switch before the material flips. Scene

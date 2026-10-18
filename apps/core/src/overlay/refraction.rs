@@ -97,6 +97,10 @@ const BLUR_STDDEV: f32 = 8.0;
 /// not read as greyed out behind the tint.
 const SATURATION: f32 = 1.2;
 const BEND_SCALE: f32 = 10.0;
+/// Show swell: the lens eases from flat to full just after the reveal, so
+/// the panel reads as glass settling rather than a pane switching on.
+/// One shot per show; nothing animates while hidden.
+const SWELL_MS: f32 = 220.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
 /// Material follows the backdrop, like Apple's vibrancy: a bright scene
@@ -823,10 +827,25 @@ impl Engine {
         w: u32,
         h: u32,
         material: &Material,
+        bend: f32,
     ) -> Result<(), String> {
         self.set_tint(material.wash());
+        self.set_bend(bend);
         self.ingest_frame(pixels, w, h)?;
         self.render_frame()
+    }
+
+    /// Lens strength: 0 is a flat pane, 1 the full rim bend. The show
+    /// swell drives this; setting it costs one effect property write.
+    fn set_bend(&self, bend: f32) {
+        let scale = BEND_SCALE * bend.clamp(0.0, 1.0);
+        unsafe {
+            let _ = self.displace.SetValue(
+                D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &scale.to_ne_bytes(),
+            );
+        }
     }
 
     /// Wash colour + alpha over the refracted backdrop.
@@ -1049,6 +1068,13 @@ struct Capture {
     protected_logged: bool,
 }
 
+/// Lens strength for the show swell: 0 at the start, 1 once it has run
+/// out. Ease-out cubic - the rim reaches shape quickly, then settles.
+fn swell_bend(elapsed_ms: f32) -> f32 {
+    let p = (elapsed_ms / SWELL_MS).clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
 fn worker_main(
     glass_sys: isize,
     initial_main_sys: isize,
@@ -1099,6 +1125,9 @@ fn worker_main(
     // desktop may not change for a while and AcquireNextFrame only
     // yields on a change, so the held mirror is re-presented instead.
     let mut show_refresh = false;
+    // When the current show's lens swell began: drives the rim bend from
+    // flat to full while the desktop is static (see SWELL_MS).
+    let mut swell_start: Option<Instant> = None;
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1121,6 +1150,9 @@ fn worker_main(
                     // Present the held mirror before the reveal: a flip
                     // swapchain shows nothing until the next Present.
                     show_refresh = true;
+                    // And swell the lens in: a pane of glass settling,
+                    // not a surface snapping on.
+                    swell_start = Some(Instant::now());
                 }
                 visible = v;
             }
@@ -1187,6 +1219,17 @@ fn worker_main(
         // current size. Panel changes rebuild content bitmaps in place
         // (buffers stay valid, presents never stall); buffers grow only
         // on DPI/scale change. No steady-state ResizeBuffers, no lag.
+        // Lens strength this pass: rises through the show swell, 1 after.
+        let bend = match swell_start {
+            Some(t0) => {
+                let value = swell_bend(t0.elapsed().as_secs_f32() * 1000.0);
+                if value >= 1.0 {
+                    swell_start = None;
+                }
+                value
+            }
+            None => 1.0,
+        };
         if engine.is_none() {
             match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(e) => engine = Some(e),
@@ -1229,7 +1272,15 @@ fn worker_main(
             // the next Present, while the desktop may stay still for a
             // while yet.
             let refresh = std::mem::take(&mut show_refresh);
-            if rebuilt || refresh {
+            // The swell re-presents the held frame: the desktop is often
+            // static, so no captured frame would drive the animation.
+            // Capped like a captured frame.
+            let swelling = swell_start.is_some()
+                && last_present.elapsed() >= Duration::from_millis(MIN_FRAME_MS as u64);
+            // Swell passes are routine (a dozen per show): keep them out
+            // of the log, only rebuilds and reveal refreshes are news.
+            let announce = rebuilt || refresh;
+            if rebuilt || refresh || swelling {
                 // Fresh zeros after rebuild, or a reveal pending: present
                 // immediately. Exact crop from the staging mirror - never
                 // a stretched old frame; stretch is only the fallback
@@ -1268,15 +1319,17 @@ fn worker_main(
                     None
                 };
                 if let Some((fresh, fw, fh)) = exact {
-                    match e.present_frame(&fresh, fw, fh, &material) {
+                    match e.present_frame(&fresh, fw, fh, &material, bend) {
                         Ok(()) => {
                             n_pre += 1;
                             last_present = Instant::now();
                             last_frame = Some((fresh, fw, fh));
-                            crate::logging::info(&format!(
-                                "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
-                                t0.elapsed().as_millis()
-                            ));
+                            if announce {
+                                crate::logging::info(&format!(
+                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                    t0.elapsed().as_millis()
+                                ));
+                            }
                         }
                         Err(error) => crate::logging::warn(&format!(
                             "[nex][refract] resize re-present failed: {error}"
@@ -1286,15 +1339,17 @@ fn worker_main(
                     let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
                     if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
                         let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e.present_frame(&stretched, ew, eh, &material) {
+                        match e.present_frame(&stretched, ew, eh, &material, bend) {
                             Ok(()) => {
                                 n_pre += 1;
                                 last_present = Instant::now();
                                 last_frame = Some((stretched, ew, eh));
-                                crate::logging::info(&format!(
-                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
-                                    t0.elapsed().as_millis()
-                                ));
+                                if announce {
+                                    crate::logging::info(&format!(
+                                        "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                        t0.elapsed().as_millis()
+                                    ));
+                                }
                             }
                             Err(error) => crate::logging::warn(&format!(
                                 "[nex][refract] resize re-present failed: {error}"
@@ -1420,7 +1475,7 @@ fn worker_main(
             let flipped = material.update(&pixels);
             // A hidden poll decides the material only: no upload, no draw.
             if !warm {
-                eng.present_frame(&pixels, bw, bh, &material)?;
+                eng.present_frame(&pixels, bw, bh, &material, bend)?;
             }
             if flipped || palette_sent != Some(material.light) {
                 palette_sent = Some(material.light);
@@ -1859,8 +1914,8 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_luma, Material, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, TINT_MAX_ALPHA,
-        TINT_MIN_ALPHA,
+        frame_luma, swell_bend, Material, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, SWELL_MS,
+        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -1901,6 +1956,19 @@ mod tests {
         // A dark scene takes it back — also exactly once.
         assert_eq!(warm(&mut m, 0, 60), 1);
         assert!(!m.light);
+    }
+
+    #[test]
+    fn swell_runs_out_and_never_overshoots() {
+        assert_eq!(swell_bend(0.0), 0.0);
+        // Monotone rise, easing off: the second half adds less than the
+        // first.
+        let half = swell_bend(SWELL_MS * 0.5);
+        assert!(half > 0.5);
+        assert!(1.0 - half < half - swell_bend(0.0));
+        // Clamped: a stalled loop cannot bend past the reference scale.
+        assert_eq!(swell_bend(SWELL_MS), 1.0);
+        assert_eq!(swell_bend(SWELL_MS * 5.0), 1.0);
     }
 
     /// Luminance of the glass: the wash composited over the backdrop.

@@ -501,6 +501,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
+                            prepare_glass_show(&glass_layer, &state);
                             push_state(&webview, &state, &icon_cache, true);
                             show_pending = true;
 
@@ -1009,7 +1010,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         layer.set_theme(dark);
                     }
                     apply_window_chrome(&window, &state);
-                    // Push state with show_pending so the JS side sends
+                    // Wake the renderer before the page paints: its present
+                    // lands while the glass window is still cloaked, so the
+                    // reveal carries this desktop, not the last session's.
+                    prepare_glass_show(&glass_layer, &state);
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -2252,6 +2256,20 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// panels paint solid and the layer stays parked (no capture, no wait).
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
     state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+}
+
+/// Wake the renderer a beat before the panel is revealed so its next
+/// present lands while the glass window is still cloaked. Revealing
+/// first would uncloak whatever the last session left presented.
+fn prepare_glass_show(
+    glass_layer: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    if glass_active(state) {
+        if let Some(layer) = glass_layer.as_ref() {
+            layer.prepare_show();
+        }
+    }
 }
 
 /// Match the WebView surface to the panel mode. Opaque modes get an

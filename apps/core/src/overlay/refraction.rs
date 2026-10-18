@@ -260,6 +260,20 @@ impl GlassLayer {
         });
     }
 
+    /// Tell the renderer a show is coming without revealing the window:
+    /// the panel is only revealed on its first paint, and by then the
+    /// worker has re-presented the held mirror, so the uncloak carries
+    /// current pixels instead of the last session's.
+    pub fn prepare_show(&self) {
+        let _ = self.tx.send(GlassConfig {
+            visible: Some(true),
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: None,
+        });
+    }
+
     /// Text theme. Seeds the material (light surface + dark text, or
     /// the reverse) until a captured frame can decide from the backdrop
     /// itself. Sent on create and on every show.

@@ -79,11 +79,6 @@ use crate::overlay::{
 #[cfg(target_os = "windows")]
 use crate::overlay::tray::TrayIcon;
 
-/// Debounce gate for hotkey events.  Both WH_KEYBOARD_LL (hook) and
-/// WM_INPUT (raw input sink) can fire for the same keystroke.  This
-/// prevents double-trigger when both detection paths fire within 50ms.
-static HOTKEY_DEBOUNCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// Gate to prevent overlapping hotkey re-registration attempts.
 /// The re-registration thread sets this while it's starting a new listener,
 /// and the dead-thread recovery path skips its check while this is true.
@@ -1705,18 +1700,10 @@ impl RuntimeWorker {
                 if self.settings_open {
                     return; // Settings owns the moment — don't summon the launcher over it
                 }
-                // Debounce: skip if we just processed a hotkey within 50ms.
-                // The WH_KEYBOARD_LL hook and WM_INPUT (raw input sink) can
-                // both fire for the same keystroke.  This deduplicates them.
-                if !HOTKEY_DEBOUNCE.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
-                    log_info("[nex::debug] Hotkey: debounced (within 50ms window)");
-                    return;
-                }
-                // Auto-reset debounce gate after 50ms.
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    HOTKEY_DEBOUNCE.store(false, std::sync::atomic::Ordering::SeqCst);
-                });
+                // Duplicate detections of one press are dropped at the
+                // source (`hotkey::send_hotkey_event`). Doing it here, on
+                // receipt, fails whenever the worker is busy: the copies
+                // leave the queue seconds apart and both toggle.
                 log_info("[nex] hotkey_event received");
                 let overlay_visible = self.overlay.is_visible();
                 let state_before = self.overlay_state.is_visible();

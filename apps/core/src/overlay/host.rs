@@ -3136,7 +3136,7 @@ unsafe extern "system" fn instance_signal_subclass(
                                 crate::runtime::log_info(
                                     "[nex::debug] WM_INPUT bare Win key-up, toggling",
                                 );
-                                let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                                let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                             }
                         } else if RAW_WIN_DOWN
                             .compare_exchange(0, vk as u32, Ordering::SeqCst, Ordering::SeqCst)
@@ -3163,7 +3163,7 @@ unsafe extern "system" fn instance_signal_subclass(
                                 "[nex::debug] WM_INPUT hotkey vk={} sending toggle",
                                 vk,
                             ));
-                            let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                            let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                         }
                     }
                 }

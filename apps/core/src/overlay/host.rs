@@ -3348,3 +3348,79 @@ fn unregister_raw_input_sink() {
     ));
 }
 // ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::snapshot_state_json;
+    use crate::config::PanelBackground;
+    use crate::overlay::model::ShimState;
+    use serde_json::{json, Value};
+
+    fn state(
+        glass_native: bool,
+        frame_ready: bool,
+        light: bool,
+        background: PanelBackground,
+    ) -> ShimState {
+        ShimState {
+            glass_native,
+            glass_frame_ready: frame_ready,
+            glass_light: light,
+            panel_background: background,
+            ..ShimState::default()
+        }
+    }
+
+    fn field(snapshot: &Value, key: &str) -> Value {
+        snapshot[key].clone()
+    }
+
+    fn push(s: &ShimState) -> Value {
+        serde_json::from_str(&snapshot_state_json(s, false)).expect("snapshot is JSON")
+    }
+
+    #[test]
+    fn glass_native_waits_for_a_presented_frame() {
+        // The page goes transparent on this flag, so it must stay false
+        // until a frame has actually been presented: that gate is what
+        // fixed the fully-transparent window before the effects showed.
+        assert_eq!(
+            field(&push(&state(true, false, false, PanelBackground::Glass)), "glassNative"),
+            json!(false)
+        );
+        assert_eq!(
+            field(&push(&state(true, true, false, PanelBackground::Glass)), "glassNative"),
+            json!(true)
+        );
+        // Opaque panel modes never ask the page to go transparent.
+        assert_eq!(
+            field(&push(&state(true, true, false, PanelBackground::Black)), "glassNative"),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn a_non_glass_push_never_asks_for_the_light_palette() {
+        // glassLight alone must not flip the page palette: an Acrylic or
+        // opaque push with a stale light flag would repaint the panel.
+        assert_eq!(
+            field(&push(&state(false, true, true, PanelBackground::Black)), "glassLight"),
+            json!(false)
+        );
+        assert_eq!(
+            field(&push(&state(true, true, true, PanelBackground::Glass)), "glassLight"),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn pointer_over_panel_is_pushed_every_snapshot() {
+        // The page needs this on every push: it decides whether a fresh
+        // show may keep its last hover coordinates.
+        let mut s = state(true, true, false, PanelBackground::Glass);
+        s.pointer_over_panel = true;
+        assert_eq!(field(&push(&s), "pointerOverPanel"), json!(true));
+        s.pointer_over_panel = false;
+        assert_eq!(field(&push(&s), "pointerOverPanel"), json!(false));
+    }
+}

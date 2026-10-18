@@ -1075,6 +1075,92 @@ fn swell_bend(elapsed_ms: f32) -> f32 {
     1.0 - (1.0 - p).powi(3)
 }
 
+/// What the worker should do with this pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pass {
+    /// Take a frame: the panel is up, or the startup prewarm still owes one.
+    Frame,
+    /// Hidden idle: decide the material, then wait out the poll interval.
+    Poll,
+    /// Hidden idle, poll interval not elapsed yet: sleep and re-check.
+    Wait,
+}
+
+/// Hidden passes decide the material only, once per `HIDDEN_POLL_MS`.
+///
+/// Nothing is presented while hidden and no full-rate acquire/render runs,
+/// but the material must still track the backdrop: the host pushes the
+/// show state — palette included — *before* it reveals the panel, so that
+/// push has to already carry the current backdrop's material or the page
+/// paints the last session's. The startup prewarm is exempt: it must
+/// present so the first show has a ready surface.
+fn pass_plan(visible: bool, prewarm_pending: bool, since_poll_ms: u64) -> Pass {
+    if visible || prewarm_pending {
+        return Pass::Frame;
+    }
+    if since_poll_ms < HIDDEN_POLL_MS {
+        return Pass::Wait;
+    }
+    Pass::Poll
+}
+
+/// Present pacing for swell passes: a static desktop never sends a frame,
+/// so the swell re-presents the held mirror — paced like a capture, so a
+/// stalled desktop cannot spin the loop.
+fn swell_pass_due(since_present_ms: u64) -> bool {
+    since_present_ms >= MIN_FRAME_MS as u64
+}
+
+/// Per-show state the worker arms on a fresh show and consumes while it
+/// presents: one held re-present and one lens swell.
+struct ShowCycle {
+    /// Re-present the held mirror on the next pass. A show is about to be
+    /// revealed and a flip swapchain paints nothing until the next
+    /// Present, while the desktop may stay still for a while yet.
+    refresh: bool,
+    /// When the current swell began, if one is running.
+    swell: Option<Instant>,
+}
+
+impl ShowCycle {
+    /// Arm a fresh show: present the held mirror and swell the lens in.
+    fn arm(&mut self) {
+        self.refresh = true;
+        self.swell = Some(Instant::now());
+    }
+
+    /// Take the pending held re-present. One per show — a refresh that is
+    /// never consumed re-presents the mirror every pass.
+    fn take_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.refresh)
+    }
+
+    /// Lens strength this pass, and whether the swell is still running.
+    fn bend(&mut self) -> (f32, bool) {
+        match self.swell {
+            Some(t0) => self.bend_at(t0.elapsed().as_secs_f32() * 1000.0),
+            None => (1.0, false),
+        }
+    }
+
+    /// [`Self::bend`] for an elapsed time, so the run-out is testable
+    /// without a clock. Clears the swell once it reaches full.
+    fn bend_at(&mut self, elapsed_ms: f32) -> (f32, bool) {
+        let value = swell_bend(elapsed_ms);
+        if value >= 1.0 {
+            self.swell = None;
+            (value, false)
+        } else {
+            (value, true)
+        }
+    }
+
+    /// Is a swell running (so this pass should re-present the mirror)?
+    fn swelling(&self) -> bool {
+        self.swell.is_some()
+    }
+}
+
 fn worker_main(
     glass_sys: isize,
     initial_main_sys: isize,
@@ -1121,13 +1207,9 @@ fn worker_main(
     };
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
-    // A show needs a present the moment the window is revealed: the
-    // desktop may not change for a while and AcquireNextFrame only
-    // yields on a change, so the held mirror is re-presented instead.
-    let mut show_refresh = false;
-    // When the current show's lens swell began: drives the rim bend from
-    // flat to full while the desktop is static (see SWELL_MS).
-    let mut swell_start: Option<Instant> = None;
+    // Per-show state: the held re-present and the lens swell a fresh show
+    // arms (see `ShowCycle`).
+    let mut cycle = ShowCycle { refresh: false, swell: None };
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1147,12 +1229,10 @@ fn worker_main(
                     // waiting for the desktop to change eight times.
                     material.fresh = true;
                     material.dwell = 0;
-                    // Present the held mirror before the reveal: a flip
-                    // swapchain shows nothing until the next Present.
-                    show_refresh = true;
-                    // And swell the lens in: a pane of glass settling,
-                    // not a surface snapping on.
-                    swell_start = Some(Instant::now());
+                    // Present the held mirror before the reveal and swell
+                    // the lens in: a pane of glass settling, not a surface
+                    // snapping on.
+                    cycle.arm();
                 }
                 visible = v;
             }
@@ -1183,24 +1263,22 @@ fn worker_main(
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if !visible && !prewarm_pending {
-            // Hidden: hold the duplication session + staging mirror (no
-            // full-rate acquire/render) so the next show presents a fresh
-            // frame within milliseconds instead of paying a capture
-            // restart. A slow poll still decides the material, because
-            // the host pushes the show state - palette included - before
-            // it reveals the panel, so that push has to already carry the
-            // backdrop's material or the page paints the last session's.
-            // ponytail: one idle session at 4Hz; no present while hidden.
-            if last_warm.elapsed() < Duration::from_millis(HIDDEN_POLL_MS) {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
+        // Hidden: hold the duplication session + staging mirror (no
+        // full-rate acquire/render) so the next show presents a fresh
+        // frame within milliseconds instead of paying a capture restart.
+        // A slow poll still decides the material (see `pass_plan`).
+        // ponytail: one idle session at 4Hz; no present while hidden.
+        let plan = pass_plan(visible, prewarm_pending, last_warm.elapsed().as_millis() as u64);
+        if plan == Pass::Wait {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        if plan == Pass::Poll {
             last_warm = Instant::now();
         }
         // Hidden idle passes decide the material only. The startup
         // prewarm still presents, so the first show has a ready surface.
-        let warm = !visible && !prewarm_pending;
+        let warm = plan == Pass::Poll;
         let Some((mx, my, mw, mh)) = main_rect(main_sys) else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -1220,16 +1298,7 @@ fn worker_main(
         // (buffers stay valid, presents never stall); buffers grow only
         // on DPI/scale change. No steady-state ResizeBuffers, no lag.
         // Lens strength this pass: rises through the show swell, 1 after.
-        let bend = match swell_start {
-            Some(t0) => {
-                let value = swell_bend(t0.elapsed().as_secs_f32() * 1000.0);
-                if value >= 1.0 {
-                    swell_start = None;
-                }
-                value
-            }
-            None => 1.0,
-        };
+        let bend = cycle.bend().0;
         if engine.is_none() {
             match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(e) => engine = Some(e),
@@ -1271,12 +1340,12 @@ fn worker_main(
             // to be revealed and a flip swapchain paints nothing until
             // the next Present, while the desktop may stay still for a
             // while yet.
-            let refresh = std::mem::take(&mut show_refresh);
+            let refresh = cycle.take_refresh();
             // The swell re-presents the held frame: the desktop is often
             // static, so no captured frame would drive the animation.
             // Capped like a captured frame.
-            let swelling = swell_start.is_some()
-                && last_present.elapsed() >= Duration::from_millis(MIN_FRAME_MS as u64);
+            let swelling =
+                cycle.swelling() && swell_pass_due(last_present.elapsed().as_millis() as u64);
             // Swell passes are routine (a dozen per show): keep them out
             // of the log, only rebuilds and reveal refreshes are news.
             let announce = rebuilt || refresh;
@@ -1914,8 +1983,9 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        frame_luma, swell_bend, Material, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, SWELL_MS,
-        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        clamp_panel_box, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend, swell_pass_due,
+        Material, Pass, ShowCycle, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH,
+        MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2062,5 +2132,120 @@ mod tests {
         assert!(m.light);
         assert_eq!(warm(&mut m, 0, 300), 1);
         assert!(!m.light);
+    }
+
+    #[test]
+    fn a_show_arms_one_held_represent() {
+        // A flip swapchain paints nothing until the next Present, so a
+        // show arms one held re-present. Exactly one: a refresh that is
+        // never consumed re-presents the mirror every pass.
+        let mut c = ShowCycle { refresh: false, swell: None };
+        assert!(!c.take_refresh(), "nothing armed before a show");
+        c.arm();
+        assert!(c.take_refresh(), "the reveal needs the held frame");
+        assert!(!c.take_refresh(), "one present per show, not a loop");
+        c.arm();
+        assert!(c.take_refresh(), "the next show arms it again");
+    }
+
+    #[test]
+    fn the_swell_starts_flat_and_ends_exactly_once() {
+        // The swell drives the lens from flat to full on a static desktop.
+        // It must end: a swell that stays armed re-presents forever.
+        let mut c = ShowCycle { refresh: false, swell: None };
+        assert_eq!(c.bend(), (1.0, false), "no show means no swell");
+        assert!(!c.swelling());
+        c.arm();
+        assert!(c.swelling());
+        let (start, running) = c.bend_at(0.0);
+        assert_eq!(start, 0.0);
+        assert!(running, "still running at its start");
+        let (end, running) = c.bend_at(SWELL_MS);
+        assert_eq!(end, 1.0);
+        assert!(!running, "a full bend ends the swell");
+        assert!(!c.swelling(), "and it must not stay armed");
+        // A pass after the swell reads full, and cannot restart it.
+        assert_eq!(c.bend_at(SWELL_MS * 3.0), (1.0, false));
+        assert_eq!(c.bend(), (1.0, false));
+    }
+
+    #[test]
+    fn hidden_passes_poll_the_backdrop_on_an_interval() {
+        // Hidden: the material must still track the backdrop, because the
+        // host pushes the show state (palette included) before it reveals
+        // the panel — but not at full rate, and never a present.
+        assert_eq!(pass_plan(true, false, 0), Pass::Frame, "panel is up");
+        assert_eq!(
+            pass_plan(false, true, 0),
+            Pass::Frame,
+            "the startup prewarm still owes a present"
+        );
+        assert_eq!(pass_plan(false, false, 0), Pass::Wait, "just polled");
+        assert_eq!(pass_plan(false, false, HIDDEN_POLL_MS - 1), Pass::Wait);
+        assert_eq!(pass_plan(false, false, HIDDEN_POLL_MS), Pass::Poll);
+    }
+
+    #[test]
+    fn swell_passes_are_frame_paced() {
+        // Swell passes re-present the held mirror; a stalled desktop must
+        // not spin the loop faster than a captured frame would.
+        assert!(!swell_pass_due(0));
+        assert!(!swell_pass_due(MIN_FRAME_MS as u64 - 1));
+        assert!(swell_pass_due(MIN_FRAME_MS as u64));
+    }
+
+    #[test]
+    fn crop_box_clamps_to_the_frame() {
+        let frame = (1920u32, 1080u32);
+        // Inside the frame: exactly the box the panel asked for.
+        assert_eq!(
+            clamp_panel_box(100, 200, 700, 441, 0, 0, frame.0, frame.1),
+            (100, 200, 700, 441)
+        );
+        // Offset output origin subtracts (monitor not at 0,0).
+        assert_eq!(
+            clamp_panel_box(100, 200, 700, 441, 100, 200, frame.0, frame.1),
+            (0, 0, 700, 441)
+        );
+        // Flush to the left/top edge: clamped origin, shorter box — the
+        // caller treats a short box as "no exact crop" and holds the last
+        // frame instead of showing a half-cropped one.
+        assert_eq!(
+            clamp_panel_box(-8, -8, 700, 441, 0, 0, frame.0, frame.1),
+            (0, 0, 692, 433)
+        );
+        // Same on the far side.
+        assert_eq!(
+            clamp_panel_box(1800, 1000, 700, 441, 0, 0, frame.0, frame.1),
+            (1800, 1000, 120, 80)
+        );
+        // Fully off the output: zero area, never a panic or a wrap.
+        assert_eq!(
+            clamp_panel_box(4000, 4000, 700, 441, 0, 0, frame.0, frame.1),
+            (1920, 1080, 0, 0)
+        );
+    }
+
+    #[test]
+    fn fallback_stretch_keeps_channels_and_size() {
+        // 2x2 BGRA source stretched to 4x4: every output pixel is a copy
+        // of one source pixel. A stride or channel swap here paints the
+        // fallback fill as garbage instead of the last frame.
+        let src = [
+            1u8, 2, 3, 255, /* (0,0) */ 4, 5, 6, 255, /* (1,0) */
+            7, 8, 9, 255, /* (0,1) */ 10, 11, 12, 255, /* (1,1) */
+        ];
+        let out = stretch_bgra_nearest(&src, 2, 2, 4, 4);
+        assert_eq!(out.len(), 4 * 4 * 4);
+        let px = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        assert_eq!(px(0, 0), [1, 2, 3, 255]);
+        assert_eq!(px(3, 0), [4, 5, 6, 255], "nearest neighbour, no filtering");
+        assert_eq!(px(3, 3), [10, 11, 12, 255], "the far corner is the last source pixel");
+        // A source that does not match its stated size yields a zero
+        // buffer, never a partial or mis-strided copy.
+        assert!(stretch_bgra_nearest(&src, 3, 2, 2, 2).iter().all(|b| *b == 0));
     }
 }

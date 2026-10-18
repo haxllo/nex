@@ -2000,11 +2000,12 @@ html.glass-native #panel {
     0 1px 8px rgba(0, 0, 0, 0.4);
 }
 
-/* Light material (dark text): the halo inverts with the surface. */
+/* Light material (dark text): no halo. The near-black text already
+   carries itself on a bright surface, and the dark shadow above reads as
+   a smudge under it, while a light one reads as a glow neither wanted.
+   The halo is a dark-surface device only. */
 html.glass-native.glass-light #panel {
-  text-shadow:
-    0 1px 2px rgba(255, 255, 255, 0.9),
-    0 1px 8px rgba(255, 255, 255, 0.5);
+  text-shadow: none;
 }
 
 /* Vibrancy: the text follows the material, not the system theme, so a

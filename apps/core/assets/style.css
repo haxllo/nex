@@ -1968,6 +1968,22 @@ html[data-native-material="acrylic"] #context-menu {
 }
 
 /* ── native glass mode (spike) ──────────────────────────── */
+/* The glint sheen is a gradient, and `background-image` swaps discretely:
+   during a material flip the sheen stepped while every other palette
+   property eased. Registering the two colours it consumes makes them
+   interpolate, so the gradient built from them eases with the rest. */
+@property --panel-glint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.12);
+}
+
+@property --panel-reflection {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.045);
+}
+
 /* A live refracted layer sits below the page: drop painted
    backgrounds so its pixels show through. Borders, glows and text
    stay — selection keeps a flat translucent fill instead of the
@@ -2062,6 +2078,14 @@ html.glass-fading #panel * {
     fill 260ms ease,
     stroke 260ms ease,
     text-shadow 260ms ease;
+}
+
+/* The glint colours are declared on the root, so they transition there:
+   the panel and its pseudo-element inherit the eased value. */
+html.glass-fading {
+  transition:
+    --panel-glint 260ms ease,
+    --panel-reflection 260ms ease;
 }
 
 /* Specular rim: gradient edge light over the refracted backdrop —

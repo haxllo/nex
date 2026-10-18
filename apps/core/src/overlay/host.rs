@@ -3122,9 +3122,12 @@ unsafe extern "system" fn instance_signal_subclass(
                         return unsafe { handle_recording_key(vk, flags, ctx) };
                     }
                     // Win hotkey detection lives HERE (raw input receives
-                    // keys globally, even over elevated windows), not in
-                    // any hook — so it works identically whether the
+                    // keys globally; it does NOT reach elevated foreground
+                    // windows, which is what the helper's pipe is for), not
+                    // in any hook — so it works identically whether the
                     // helper is connected or not.
+                    // Both this and the helper can report one Win press:
+                    // toggle via send_hotkey_event, never directly.
                     if is_win && crate::overlay::hotkey::is_win_key_hotkey() {
                         if (flags & RI_KEY_BREAK) != 0 {
                             let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
@@ -3157,7 +3160,9 @@ unsafe extern "system" fn instance_signal_subclass(
                         // WH_KEYBOARD_LL may not fire when the overlay
                         // is foreground (Chromium installs its own LL
                         // hook which runs first), so we check the
-                        // configured hotkey here.
+                        // configured hotkey here. Overlaps the hook and
+                        // the RegisterHotKeyW fallback: send through
+                        // send_hotkey_event, never directly.
                         if crate::overlay::hotkey::check_raw_input_hotkey(vk) {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] WM_INPUT hotkey vk={} sending toggle",

@@ -1701,9 +1701,10 @@ impl RuntimeWorker {
                     return; // Settings owns the moment — don't summon the launcher over it
                 }
                 // Duplicate detections of one press are dropped at the
-                // source (`hotkey::send_hotkey_event`). Doing it here, on
-                // receipt, fails whenever the worker is busy: the copies
-                // leave the queue seconds apart and both toggle.
+                // source (`hotkey::send_hotkey_event`). Do NOT reintroduce
+                // a debounce here: on receipt the two copies can arrive
+                // seconds apart (busy worker), so both pass and one press
+                // toggles twice — the first-seconds-after-launch bug.
                 log_info("[nex] hotkey_event received");
                 let overlay_visible = self.overlay.is_visible();
                 let state_before = self.overlay_state.is_visible();

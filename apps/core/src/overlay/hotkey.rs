@@ -64,15 +64,26 @@ static HOTKEY_CLOCK: OnceLock<Instant> = OnceLock::new();
 /// Send one toggle to the runtime, unless another detection path already
 /// sent one for the same key press.
 ///
-/// Detection overlaps by design: raw input sees what the hook cannot,
-/// the hook covers the window before the helper connects, and the
-/// helper's pipe covers elevated foreground windows. For one press those
-/// paths fire within milliseconds of each other, so the copy is dropped
-/// here, where the real timings are known. Doing it on receipt in the
-/// runtime fails whenever the worker is busy: the two copies then leave
-/// the queue seconds apart, both pass the window, and one press toggles
-/// twice — visible for the first seconds after launch, when startup work
-/// owns the worker.
+/// **Contract — every sender of `OverlayEvent::Hotkey` goes through here.**
+/// Detection overlaps on purpose, and must keep overlapping:
+/// - raw input (host.rs WM_INPUT) is nex's own path and covers normal focus;
+/// - the in-process hook (this file) covers the window before the helper
+///   connects, and non-Win combos that RegisterHotKeyW refuses;
+/// - the WM_HOTKEY fallback covers combos RegisterHotKeyW delivers;
+/// - the helper's pipe is the ONLY path that sees elevated foreground
+///   windows (UIPI blocks both raw input and the Medium-IL hook there).
+///
+/// One press therefore reaches several of them within milliseconds, so the
+/// copy is dropped at the send site, where those timings are real. Keep it
+/// here. A receipt-time window in the runtime (removed in `87ac9f8`) failed
+/// whenever the worker was busy: the copies left the queue seconds apart,
+/// both passed, and one press toggled twice — the "one press acts like a
+/// double press, then it settles" complaint from the first seconds after
+/// launch. History: v2.10.0 "fixed" this by deleting the WM_INPUT Win
+/// toggle, 6854445 re-added it with the helper out of detection, and
+/// 055a47a re-enabled helper detection; two consumers came back with only
+/// the receipt window between them, and v2.26.0's single-consumer fix was
+/// reverted during bisect.
 pub(crate) fn send_hotkey_event(sender: &Sender<OverlayEvent>, hotkey_id: i32) -> bool {
     let now = HOTKEY_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64;
     let prev = HOTKEY_EVENT_AT_MS.swap(now, Ordering::SeqCst);
@@ -986,6 +997,9 @@ impl HotkeyListener {
                                         match line {
                                             Ok(l) if l == "HOTKEY" => {
                                                 logging::info("[nex] pipe: HOTKEY received from helper");
+                                                // Stamped on arrival: the helper's copy of a
+                                                // press that raw input also saw lands here
+                                                // within the same 50 ms gate window.
                                                 let _ = send_hotkey_event(&pipe_event_tx, 1);
                                             }
                                             Ok(l) if l == "SUPPRESS_ON" => {

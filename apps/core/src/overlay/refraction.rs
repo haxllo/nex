@@ -1161,6 +1161,44 @@ impl ShowCycle {
     }
 }
 
+/// Pull the desktop's newest frame into the staging mirror, if the
+/// desktop has produced one since the last acquire. Returns whether the
+/// mirror moved.
+///
+/// A show wants the desktop as it is *now*, not as the hidden poll last
+/// saw it: the poll runs every `HIDDEN_POLL_MS`, which is most of a
+/// second of video motion, and the reveal shows whatever we present next.
+/// AcquireNextFrame only yields when the desktop changed, so this either
+/// hands us the current image or proves nothing has changed since the
+/// poll - and then the mirror is already current, so a timeout is not a
+/// miss. Nonblocking, and any failure (lost access, dead session) leaves
+/// the mirror untouched; the capture path proper handles a dead session
+/// on its next pass.
+fn refresh_staging(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
+    let mut info: windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO =
+        unsafe { std::mem::zeroed() };
+    let mut resource: Option<IDXGIResource> = None;
+    match unsafe {
+        cap.duplication
+            .AcquireNextFrame(0, &mut info as *mut _, &mut resource as *mut _)
+    } {
+        Ok(()) => {}
+        Err(_) => return false,
+    }
+    let copied = (|| -> Result<(), String> {
+        let texture: ID3D11Texture2D = resource
+            .as_ref()
+            .ok_or("empty frame resource")?
+            .cast()
+            .map_err(|e| format!("frame QI texture failed: {e:?}"))?;
+        unsafe { context.CopySubresourceRegion(&cap.staging, 0, 0, 0, 0, &texture, 0, None) };
+        Ok(())
+    })()
+    .is_ok();
+    let _ = unsafe { cap.duplication.ReleaseFrame() };
+    copied
+}
+
 fn worker_main(
     glass_sys: isize,
     initial_main_sys: isize,
@@ -1349,6 +1387,17 @@ fn worker_main(
             // Swell passes are routine (a dozen per show): keep them out
             // of the log, only rebuilds and reveal refreshes are news.
             let announce = rebuilt || refresh;
+            // A show is the one pass that must carry the desktop as it is
+            // now: the host reveals as soon as the page paints, so this
+            // present is the first thing seen. The hidden poll left the
+            // mirror up to HIDDEN_POLL_MS stale, which reads as a frozen
+            // frame over anything moving, so ask the desktop for a newer
+            // one first and fall back to the mirror when it has none.
+            let live = refresh
+                && staged
+                && capture
+                    .as_mut()
+                    .is_some_and(|cap| refresh_staging(cap, &e.context));
             if rebuilt || refresh || swelling {
                 // Fresh zeros after rebuild, or a reveal pending: present
                 // immediately. Exact crop from the staging mirror - never
@@ -1394,8 +1443,12 @@ fn worker_main(
                             last_present = Instant::now();
                             last_frame = Some((fresh, fw, fh));
                             if announce {
+                                // live: the desktop had a newer frame than
+                                // the hidden poll's. mirror: it had none, so
+                                // the mirror already was the current desktop.
+                                let source = if live { "live" } else { "mirror" };
                                 crate::logging::info(&format!(
-                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms ({source})",
                                     t0.elapsed().as_millis()
                                 ));
                             }
@@ -1415,7 +1468,7 @@ fn worker_main(
                                 last_frame = Some((stretched, ew, eh));
                                 if announce {
                                     crate::logging::info(&format!(
-                                        "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                        "[nex][refract] panel {pw}x{ph} re-presented in {}ms (held)",
                                         t0.elapsed().as_millis()
                                     ));
                                 }

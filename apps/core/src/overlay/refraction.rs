@@ -69,7 +69,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, RegisterClassW,
-    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_SHOWNA,
     WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -324,6 +324,27 @@ fn disable_main_backdrop(main_sys: isize) {
     ));
 }
 
+/// Composition-level visibility. A cloaked window keeps its swapchain
+/// image while staying out of the composition, which is what makes an
+/// instant reveal possible.
+fn set_glass_cloaked(hwnd: HWND, cloak: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    let value: i32 = if cloak { 1 } else { 0 };
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as *mut std::ffi::c_void,
+            DWMWA_CLOAK as u32,
+            &value as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if hr < 0 {
+        crate::logging::warn(&format!(
+            "[nex][refract] glass cloak={cloak} failed: HRESULT {hr}"
+        ));
+    }
+}
+
 impl GlassWindow {
     /// Max-panel HWND, top-left aligned to the main window. The visible
     /// shape comes from the round region (per-resize); the window and
@@ -383,6 +404,17 @@ impl GlassWindow {
                 )),
             }
         }
+        // Shown once, cloaked from here on. Revealing a window that was
+        // hidden put an empty window over the desktop: a hidden window
+        // loses its swapchain image, so the panel stayed see-through
+        // until the next present landed. A cloaked window is not
+        // composed but stays shown, so the last presented frame is
+        // there the instant it is uncloaked.
+        set_glass_cloaked(hwnd, true);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+        }
+
         // No DWM transitions on the glass itself: sync_to_main
         // re-inserts it in z-order on every resize, and an animated
         // insert over a flip swapchain reads as a black flash.
@@ -444,9 +476,9 @@ impl GlassWindow {
     }
 
     fn show(&self, show: bool) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, if show { SW_SHOWNA } else { SW_HIDE });
-        }
+        // Visibility is the DWM cloak alone: ShowWindow(SW_HIDE) drops
+        // the rendered frame, so un-hiding put an empty window on screen.
+        set_glass_cloaked(self.hwnd, !show);
         crate::logging::info(&format!("[nex][refract] glass visible={show}"));
     }
 

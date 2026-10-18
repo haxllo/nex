@@ -980,11 +980,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Ok(mut s) = state.lock() {
                         s.accent_color = crate::overlay::platform::detect_accent_color();
                         s.theme = crate::overlay::platform::detect_system_theme();
-                        // Re-seed the palette for the show; the worker
-                        // re-seeds its material from the same theme in
-                        // the same breath, and a contradicting backdrop
-                        // flips both a frame later.
-                        s.glass_light = s.theme == Theme::Light;
+                        // Deliberately not re-seeding the glass palette
+                        // from the theme here. While hidden the worker
+                        // keeps the material current from the desktop and
+                        // reports it, so the show push already carries
+                        // the right one. Seeding it from the theme handed
+                        // the page white text on a dark Windows theme and
+                        // only flipped it a frame later - invisible over a
+                        // dark backdrop, a flash over a bright one.
                     }
                     // Theme may have flipped while hidden: the tint
                     // direction has to follow it.

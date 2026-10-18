@@ -1049,6 +1049,10 @@ fn worker_main(
     };
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
+    // A show needs a present the moment the window is revealed: the
+    // desktop may not change for a while and AcquireNextFrame only
+    // yields on a change, so the held mirror is re-presented instead.
+    let mut show_refresh = false;
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -1068,6 +1072,9 @@ fn worker_main(
                     // waiting for the desktop to change eight times.
                     material.fresh = true;
                     material.dwell = 0;
+                    // Present the held mirror before the reveal: a flip
+                    // swapchain shows nothing until the next Present.
+                    show_refresh = true;
                 }
                 visible = v;
             }
@@ -1171,12 +1178,16 @@ fn worker_main(
                 }
                 rebuilt = true;
             }
-            if rebuilt {
-                // Fresh zeros after rebuild: re-present immediately so a
-                // static desktop (no new duplication frame) never leaves
-                // the panel black. Exact crop from the staging mirror —
-                // never a stretched old frame; stretch is only the
-                // fallback when the mirror isn't armed yet.
+            // A show re-presents the same held frame: the window is about
+            // to be revealed and a flip swapchain paints nothing until
+            // the next Present, while the desktop may stay still for a
+            // while yet.
+            let refresh = std::mem::take(&mut show_refresh);
+            if rebuilt || refresh {
+                // Fresh zeros after rebuild, or a reveal pending: present
+                // immediately. Exact crop from the staging mirror - never
+                // a stretched old frame; stretch is only the fallback
+                // when the mirror isn't armed yet.
                 let exact: Option<(Vec<u8>, u32, u32)> = if staged {
                     capture.as_ref().and_then(|cap| {
                         let pad = BLUR_PAD as i32;
@@ -1217,7 +1228,7 @@ fn worker_main(
                             last_present = Instant::now();
                             last_frame = Some((fresh, fw, fh));
                             crate::logging::info(&format!(
-                                "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
+                                "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
                                 t0.elapsed().as_millis()
                             ));
                         }
@@ -1235,7 +1246,7 @@ fn worker_main(
                                 last_present = Instant::now();
                                 last_frame = Some((stretched, ew, eh));
                                 crate::logging::info(&format!(
-                                    "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
+                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
                                     t0.elapsed().as_millis()
                                 ));
                             }

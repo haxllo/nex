@@ -126,6 +126,10 @@ const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
+/// While hidden, poll the desktop at most this often to keep the backdrop
+/// material current. The palette the page opens with comes from this, so
+/// a slow poll is enough, and presenting is skipped.
+const HIDDEN_POLL_MS: u64 = 250;
 
 /// Host -> worker config. `main_sys == 0` / `None` means unchanged.
 struct GlassConfig {
@@ -1024,6 +1028,8 @@ fn worker_main(
     let mut last_present = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
+    // Anchor for the hidden material poll.
+    let mut last_warm = Instant::now();
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us, mut render_us) = (0u64, 0u64, 0u64, 0u64);
     // Last panel position the glass was aligned to. Re-align if the
@@ -1094,12 +1100,22 @@ fn worker_main(
         }
         if !visible && !prewarm_pending {
             // Hidden: hold the duplication session + staging mirror (no
-            // acquire/render) so the next show presents a fresh frame
-            // within milliseconds instead of paying a capture restart.
-            // ponytail: one idle session; no polling cost while hidden.
-            std::thread::sleep(Duration::from_millis(10));
-            continue;
+            // full-rate acquire/render) so the next show presents a fresh
+            // frame within milliseconds instead of paying a capture
+            // restart. A slow poll still decides the material, because
+            // the host pushes the show state - palette included - before
+            // it reveals the panel, so that push has to already carry the
+            // backdrop's material or the page paints the last session's.
+            // ponytail: one idle session at 4Hz; no present while hidden.
+            if last_warm.elapsed() < Duration::from_millis(HIDDEN_POLL_MS) {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            last_warm = Instant::now();
         }
+        // Hidden idle passes decide the material only. The startup
+        // prewarm still presents, so the first show has a ready surface.
+        let warm = !visible && !prewarm_pending;
         let Some((mx, my, mw, mh)) = main_rect(main_sys) else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -1345,7 +1361,10 @@ fn worker_main(
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
             let flipped = material.update(&pixels);
-            eng.present_frame(&pixels, bw, bh, &material)?;
+            // A hidden poll decides the material only: no upload, no draw.
+            if !warm {
+                eng.present_frame(&pixels, bw, bh, &material)?;
+            }
             if flipped || palette_sent != Some(material.light) {
                 palette_sent = Some(material.light);
                 let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
@@ -1358,11 +1377,13 @@ fn worker_main(
             Ok((us, frame_render_us, pixels)) => {
                 copy_us += us;
                 render_us += frame_render_us;
-                n_pre += 1;
                 n_fail = 0;
-                last_present = Instant::now();
                 staged = true;
                 last_frame = Some((pixels, bw, bh));
+                if !warm {
+                    n_pre += 1;
+                    last_present = Instant::now();
+                }
                 if !ready.swap(true, Ordering::AcqRel) {
                     let _ = proxy.send_event(UiCommand::GlassReady);
                 }

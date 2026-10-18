@@ -507,12 +507,22 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         }
                     }
                     UiCommand::GlassReady => {
-                        if OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                        // The renderer has a frame. Record it so the page is
+                        // allowed to drop its painted surface, then reveal
+                        // the layer before that push lands: glass first, then
+                        // transparency, never the other way round.
+                        if let Ok(mut s) = state.lock() {
+                            s.glass_frame_ready = true;
+                        }
+                        let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
-                            && glass_active(&state)
-                        {
+                            && glass_active(&state);
+                        if live {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.show_ready_frame();
+                            }
+                            if ready {
+                                push_state(&webview, &state, &icon_cache, false);
                             }
                         }
                     }
@@ -1250,12 +1260,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             && glass_layer.as_ref().is_some_and(|layer| !layer.is_ready())
                         {
                             // Glass frame not ready yet: show the panel now
-                            // anyway (its backdrop covers the gap) and let
-                            // the pending GlassReady reveal the layer —
-                            // blocking the whole panel on first capture
-                            // reads as a hung show.
+                            // anyway (its opaque surface covers the gap, the
+                            // page only goes transparent once the renderer
+                            // reports a frame) and let the pending GlassReady
+                            // reveal the layer - blocking the whole panel on
+                            // first capture reads as a hung show.
                             crate::runtime::log_info(
-                                "[nex] host Painted: glass frame pending, showing panel first",
+                                "[nex] host Painted: glass frame pending, showing panel opaque",
                             );
                         }
                         show_pending = false;
@@ -2452,7 +2463,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
         "panelBackground": s.panel_background.as_str(),
-        "glassNative": s.glass_native && !s.panel_background.is_opaque(),
+        "glassNative": s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
         "glassLight": s.glass_native && s.glass_light,
     })
     .to_string()

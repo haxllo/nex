@@ -501,6 +501,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
+                            refresh_pointer_over_panel(hwnd, &state);
                             prepare_glass_show(&glass_layer, &state);
                             push_state(&webview, &state, &icon_cache, true);
                             show_pending = true;
@@ -1013,6 +1014,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // Wake the renderer before the page paints: its present
                     // lands while the glass window is still cloaked, so the
                     // reveal carries this desktop, not the last session's.
+                    refresh_pointer_over_panel(hwnd, &state);
                     prepare_glass_show(&glass_layer, &state);
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
@@ -2272,6 +2274,28 @@ fn prepare_glass_show(
     }
 }
 
+/// Record whether the cursor is over the panel right now. The page holds
+/// the pointer position from the last session so a re-render keeps the
+/// selection under a stationary mouse; that memory is only the truth if
+/// the pointer never left the panel, and the page cannot ask the OS.
+fn refresh_pointer_over_panel(
+    hwnd: HWND,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let mut pt = POINT { x: 0, y: 0 };
+    let inside = unsafe { GetWindowRect(hwnd, &mut rect) != 0 && GetCursorPos(&mut pt) != 0 }
+        && pt.x >= rect.left
+        && pt.x < rect.right
+        && pt.y >= rect.top
+        && pt.y < rect.bottom;
+    if let Ok(mut s) = state.lock() {
+        s.pointer_over_panel = inside;
+    }
+}
+
 /// Match the WebView surface to the panel mode. Opaque modes get an
 /// opaque surface, which re-enables ClearType subpixel text (Chromium
 /// only subpixels over opaque — transparent always falls back to
@@ -2480,6 +2504,7 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "updateAvailable": s.update_available,
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
+        "pointerOverPanel": s.pointer_over_panel,
         "panelBackground": s.panel_background.as_str(),
         "glassNative": s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
         "glassLight": s.glass_native && s.glass_light,

@@ -3142,6 +3142,14 @@
       if (typeof state.overlayVisible === "boolean") {
         overlayVisible = state.overlayVisible;
       }
+      // The remembered pointer position only describes the pointer while
+      // it is over the panel. If the show finds it elsewhere, drop it:
+      // row hover fires on mousemove alone, and recalling a position from
+      // the last session would select a row nobody is pointing at.
+      if (showPush && state.pointerOverPanel === false) {
+        lastMouseX = -1;
+        lastMouseY = -1;
+      }
 
       // Native glass below the page: drop painted backgrounds so the
       // refracted layer shows through instead of acrylic.

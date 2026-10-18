@@ -207,6 +207,11 @@ pub struct ShimState {
     /// layer with nothing in it is a see-through panel, and a renderer
     /// that never comes up would leave the panel invisible.
     pub glass_frame_ready: bool,
+    /// Whether the cursor is inside the panel at show. The page keeps the
+    /// pointer position from the previous session to keep the selection
+    /// under a stationary mouse; if the pointer is elsewhere, remembering
+    /// it would re-select a row nobody is pointing at.
+    pub pointer_over_panel: bool,
     /// The glass material is currently a light surface, so the page uses
     /// the light palette with dark text (vibrancy: the material follows
     /// the backdrop, and the text follows the material).
@@ -252,6 +257,7 @@ impl Default for ShimState {
             update_available: false,
             whats_new_pending: None,
             glass_native: false,
+            pointer_over_panel: false,
             glass_frame_ready: false,
             glass_light: false,
             panel_background: crate::config::PanelBackground::Black,

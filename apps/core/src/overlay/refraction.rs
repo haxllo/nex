@@ -130,6 +130,13 @@ const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
+
+/// How recently the desktop must have handed us a frame for the backdrop
+/// to count as moving. Comfortably longer than a 30fps frame interval,
+/// short enough that a show over a paused player still animates the swell
+/// off the held mirror.
+const DESKTOP_RECENT_MS: u64 = 60;
+
 /// While hidden, poll the desktop at most this often to keep the backdrop
 /// material current. The palette the page opens with comes from this, so
 /// a slow poll is enough, and presenting is skipped.
@@ -1111,6 +1118,16 @@ fn swell_pass_due(since_present_ms: u64) -> bool {
     since_present_ms >= MIN_FRAME_MS as u64
 }
 
+/// Does the desktop count as producing frames of its own?
+///
+/// `since_last_frame_ms` is how long ago the desktop last handed us a
+/// frame; `None` means it never has. Deliberately a question about *age*,
+/// not about the previous pass: see `swell_wants_mirror` for why a
+/// per-pass answer breaks a show over playing video.
+fn desktop_recent(since_last_frame_ms: Option<u64>) -> bool {
+    since_last_frame_ms.is_some_and(|ms| ms < DESKTOP_RECENT_MS)
+}
+
 /// Does a due swell pass need the held mirror?
 ///
 /// Only while the desktop is not giving frames of its own. Both sources
@@ -1119,8 +1136,14 @@ fn swell_pass_due(since_present_ms: u64) -> bool {
 /// with one running, every capture pass gets dropped and the backdrop
 /// holds still for the whole swell (SWELL_MS) — a stale first frame over
 /// anything playing, which is what every open used to look like.
-fn swell_wants_mirror(swell_due: bool, desktop_moving: bool) -> bool {
-    swell_due && !desktop_moving
+///
+/// `desktop_recent` must mean "the desktop produced a frame recently",
+/// never "the last pass got one": the desktop yields a frame every
+/// 16-33ms while this loop turns over in 2-5ms, so a per-pass flag reads
+/// false for most passes *while video is plainly playing*, and the whole
+/// show degrades back to a frozen mirror.
+fn swell_wants_mirror(swell_due: bool, desktop_recent: bool) -> bool {
+    swell_due && !desktop_recent
 }
 
 /// Per-show state the worker arms on a fresh show and consumes while it
@@ -1246,10 +1269,13 @@ fn worker_main(
     // Full-frame staging mirror valid yet (fresh capture starts
     // uninitialized; first mirrored frame arms it).
     let mut staged = false;
-    // The desktop handed over a frame on the last pass that acquired one.
-    // Kept across passes because the swell decision is made before this
-    // pass's acquire: see `swell_wants_mirror`.
-    let mut desktop_moving = false;
+    // When the desktop last handed us a frame. Not a per-pass flag: the
+    // desktop yields one frame every 16-33ms (60Hz compose, 30fps video)
+    // while this loop turns over every 2-5ms, so "did the last pass
+    // acquire" is false for most passes *while video is plainly
+    // playing*. The swell asks this and the answer has to mean "the
+    // desktop is producing frames", not "one happened to land just now".
+    let mut last_desktop_frame: Option<Instant> = None;
     // Backdrop-driven material (surface appearance + page palette).
     // Seeded dark; the host sends the text theme on create and on each
     // show, and every captured frame re-decides from the backdrop.
@@ -1351,9 +1377,9 @@ fn worker_main(
         // current size. Panel changes rebuild content bitmaps in place
         // (buffers stay valid, presents never stall); buffers grow only
         // on DPI/scale change. No steady-state ResizeBuffers, no lag.
-        // Last pass's answer: is the desktop giving frames of its own?
-        let moving = desktop_moving;
-        desktop_moving = false;
+        // Is the desktop producing frames of its own? Recent, not just
+        // "the previous pass got lucky" - see the declaration.
+        let moving = desktop_recent(last_desktop_frame.map(|t| t.elapsed().as_millis() as u64));
         // Lens strength this pass: rises through the show swell, 1 after.
         let bend = cycle.bend().0;
         if engine.is_none() {
@@ -1419,6 +1445,11 @@ fn worker_main(
                 && capture
                     .as_mut()
                     .is_some_and(|cap| refresh_staging(cap, &e.context));
+            if live {
+                // A frame this fresh counts as the desktop moving: it *is*
+                // the desktop, taken seconds later than any pass could.
+                last_desktop_frame = Some(Instant::now());
+            }
             if rebuilt || refresh || swelling {
                 // Fresh zeros after rebuild, or a reveal pending: present
                 // immediately. Exact crop from the staging mirror - never
@@ -1560,7 +1591,7 @@ fn worker_main(
                 std::thread::sleep(Duration::from_millis(250));
                 continue;
             }
-            Ok(()) => desktop_moving = true,
+            Ok(()) => last_desktop_frame = Some(Instant::now()),
         }
         n_cap += 1;
         if info.ProtectedContentMaskedOut.0 != 0 {
@@ -2057,9 +2088,10 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend, swell_pass_due,
-        swell_wants_mirror, Material, Pass, ShowCycle, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS,
-        MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        clamp_panel_box, desktop_recent, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend,
+        swell_pass_due, swell_wants_mirror, Material, Pass, ShowCycle, DESKTOP_RECENT_MS,
+        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS,
+        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2266,6 +2298,22 @@ mod tests {
         assert!(!swell_pass_due(0));
         assert!(!swell_pass_due(MIN_FRAME_MS as u64 - 1));
         assert!(swell_pass_due(MIN_FRAME_MS as u64));
+    }
+
+    #[test]
+    fn moving_content_is_decided_by_frame_age_not_by_the_last_pass() {
+        // The desktop hands over a frame every 16-33ms while this loop
+        // turns over every 2-5ms, so most passes acquire nothing. Reading
+        // "did the last pass get a frame" therefore says the desktop is
+        // still while video plays, the swell re-presents the frozen
+        // mirror, and the backdrop sits still for SWELL_MS.
+        assert!(desktop_recent(Some(0)));
+        assert!(desktop_recent(Some(MIN_FRAME_MS as u64)));
+        assert!(desktop_recent(Some(DESKTOP_RECENT_MS - 1)));
+        assert!(!desktop_recent(Some(DESKTOP_RECENT_MS)));
+        assert!(!desktop_recent(Some(1000)));
+        // Never saw a frame (startup, dead session): not moving.
+        assert!(!desktop_recent(None));
     }
 
     #[test]

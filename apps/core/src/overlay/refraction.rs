@@ -1111,6 +1111,18 @@ fn swell_pass_due(since_present_ms: u64) -> bool {
     since_present_ms >= MIN_FRAME_MS as u64
 }
 
+/// Does a due swell pass need the held mirror?
+///
+/// Only while the desktop is not giving frames of its own. Both sources
+/// paint the same animation, but the mirror is frozen while the panel is
+/// visible, and a mirror re-present resets the gate that paces captures:
+/// with one running, every capture pass gets dropped and the backdrop
+/// holds still for the whole swell (SWELL_MS) — a stale first frame over
+/// anything playing, which is what every open used to look like.
+fn swell_wants_mirror(swell_due: bool, desktop_moving: bool) -> bool {
+    swell_due && !desktop_moving
+}
+
 /// Per-show state the worker arms on a fresh show and consumes while it
 /// presents: one held re-present and one lens swell.
 struct ShowCycle {
@@ -1234,6 +1246,10 @@ fn worker_main(
     // Full-frame staging mirror valid yet (fresh capture starts
     // uninitialized; first mirrored frame arms it).
     let mut staged = false;
+    // The desktop handed over a frame on the last pass that acquired one.
+    // Kept across passes because the swell decision is made before this
+    // pass's acquire: see `swell_wants_mirror`.
+    let mut desktop_moving = false;
     // Backdrop-driven material (surface appearance + page palette).
     // Seeded dark; the host sends the text theme on create and on each
     // show, and every captured frame re-decides from the backdrop.
@@ -1335,6 +1351,9 @@ fn worker_main(
         // current size. Panel changes rebuild content bitmaps in place
         // (buffers stay valid, presents never stall); buffers grow only
         // on DPI/scale change. No steady-state ResizeBuffers, no lag.
+        // Last pass's answer: is the desktop giving frames of its own?
+        let moving = desktop_moving;
+        desktop_moving = false;
         // Lens strength this pass: rises through the show swell, 1 after.
         let bend = cycle.bend().0;
         if engine.is_none() {
@@ -1381,9 +1400,11 @@ fn worker_main(
             let refresh = cycle.take_refresh();
             // The swell re-presents the held frame: the desktop is often
             // static, so no captured frame would drive the animation.
-            // Capped like a captured frame.
-            let swelling =
+            // Capped like a captured frame, and only while the desktop
+            // has nothing of its own to paint it with.
+            let swell_due =
                 cycle.swelling() && swell_pass_due(last_present.elapsed().as_millis() as u64);
+            let swelling = swell_wants_mirror(swell_due, moving);
             // Swell passes are routine (a dozen per show): keep them out
             // of the log, only rebuilds and reveal refreshes are news.
             let announce = rebuilt || refresh;
@@ -1539,7 +1560,7 @@ fn worker_main(
                 std::thread::sleep(Duration::from_millis(250));
                 continue;
             }
-            Ok(()) => {}
+            Ok(()) => desktop_moving = true,
         }
         n_cap += 1;
         if info.ProtectedContentMaskedOut.0 != 0 {
@@ -2037,8 +2058,8 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 mod tests {
     use super::{
         clamp_panel_box, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend, swell_pass_due,
-        Material, Pass, ShowCycle, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH,
-        MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        swell_wants_mirror, Material, Pass, ShowCycle, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS,
+        MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2245,6 +2266,24 @@ mod tests {
         assert!(!swell_pass_due(0));
         assert!(!swell_pass_due(MIN_FRAME_MS as u64 - 1));
         assert!(swell_pass_due(MIN_FRAME_MS as u64));
+    }
+
+    #[test]
+    fn a_swell_does_not_re_present_the_mirror_over_moving_content() {
+        // Static desktop: no captured frame exists to paint the swell, so
+        // the mirror does. Moving desktop: the captures paint it, and a
+        // mirror re-present would drop every one of them (it resets the
+        // same frame gate) and freeze the backdrop for the whole swell.
+        assert!(
+            swell_wants_mirror(true, false),
+            "a static desktop needs the mirror to animate"
+        );
+        assert!(
+            !swell_wants_mirror(true, true),
+            "wrong choice here freezes a playing backdrop for SWELL_MS"
+        );
+        assert!(!swell_wants_mirror(false, false));
+        assert!(!swell_wants_mirror(false, true));
     }
 
     #[test]

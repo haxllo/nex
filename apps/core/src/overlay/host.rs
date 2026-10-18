@@ -233,6 +233,9 @@ pub(crate) enum UiCommand {
     Painted,
     /// The first native glass frame was presented and can be revealed.
     GlassReady,
+    /// The glass material changed appearance (light surface + dark text,
+    /// or the reverse). The page swaps its palette to follow.
+    GlassPalette(bool),
     /// The page measured its content height (CSS px); resize to hug it.
     Resize {
         h: f64,
@@ -327,6 +330,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // whenever the saved config was opaque.)
     if let Ok(mut s) = state.lock() {
         s.glass_native = glass_layer.is_some();
+        // Material/palette seed from the theme; the backdrop overrides
+        // both per frame (the worker reports back via GlassPalette).
+        s.glass_light = s.theme == Theme::Light;
+    }
+    // The worker seeds its material from the same theme before the
+    // first frame, so page palette and native tint start in step.
+    if let Some(layer) = glass_layer.as_ref() {
+        let dark = state
+            .lock()
+            .map(|s| s.theme == Theme::Dark)
+            .unwrap_or(true);
+        layer.set_theme(dark);
     }
     unsafe {
         install_instance_signal_subclass(hwnd, &event_tx);
@@ -486,19 +501,46 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
+                            refresh_pointer_over_panel(hwnd, &state);
+                            prepare_glass_show(&glass_layer, &state);
                             push_state(&webview, &state, &icon_cache, true);
                             show_pending = true;
 
                         }
                     }
                     UiCommand::GlassReady => {
-                        if OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                        // The renderer has a frame. Record it so the page is
+                        // allowed to drop its painted surface, then reveal
+                        // the layer before that push lands: glass first, then
+                        // transparency, never the other way round.
+                        if let Ok(mut s) = state.lock() {
+                            s.glass_frame_ready = true;
+                        }
+                        let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
-                            && glass_active(&state)
-                        {
+                            && glass_active(&state);
+                        if live {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.show_ready_frame();
                             }
+                            if ready {
+                                push_state(&webview, &state, &icon_cache, false);
+                            }
+                        }
+                    }
+                    UiCommand::GlassPalette(light) => {
+                        // Recorded even while hidden: the state is the
+                        // page's source of truth, so the next push (the
+                        // one at show) already carries the right palette.
+                        let visible = match state.lock() {
+                            Ok(mut s) => {
+                                s.glass_light = light;
+                                s.visible
+                            }
+                            Err(_) => false,
+                        };
+                        if ready && visible {
+                            push_state(&webview, &state, &icon_cache, false);
                         }
                     }
                 UiCommand::Apply => {
@@ -950,9 +992,30 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Ok(mut s) = state.lock() {
                         s.accent_color = crate::overlay::platform::detect_accent_color();
                         s.theme = crate::overlay::platform::detect_system_theme();
+                        // Deliberately not re-seeding the glass palette
+                        // from the theme here. While hidden the worker
+                        // keeps the material current from the desktop and
+                        // reports it, so the show push already carries
+                        // the right one. Seeding it from the theme handed
+                        // the page white text on a dark Windows theme and
+                        // only flipped it a frame later - invisible over a
+                        // dark backdrop, a flash over a bright one.
+                    }
+                    // Theme may have flipped while hidden: the tint
+                    // direction has to follow it.
+                    if let Some(layer) = glass_layer.as_ref() {
+                        let dark = state
+                            .lock()
+                            .map(|s| s.theme == Theme::Dark)
+                            .unwrap_or(true);
+                        layer.set_theme(dark);
                     }
                     apply_window_chrome(&window, &state);
-                    // Push state with show_pending so the JS side sends
+                    // Wake the renderer before the page paints: its present
+                    // lands while the glass window is still cloaked, so the
+                    // reveal carries this desktop, not the last session's.
+                    refresh_pointer_over_panel(hwnd, &state);
+                    prepare_glass_show(&glass_layer, &state);
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
@@ -1203,12 +1266,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             && glass_layer.as_ref().is_some_and(|layer| !layer.is_ready())
                         {
                             // Glass frame not ready yet: show the panel now
-                            // anyway (its backdrop covers the gap) and let
-                            // the pending GlassReady reveal the layer —
-                            // blocking the whole panel on first capture
-                            // reads as a hung show.
+                            // anyway (its opaque surface covers the gap, the
+                            // page only goes transparent once the renderer
+                            // reports a frame) and let the pending GlassReady
+                            // reveal the layer - blocking the whole panel on
+                            // first capture reads as a hung show.
                             crate::runtime::log_info(
-                                "[nex] host Painted: glass frame pending, showing panel first",
+                                "[nex] host Painted: glass frame pending, showing panel opaque",
                             );
                         }
                         show_pending = false;
@@ -2196,6 +2260,42 @@ fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::S
     state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
 }
 
+/// Wake the renderer a beat before the panel is revealed so its next
+/// present lands while the glass window is still cloaked. Revealing
+/// first would uncloak whatever the last session left presented.
+fn prepare_glass_show(
+    glass_layer: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    if glass_active(state) {
+        if let Some(layer) = glass_layer.as_ref() {
+            layer.prepare_show();
+        }
+    }
+}
+
+/// Record whether the cursor is over the panel right now. The page holds
+/// the pointer position from the last session so a re-render keeps the
+/// selection under a stationary mouse; that memory is only the truth if
+/// the pointer never left the panel, and the page cannot ask the OS.
+fn refresh_pointer_over_panel(
+    hwnd: HWND,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let mut pt = POINT { x: 0, y: 0 };
+    let inside = unsafe { GetWindowRect(hwnd, &mut rect) != 0 && GetCursorPos(&mut pt) != 0 }
+        && pt.x >= rect.left
+        && pt.x < rect.right
+        && pt.y >= rect.top
+        && pt.y < rect.bottom;
+    if let Ok(mut s) = state.lock() {
+        s.pointer_over_panel = inside;
+    }
+}
+
 /// Match the WebView surface to the panel mode. Opaque modes get an
 /// opaque surface, which re-enables ClearType subpixel text (Chromium
 /// only subpixels over opaque — transparent always falls back to
@@ -2404,8 +2504,10 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "updateAvailable": s.update_available,
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
+        "pointerOverPanel": s.pointer_over_panel,
         "panelBackground": s.panel_background.as_str(),
-        "glassNative": s.glass_native && !s.panel_background.is_opaque(),
+        "glassNative": s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
+        "glassLight": s.glass_native && s.glass_light,
     })
     .to_string()
 }
@@ -3020,9 +3122,12 @@ unsafe extern "system" fn instance_signal_subclass(
                         return unsafe { handle_recording_key(vk, flags, ctx) };
                     }
                     // Win hotkey detection lives HERE (raw input receives
-                    // keys globally, even over elevated windows), not in
-                    // any hook — so it works identically whether the
+                    // keys globally; it does NOT reach elevated foreground
+                    // windows, which is what the helper's pipe is for), not
+                    // in any hook — so it works identically whether the
                     // helper is connected or not.
+                    // Both this and the helper can report one Win press:
+                    // toggle via send_hotkey_event, never directly.
                     if is_win && crate::overlay::hotkey::is_win_key_hotkey() {
                         if (flags & RI_KEY_BREAK) != 0 {
                             let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
@@ -3034,7 +3139,7 @@ unsafe extern "system" fn instance_signal_subclass(
                                 crate::runtime::log_info(
                                     "[nex::debug] WM_INPUT bare Win key-up, toggling",
                                 );
-                                let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                                let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                             }
                         } else if RAW_WIN_DOWN
                             .compare_exchange(0, vk as u32, Ordering::SeqCst, Ordering::SeqCst)
@@ -3055,13 +3160,15 @@ unsafe extern "system" fn instance_signal_subclass(
                         // WH_KEYBOARD_LL may not fire when the overlay
                         // is foreground (Chromium installs its own LL
                         // hook which runs first), so we check the
-                        // configured hotkey here.
+                        // configured hotkey here. Overlaps the hook and
+                        // the RegisterHotKeyW fallback: send through
+                        // send_hotkey_event, never directly.
                         if crate::overlay::hotkey::check_raw_input_hotkey(vk) {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] WM_INPUT hotkey vk={} sending toggle",
                                 vk,
                             ));
-                            let _ = ctx.event_tx.send(OverlayEvent::Hotkey(1));
+                            let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                         }
                     }
                 }
@@ -3241,3 +3348,79 @@ fn unregister_raw_input_sink() {
     ));
 }
 // ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::snapshot_state_json;
+    use crate::config::PanelBackground;
+    use crate::overlay::model::ShimState;
+    use serde_json::{json, Value};
+
+    fn state(
+        glass_native: bool,
+        frame_ready: bool,
+        light: bool,
+        background: PanelBackground,
+    ) -> ShimState {
+        ShimState {
+            glass_native,
+            glass_frame_ready: frame_ready,
+            glass_light: light,
+            panel_background: background,
+            ..ShimState::default()
+        }
+    }
+
+    fn field(snapshot: &Value, key: &str) -> Value {
+        snapshot[key].clone()
+    }
+
+    fn push(s: &ShimState) -> Value {
+        serde_json::from_str(&snapshot_state_json(s, false)).expect("snapshot is JSON")
+    }
+
+    #[test]
+    fn glass_native_waits_for_a_presented_frame() {
+        // The page goes transparent on this flag, so it must stay false
+        // until a frame has actually been presented: that gate is what
+        // fixed the fully-transparent window before the effects showed.
+        assert_eq!(
+            field(&push(&state(true, false, false, PanelBackground::Glass)), "glassNative"),
+            json!(false)
+        );
+        assert_eq!(
+            field(&push(&state(true, true, false, PanelBackground::Glass)), "glassNative"),
+            json!(true)
+        );
+        // Opaque panel modes never ask the page to go transparent.
+        assert_eq!(
+            field(&push(&state(true, true, false, PanelBackground::Black)), "glassNative"),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn a_non_glass_push_never_asks_for_the_light_palette() {
+        // glassLight alone must not flip the page palette: an Acrylic or
+        // opaque push with a stale light flag would repaint the panel.
+        assert_eq!(
+            field(&push(&state(false, true, true, PanelBackground::Black)), "glassLight"),
+            json!(false)
+        );
+        assert_eq!(
+            field(&push(&state(true, true, true, PanelBackground::Glass)), "glassLight"),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn pointer_over_panel_is_pushed_every_snapshot() {
+        // The page needs this on every push: it decides whether a fresh
+        // show may keep its last hover coordinates.
+        let mut s = state(true, true, false, PanelBackground::Glass);
+        s.pointer_over_panel = true;
+        assert_eq!(field(&push(&s), "pointerOverPanel"), json!(true));
+        s.pointer_over_panel = false;
+        assert_eq!(field(&push(&s), "pointerOverPanel"), json!(false));
+    }
+}

@@ -122,6 +122,9 @@ body {
 }
 
 #panel {
+  /* Anchors the glass rim/glint pseudo-elements. The panel fills the
+     client area, so absolute children keep their current place. */
+  position: relative;
   width: 100%;
   background:
     linear-gradient(136deg, var(--panel-glint) 0%, transparent 28%, transparent 74%, var(--panel-reflection) 100%),
@@ -1965,6 +1968,22 @@ html[data-native-material="acrylic"] #context-menu {
 }
 
 /* ── native glass mode (spike) ──────────────────────────── */
+/* The glint sheen is a gradient, and `background-image` swaps discretely:
+   during a material flip the sheen stepped while every other palette
+   property eased. Registering the two colours it consumes makes them
+   interpolate, so the gradient built from them eases with the rest. */
+@property --panel-glint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.12);
+}
+
+@property --panel-reflection {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.045);
+}
+
 /* A live refracted layer sits below the page: drop painted
    backgrounds so its pixels show through. Borders, glows and text
    stay — selection keeps a flat translucent fill instead of the
@@ -1972,7 +1991,159 @@ html[data-native-material="acrylic"] #context-menu {
 html.glass-native #panel {
   background: transparent;
   box-shadow: none;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  /* Subtitle-style legibility: a tight near-opaque shadow carries text
+     over any backdrop, the soft one keeps the edge from reading as a
+     stroke. The tint alone cannot guarantee contrast — partial
+     transmission leaves a mid-luminance surface in bright scenes. */
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.8),
+    0 1px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Light material (dark text): the halo inverts with the surface. */
+html.glass-native.glass-light #panel {
+  text-shadow:
+    0 1px 2px rgba(255, 255, 255, 0.9),
+    0 1px 8px rgba(255, 255, 255, 0.5);
+}
+
+/* Vibrancy: the text follows the material, not the system theme, so a
+   bright backdrop hands the panel a light surface with dark text.
+   Text, surfaces and hairlines flip together — a half-flipped palette
+   would put dark text on a dark menu. Accent and action colours stay:
+   they are picked to read on either surface. */
+html.glass-native.glass-light {
+  --bg: #ffffff;
+  --bg-opaque: #ffffff;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.28);
+  --panel-highlight: rgba(255, 255, 255, 0.65);
+  --panel-edge: rgba(0, 0, 0, 0.1);
+  --panel-glint: rgba(255, 255, 255, 0.25);
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text: #16161a;
+  --text-dim: #4b515c;
+  --text-faint: #68717e;
+  --sel: rgba(0, 0, 0, 0.06);
+  --sel-border: rgba(0, 0, 0, 0.06);
+  --hover: rgba(0, 0, 0, 0.11);
+  --divider: rgba(0, 0, 0, 0.07);
+  --kbd-bg: rgba(0, 0, 0, 0.06);
+  --kbd-cap-bg: #ffffff;
+  --kbd-cap-border: rgba(0, 0, 0, 0.15);
+  --icon-bg: rgba(0, 0, 0, 0.05);
+  --text-select: rgba(0, 0, 0, 0.18);
+}
+
+html.glass-native.glass-dark {
+  --bg: #1e1e1e;
+  --bg-opaque: #1e1e1e;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
+  --panel-highlight: rgba(255, 255, 255, 0.12);
+  --panel-edge: rgba(255, 255, 255, 0.12);
+  --panel-glint: rgba(255, 255, 255, 0.12);
+  --panel-sheen: rgba(255, 255, 255, 0.1);
+  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-bottom-edge: rgba(0, 0, 0, 0.24);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #f4f4f6;
+  --text-dim: #c3c9d2;
+  --text-faint: #aeb6c2;
+  --sel: rgba(255, 255, 255, 0.07);
+  --sel-border: rgba(255, 255, 255, 0.08);
+  --hover: rgba(255, 255, 255, 0.12);
+  --divider: rgba(255, 255, 255, 0.06);
+  --kbd-bg: rgba(255, 255, 255, 0.08);
+  --kbd-cap-bg: rgba(255, 255, 255, 0.1);
+  --kbd-cap-border: rgba(0, 0, 0, 0.35);
+  --icon-bg: rgba(255, 255, 255, 0.06);
+  --text-select: rgba(255, 255, 255, 0.28);
+}
+
+/* The material flip above is a step change in the palette; ease the
+   properties that consume it so a flip reads as a fade rather than a
+   flash. Scoped to the swap window (html.glass-fading is armed by the
+   page for ~300ms) so it never overrides the hover and selection
+   transitions of the base rules. */
+html.glass-fading #panel,
+html.glass-fading #panel * {
+  transition:
+    color 260ms ease,
+    background-color 260ms ease,
+    border-color 260ms ease,
+    fill 260ms ease,
+    stroke 260ms ease,
+    text-shadow 260ms ease;
+}
+
+/* The glint colours are declared on the root, so they transition there:
+   the panel and its pseudo-element inherit the eased value. */
+html.glass-fading {
+  transition:
+    --panel-glint 260ms ease,
+    --panel-reflection 260ms ease;
+}
+
+/* Specular rim: gradient edge light over the refracted backdrop —
+   bright where the light falls (top-left), dim opposite, instead of a
+   flat uniform ring. Radius inherited (no fourth radius owner). */
+html.glass-native #panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  pointer-events: none;
+  padding: 1px;
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0.09) 22%,
+    rgba(255, 255, 255, 0.03) 52%,
+    rgba(255, 255, 255, 0.07) 76%,
+    rgba(255, 255, 255, 0.28) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* Interior glint: the diagonal sheen the opaque modes keep in the
+   panel background, reinstated under page content (glass drops the
+   painted background). Sits below z-indexed rows. A fine noise layer
+   dithers the 8-bit alpha ramp — without it the sheen reads as banding
+   stripes over smooth backdrops, and every stop fades to the same hue
+   at zero alpha so the ramp never passes through black. */
+html.glass-native #panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E")
+      repeat,
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.05),
+      rgba(255, 255, 255, 0) 10%
+    ),
+    linear-gradient(
+      136deg,
+      var(--panel-glint) 0%,
+      rgba(255, 255, 255, 0) 28%,
+      rgba(255, 255, 255, 0) 74%,
+      var(--panel-reflection) 100%
+    );
 }
 
 html.glass-native #divider {

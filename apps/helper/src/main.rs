@@ -601,9 +601,17 @@ unsafe extern "system" fn keyboard_hook_proc(
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
-                    // hotkey goes dead exactly there. Normal-focus
-                    // double-fires with nex raw input are absorbed by
-                    // the runtime's 50ms debounce.
+                    // hotkey goes dead exactly there. Do not drop this
+                    // for tidiness: it is the only detector elevated
+                    // windows have.
+                    //
+                    // Normal focus makes nex's raw input report the same
+                    // key-up, which is expected overlap. It is collapsed
+                    // in nex by `hotkey::send_hotkey_event` (50 ms
+                    // same-press gate at the sender), NOT by the runtime:
+                    // a busy worker dequeues the two copies seconds
+                    // apart, so receipt-time dedup let one press toggle
+                    // twice for the first seconds after launch.
                     HOTKEY_FIRED.store(true, Ordering::SeqCst);
                     WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
                     if let Some(tid) = HELPER_THREAD_ID.get() {
@@ -638,8 +646,8 @@ unsafe extern "system" fn keyboard_hook_proc(
     if is_target && !injected && detect_enabled && check_modifiers_atomic() {
         if target_is_win {
             // Win key-down: hold the mask (blocks Start) and DON'T EAT so
-            // Win+ chords still reach the OS. nex toggles via its own raw
-            // input on key-up — the helper no longer fires hotkey events.
+            // Win+ chords still reach the OS. The Win key-up branch above
+            // owns the hotkey report — this key-down fires nothing.
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);

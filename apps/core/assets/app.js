@@ -142,6 +142,10 @@
   // dedicated view instead of running an update check.
   let updateAvailable = false;
   let updateConfirmTimer = 0;
+  // Window during which a glass material flip eases instead of snapping.
+  let glassFadeTimer = 0;
+  // Last visibility the page was told about; identifies the show push.
+  let overlayVisible = false;
   let whatsNewPending = null;
   let whatsNewOpen = false;
   let whatsNewContent = null;
@@ -3132,10 +3136,46 @@
         closeWhatsNew();
       }
 
+      // The show push arrives before the panel is revealed: the palette
+      // it carries is the first frame painted, so it must not ease.
+      const showPush = state.overlayVisible === true && !overlayVisible;
+      if (typeof state.overlayVisible === "boolean") {
+        overlayVisible = state.overlayVisible;
+      }
+      // The remembered pointer position only describes the pointer while
+      // it is over the panel. If the show finds it elsewhere, drop it:
+      // row hover fires on mousemove alone, and recalling a position from
+      // the last session would select a row nobody is pointing at.
+      if (showPush && state.pointerOverPanel === false) {
+        lastMouseX = -1;
+        lastMouseY = -1;
+      }
+
       // Native glass below the page: drop painted backgrounds so the
       // refracted layer shows through instead of acrylic.
       if (typeof state.glassNative === "boolean") {
         document.documentElement.classList.toggle("glass-native", state.glassNative);
+      }
+
+      // Vibrancy: the material picks the palette, not the system theme,
+      // so text stays dark on a light surface and light on a dark one.
+      if (typeof state.glassLight === "boolean") {
+        const root = document.documentElement;
+        const isLight = state.glassLight;
+        // Material flips are a step change; ramp the palette so the
+        // panel eases between surfaces instead of flashing. The class
+        // only arms transitions for the length of the swap.
+        //
+        // Except on the push that opens the panel: it is painted before
+        // the window is revealed, so easing there would paint the last
+        // session's palette first and fade out of it. Snap that one.
+        if (root.classList.contains("glass-light") !== isLight && !showPush) {
+          root.classList.add("glass-fading");
+          clearTimeout(glassFadeTimer);
+          glassFadeTimer = setTimeout(() => root.classList.remove("glass-fading"), 300);
+        }
+        root.classList.toggle("glass-light", isLight);
+        root.classList.toggle("glass-dark", !isLight);
       }
 
       // Track QL presence before overwriting rows — used to detect

@@ -8,10 +8,10 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
@@ -55,6 +55,52 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// hook keeps running (as a warm backup that never fired anyway) but its
 /// dispatch is gated so the helper and the hook can never double-toggle.
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Real time of the last toggle any detection path accepted, plus the
+/// clock it is measured against.
+static HOTKEY_EVENT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static HOTKEY_CLOCK: OnceLock<Instant> = OnceLock::new();
+
+/// Send one toggle to the runtime, unless another detection path already
+/// sent one for the same key press.
+///
+/// **Contract — every sender of `OverlayEvent::Hotkey` goes through here.**
+/// Detection overlaps on purpose, and must keep overlapping:
+/// - raw input (host.rs WM_INPUT) is nex's own path and covers normal focus;
+/// - the in-process hook (this file) covers the window before the helper
+///   connects, and non-Win combos that RegisterHotKeyW refuses;
+/// - the WM_HOTKEY fallback covers combos RegisterHotKeyW delivers;
+/// - the helper's pipe is the ONLY path that sees elevated foreground
+///   windows (UIPI blocks both raw input and the Medium-IL hook there).
+///
+/// One press therefore reaches several of them within milliseconds, so the
+/// copy is dropped at the send site, where those timings are real. Keep it
+/// here. A receipt-time window in the runtime (removed in `87ac9f8`) failed
+/// whenever the worker was busy: the copies left the queue seconds apart,
+/// both passed, and one press toggled twice — the "one press acts like a
+/// double press, then it settles" complaint from the first seconds after
+/// launch. History: v2.10.0 "fixed" this by deleting the WM_INPUT Win
+/// toggle, 6854445 re-added it with the helper out of detection, and
+/// 055a47a re-enabled helper detection; two consumers came back with only
+/// the receipt window between them, and v2.26.0's single-consumer fix was
+/// reverted during bisect.
+pub(crate) fn send_hotkey_event(sender: &Sender<OverlayEvent>, hotkey_id: i32) -> bool {
+    let now = HOTKEY_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    let prev = HOTKEY_EVENT_AT_MS.swap(now, Ordering::SeqCst);
+    if same_press(prev, now) {
+        logging::info("[nex::debug] Hotkey: duplicate detection path ignored");
+        return false;
+    }
+    sender.send(OverlayEvent::Hotkey(hotkey_id)).is_ok()
+}
+
+/// Is `now_ms` the same physical press as the previous one at `prev_ms`?
+/// A zero `prev_ms` means no press yet.
+fn same_press(prev_ms: u64, now_ms: u64) -> bool {
+    /// Window in which two detections are the same physical press.
+    const SAME_PRESS_MS: u64 = 50;
+    prev_ms != 0 && now_ms.saturating_sub(prev_ms) < SAME_PRESS_MS
+}
 
 /// Outbound command pipe to the helper (simulation transport).
 /// Connected best-effort during helper setup; `None` when down.
@@ -381,7 +427,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 vk,
             ));
             send_mask_up();
-            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+            let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
         }
     }
 
@@ -456,7 +502,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                         std::ptr::null_mut(), n_code, w_param, l_param)
                 };
             }
-            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+            let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
             return 1;
         }
     }
@@ -863,7 +909,7 @@ impl HotkeyListener {
                                 Some(ctx) => ctx,
                                 None => continue,
                             };
-                            let _ = ctx.sender.send(OverlayEvent::Hotkey(ctx.hotkey_id));
+                            let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
                         }
                     }
                     unsafe { TranslateMessage(&msg); DispatchMessageW(&msg); }
@@ -951,7 +997,10 @@ impl HotkeyListener {
                                         match line {
                                             Ok(l) if l == "HOTKEY" => {
                                                 logging::info("[nex] pipe: HOTKEY received from helper");
-                                                let _ = pipe_event_tx.send(OverlayEvent::Hotkey(1));
+                                                // Stamped on arrival: the helper's copy of a
+                                                // press that raw input also saw lands here
+                                                // within the same 50 ms gate window.
+                                                let _ = send_hotkey_event(&pipe_event_tx, 1);
                                             }
                                             Ok(l) if l == "SUPPRESS_ON" => {
                                                 crate::overlay::hotkey::set_suppress_focus_escape(true);
@@ -1859,6 +1908,11 @@ mod tests {
     #[test] fn parse_ctrl_shift_f5() { let p = parse_hotkey("Ctrl+Shift+F5").unwrap(); assert_eq!(p.modifiers, vec!["Shift", "Ctrl"]); assert_eq!(p.key, "F5"); }
     #[test] fn parse_single_key() { let p = parse_hotkey("F1").unwrap(); assert!(p.modifiers.is_empty()); assert_eq!(p.key, "F1"); }
     #[test] fn parse_rejects_empty() { assert!(parse_hotkey("").is_err()); assert!(parse_hotkey("++").is_err()); }
+    #[test] fn same_press_only_within_window() {
+        assert!(!same_press(0, 5));        // first event ever
+        assert!(same_press(1_000, 1_030)); // overlapping detection paths
+        assert!(!same_press(1_000, 1_050)); // a fresh press
+    }
     #[test] fn vk_space() { assert_eq!(vk_from_key("Space").unwrap(), windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SPACE as u32); }
     #[test] fn vk_f5() { assert_eq!(vk_from_key("F5").unwrap(), windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F5 as u32); }
     #[test] fn vk_single_letter() { assert_eq!(vk_from_key("A").unwrap(), b'A' as u32); }

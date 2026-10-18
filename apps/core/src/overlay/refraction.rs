@@ -34,8 +34,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_SATURATION_PROP_SATURATION,
     D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R,
-    CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, ID2D1Bitmap1,
+    CLSID_D2D1DisplacementMap, CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, ID2D1Bitmap1,
     ID2D1Device, ID2D1DeviceContext, ID2D1Effect, ID2D1Factory, ID2D1Factory1, ID2D1Image,
     ID2D1SolidColorBrush,
 };
@@ -68,7 +69,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, RegisterClassW,
-    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_SHOWNA,
     WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -88,18 +89,51 @@ pub fn enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Match the reference liquid-glass renderer at 96 DPI.
-const BLUR_STDDEV: f32 = 3.0;
+/// Match the reference liquid-glass renderer at 96 DPI. Heavy enough to
+/// read as frost rather than acrylic, light enough to keep the bezel
+/// bend legible.
+const BLUR_STDDEV: f32 = 8.0;
+/// Backdrop vibrancy: the refracted image is lifted slightly so it does
+/// not read as greyed out behind the tint.
+const SATURATION: f32 = 1.2;
 const BEND_SCALE: f32 = 10.0;
+/// Show swell: the lens eases from flat to full just after the reveal, so
+/// the panel reads as glass settling rather than a pane switching on.
+/// One shot per show; nothing animates while hidden.
+const SWELL_MS: f32 = 220.0;
 const BEZEL_MARGIN: f32 = 32.0;
 const CORNER_RADIUS: f32 = 8.0;
-const TINT_ALPHA: f32 = 56.0 / 255.0;
+/// Material follows the backdrop, like Apple's vibrancy: a bright scene
+/// gets a light surface with dark text, a dark scene the reverse, so
+/// the text colour never fights what is behind the glass. Alpha is the
+/// wash at the material's own extreme; hysteresis (plus the dwell below)
+/// stops flapping when the backdrop sits near the switch.
+const TINT_MIN_ALPHA: f32 = 0.13;
+const TINT_MAX_ALPHA: f32 = 0.34;
+const MATERIAL_SWITCH: f32 = 0.55;
+const MATERIAL_HYSTERESIS: f32 = 0.18;
+/// Consecutive frames past the switch before the material flips. Scene
+/// cuts and fast scrolling cross it for a frame or two; without this the
+/// palette flashes.
+const MATERIAL_DWELL: u32 = 8;
+const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
+const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
+/// Per-frame exponential smoothing on backdrop luminance (~150ms at
+/// 60fps) so a scene cut eases the tint instead of snapping it.
+const LUMA_EMA: f32 = 0.10;
 /// Extra desktop pixels around the panel keep the blur kernel away from
-/// the capture boundary. Matches the reference renderer's 3σ + 2 pad.
+/// the capture boundary: 3σ + 2, the reference renderer's rule, now
+/// scaled up with the blur. The panel must sit this far inside the
+/// monitor or the crop clamps and the worker drops frames, so the pad
+/// is kept to the blur's actual reach rather than padded for comfort.
 const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
+/// While hidden, poll the desktop at most this often to keep the backdrop
+/// material current. The palette the page opens with comes from this, so
+/// a slow poll is enough, and presenting is skipped.
+const HIDDEN_POLL_MS: u64 = 250;
 
 /// Host -> worker config. `main_sys == 0` / `None` means unchanged.
 struct GlassConfig {
@@ -110,6 +144,10 @@ struct GlassConfig {
     /// instead of polling the window rect, so content tracks the region
     /// on the same tick — no frame of stale rows on growth.
     panel_wh: Option<(u32, u32)>,
+    /// Text theme. Seeds the material before the first frame (a light
+    /// theme opens on a light surface); every frame then re-decides
+    /// from the backdrop.
+    theme_dark: Option<bool>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -208,6 +246,7 @@ impl GlassLayer {
             main_sys,
             max_wh: Some((max_w_px, max_h_px)),
             panel_wh: Some((w, h)),
+            theme_dark: None,
         });
     }
 
@@ -221,6 +260,34 @@ impl GlassLayer {
             main_sys: 0,
             max_wh: None,
             panel_wh: None,
+            theme_dark: None,
+        });
+    }
+
+    /// Tell the renderer a show is coming without revealing the window:
+    /// the panel is only revealed on its first paint, and by then the
+    /// worker has re-presented the held mirror, so the uncloak carries
+    /// current pixels instead of the last session's.
+    pub fn prepare_show(&self) {
+        let _ = self.tx.send(GlassConfig {
+            visible: Some(true),
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: None,
+        });
+    }
+
+    /// Text theme. Seeds the material (light surface + dark text, or
+    /// the reverse) until a captured frame can decide from the backdrop
+    /// itself. Sent on create and on every show.
+    pub fn set_theme(&self, dark: bool) {
+        let _ = self.tx.send(GlassConfig {
+            visible: None,
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: Some(dark),
         });
     }
 
@@ -273,6 +340,27 @@ fn disable_main_backdrop(main_sys: isize) {
     crate::logging::info(&format!(
         "[nex][refract] backdrop readback={back} (want 1=NONE, 3=TRANSIENT; get/rc={read_hr})"
     ));
+}
+
+/// Composition-level visibility. A cloaked window keeps its swapchain
+/// image while staying out of the composition, which is what makes an
+/// instant reveal possible.
+fn set_glass_cloaked(hwnd: HWND, cloak: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    let value: i32 = if cloak { 1 } else { 0 };
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as *mut std::ffi::c_void,
+            DWMWA_CLOAK as u32,
+            &value as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if hr < 0 {
+        crate::logging::warn(&format!(
+            "[nex][refract] glass cloak={cloak} failed: HRESULT {hr}"
+        ));
+    }
 }
 
 impl GlassWindow {
@@ -334,6 +422,17 @@ impl GlassWindow {
                 )),
             }
         }
+        // Shown once, cloaked from here on. Revealing a window that was
+        // hidden put an empty window over the desktop: a hidden window
+        // loses its swapchain image, so the panel stayed see-through
+        // until the next present landed. A cloaked window is not
+        // composed but stays shown, so the last presented frame is
+        // there the instant it is uncloaked.
+        set_glass_cloaked(hwnd, true);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+        }
+
         // No DWM transitions on the glass itself: sync_to_main
         // re-inserts it in z-order on every resize, and an animated
         // insert over a flip swapchain reads as a black flash.
@@ -395,9 +494,9 @@ impl GlassWindow {
     }
 
     fn show(&self, show: bool) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, if show { SW_SHOWNA } else { SW_HIDE });
-        }
+        // Visibility is the DWM cloak alone: ShowWindow(SW_HIDE) drops
+        // the rendered frame, so un-hiding put an empty window on screen.
+        set_glass_cloaked(self.hwnd, !show);
         crate::logging::info(&format!("[nex][refract] glass visible={show}"));
     }
 
@@ -440,6 +539,8 @@ struct Engine {
     /// bitmaps underneath via SetInput, so a panel resize costs two
     /// bitmap creates instead of a full graph rebuild.
     blur: ID2D1Effect,
+    /// Backdrop vibrancy: blur output lifted before the bend.
+    saturate: ID2D1Effect,
     displace: ID2D1Effect,
     source: Option<ID2D1Bitmap1>,
     map: Option<ID2D1Bitmap1>,
@@ -545,15 +646,15 @@ impl Engine {
 
         let d2d = d2d_setup(&device)?;
         crate::logging::info(&format!(
-            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} bend={BEND_SCALE} margin={BEZEL_MARGIN}px"
+            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} sat={SATURATION} bend={BEND_SCALE} margin={BEZEL_MARGIN}px pad={BLUR_PAD}"
         ));
         let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 12.0 / 255.0,
-                    g: 14.0 / 255.0,
-                    b: 20.0 / 255.0,
-                    a: TINT_ALPHA,
+                    r: TINT_DARK.0,
+                    g: TINT_DARK.1,
+                    b: TINT_DARK.2,
+                    a: TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * 0.5,
                 },
                 None,
             )
@@ -571,6 +672,19 @@ impl Engine {
                     &BLUR_STDDEV.to_ne_bytes(),
                 )
                 .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
+        }
+        let saturate: ID2D1Effect = unsafe {
+            d2d.CreateEffect(&CLSID_D2D1Saturation as *const _)
+                .map_err(|e| format!("saturation CreateEffect failed: {e:?}"))?
+        };
+        unsafe {
+            saturate
+                .SetValue(
+                    D2D1_SATURATION_PROP_SATURATION.0 as u32,
+                    D2D1_PROPERTY_TYPE_FLOAT,
+                    &SATURATION.to_ne_bytes(),
+                )
+                .map_err(|e| format!("saturation SetValue failed: {e:?}"))?;
         }
         let displace: ID2D1Effect = unsafe {
             d2d.CreateEffect(&CLSID_D2D1DisplacementMap as *const _)
@@ -616,6 +730,7 @@ impl Engine {
             panel_w,
             panel_h,
             blur,
+            saturate,
             displace,
         };
         engine.rebuild_content()?;
@@ -674,7 +789,8 @@ impl Engine {
         // are size-agnostic; only the bitmaps track the panel.
         unsafe {
             self.blur.SetInput(0, &source, true);
-            self.displace.SetInput(0, &blur_output(&self.blur)?, true);
+            self.saturate.SetInput(0, &effect_output(&self.blur)?, true);
+            self.displace.SetInput(0, &effect_output(&self.saturate)?, true);
             self.displace.SetInput(1, &map, true);
         }
         self.source = Some(source);
@@ -701,6 +817,48 @@ impl Engine {
                 .map_err(|e| format!("CopyFromMemory failed: {e:?}"))?;
         }
         Ok(())
+    }
+
+    /// Upload and present one frame with the current material's tint.
+    /// Uploading also refreshes the source bitmap after a resize.
+    fn present_frame(
+        &self,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+        material: &Material,
+        bend: f32,
+    ) -> Result<(), String> {
+        self.set_tint(material.wash());
+        self.set_bend(bend);
+        self.ingest_frame(pixels, w, h)?;
+        self.render_frame()
+    }
+
+    /// Lens strength: 0 is a flat pane, 1 the full rim bend. The show
+    /// swell drives this; setting it costs one effect property write.
+    fn set_bend(&self, bend: f32) {
+        let scale = BEND_SCALE * bend.clamp(0.0, 1.0);
+        unsafe {
+            let _ = self.displace.SetValue(
+                D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &scale.to_ne_bytes(),
+            );
+        }
+    }
+
+    /// Wash colour + alpha over the refracted backdrop.
+    fn set_tint(&self, wash: (f32, f32, f32, f32)) {
+        let (r, g, b, a) = wash;
+        unsafe {
+            self.tint_brush.SetColor(&D2D1_COLOR_F {
+                r,
+                g,
+                b,
+                a: a.clamp(0.0, 1.0),
+            });
+        }
     }
 
     /// Draw the effect into the current backbuffer and present it. The
@@ -730,7 +888,7 @@ impl Engine {
                 bottom: (BLUR_PAD + self.panel_h) as f32,
             };
             self.d2d.DrawImage(
-                &blur_output(displace)?,
+                &effect_output(displace)?,
                 None,
                 Some(&source_rect as *const _),
                 D2D1_INTERPOLATION_MODE_LINEAR,
@@ -848,9 +1006,10 @@ fn bitmap_props_with_alpha(
 
 /// Output image of an effect. Effects derive from ID2D1Properties, not
 /// ID2D1Image, so chaining and drawing go through GetOutput.
-fn blur_output(blur: &ID2D1Effect) -> Result<ID2D1Image, String> {
+fn effect_output(effect: &ID2D1Effect) -> Result<ID2D1Image, String> {
     unsafe {
-        blur.GetOutput()
+        effect
+            .GetOutput()
             .map_err(|e| format!("effect GetOutput failed: {e:?}"))
     }
 }
@@ -909,6 +1068,99 @@ struct Capture {
     protected_logged: bool,
 }
 
+/// Lens strength for the show swell: 0 at the start, 1 once it has run
+/// out. Ease-out cubic - the rim reaches shape quickly, then settles.
+fn swell_bend(elapsed_ms: f32) -> f32 {
+    let p = (elapsed_ms / SWELL_MS).clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
+/// What the worker should do with this pass.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pass {
+    /// Take a frame: the panel is up, or the startup prewarm still owes one.
+    Frame,
+    /// Hidden idle: decide the material, then wait out the poll interval.
+    Poll,
+    /// Hidden idle, poll interval not elapsed yet: sleep and re-check.
+    Wait,
+}
+
+/// Hidden passes decide the material only, once per `HIDDEN_POLL_MS`.
+///
+/// Nothing is presented while hidden and no full-rate acquire/render runs,
+/// but the material must still track the backdrop: the host pushes the
+/// show state — palette included — *before* it reveals the panel, so that
+/// push has to already carry the current backdrop's material or the page
+/// paints the last session's. The startup prewarm is exempt: it must
+/// present so the first show has a ready surface.
+fn pass_plan(visible: bool, prewarm_pending: bool, since_poll_ms: u64) -> Pass {
+    if visible || prewarm_pending {
+        return Pass::Frame;
+    }
+    if since_poll_ms < HIDDEN_POLL_MS {
+        return Pass::Wait;
+    }
+    Pass::Poll
+}
+
+/// Present pacing for swell passes: a static desktop never sends a frame,
+/// so the swell re-presents the held mirror — paced like a capture, so a
+/// stalled desktop cannot spin the loop.
+fn swell_pass_due(since_present_ms: u64) -> bool {
+    since_present_ms >= MIN_FRAME_MS as u64
+}
+
+/// Per-show state the worker arms on a fresh show and consumes while it
+/// presents: one held re-present and one lens swell.
+struct ShowCycle {
+    /// Re-present the held mirror on the next pass. A show is about to be
+    /// revealed and a flip swapchain paints nothing until the next
+    /// Present, while the desktop may stay still for a while yet.
+    refresh: bool,
+    /// When the current swell began, if one is running.
+    swell: Option<Instant>,
+}
+
+impl ShowCycle {
+    /// Arm a fresh show: present the held mirror and swell the lens in.
+    fn arm(&mut self) {
+        self.refresh = true;
+        self.swell = Some(Instant::now());
+    }
+
+    /// Take the pending held re-present. One per show — a refresh that is
+    /// never consumed re-presents the mirror every pass.
+    fn take_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.refresh)
+    }
+
+    /// Lens strength this pass, and whether the swell is still running.
+    fn bend(&mut self) -> (f32, bool) {
+        match self.swell {
+            Some(t0) => self.bend_at(t0.elapsed().as_secs_f32() * 1000.0),
+            None => (1.0, false),
+        }
+    }
+
+    /// [`Self::bend`] for an elapsed time, so the run-out is testable
+    /// without a clock. Clears the swell once it reaches full.
+    fn bend_at(&mut self, elapsed_ms: f32) -> (f32, bool) {
+        let value = swell_bend(elapsed_ms);
+        if value >= 1.0 {
+            self.swell = None;
+            (value, false)
+        } else {
+            (value, true)
+        }
+    }
+
+    /// Is a swell running (so this pass should re-present the mirror)?
+    fn swelling(&self) -> bool {
+        self.swell.is_some()
+    }
+}
+
 fn worker_main(
     glass_sys: isize,
     initial_main_sys: isize,
@@ -934,6 +1186,8 @@ fn worker_main(
     let mut last_present = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
+    // Anchor for the hidden material poll.
+    let mut last_warm = Instant::now();
     let mut stat_t = Instant::now();
     let (mut n_cap, mut n_pre, mut copy_us, mut render_us) = (0u64, 0u64, 0u64, 0u64);
     // Last panel position the glass was aligned to. Re-align if the
@@ -942,6 +1196,20 @@ fn worker_main(
     // Full-frame staging mirror valid yet (fresh capture starts
     // uninitialized; first mirrored frame arms it).
     let mut staged = false;
+    // Backdrop-driven material (surface appearance + page palette).
+    // Seeded dark; the host sends the text theme on create and on each
+    // show, and every captured frame re-decides from the backdrop.
+    let mut material = Material {
+        luma: None,
+        light: false,
+        dwell: 0,
+        fresh: false,
+    };
+    // Last material the page was told about; None forces a re-send.
+    let mut palette_sent: Option<bool> = None;
+    // Per-show state: the held re-present and the lens swell a fresh show
+    // arms (see `ShowCycle`).
+    let mut cycle = ShowCycle { refresh: false, swell: None };
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
     let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
@@ -952,6 +1220,20 @@ fn worker_main(
     loop {
         while let Ok(cfg) = rx.try_recv() {
             if let Some(v) = cfg.visible {
+                if v && !visible {
+                    // Fresh show: re-announce the material, the page may
+                    // have re-seeded its palette to the system theme.
+                    palette_sent = None;
+                    // And let the first frame decide outright, so the
+                    // page palette lands with the glass instead of
+                    // waiting for the desktop to change eight times.
+                    material.fresh = true;
+                    material.dwell = 0;
+                    // Present the held mirror before the reveal and swell
+                    // the lens in: a pane of glass settling, not a surface
+                    // snapping on.
+                    cycle.arm();
+                }
                 visible = v;
             }
             if cfg.main_sys != 0 {
@@ -963,19 +1245,40 @@ fn worker_main(
             if let Some(p) = cfg.panel_wh {
                 cfg_panel = Some(p);
             }
+            if let Some(dark) = cfg.theme_dark {
+                // The theme seeds the material once, before any backdrop
+                // has been seen. After that the backdrop rules: seeding
+                // on every show would flip a backdrop that has not moved
+                // whenever it sits inside the hysteresis band.
+                if material.luma.is_none() {
+                    material.light = !dark;
+                    material.dwell = 0;
+                    if let Some(e) = engine.as_ref() {
+                        e.set_tint(material.wash());
+                    }
+                }
+            }
         }
         if main_sys == 0 {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if !visible && !prewarm_pending {
-            // Hidden: hold the duplication session + staging mirror (no
-            // acquire/render) so the next show presents a fresh frame
-            // within milliseconds instead of paying a capture restart.
-            // ponytail: one idle session; no polling cost while hidden.
+        // Hidden: hold the duplication session + staging mirror (no
+        // full-rate acquire/render) so the next show presents a fresh
+        // frame within milliseconds instead of paying a capture restart.
+        // A slow poll still decides the material (see `pass_plan`).
+        // ponytail: one idle session at 4Hz; no present while hidden.
+        let plan = pass_plan(visible, prewarm_pending, last_warm.elapsed().as_millis() as u64);
+        if plan == Pass::Wait {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         }
+        if plan == Pass::Poll {
+            last_warm = Instant::now();
+        }
+        // Hidden idle passes decide the material only. The startup
+        // prewarm still presents, so the first show has a ready surface.
+        let warm = plan == Pass::Poll;
         let Some((mx, my, mw, mh)) = main_rect(main_sys) else {
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -994,6 +1297,8 @@ fn worker_main(
         // current size. Panel changes rebuild content bitmaps in place
         // (buffers stay valid, presents never stall); buffers grow only
         // on DPI/scale change. No steady-state ResizeBuffers, no lag.
+        // Lens strength this pass: rises through the show swell, 1 after.
+        let bend = cycle.bend().0;
         if engine.is_none() {
             match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(e) => engine = Some(e),
@@ -1031,12 +1336,24 @@ fn worker_main(
                 }
                 rebuilt = true;
             }
-            if rebuilt {
-                // Fresh zeros after rebuild: re-present immediately so a
-                // static desktop (no new duplication frame) never leaves
-                // the panel black. Exact crop from the staging mirror —
-                // never a stretched old frame; stretch is only the
-                // fallback when the mirror isn't armed yet.
+            // A show re-presents the same held frame: the window is about
+            // to be revealed and a flip swapchain paints nothing until
+            // the next Present, while the desktop may stay still for a
+            // while yet.
+            let refresh = cycle.take_refresh();
+            // The swell re-presents the held frame: the desktop is often
+            // static, so no captured frame would drive the animation.
+            // Capped like a captured frame.
+            let swelling =
+                cycle.swelling() && swell_pass_due(last_present.elapsed().as_millis() as u64);
+            // Swell passes are routine (a dozen per show): keep them out
+            // of the log, only rebuilds and reveal refreshes are news.
+            let announce = rebuilt || refresh;
+            if rebuilt || refresh || swelling {
+                // Fresh zeros after rebuild, or a reveal pending: present
+                // immediately. Exact crop from the staging mirror - never
+                // a stretched old frame; stretch is only the fallback
+                // when the mirror isn't armed yet.
                 let exact: Option<(Vec<u8>, u32, u32)> = if staged {
                     capture.as_ref().and_then(|cap| {
                         let pad = BLUR_PAD as i32;
@@ -1071,18 +1388,17 @@ fn worker_main(
                     None
                 };
                 if let Some((fresh, fw, fh)) = exact {
-                    match e
-                        .ingest_frame(&fresh, fw, fh)
-                        .and_then(|_| e.render_frame())
-                    {
+                    match e.present_frame(&fresh, fw, fh, &material, bend) {
                         Ok(()) => {
                             n_pre += 1;
                             last_present = Instant::now();
                             last_frame = Some((fresh, fw, fh));
-                            crate::logging::info(&format!(
-                                "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
-                                t0.elapsed().as_millis()
-                            ));
+                            if announce {
+                                crate::logging::info(&format!(
+                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                    t0.elapsed().as_millis()
+                                ));
+                            }
                         }
                         Err(error) => crate::logging::warn(&format!(
                             "[nex][refract] resize re-present failed: {error}"
@@ -1092,18 +1408,17 @@ fn worker_main(
                     let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
                     if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
                         let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e
-                            .ingest_frame(&stretched, ew, eh)
-                            .and_then(|_| e.render_frame())
-                        {
+                        match e.present_frame(&stretched, ew, eh, &material, bend) {
                             Ok(()) => {
                                 n_pre += 1;
                                 last_present = Instant::now();
                                 last_frame = Some((stretched, ew, eh));
-                                crate::logging::info(&format!(
-                                    "[nex][refract] panel {pw}x{ph} rebuilt+re-presented in {}ms",
-                                    t0.elapsed().as_millis()
-                                ));
+                                if announce {
+                                    crate::logging::info(&format!(
+                                        "[nex][refract] panel {pw}x{ph} re-presented in {}ms",
+                                        t0.elapsed().as_millis()
+                                    ));
+                                }
                             }
                             Err(error) => crate::logging::warn(&format!(
                                 "[nex][refract] resize re-present failed: {error}"
@@ -1226,8 +1541,15 @@ fn worker_main(
             )?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
-            eng.ingest_frame(&pixels, bw, bh)?;
-            eng.render_frame()?;
+            let flipped = material.update(&pixels);
+            // A hidden poll decides the material only: no upload, no draw.
+            if !warm {
+                eng.present_frame(&pixels, bw, bh, &material, bend)?;
+            }
+            if flipped || palette_sent != Some(material.light) {
+                palette_sent = Some(material.light);
+                let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
+            }
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             Ok((us, render_us, pixels))
@@ -1236,11 +1558,13 @@ fn worker_main(
             Ok((us, frame_render_us, pixels)) => {
                 copy_us += us;
                 render_us += frame_render_us;
-                n_pre += 1;
                 n_fail = 0;
-                last_present = Instant::now();
                 staged = true;
                 last_frame = Some((pixels, bw, bh));
+                if !warm {
+                    n_pre += 1;
+                    last_present = Instant::now();
+                }
                 if !ready.swap(true, Ordering::AcqRel) {
                     let _ = proxy.send_event(UiCommand::GlassReady);
                 }
@@ -1440,6 +1764,107 @@ fn crop_staging(
     Ok(pixels)
 }
 
+/// Backdrop-driven material: smoothed luminance picks a light or dark
+/// surface (with hysteresis), and the tint always pushes the surface
+/// toward that material's own extreme so text keeps its contrast.
+struct Material {
+    /// Smoothed backdrop luminance; None until the first frame.
+    luma: Option<f32>,
+    /// Light surface + dark text (true) or dark surface + light text.
+    light: bool,
+    /// Consecutive frames the backdrop has sat past the switch.
+    dwell: u32,
+    /// The next frame decides outright - no smoothing, no dwell. Set by
+    /// every fresh show: dwell guards against the backdrop changing
+    /// while the panel is open, and frames only arrive when the desktop
+    /// changes, so settling on open would leave the page palette
+    /// seconds behind the glass.
+    fresh: bool,
+}
+
+impl Material {
+    /// Fold in one captured frame. Returns true when the material
+    /// flipped - the caller tells the page, which swaps its palette.
+    fn update(&mut self, pixels: &[u8]) -> bool {
+        let luma = frame_luma(pixels);
+        let ema = match self.luma {
+            Some(prev) if !self.fresh => prev + (luma - prev) * LUMA_EMA,
+            _ => luma,
+        };
+        let settle = self.fresh;
+        self.fresh = false;
+        self.luma = Some(ema);
+        let switch = if self.light {
+            MATERIAL_SWITCH - MATERIAL_HYSTERESIS
+        } else {
+            MATERIAL_SWITCH
+        };
+        if (ema > switch) == self.light {
+            self.dwell = 0;
+            return false;
+        }
+        // Past the switch - but only flip once the backdrop has stayed
+        // there a moment, so a scene cut or a fast scroll cannot flash
+        // the palette.
+        if !settle {
+            self.dwell += 1;
+            if self.dwell < MATERIAL_DWELL {
+                return false;
+            }
+        }
+        self.dwell = 0;
+        self.light = ema > switch;
+        true
+    }
+
+    /// Wash (r, g, b, a) over the current backdrop. Colour and alpha ease
+    /// across the hysteresis band rather than stepping when the palette
+    /// flips, so the composite under the text never jumps; `light` only
+    /// picks the page palette.
+    fn wash(&self) -> (f32, f32, f32, f32) {
+        let luma = self.luma.unwrap_or(0.5).clamp(0.0, 1.0);
+        let floor = MATERIAL_SWITCH - MATERIAL_HYSTERESIS;
+        let t = ((luma - floor) / (2.0 * MATERIAL_HYSTERESIS)).clamp(0.0, 1.0);
+        // A dark material washes a bright backdrop and follows the
+        // backdrop; a light one is the mirror of it. Blend both across
+        // the band so the crossover is continuous.
+        let alpha = |push: f32| TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push;
+        let a = alpha(1.0 - luma) * (1.0 - t) + alpha(luma) * t;
+        let mix = |dark: f32, light: f32| dark + (light - dark) * t;
+        (
+            mix(TINT_DARK.0, TINT_LIGHT.0),
+            mix(TINT_DARK.1, TINT_LIGHT.1),
+            mix(TINT_DARK.2, TINT_LIGHT.2),
+            a,
+        )
+    }
+}
+
+/// Average luminance (BT.709) of a BGRA frame, sampled every 16th
+/// pixel: plenty for a tint response, ~free next to the crop.
+fn frame_luma(pixels: &[u8]) -> f32 {
+    const STEP_BYTES: usize = 64; // 16 BGRA pixels
+    let mut sum = 0.0f32;
+    let mut n = 0.0f32;
+    let mut i = 0usize;
+    while i + 2 < pixels.len() {
+        let (b, g, r) = (
+            pixels[i] as f32,
+            pixels[i + 1] as f32,
+            pixels[i + 2] as f32,
+        );
+        sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        n += 1.0;
+        i += STEP_BYTES;
+    }
+    if n == 0.0 {
+        // No pixels (shouldn't happen): mid gray keeps the tint neutral.
+        0.5
+    } else {
+        (sum / n / 255.0).clamp(0.0, 1.0)
+    }
+}
+
 /// Nearest-neighbor BGRA stretch: fallback only, when the staging
 fn stretch_bgra_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
@@ -1553,4 +1978,274 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
         (client.bottom - client.top).max(1),
     );
     Some((origin.x, origin.y, w as u32, h as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clamp_panel_box, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend, swell_pass_due,
+        Material, Pass, ShowCycle, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH,
+        MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+    };
+
+    fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
+        (0..pixels).flat_map(|_| [b, g, r, 255]).collect()
+    }
+
+    fn gray(level: u8, pixels: usize) -> Vec<u8> {
+        bgra(level, level, level, pixels)
+    }
+
+    /// Feed frames at one level; returns how many flips were reported.
+    fn warm(m: &mut Material, level: u8, frames: usize) -> usize {
+        (0..frames).filter(|_| m.update(&gray(level, 64))).count()
+    }
+
+    #[test]
+    fn luma_bounds_and_weighting() {
+        assert_eq!(frame_luma(&[]), 0.5);
+        assert!(frame_luma(&bgra(0, 0, 0, 4096)) < 0.01);
+        assert!(frame_luma(&bgra(255, 255, 255, 4096)) > 0.99);
+        // BT.709: green reads brighter than an equal-valued blue.
+        assert!(frame_luma(&bgra(0, 255, 0, 4096)) > frame_luma(&bgra(255, 0, 0, 4096)));
+        // The tint range is monotone and inside the brush's legal range.
+        assert!(0.0 < TINT_MIN_ALPHA && TINT_MIN_ALPHA < TINT_MAX_ALPHA && TINT_MAX_ALPHA <= 1.0);
+    }
+
+    #[test]
+    fn material_follows_the_backdrop() {
+        let mut m = Material {
+            luma: None,
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        // A bright scene turns the surface light — reported exactly once.
+        assert_eq!(warm(&mut m, 255, 60), 1);
+        assert!(m.light);
+        // A dark scene takes it back — also exactly once.
+        assert_eq!(warm(&mut m, 0, 60), 1);
+        assert!(!m.light);
+    }
+
+    #[test]
+    fn swell_runs_out_and_never_overshoots() {
+        assert_eq!(swell_bend(0.0), 0.0);
+        // Monotone rise, easing off: the second half adds less than the
+        // first.
+        let half = swell_bend(SWELL_MS * 0.5);
+        assert!(half > 0.5);
+        assert!(1.0 - half < half - swell_bend(0.0));
+        // Clamped: a stalled loop cannot bend past the reference scale.
+        assert_eq!(swell_bend(SWELL_MS), 1.0);
+        assert_eq!(swell_bend(SWELL_MS * 5.0), 1.0);
+    }
+
+    /// Luminance of the glass: the wash composited over the backdrop.
+    fn composite(wash: (f32, f32, f32, f32), luma: f32) -> f32 {
+        let tint = 0.2126 * wash.0 + 0.7152 * wash.1 + 0.0722 * wash.2;
+        wash.3 * tint + (1.0 - wash.3) * luma
+    }
+
+    #[test]
+    fn wash_stays_in_band_and_crosses_the_switch_smoothly() {
+        let at = |luma: f32| Material {
+            luma: Some(luma),
+            light: false,
+            dwell: 0,
+            fresh: false,
+        }
+        .wash();
+        for luma in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let a = at(luma).3;
+            assert!(
+                (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
+                "alpha {a} out of band at {luma}"
+            );
+        }
+        // The palette flips at the switch: the glass itself must not.
+        let lo = MATERIAL_SWITCH - 0.001;
+        let hi = MATERIAL_SWITCH + 0.001;
+        let jump = (composite(at(hi), hi) - composite(at(lo), lo)).abs();
+        assert!(jump < 0.01, "wetness jumped {jump} across the switch");
+    }
+
+    #[test]
+    fn dwell_swallows_transient_backdrops() {
+        // One bright frame past the switch counts, but does not flip;
+        // the next frame back under the switch resets the count.
+        let mut m = Material {
+            luma: Some(0.54),
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        assert!(!m.update(&gray(255, 64)));
+        assert!(!m.light);
+        assert_eq!(m.dwell, 1, "a crossing frame starts the dwell count");
+        assert!(!m.update(&gray(20, 64)));
+        assert_eq!(m.dwell, 0, "a frame back under the switch resets it");
+        assert!(!m.light);
+    }
+
+    #[test]
+    fn a_fresh_show_decides_on_its_first_frame() {
+        // Panel was open over a dark backdrop, reopens over a bright one:
+        // the first frame must flip the palette, not the eighth. Frames
+        // only arrive when the desktop changes, so waiting to settle
+        // would leave the page palette seconds behind the glass.
+        let mut m = Material {
+            luma: Some(0.1),
+            light: false,
+            dwell: 0,
+            fresh: true,
+        };
+        assert!(m.update(&gray(255, 64)));
+        assert!(m.light);
+        // Settling is back on for the frames after the open.
+        let mut m = Material {
+            luma: Some(0.54),
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        assert!(!m.update(&gray(255, 64)), "dwell must still gate later flips");
+        assert!(!m.light);
+    }
+
+    #[test]
+    fn material_hysteresis_holds_between_thresholds() {
+        // Mid-gray sits above the light-stay floor and below the
+        // dark-to-light switch: neither material should flip on it.
+        let mid = (((MATERIAL_SWITCH + MATERIAL_SWITCH - MATERIAL_HYSTERESIS) / 2.0) * 255.0) as u8;
+        let mut m = Material {
+            luma: None,
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        assert_eq!(warm(&mut m, mid, 300), 0);
+        assert!(!m.light);
+        assert_eq!(warm(&mut m, 255, 300), 1);
+        assert!(m.light);
+        assert_eq!(warm(&mut m, mid, 300), 0, "hysteresis must hold the material");
+        assert!(m.light);
+        assert_eq!(warm(&mut m, 0, 300), 1);
+        assert!(!m.light);
+    }
+
+    #[test]
+    fn a_show_arms_one_held_represent() {
+        // A flip swapchain paints nothing until the next Present, so a
+        // show arms one held re-present. Exactly one: a refresh that is
+        // never consumed re-presents the mirror every pass.
+        let mut c = ShowCycle { refresh: false, swell: None };
+        assert!(!c.take_refresh(), "nothing armed before a show");
+        c.arm();
+        assert!(c.take_refresh(), "the reveal needs the held frame");
+        assert!(!c.take_refresh(), "one present per show, not a loop");
+        c.arm();
+        assert!(c.take_refresh(), "the next show arms it again");
+    }
+
+    #[test]
+    fn the_swell_starts_flat_and_ends_exactly_once() {
+        // The swell drives the lens from flat to full on a static desktop.
+        // It must end: a swell that stays armed re-presents forever.
+        let mut c = ShowCycle { refresh: false, swell: None };
+        assert_eq!(c.bend(), (1.0, false), "no show means no swell");
+        assert!(!c.swelling());
+        c.arm();
+        assert!(c.swelling());
+        let (start, running) = c.bend_at(0.0);
+        assert_eq!(start, 0.0);
+        assert!(running, "still running at its start");
+        let (end, running) = c.bend_at(SWELL_MS);
+        assert_eq!(end, 1.0);
+        assert!(!running, "a full bend ends the swell");
+        assert!(!c.swelling(), "and it must not stay armed");
+        // A pass after the swell reads full, and cannot restart it.
+        assert_eq!(c.bend_at(SWELL_MS * 3.0), (1.0, false));
+        assert_eq!(c.bend(), (1.0, false));
+    }
+
+    #[test]
+    fn hidden_passes_poll_the_backdrop_on_an_interval() {
+        // Hidden: the material must still track the backdrop, because the
+        // host pushes the show state (palette included) before it reveals
+        // the panel — but not at full rate, and never a present.
+        assert_eq!(pass_plan(true, false, 0), Pass::Frame, "panel is up");
+        assert_eq!(
+            pass_plan(false, true, 0),
+            Pass::Frame,
+            "the startup prewarm still owes a present"
+        );
+        assert_eq!(pass_plan(false, false, 0), Pass::Wait, "just polled");
+        assert_eq!(pass_plan(false, false, HIDDEN_POLL_MS - 1), Pass::Wait);
+        assert_eq!(pass_plan(false, false, HIDDEN_POLL_MS), Pass::Poll);
+    }
+
+    #[test]
+    fn swell_passes_are_frame_paced() {
+        // Swell passes re-present the held mirror; a stalled desktop must
+        // not spin the loop faster than a captured frame would.
+        assert!(!swell_pass_due(0));
+        assert!(!swell_pass_due(MIN_FRAME_MS as u64 - 1));
+        assert!(swell_pass_due(MIN_FRAME_MS as u64));
+    }
+
+    #[test]
+    fn crop_box_clamps_to_the_frame() {
+        let frame = (1920u32, 1080u32);
+        // Inside the frame: exactly the box the panel asked for.
+        assert_eq!(
+            clamp_panel_box(100, 200, 700, 441, 0, 0, frame.0, frame.1),
+            (100, 200, 700, 441)
+        );
+        // Offset output origin subtracts (monitor not at 0,0).
+        assert_eq!(
+            clamp_panel_box(100, 200, 700, 441, 100, 200, frame.0, frame.1),
+            (0, 0, 700, 441)
+        );
+        // Flush to the left/top edge: clamped origin, shorter box — the
+        // caller treats a short box as "no exact crop" and holds the last
+        // frame instead of showing a half-cropped one.
+        assert_eq!(
+            clamp_panel_box(-8, -8, 700, 441, 0, 0, frame.0, frame.1),
+            (0, 0, 692, 433)
+        );
+        // Same on the far side.
+        assert_eq!(
+            clamp_panel_box(1800, 1000, 700, 441, 0, 0, frame.0, frame.1),
+            (1800, 1000, 120, 80)
+        );
+        // Fully off the output: zero area, never a panic or a wrap.
+        assert_eq!(
+            clamp_panel_box(4000, 4000, 700, 441, 0, 0, frame.0, frame.1),
+            (1920, 1080, 0, 0)
+        );
+    }
+
+    #[test]
+    fn fallback_stretch_keeps_channels_and_size() {
+        // 2x2 BGRA source stretched to 4x4: every output pixel is a copy
+        // of one source pixel. A stride or channel swap here paints the
+        // fallback fill as garbage instead of the last frame.
+        let src = [
+            1u8, 2, 3, 255, /* (0,0) */ 4, 5, 6, 255, /* (1,0) */
+            7, 8, 9, 255, /* (0,1) */ 10, 11, 12, 255, /* (1,1) */
+        ];
+        let out = stretch_bgra_nearest(&src, 2, 2, 4, 4);
+        assert_eq!(out.len(), 4 * 4 * 4);
+        let px = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 4;
+            [out[i], out[i + 1], out[i + 2], out[i + 3]]
+        };
+        assert_eq!(px(0, 0), [1, 2, 3, 255]);
+        assert_eq!(px(3, 0), [4, 5, 6, 255], "nearest neighbour, no filtering");
+        assert_eq!(px(3, 3), [10, 11, 12, 255], "the far corner is the last source pixel");
+        // A source that does not match its stated size yields a zero
+        // buffer, never a partial or mis-strided copy.
+        assert!(stretch_bgra_nearest(&src, 3, 2, 2, 2).iter().all(|b| *b == 0));
+    }
 }

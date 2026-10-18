@@ -202,6 +202,20 @@ pub struct ShimState {
     /// Native glass layer active below the page: the page drops its own
     /// painted backgrounds so live pixels show through (spike).
     pub glass_native: bool,
+    /// The renderer has presented a frame the layer can show. Until it
+    /// has, the page keeps its opaque surface: transparency over a glass
+    /// layer with nothing in it is a see-through panel, and a renderer
+    /// that never comes up would leave the panel invisible.
+    pub glass_frame_ready: bool,
+    /// Whether the cursor is inside the panel at show. The page keeps the
+    /// pointer position from the previous session to keep the selection
+    /// under a stationary mouse; if the pointer is elsewhere, remembering
+    /// it would re-select a row nobody is pointing at.
+    pub pointer_over_panel: bool,
+    /// The glass material is currently a light surface, so the page uses
+    /// the light palette with dark text (vibrancy: the material follows
+    /// the backdrop, and the text follows the material).
+    pub glass_light: bool,
     /// Post-update version with unseen notes. When set, the update notice
     /// opens the What's New view instead of running an update check.
     pub whats_new_pending: Option<String>,
@@ -243,6 +257,9 @@ impl Default for ShimState {
             update_available: false,
             whats_new_pending: None,
             glass_native: false,
+            pointer_over_panel: false,
+            glass_frame_ready: false,
+            glass_light: false,
             panel_background: crate::config::PanelBackground::Black,
             content_pending: false,
         }

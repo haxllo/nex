@@ -1075,13 +1075,16 @@ fn worker_main(
                 cfg_panel = Some(p);
             }
             if let Some(dark) = cfg.theme_dark {
-                // Theme seeds the material's starting state only: the
-                // first frame after a show decides from the backdrop,
-                // and the wash tracks the backdrop luminance.
-                material.light = !dark;
-                material.dwell = 0;
-                if let Some(e) = engine.as_ref() {
-                    e.set_tint(material.wash());
+                // The theme seeds the material once, before any backdrop
+                // has been seen. After that the backdrop rules: seeding
+                // on every show would flip a backdrop that has not moved
+                // whenever it sits inside the hysteresis band.
+                if material.luma.is_none() {
+                    material.light = !dark;
+                    material.dwell = 0;
+                    if let Some(e) = engine.as_ref() {
+                        e.set_tint(material.wash());
+                    }
                 }
             }
         }

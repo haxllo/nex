@@ -3156,6 +3156,9 @@
       if (typeof state.glassNative === "boolean") {
         document.documentElement.classList.toggle("glass-native", state.glassNative);
       }
+      if (typeof state.glassClip === "string") {
+        document.documentElement.style.setProperty("--glass-clip", state.glassClip);
+      }
 
       // Vibrancy: the material picks the palette, not the system theme,
       // so text stays dark on a light surface and light on a dark one.

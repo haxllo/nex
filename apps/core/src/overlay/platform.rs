@@ -51,6 +51,21 @@ pub(crate) fn detect_system_theme() -> Theme {
     }
 }
 
+pub(crate) fn animations_enabled() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION};
+    let mut enabled = 1_i32;
+    unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &mut enabled as *mut _ as *mut c_void, 0);
+    }
+    enabled != 0
+}
+
+pub(crate) fn transparency_enabled() -> bool {
+    detect_registry_dword(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "EnableTransparency",
+    ) != Some(0)
+}
+
 /// Windows accent color as `#RRGGBB`.
 ///
 /// Sources, in order of authority:

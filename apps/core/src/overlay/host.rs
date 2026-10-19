@@ -2257,7 +2257,8 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// Native glass renders only in glass panel mode: opaque black/white
 /// panels paint solid and the layer stays parked (no capture, no wait).
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+    crate::overlay::platform::transparency_enabled()
+        && state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
 }
 
 /// Wake the renderer a beat before the panel is revealed so its next
@@ -2309,10 +2310,15 @@ fn sync_webview_background(
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     let Some(wv) = webview else { return };
-    let mode = state
+    let mut mode = state
         .lock()
         .map(|s| s.panel_background)
         .unwrap_or(crate::config::PanelBackground::Glass);
+    if !crate::overlay::platform::transparency_enabled() && !mode.is_opaque() {
+        mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
+            crate::config::PanelBackground::White
+        } else { crate::config::PanelBackground::Black };
+    }
     static LAST_MODE: std::sync::Mutex<Option<crate::config::PanelBackground>> =
         std::sync::Mutex::new(None);
     if LAST_MODE.lock().map(|g| *g == Some(mode)).unwrap_or(false) {
@@ -2407,6 +2413,14 @@ fn focus_input(webview: &Option<WebView>) {
 /// Serialize the overlay state into lightweight JSON without icon data.
 /// Icon fields contain only the file path (used as a JS cache key).
 fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
+    snapshot_state_with_transparency(s, show_pending, crate::overlay::platform::transparency_enabled())
+}
+
+fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transparent: bool) -> String {
+    let background = if !transparent && !s.panel_background.is_opaque() {
+        if s.theme == Theme::Light { "white" } else { "black" }
+    } else { s.panel_background.as_str() };
+    static LENS_CLIP: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::overlay::refraction::lens_clip_css);
     let rows: Vec<serde_json::Value> = s
         .rows
         .iter()
@@ -2505,9 +2519,10 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
         "pointerOverPanel": s.pointer_over_panel,
-        "panelBackground": s.panel_background.as_str(),
-        "glassNative": s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
-        "glassLight": s.glass_native && s.glass_light,
+        "panelBackground": background,
+        "glassNative": transparent && s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
+        "glassLight": transparent && s.glass_native && s.glass_light,
+        "glassClip": &*LENS_CLIP,
     })
     .to_string()
 }
@@ -2592,19 +2607,24 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         (
             s.theme == Theme::Dark,
             s.glass_native,
-            s.panel_background.is_opaque(),
+            s.panel_background.is_opaque() || !crate::overlay::platform::transparency_enabled(),
         )
     }).unwrap_or((true, false, false));
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
-    // DWM default corners (8px on Win11): the OS owns the silhouette, no
-    // custom GDI regions anywhere. Opaque WebView surfaces and glass both
-    // paint inside it.
-    let rounded_corners = DWMWCP_DEFAULT;
+    // Native glass uses the same continuous profile for both HWND regions
+    // and CSS. Opaque/acrylic modes retain the system's default corners.
+    let rounded_corners = if glass_native && !opaque_panel {
+        windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
+    } else { DWMWCP_DEFAULT };
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+    // Native glass already shades its own edge. A second system frame
+    // reads as an unrelated hard outline (especially on bright backdrops).
+    let border_color: u32 = if glass_native && !opaque_panel { 0xFFFFFFFE } else { 0xFFFFFFFF };
+    let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
 
     // Keep DWM acrylic for the fallback path. With the native refraction
     // layer active, even reapplying acrylic on a later show paints over the
@@ -2617,10 +2637,8 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         DWMSBT_TRANSIENTWINDOW
     };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
-    // Frame rendering stays on: with DEFAULT corners DWM draws the rounded
-    // silhouette and clips the whole window (child included) itself.
-    // No BORDER_COLOR dye: BBGGRR hand values rendered copper, and their
-    // UI leaves the system default border alone. DWM draws it.
+    // Frame rendering stays on; glass supplies its own region at reveal.
+    // BORDER_COLOR above uses DWM's NONE/DEFAULT sentinels, not a tint.
     let available = if opaque_panel {
         // Opaque panels paint solid over an opaque WebView surface
         // (ClearType): no backdrop, and no acrylic fallback — any
@@ -3351,7 +3369,7 @@ fn unregister_raw_input_sink() {
 
 #[cfg(test)]
 mod snapshot_tests {
-    use super::snapshot_state_json;
+    use super::snapshot_state_with_transparency;
     use crate::config::PanelBackground;
     use crate::overlay::model::ShimState;
     use serde_json::{json, Value};
@@ -3376,7 +3394,16 @@ mod snapshot_tests {
     }
 
     fn push(s: &ShimState) -> Value {
-        serde_json::from_str(&snapshot_state_json(s, false)).expect("snapshot is JSON")
+        serde_json::from_str(&snapshot_state_with_transparency(s, false, true)).expect("snapshot is JSON")
+    }
+
+    #[test]
+    fn reduced_transparency_keeps_page_opaque_even_with_ready_glass() {
+        let s = state(true, true, true, PanelBackground::Glass);
+        let push: Value = serde_json::from_str(&snapshot_state_with_transparency(&s, false, false)).unwrap();
+        assert_eq!(push["glassNative"], json!(false));
+        assert_eq!(push["glassLight"], json!(false));
+        assert!(push["panelBackground"] == "black" || push["panelBackground"] == "white");
     }
 
     #[test]

@@ -1991,6 +1991,8 @@ html[data-native-material="acrylic"] #context-menu {
 html.glass-native #panel {
   background: transparent;
   box-shadow: none;
+  border-radius: 0;
+  clip-path: var(--glass-clip);
   /* Subtitle-style legibility: a tight near-opaque shadow carries text
      over any backdrop, the soft one keeps the edge from reading as a
      stroke. The tint alone cannot guarantee contrast — partial
@@ -2089,62 +2091,15 @@ html.glass-fading {
     --panel-reflection 260ms ease;
 }
 
-/* Specular rim: gradient edge light over the refracted backdrop —
-   bright where the light falls (top-left), dim opposite, instead of a
-   flat uniform ring. Radius inherited (no fourth radius owner). */
+/* Curved lighting, inner shade and fine dither now live in D2D beneath
+   the page. No second, stationary specular layer over the text. */
+html.glass-native #panel::before,
 html.glass-native #panel::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  border-radius: inherit;
-  pointer-events: none;
-  padding: 1px;
-  background: linear-gradient(
-    145deg,
-    rgba(255, 255, 255, 0.45) 0%,
-    rgba(255, 255, 255, 0.09) 22%,
-    rgba(255, 255, 255, 0.03) 52%,
-    rgba(255, 255, 255, 0.07) 76%,
-    rgba(255, 255, 255, 0.28) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
+  content: none;
 }
 
-/* Interior glint: the diagonal sheen the opaque modes keep in the
-   panel background, reinstated under page content (glass drops the
-   painted background). Sits below z-indexed rows. A fine noise layer
-   dithers the 8-bit alpha ramp — without it the sheen reads as banding
-   stripes over smooth backdrops, and every stop fades to the same hue
-   at zero alpha so the ramp never passes through black. */
-html.glass-native #panel::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='96' height='96' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E")
-      repeat,
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.05),
-      rgba(255, 255, 255, 0) 10%
-    ),
-    linear-gradient(
-      136deg,
-      var(--panel-glint) 0%,
-      rgba(255, 255, 255, 0) 28%,
-      rgba(255, 255, 255, 0) 74%,
-      var(--panel-reflection) 100%
-    );
+@media (prefers-reduced-motion: reduce) {
+  html.glass-fading, html.glass-fading * { transition: none !important; }
 }
 
 html.glass-native #divider {

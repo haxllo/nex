@@ -225,14 +225,23 @@ pub(crate) enum UiCommand {
     Hide,
     /// Hide and signal completion (used for synchronous hide-before-launch).
     HideSync(std::sync::mpsc::Sender<()>),
+    /// The glass worker declared its D2D engine persistently failed. The
+    /// panel switches to the opaque fallback instead of a transparent page
+    /// over a surface that will not present.
+    GlassFailed,
     /// Fired by the warm-release timer; if still hidden and the
     /// generation matches, clears the icon cache while keeping the
     /// WebView warm for consistent re-open timing.
     Teardown(u64),
     /// The page painted after a push_state — trigger deferred show.
     Painted,
-    /// The first native glass frame was presented and can be revealed.
-    GlassReady,
+    /// The native glass renderer presented a frame at this panel size. The
+    /// layer is uncloaked only once such an ack matches the size the page
+    /// has, so the first pixels seen belong to the current backdrop.
+    GlassPresented {
+        w: u32,
+        h: u32,
+    },
     /// The glass material changed appearance (light surface + dark text,
     /// or the reverse). The page swaps its palette to follow.
     GlassPalette(bool),
@@ -508,24 +517,40 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
 
                         }
                     }
-                    UiCommand::GlassReady => {
-                        // The renderer has a frame. Record it so the page is
-                        // allowed to drop its painted surface, then reveal
-                        // the layer before that push lands: glass first, then
-                        // transparency, never the other way round.
-                        if let Ok(mut s) = state.lock() {
-                            s.glass_frame_ready = true;
+                    UiCommand::GlassPresented { w, h } => {
+                        // The renderer has a frame. Re-presenting one for the
+                        // size the page is on lifts the cloak — never the
+                        // last session's held buffer.
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.note_frame(w, h);
                         }
                         let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
                             && glass_active(&state);
-                        if live {
-                            if let Some(layer) = glass_layer.as_ref() {
-                                layer.show_ready_frame();
+                        let revealed = live
+                            && glass_layer.as_ref().is_some_and(|layer| layer.reveal());
+                        // The page drops its painted surface exactly when the
+                        // layer shows through, so it is never see-through
+                        // over a cloaked glass.
+                        if revealed {
+                            if let Ok(mut s) = state.lock() {
+                                s.glass_frame_ready = true;
                             }
                             if ready {
                                 push_state(&webview, &state, &icon_cache, false);
                             }
+                        }
+                    }
+                    UiCommand::GlassFailed => {
+                        crate::logging::warn(
+                            "[nex] glass engine failed persistently — switching to opaque panel",
+                        );
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.set_visible(false);
+                        }
+                        sync_webview_background(webview.as_ref(), &state);
+                        if ready {
+                            push_state(&webview, &state, &icon_cache, false);
                         }
                     }
                     UiCommand::GlassPalette(light) => {
@@ -1065,7 +1090,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window, &glass_layer);
+                    hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Cloak fallback: if focus is still ours the invisible
@@ -1129,7 +1154,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window, &glass_layer);
+                    hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Same cloak fallback as Hide (see above).
@@ -1268,9 +1293,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             // Glass frame not ready yet: show the panel now
                             // anyway (its opaque surface covers the gap, the
                             // page only goes transparent once the renderer
-                            // reports a frame) and let the pending GlassReady
-                            // reveal the layer - blocking the whole panel on
-                            // first capture reads as a hung show.
+                            // acks a frame) and let that ack reveal the layer
+                            // - blocking the whole panel on first capture
+                            // reads as a hung show.
                             crate::runtime::log_info(
                                 "[nex] host Painted: glass frame pending, showing panel opaque",
                             );
@@ -1312,11 +1337,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = window.set_focus();
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Start glass capture with the panel. Its HWND is
-                        // revealed only after the worker presents a frame.
+                        // revealed by the layer's own ack — a frame at the
+                        // size the page just settled on — or right here if
+                        // one for this size already landed.
                         // Parked in opaque panel modes (solid CSS covers it).
                         if glass_active(&state) {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.set_visible(true);
+                                if layer.reveal() {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.glass_frame_ready = true;
+                                    }
+                                    push_state(&webview, &state, &icon_cache, false);
+                                }
                             }
                         }
                         // Re-assert topmost Z-position. When the overlay
@@ -2257,7 +2290,9 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// Native glass renders only in glass panel mode: opaque black/white
 /// panels paint solid and the layer stays parked (no capture, no wait).
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
-    state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+    crate::overlay::platform::transparency_enabled()
+        && !crate::overlay::refraction::glass_failed()
+        && state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
 }
 
 /// Wake the renderer a beat before the panel is revealed so its next
@@ -2309,10 +2344,17 @@ fn sync_webview_background(
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     let Some(wv) = webview else { return };
-    let mode = state
+    let mut mode = state
         .lock()
         .map(|s| s.panel_background)
         .unwrap_or(crate::config::PanelBackground::Glass);
+    if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
+        || crate::overlay::refraction::glass_failed()
+    {
+        mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
+            crate::config::PanelBackground::White
+        } else { crate::config::PanelBackground::Black };
+    }
     static LAST_MODE: std::sync::Mutex<Option<crate::config::PanelBackground>> =
         std::sync::Mutex::new(None);
     if LAST_MODE.lock().map(|g| *g == Some(mode)).unwrap_or(false) {
@@ -2407,6 +2449,19 @@ fn focus_input(webview: &Option<WebView>) {
 /// Serialize the overlay state into lightweight JSON without icon data.
 /// Icon fields contain only the file path (used as a JS cache key).
 fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
+    snapshot_state_with_transparency(
+        s,
+        show_pending,
+        crate::overlay::platform::transparency_enabled()
+            && !crate::overlay::refraction::glass_failed(),
+    )
+}
+
+fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transparent: bool) -> String {
+    let background = if !transparent && !s.panel_background.is_opaque() {
+        if s.theme == Theme::Light { "white" } else { "black" }
+    } else { s.panel_background.as_str() };
+    static LENS_CLIP: std::sync::LazyLock<String> = std::sync::LazyLock::new(crate::overlay::refraction::lens_clip_css);
     let rows: Vec<serde_json::Value> = s
         .rows
         .iter()
@@ -2505,9 +2560,10 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         "whatsNewPending": s.whats_new_pending,
         "overlayVisible": s.visible,
         "pointerOverPanel": s.pointer_over_panel,
-        "panelBackground": s.panel_background.as_str(),
-        "glassNative": s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
-        "glassLight": s.glass_native && s.glass_light,
+        "panelBackground": background,
+        "glassNative": transparent && s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
+        "glassLight": transparent && s.glass_native && s.glass_light,
+        "glassClip": &*LENS_CLIP,
     })
     .to_string()
 }
@@ -2592,19 +2648,24 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         (
             s.theme == Theme::Dark,
             s.glass_native,
-            s.panel_background.is_opaque(),
+            s.panel_background.is_opaque() || !crate::overlay::platform::transparency_enabled(),
         )
     }).unwrap_or((true, false, false));
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
-    // DWM default corners (8px on Win11): the OS owns the silhouette, no
-    // custom GDI regions anywhere. Opaque WebView surfaces and glass both
-    // paint inside it.
-    let rounded_corners = DWMWCP_DEFAULT;
+    // Native glass uses the same continuous profile for both HWND regions
+    // and CSS. Opaque/acrylic modes retain the system's default corners.
+    let rounded_corners = if glass_native && !opaque_panel {
+        windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
+    } else { DWMWCP_DEFAULT };
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+    // Native glass already shades its own edge. A second system frame
+    // reads as an unrelated hard outline (especially on bright backdrops).
+    let border_color: u32 = if glass_native && !opaque_panel { 0xFFFFFFFE } else { 0xFFFFFFFF };
+    let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
 
     // Keep DWM acrylic for the fallback path. With the native refraction
     // layer active, even reapplying acrylic on a later show paints over the
@@ -2617,10 +2678,8 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
         DWMSBT_TRANSIENTWINDOW
     };
     let native_backdrop = set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop);
-    // Frame rendering stays on: with DEFAULT corners DWM draws the rounded
-    // silhouette and clips the whole window (child included) itself.
-    // No BORDER_COLOR dye: BBGGRR hand values rendered copper, and their
-    // UI leaves the system default border alone. DWM draws it.
+    // Frame rendering stays on; glass supplies its own region at reveal.
+    // BORDER_COLOR above uses DWM's NONE/DEFAULT sentinels, not a tint.
     let available = if opaque_panel {
         // Opaque panels paint solid over an opaque WebView surface
         // (ClearType): no backdrop, and no acrylic fallback — any
@@ -2857,10 +2916,16 @@ fn hide_overlay_window(
     hwnd: HWND,
     window: &Window,
     glass: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     // Spike glass vanishes with the panel.
     if let Some(layer) = glass {
         layer.set_visible(false);
+    }
+    // The page goes back to its painted panel while the glass is cloaked,
+    // so the next show never paints transparent over a stale layer.
+    if let Ok(mut s) = state.lock() {
+        s.glass_frame_ready = false;
     }
     // Transparent-hide first: cloak + click-through + child hidden.
     // WS_EX_TRANSPARENT on the parent does not stop hit-testing on the
@@ -3351,7 +3416,7 @@ fn unregister_raw_input_sink() {
 
 #[cfg(test)]
 mod snapshot_tests {
-    use super::snapshot_state_json;
+    use super::snapshot_state_with_transparency;
     use crate::config::PanelBackground;
     use crate::overlay::model::ShimState;
     use serde_json::{json, Value};
@@ -3376,7 +3441,16 @@ mod snapshot_tests {
     }
 
     fn push(s: &ShimState) -> Value {
-        serde_json::from_str(&snapshot_state_json(s, false)).expect("snapshot is JSON")
+        serde_json::from_str(&snapshot_state_with_transparency(s, false, true)).expect("snapshot is JSON")
+    }
+
+    #[test]
+    fn reduced_transparency_keeps_page_opaque_even_with_ready_glass() {
+        let s = state(true, true, true, PanelBackground::Glass);
+        let push: Value = serde_json::from_str(&snapshot_state_with_transparency(&s, false, false)).unwrap();
+        assert_eq!(push["glassNative"], json!(false));
+        assert_eq!(push["glassLight"], json!(false));
+        assert!(push["panelBackground"] == "black" || push["panelBackground"] == "white");
     }
 
     #[test]

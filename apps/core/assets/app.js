@@ -236,7 +236,14 @@
   // WebView2 runtime already parsed the JSON — e.data is a JS object.
   if (window.chrome?.webview) {
     window.chrome.webview.addEventListener("message", (e) => {
-      try { nex.apply(e.data); } catch (_) {}
+      try {
+        // Visual-close control message, not a state snapshot.
+        if (e.data && e.data.t === "closing") {
+          window.nex?.playClose?.();
+          return;
+        }
+        window.nex.apply(e.data);
+      } catch (_) {}
     });
   }
 
@@ -3142,6 +3149,11 @@
       if (typeof state.overlayVisible === "boolean") {
         overlayVisible = state.overlayVisible;
       }
+      // A show cancels the close fade (playClose adds the class). Remove it
+      // before the reveal so the panel is opaque on its first frame.
+      if (state.overlayVisible === true) {
+        document.documentElement.classList.remove("panel-closing");
+      }
       // The remembered pointer position only describes the pointer while
       // it is over the panel. If the show finds it elsewhere, drop it:
       // row hover fires on mousemove alone, and recalling a position from
@@ -3285,6 +3297,14 @@
       scrollToInstant(0);
       input.focus();
       input.select();
+    },
+
+    // Visual close (Rust posts {"t":"closing"}). Input has already left;
+    // this only fades the page's own paint while the native lens flattens
+    // underneath, and the host cloaks once it settles. The next show push
+    // removes the class.
+    playClose() {
+      document.documentElement.classList.add("panel-closing");
     },
   };
 

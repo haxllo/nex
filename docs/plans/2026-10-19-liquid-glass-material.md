@@ -167,3 +167,36 @@ Changes:
 Verification: **89 release overlay tests passed**, including GPU probe; latest release build passed. Preview restarted from `G:\nex-target\release\Nex.exe`. First build hit a respawned running executable; stopped/waited for process exit, rebuilt successfully. No commit/release. Logs: `glass-clean-edge-tests.txt`, `glass-clean-edge-build.txt` on G temp path.
 
 Visual quality still requires user confirmation; no claim made that numeric tests prove border appearance. Binary polygon corner aliasing remains a possible separate issue if complaint persists specifically at corners.
+
+### Continuation checkpoint: committed baseline + close elasticity + engine fallback
+
+Committed the handoff tree on branch `liquid-glass-material` as `8c19c4e` (no push, no release). User confirmed the border is removed.
+
+**Normal close elasticity (was Remaining #1).** Regular hides no longer cloak immediately:
+- `UiCommand::Hide` keeps hotkey masking, foreground restore and click-through immediate, then posts `{"t":"closing"}` to the page and sends `GlassLayer::begin_close()`. It schedules `UiCommand::CloseDone(epoch)` on a timer thread; the UI thread never sleeps.
+- Close contract: `close_epoch` bumps on every Hide-with-animation and every Show. `CloseDone(epoch)` cloaks only when `close_pending == Some(epoch)` and the panel is still logically hidden. A Show inside the deadline wins; a second Hide or `HideSync` invalidates the pending close. `HideSync` remains immediate with no animation.
+- The page fade (CSS `html.panel-closing #panel`) runs while the native lens releases from bend 1 to 0 (`close_bend`, smoothstep over `CLOSE_MS = 190`). The host cloaks at 220 ms, after the lens has settled. `swell_pass_due` re-presents the held mirror during the release on a static desktop, using the existing mirror/live invariants.
+- The page is not pushed the cleared state until `CloseDone`, so the fade shows the last painted content, not an emptied panel. The next show push removes the close class before the reveal.
+- Input: parent and WebView child both get `WS_EX_TRANSPARENT` for the duration; the child is not hidden (hiding it would pop the content). The show path clears both.
+- Reduced motion (`animations_enabled == false`) or an unready page skips the animation and uses the old immediate hide.
+
+**GPU resilience (was Remaining #8).** `note_engine_failure` counts consecutive build/rebuild failures; three requests `UiCommand::GlassFailed` once. The host then renders opaque (`glass_active` and `snapshot_state_json` consult `refraction::glass_failed()`, `sync_webview_background` falls back to the theme's opaque surface) and parks the layer. The worker keeps retrying, so a lucky recovery still presents; the page surface is only downgraded.
+
+**Verification (this checkpoint).**
+- `cargo test --release -p nex --lib overlay:: -- --include-ignored --test-threads=1`: **90 passed, 0 failed, 0 ignored**. The first run had one environmental failure (`instance_signal_handles_absent_window`) because the preview instance was running; stopped Nex/NexHelper, rerun clean.
+- New regression: `the_close_releases_the_lens_monotonically_without_overshoot` (start 1, midpoint 0.5, end 0, no reversal/overshoot, no close = 1).
+- `cargo build --release --bin Nex --bin NexHelper` passed; `node --check apps/core/assets/app.js` and `git diff --check` passed.
+- GPU probe at this tree: optical 160x96 readback 0.94 ms/frame; 700x441 content rebuild + buffer growth 34.57 ms; full material CPU submission + Present 4.30 ms/frame. Still single-run, CPU-side, not p95.
+
+**Open visual question:** close feel. Fade length, lens release, and whether the page fade reads as a settling panel or a plain dissolve need eyeball confirmation. Nothing numeric proves the close looks right.
+
+**Remaining mandatory work, renumbered.**
+1. External contact shadow tied to thickness (was #3): still inner shade only; needs shadow-bearing margins/composition surface.
+2. Per-text contrast proof (was #4): 4x4 scrim is backdrop-aware, not text-bound-aware.
+3. Full-frame performance/runtime (was #5): static vs moving release benchmark at 700x441 and max size, resize cost, first-show; p95 and GPU completion separate from CPU submission.
+4. Accessibility live changes/mode transitions (was #6): transparency toggle while visible, opaque↔glass, re-check on show.
+5. Corner visual verification (was #7): eyeball both HWND/CSS silhouettes, context menus, edge hit testing, corner aliasing.
+6. Geometry elasticity (was #2): optional physical silhouette morph; still last.
+7. Cleanup (was #9): stale `swell` naming now also covers close; blur/saturation log text. Not done to avoid churn.
+
+Also carried: `glassClip` serialized per snapshot; tint EMA frame-based; 8-bit neutral normal map; 32 px shade cutoff seam check.

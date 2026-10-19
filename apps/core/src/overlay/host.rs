@@ -150,6 +150,10 @@ const WINDOW_WIDTH: f64 = 700.0;
 const INITIAL_HEIGHT: f64 = 60.0;
 const MAX_HEIGHT: f64 = 680.0;
 const FOCUS_GRACE_MS: u64 = 400;
+/// Deadline for the visual close: input leaves immediately on hide, the
+/// native lens eases flat and the page fades, then the window cloaks.
+/// Slightly longer than the native lens so the cloak never cuts it off.
+const CLOSE_ANIM_MS: u64 = 220;
 
 /// How long after a Show completes focus-loss is treated as a flap-pair
 /// rather than a genuine dismissal. During this window we always defer
@@ -225,6 +229,13 @@ pub(crate) enum UiCommand {
     Hide,
     /// Hide and signal completion (used for synchronous hide-before-launch).
     HideSync(std::sync::mpsc::Sender<()>),
+    /// The visual close animation's deadline elapsed. Cloaks the window
+    /// only if this close is still the current one (see `Hide`).
+    CloseDone(u64),
+    /// The glass worker declared its D2D engine persistently failed. The
+    /// panel switches to the opaque fallback instead of a transparent page
+    /// over a surface that will not present.
+    GlassFailed,
     /// Fired by the warm-release timer; if still hidden and the
     /// generation matches, clears the icon cache while keeping the
     /// WebView warm for consistent re-open timing.
@@ -390,6 +401,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    // Visual-close epoch. A Hide that animates out bumps this and parks the
+    // epoch here; the matching CloseDone is the only one allowed to cloak.
+    // Any Show bumps it too, so a late CloseDone cannot re-hide a newer show.
+    let mut close_epoch: u64 = 0;
+    let mut close_pending: Option<u64> = None;
     // Show-path latency telemetry: stamped on UiCommand::Show receipt,
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
@@ -526,6 +542,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             if ready {
                                 push_state(&webview, &state, &icon_cache, false);
                             }
+                        }
+                    }
+                    UiCommand::GlassFailed => {
+                        crate::logging::warn(
+                            "[nex] glass engine failed persistently — switching to opaque panel",
+                        );
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.set_visible(false);
+                        }
+                        sync_webview_background(webview.as_ref(), &state);
+                        if ready {
+                            push_state(&webview, &state, &icon_cache, false);
                         }
                     }
                     UiCommand::GlassPalette(light) => {
@@ -897,6 +925,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
+                    // Invalidate any in-flight visual close: this show must
+                    // never be cloaked by the previous hide's deadline.
+                    close_epoch = close_epoch.wrapping_add(1);
+                    close_pending = None;
                     show_cmd_at = Some(Instant::now());
                     push_fg_stack(&mut fg_stack, hwnd);
                     if webview.is_none() {
@@ -1065,8 +1097,41 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window, &glass_layer);
-                    OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+                    let was_showing = OVERLAY_VISIBLE.swap(false, Ordering::SeqCst);
+                    // Regular hides play a short visual close after input
+                    // has already left. HideSync below stays instant:
+                    // hide-before-launch must never wait on an animation.
+                    // The close is epoch-guarded, so a Show that lands
+                    // inside the deadline wins and the panel is not hidden.
+                    let animate_close = was_showing
+                        && ready
+                        && webview.is_some()
+                        && close_pending.is_none()
+                        && crate::overlay::platform::animations_enabled();
+                    if animate_close {
+                        close_epoch = close_epoch.wrapping_add(1);
+                        let epoch = close_epoch;
+                        close_pending = Some(epoch);
+                        // Click-through now, pixels later. The child keeps
+                        // rendering: hiding it would pop the content the
+                        // close is animating away.
+                        set_overlay_click_through(hwnd, true);
+                        set_webview_click_through(&window, true);
+                        if let Some(wv) = webview.as_ref() {
+                            post_json(wv, "{\"t\":\"closing\"}");
+                        }
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.begin_close();
+                        }
+                        let proxy_close = proxy.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(CLOSE_ANIM_MS));
+                            try_send_ui(&proxy_close, UiCommand::CloseDone(epoch));
+                        });
+                    } else {
+                        close_pending = None;
+                        hide_overlay_window(hwnd, &window, &glass_layer);
+                    }
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Cloak fallback: if focus is still ours the invisible
                     // window owns the foreground and typing would land in
@@ -1100,8 +1165,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // apply after next Show.
                     pending_resize = None;
                     // Push cleared state while hidden so next Show has
-                    // a fresh page ready to render.
-                    if ready {
+                    // a fresh page ready to render. An animated close
+                    // defers this to CloseDone: the page must keep its
+                    // last painted content while it fades.
+                    if ready && !animate_close {
                         push_state(&webview, &state, &icon_cache, false);
                     }
                     if let Ok(mut s) = state.lock() {
@@ -1125,6 +1192,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
                 }
                 UiCommand::HideSync(ack) => {
+                    // Hide-before-launch is immediate and also invalidates
+                    // any visual close still in flight: launch must not
+                    // wait, and the stale CloseDone must not fire later.
+                    close_epoch = close_epoch.wrapping_add(1);
+                    close_pending = None;
                     crate::overlay::hotkey::hold_mask_before_hide();
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
@@ -1157,6 +1229,31 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         .max(500) as u64;
                     let _ = warm_release_arm.send(Some((generation, Duration::from_millis(delay))));
                     let _ = ack.send(());
+                }
+                UiCommand::CloseDone(epoch) => {
+                    // Only the current close may cloak. A newer Show bumped
+                    // the epoch (and cleared close_pending), a newer Hide
+                    // started its own close; either way this one is stale.
+                    if close_pending != Some(epoch) {
+                        return;
+                    }
+                    close_pending = None;
+                    // Belt and braces: even with the epoch intact, never
+                    // cloak a panel that is logically visible again.
+                    if OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                        || state.lock().map(|s| s.visible).unwrap_or(false)
+                    {
+                        return;
+                    }
+                    hide_overlay_window(hwnd, &window, &glass_layer);
+                    // Child was transparent for the close, not hidden; it is
+                    // hidden now, and the next show re-enables hit testing.
+                    set_webview_click_through(&window, false);
+                    // The page kept its last painted content through the
+                    // fade; clear it now that nothing can see it.
+                    if ready {
+                        push_state(&webview, &state, &icon_cache, false);
+                    }
                 }
                 UiCommand::Teardown(generation) => {
                     let still_hidden = !state.lock().map(|s| s.visible).unwrap_or(false);
@@ -1296,8 +1393,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // characters).
                         focus_input(&webview);
                         // Transparent-hide reversal (order mirrors hide):
-                        // uncloak + child visible before first frame.
+                        // uncloak + child visible before first frame. A
+                        // visual close left the child click-through; take
+                        // that off before the panel accepts input again.
                         set_overlay_cloaked(hwnd, false);
+                        set_webview_click_through(&window, false);
                         set_webview_child_visible(&window, true);
                         // Single activation path (helper owns foreground;
                         // local force only without helper). Request before
@@ -2258,6 +2358,7 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 /// panels paint solid and the layer stays parked (no capture, no wait).
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
     crate::overlay::platform::transparency_enabled()
+        && !crate::overlay::refraction::glass_failed()
         && state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
 }
 
@@ -2314,7 +2415,9 @@ fn sync_webview_background(
         .lock()
         .map(|s| s.panel_background)
         .unwrap_or(crate::config::PanelBackground::Glass);
-    if !crate::overlay::platform::transparency_enabled() && !mode.is_opaque() {
+    if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
+        || crate::overlay::refraction::glass_failed()
+    {
         mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
             crate::config::PanelBackground::White
         } else { crate::config::PanelBackground::Black };
@@ -2413,7 +2516,12 @@ fn focus_input(webview: &Option<WebView>) {
 /// Serialize the overlay state into lightweight JSON without icon data.
 /// Icon fields contain only the file path (used as a JS cache key).
 fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
-    snapshot_state_with_transparency(s, show_pending, crate::overlay::platform::transparency_enabled())
+    snapshot_state_with_transparency(
+        s,
+        show_pending,
+        crate::overlay::platform::transparency_enabled()
+            && !crate::overlay::refraction::glass_failed(),
+    )
 }
 
 fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transparent: bool) -> String {
@@ -2960,11 +3068,6 @@ fn set_webview_child_visible(window: &Window, visible: bool) {
 /// falls back to SW_HIDEWINDOW).
 fn set_overlay_cloaked(hwnd: HWND, cloak: bool) -> bool {
     use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    };
-    const TRANSPARENT_BIT: isize = 0x20; // WS_EX_TRANSPARENT
     let cloak_int: i32 = if cloak { 1 } else { 0 };
     if unsafe {
         DwmSetWindowAttribute(
@@ -2977,8 +3080,35 @@ fn set_overlay_cloaked(hwnd: HWND, cloak: bool) -> bool {
     {
         return false;
     }
+    set_overlay_click_through(hwnd, cloak);
+    true
+}
+
+/// Toggle `WS_EX_TRANSPARENT` on the overlay window. Split from cloaking so
+/// a visual close can drop input immediately while the panel still paints.
+fn set_overlay_click_through(hwnd: HWND, click_through: bool) {
+    set_click_through(hwnd, click_through);
+}
+
+/// Same for the WebView child: `WS_EX_TRANSPARENT` on the parent does not
+/// stop the child from hit-testing. Used by the close so the still-painting
+/// page cannot swallow clicks during its fade; the child is hidden outright
+/// when the close completes.
+fn set_webview_click_through(window: &Window, click_through: bool) {
+    let child = find_webview_child(window);
+    if !child.is_null() {
+        set_click_through(child, click_through);
+    }
+}
+
+fn set_click_through(hwnd: HWND, click_through: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    const TRANSPARENT_BIT: isize = 0x20; // WS_EX_TRANSPARENT
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    let want = if cloak {
+    let want = if click_through {
         exstyle | TRANSPARENT_BIT
     } else {
         exstyle & !TRANSPARENT_BIT
@@ -2997,7 +3127,6 @@ fn set_overlay_cloaked(hwnd: HWND, cloak: bool) -> bool {
             );
         }
     }
-    true
 }
 
 /// Activate the overlay without injecting keyboard input. `AttachThreadInput`

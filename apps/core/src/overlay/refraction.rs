@@ -83,14 +83,31 @@ use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
 
 /// Refraction is on by default; an explicit zero keeps the Acrylic fallback.
 pub fn enabled() -> bool {
-    std::env::var("NEX_REFRACT_LAB")
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            )
-        })
-        .unwrap_or(true)
+    !glass_failed()
+        && std::env::var("NEX_REFRACT_LAB")
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            })
+            .unwrap_or(true)
+}
+
+/// Set once the worker decides the D2D engine is not coming back (repeated
+/// build/rebuild failures). The host then renders the page opaque and parks
+/// the glass layer; the worker keeps retrying behind the scenes. Process
+/// lifetime: recovery for a poisoned device needs a restart, which is
+/// exactly what a persistent failure means.
+static GLASS_FAILED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn glass_failed() -> bool {
+    GLASS_FAILED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn mark_glass_failed() {
+    GLASS_FAILED.store(true, std::sync::atomic::Ordering::Release);
 }
 
 /// Wide diffusion branch; the center primarily uses the tight branch.
@@ -106,6 +123,10 @@ const BEND_SCALE: f32 = 10.0;
 /// Show spring settling deadline. No frame-count-dependent animation.
 /// One shot per show; nothing animates while hidden.
 const SWELL_MS: f32 = 420.0;
+/// Close lens release. Deliberately shorter than the show spring: a close
+/// should read as settling, not as an animation to wait through. The host
+/// cloaks a beat after this (CLOSE_ANIM_MS), so the last frame is not cut.
+const CLOSE_MS: f32 = 190.0;
 const BEZEL_MARGIN: f32 = 32.0;
 pub(crate) const CORNER_RADIUS: f32 = 8.0;
 /// Material follows the backdrop, like Apple's vibrancy: a bright scene
@@ -161,6 +182,9 @@ struct GlassConfig {
     /// from the backdrop.
     theme_dark: Option<bool>,
     scale: Option<f64>,
+    /// Visual close requested: release the lens over `CLOSE_MS` while the
+    /// host fades the page. A show cancels it; nothing is hidden here.
+    closing: Option<bool>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -266,6 +290,7 @@ impl GlassLayer {
             panel_wh: Some((w, h)),
             theme_dark: None,
             scale: Some(scale),
+            closing: None,
         });
     }
 
@@ -290,6 +315,22 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
+            closing: None,
+        });
+    }
+
+    /// Regular hide: release the lens while the host fades the page, so
+    /// the panel settles instead of snapping off. Purely visual — input,
+    /// foreground and the cloak deadline belong to the host.
+    pub fn begin_close(&self) {
+        let _ = self.tx.send(GlassConfig {
+            visible: None,
+            main_sys: 0,
+            max_wh: None,
+            panel_wh: None,
+            theme_dark: None,
+            scale: None,
+            closing: Some(true),
         });
     }
 
@@ -308,6 +349,7 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
+            closing: None,
         });
     }
 
@@ -322,6 +364,7 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: Some(dark),
             scale: None,
+            closing: None,
         });
     }
 
@@ -1380,6 +1423,14 @@ fn swell_bend(elapsed_ms: f32) -> f32 {
     spring.value
 }
 
+/// Close lens release: 1 (resting curvature) at the start, 0 (flat) at
+/// `CLOSE_MS`. Smoothstep, no overshoot — a close should settle, not bounce.
+fn close_bend(elapsed_ms: Option<f32>) -> f32 {
+    let Some(ms) = elapsed_ms else { return 1.0 };
+    let t = (ms / CLOSE_MS).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 /// Exact solution of an underdamped spring. Retarget without throwing away
 /// velocity; elapsed wall time, not frame count, determines motion.
 #[derive(Clone, Copy)]
@@ -1557,6 +1608,21 @@ fn refresh_staging(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
     copied
 }
 
+/// Count a failed engine build/rebuild. Three straight is a poisoned graph
+/// rather than a transient: tell the host to go opaque, once. The worker
+/// still retries, so a lucky recovery wins the pixels back without a restart
+/// (the host only needs the flag for the page surface).
+fn note_engine_failure(n: &mut u32, proxy: &EventLoopProxy<UiCommand>) {
+    *n += 1;
+    if *n >= 3 && !glass_failed() {
+        mark_glass_failed();
+        crate::logging::warn(
+            "[nex][refract] engine failed repeatedly — requesting opaque fallback",
+        );
+        let _ = proxy.send_event(UiCommand::GlassFailed);
+    }
+}
+
 fn worker_main(
     glass_sys: isize,
     initial_main_sys: isize,
@@ -1620,10 +1686,15 @@ fn worker_main(
     // Straight failures in a row: a poisoned device/capture never heals
     // by retrying the same calls, so rebuild everything after a few.
     let mut n_fail = 0u32;
+    // Engine build/rebuild failures in a row. Kept separate from capture
+    // failures: one is a poisoned GPU graph, the other a stale session.
+    let mut n_engine_fail = 0u32;
     let mut motion = crate::overlay::platform::animations_enabled();
     let mut interaction = Spring { value: 1.0, velocity: 0.0 };
     let mut interaction_at = Instant::now();
     let mut interaction_dirty = false;
+    // When the current visual close began. Cleared by any show/hide config.
+    let mut close_at: Option<Instant> = None;
     let mut previous_panel = (0, 0);
 
     loop {
@@ -1633,6 +1704,8 @@ fn worker_main(
                     motion = crate::overlay::platform::animations_enabled();
                     interaction = Spring { value: 1.0, velocity: 0.0 };
                     interaction_at = Instant::now();
+                    // A show wins over any close still in flight.
+                    close_at = None;
                     // Fresh show: re-announce the material, the page may
                     // have re-seeded its palette to the system theme.
                     palette_sent = None;
@@ -1652,8 +1725,12 @@ fn worker_main(
                     cycle.swell = None;
                     cycle.refresh = false;
                     interaction_dirty = false;
+                    close_at = None;
                 }
                 visible = v;
+            }
+            if let Some(closing) = cfg.closing {
+                close_at = closing.then(Instant::now);
             }
             if cfg.main_sys != 0 {
                 main_sys = cfg.main_sys;
@@ -1755,7 +1832,11 @@ fn worker_main(
             interaction = Spring { value: 1.0, velocity: 0.0 };
         }
         previous_panel = (pw, ph);
-        let bend = cycle.bend().0 * interaction.value;
+        // Close lens release: flat at the end, so the cloak that follows
+        // cuts a settled surface rather than a refraction mid-flight.
+        let close_elapsed = close_at.map(|t0| t0.elapsed().as_secs_f32() * 1000.0);
+        let closing = close_elapsed.is_some_and(|ms| ms < CLOSE_MS);
+        let bend = cycle.bend().0 * interaction.value * close_bend(close_elapsed);
         if engine.is_none() {
             match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(mut e) => {
@@ -1763,14 +1844,17 @@ fn worker_main(
                         e.scale = scale;
                         if let Err(error) = e.rebuild_content() {
                             crate::logging::warn(&format!("[nex][refract] scale rebuild failed: {error}"));
+                            note_engine_failure(&mut n_engine_fail, &proxy);
                             continue;
                         }
                     }
                     e.light_direction.set(light);
                     engine = Some(e);
+                    n_engine_fail = 0;
                 },
                 Err(error) => {
                     crate::logging::warn(&format!("[nex][refract] engine build failed: {error}"));
+                    note_engine_failure(&mut n_engine_fail, &proxy);
                     std::thread::sleep(Duration::from_millis(1000));
                     continue;
                 }
@@ -1788,6 +1872,7 @@ fn worker_main(
                 e.scale = scale;
                 if let Err(error) = e.resize_buffers(max_wh.0, max_wh.1) {
                     crate::logging::warn(&format!("[nex][refract] engine resize failed: {error}"));
+                    note_engine_failure(&mut n_engine_fail, &proxy);
                     engine = None;
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
@@ -1799,6 +1884,7 @@ fn worker_main(
                 e.scale = scale;
                 if let Err(error) = e.rebuild_content() {
                     crate::logging::warn(&format!("[nex][refract] content rebuild failed: {error}"));
+                    note_engine_failure(&mut n_engine_fail, &proxy);
                     engine = None;
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
@@ -1810,12 +1896,12 @@ fn worker_main(
             // the next Present, while the desktop may stay still for a
             // while yet.
             let refresh = cycle.take_refresh();
-            // The swell re-presents the held frame: the desktop is often
-            // static, so no captured frame would drive the animation.
-            // Capped like a captured frame, and only while the desktop
-            // has nothing of its own to paint it with.
-            let swell_due =
-                (cycle.swelling() || interaction_dirty) && swell_pass_due(last_present.elapsed().as_millis() as u64);
+            // The swell and the close both re-present the held frame: the
+            // desktop is often static, so no captured frame would drive
+            // them. Capped like a captured frame, and only while the
+            // desktop has nothing of its own to paint it with.
+            let swell_due = (cycle.swelling() || interaction_dirty || closing)
+                && swell_pass_due(last_present.elapsed().as_millis() as u64);
             let swelling = swell_wants_mirror(swell_due, moving);
             // Swell passes are routine (a dozen per show): keep them out
             // of the log, only rebuilds and reveal refreshes are news.
@@ -2482,10 +2568,10 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, desktop_recent, frame_luma, pass_plan, stretch_bgra_nearest, swell_bend,
-        swell_pass_due, swell_wants_mirror, Material, Pass, ShowCycle, DESKTOP_RECENT_MS,
-        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS,
-        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        clamp_panel_box, close_bend, desktop_recent, frame_luma, pass_plan,
+        stretch_bgra_nearest, swell_bend, swell_pass_due, swell_wants_mirror, Material, Pass,
+        ShowCycle, CLOSE_MS, DESKTOP_RECENT_MS, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS,
+        MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2834,6 +2920,28 @@ mod tests {
         // A pass after the swell reads full, and cannot restart it.
         assert_eq!(c.bend_at(SWELL_MS * 3.0), (1.0, false));
         assert_eq!(c.bend(), (1.0, false));
+    }
+
+    #[test]
+    fn the_close_releases_the_lens_monotonically_without_overshoot() {
+        // No close: resting curvature, nothing pending.
+        assert_eq!(close_bend(None), 1.0);
+        // Start is the resting lens; end is flat; both are exact so the
+        // host's cloak deadline cannot cut a partially released lens off.
+        assert_eq!(close_bend(Some(0.0)), 1.0);
+        assert_eq!(close_bend(Some(CLOSE_MS)), 0.0);
+        assert_eq!(close_bend(Some(CLOSE_MS * 2.0)), 0.0, "no rebound");
+        // Strictly decreasing and smoothstepped (no early cliff): the
+        // midpoint sits at half, and no sample goes back up.
+        let mut previous = 1.0;
+        for step in 0..=20 {
+            let value = close_bend(Some(CLOSE_MS * step as f32 / 20.0));
+            assert!(value <= previous + f32::EPSILON, "close must not reverse");
+            assert!((-0.001..=1.001).contains(&value), "bend leaves its range");
+            previous = value;
+        }
+        let middle = close_bend(Some(CLOSE_MS * 0.5));
+        assert!((middle - 0.5).abs() < 0.001, "smoothstep midpoint: {middle}");
     }
 
     #[test]

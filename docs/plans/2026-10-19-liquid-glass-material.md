@@ -200,3 +200,86 @@ Committed the handoff tree on branch `liquid-glass-material` as `8c19c4e` (no pu
 7. Cleanup (was #9): stale `swell` naming now also covers close; blur/saturation log text. Not done to avoid churn.
 
 Also carried: `glassClip` serialized per snapshot; tint EMA frame-based; 8-bit neutral normal map; 32 px shade cutoff seam check.
+
+### Continuation checkpoint: GPU-resident frames, no close animation, refraction/silhouette
+
+User asked to drop the close elasticity (it read as a dissolve and did not justify its cost) and focus on material performance and appearance. The close path is back to the immediate cloak for every hide; `HideSync` still acknowledges without waiting. CSS `panel-closing`, `playClose`, `CloseDone`, close epochs and the close bend were all removed. `GlassFailed`/opaque fallback stays.
+
+**Structural: GPU budget / no full-frame CPU readback.** The steady-state path no longer maps the panel to the CPU:
+- The desktop duplication texture is mirrored into a `D3D11_USAGE_DEFAULT` + `BIND_SHADER_RESOURCE` texture (`cap.mirror`) on the GPU, retaining the full desktop for later resizes.
+- Only the panel box is copied GPU→GPU (`Engine::copy_crop` → `source_tex`) and wrapped as the D2D source bitmap via `CreateBitmapFromDxgiSurface`.
+- Material/tint statistics come from one 16x16 D2D downsample (`sample_backdrop`): 1 KiB map instead of a full-panel Map + memcpy + upload. `backdrop_grid` averages all 4x4 pixels per cell and `frame_luma` steps full pixels.
+- The stretched last-frame fallback and `stretch_bgra_nearest` are gone; clamped/partial GPU crops cover the edge cases. `present` reads the held `source_tex`; `present_frame` no longer exists.
+- Stats sampling still synchronizes once per presented frame (small `Map`); it is the only remaining per-frame CPU readback.
+
+**Refraction realism.** The normal map gained a thickness tail (`SLAB_BEND = 0.08`, `SLAB_DECAY = 30.0`): past the bevel the surface keeps bending slightly before flattening, so the lens reads as a slab with depth instead of a pure edge. The tail direction is radial from the panel centre, avoiding a seam at the medial axis. The centre stays neutral and does not split RGB (within one 8-bit level).
+
+**Edge silhouette.** The main window's native region is grown by `SILHOUETTE_GROW_PX = 1.0` device pixel while the glass window uses the exact profile (`grow = 0.0`). The page's antialiased CSS clip defines the visible edge, so the native polygon no longer acts as a hard, aliased outer cut. Region generation is factored into `lens_region_points(w, h, scale, grow_px)`.
+
+**Verification at this tree.**
+- `cargo test --release -p nex --lib overlay:: -- --include-ignored --test-threads=1`: **90 passed, 0 failed, 0 ignored**.
+- New regressions: `thickness_tail_bends_past_the_bevel_but_not_the_center`; `silhouette_growth_only_expands_the_cut`; the ignored GPU probe now writes a four-colour quadrant desktop pattern, copies/samples the GPU path and asserts orientation and channel order (TL red, TR green, BL blue, BR white).
+- GPU probe: optical 160x96 **0.49 ms/frame** with readback; 700x441 rebuild + buffer growth **28.94 ms**; full material **3.54 ms/frame** CPU submission + `Present` (not GPU completion). Single run, not p95.
+- `cargo build --release --bin Nex --bin NexHelper` passed (release binary at `G:\nex-target\release\Nex.exe`). No commit/release/push.
+
+**Open questions.**
+- Live eyeball still required: silhouette/corner edge after the 1 px growth, thickness tail strength, and whether the 16x16 stats granularity causes visible tint banding.
+- The sample readback's channel/orientation is now asserted; an earlier single failure was a stale first sample, not a flip.
+- User was actively using the machine, so the preview was stopped for tests and not restarted automatically.
+
+**Remaining mandatory work, renumbered.**
+1. External contact shadow (unchanged): needs shadow-bearing margins/composition surface.
+2. Per-text contrast (unchanged): 4x4 scrim is backdrop-aware, not text-bound-aware.
+3. Full-frame performance: static vs moving release benchmark at 700x441 and max size, first-show, p95 and GPU completion separate from CPU submission.
+4. Accessibility live changes: transparency toggle while visible, opaque↔glass, re-check on show.
+5. Corner visual verification: both HWND/CSS silhouettes, context menus, edge hit testing, corner aliasing.
+6. Optional geometry morph; last.
+7. Cleanup: stale `swell` naming (now no close), blur/saturation log text; sample cadence if the per-frame `Map` shows up.
+8. Stats sample cadence: sampling every presented frame is the remaining sync; consider every N frames only if measured to matter.
+
+### Continuation checkpoint: composition corners, stronger slab edge
+
+User feedback after the circular-corner build: corners still read as a diagonal cut, edge light only slightly visible while moving the pointer, and the pane still lacks the look of a thick block of glass. "3D" here means how the live backdrop is warped and presented at the borders, not a CSS transform.
+
+**Corner geometry.**
+- Radius raised `8 -> 12` logical px. At 8 px a hard-rasterised quarter arc reads as a chamfer at 100% scale.
+- `lens_region_points(w, h, scale, grow_px)` now expands each corner radially from its own arc centre. The previous `x/y - grow` trick was a square dilation: 1.41 px outward at the diagonal, 1 px inward at the tangents once clamped. Points may sit just outside the window rect; Windows clips them. The test now asserts radial growth is exactly `SILHOUETTE_GROW_PX` at every sample.
+- The glass HWND no longer uses `SetWindowRgn` at all. It presents through a **composition swapchain** (`CreateSwapChainForComposition`, premultiplied, flip-sequential) hosted on an `IDCompositionVisual` with an `IDCompositionRectangleClip`; the window has `WS_EX_NOREDIRECTIONBITMAP`. The visual clip is updated per rebuild (`Engine::apply_clip`, DIPs = physical / scale). This removes the binary GDI corner staircase from the glass layer; the main window keeps a 1 px-grown GDI region only so its antialiased CSS clip is not shaved.
+- If composition setup fails, the glass engine fails and the existing acrylic/opaque fallback takes over; there is no second region-based glass path.
+
+**Edge / slab readability.**
+- `BEND_SCALE 11 -> 14`: the rim now pulls ~6.5 px at the boundary instead of ~5 px.
+- `SLAB_BEND 0.20` (was 0.16) keeps a sub-pixel inward draw across the body, so the whole pane participates instead of only the 32 px bevel.
+- Rim scatter reduced from `0.10 + 0.55 * smoothstep` to `0.10 + 0.45 * smoothstep`, so the refracted edge stays legible instead of milky.
+- `ABERRATION` held at `0.07`; `scale * aberration = 0.98 px`, under the existing "no coloured outline" invariant. Do not raise it without changing that test and re-eyeballing text edges.
+
+**Diagnostics caveat.**
+- A temporary `NEX_GLASS_CAPTURE=1` bypass skipped `WDA_EXCLUDEFROMCAPTURE` so screenshots could see the panel. It is removed from the tree. With exclusion off, desktop duplication captures Nex's own page, so the glass refracts a copy of its own rows ("effects on the components instead of the background"). Any screenshot taken that way is invalid for material or corner judgement.
+- Normal builds keep capture exclusion on. Visual checks require a phone photo or a user eyeball; renderer readback can prove pixels but not the composed HWND edge.
+
+**Verification at this tree.**
+- Debug refraction suite: **20 passed, 1 ignored** (GPU probe).
+- GPU probe after the tuning: optical 160x96 **0.56 ms/frame** with readback; 700x441 rebuild + buffer growth **29.71 ms**; full material **2.51 ms/frame** CPU submission + `Present` (not GPU completion). Single run, not p95.
+- `cargo build --release --bin Nex --bin NexHelper` passed. No commit/release/push.
+- The full release overlay suite was last green before the composition swapchain change; rerun it with Nex stopped before calling this checkpoint verified.
+
+**Still mandatory.**
+1. Eyeball the composed panel over a bright grid/text backdrop: corner silhouette, pointer edge light, border convergence, and whether the 12 px radius matches the rest of the UI.
+2. External contact shadow (unchanged): needs shadow-bearing margins/composition surface.
+3. Per-text contrast (unchanged): 4x4 scrim is backdrop-aware, not text-bound-aware.
+4. Full-frame performance: static vs moving release benchmark at 700x441 and max size, first-show, p95 and GPU completion separate from CPU submission.
+5. Accessibility live changes: transparency toggle while visible, opaque<->glass, re-check on show.
+6. Context menus / edge hit testing / panel-height changes with the composition clip; confirm the visual clip tracks every resize and DPI change.
+7. Optional geometry morph; last.
+8. Cleanup: stale `swell` naming (no close), blur/saturation log text, unused DXGI imports, and the per-frame stats `Map` if it shows up in measurements.
+
+### Continuation checkpoint: alpha-mask corners, physical-pixel DComp transform
+
+User report on the composition-clip build: corners curved the right shape but **pixelated**; content **overflowed the panel at 125% display scale**; edge light visible only on two opposite corners.
+
+- The `IDCompositionRectangleClip` is gone. DirectComposition rounded clips are hard-edged, so they only moved the staircase from GDI to DComp. The silhouette now lives in the **backbuffer alpha**: `rounded_mask()` builds a panel-sized premultiplied bitmap (analytic rounded-rect SDF, 1 px coverage ramp) and `render_frame` composites it with `D2D1_COMPOSITE_MODE_DESTINATION_IN` after the material. The compositor blends that alpha, so the arc is antialiased in the same pass that draws the glass. `target_props()` is back to `D2D1_ALPHA_MODE_PREMULTIPLIED` (valid on the composition swapchain), and the backbuffer is cleared to transparent before the material.
+- **125% overflow:** the DComp visual tree is DPI-scaled by the host window, so a 700 px surface was being presented at 875 px while the panel stayed 700 px. `Engine::apply_visual` now sets `visual.SetTransform2(Matrix3x2::scale(1/scale, 1/scale))`, cancelling the window DPI; the mask and material remain in physical pixels. `windows-numerics` is a direct dependency for `Matrix3x2`.
+- Edge light base raised (`0.10 -> 0.20` opacity, taper `0.18 + 0.82(1-t)^2 -> 0.34 + 0.66(1-t)^2`) so all four edges read as glass, not just the two nearest the pointer.
+- Verification: debug refraction suite **21 passed, 1 ignored** (new `rounded_mask_is_transparent_outside_and_opaque_inside`); release GPU probe **0.53 ms optical / 3.08 ms full frame**; release binaries built and Nex restarted. The DPI transform direction assumes the compositor scales by window DPI (confirmed by the 125% overflow symptom); if a photo shows the panel too small instead, the sign of that scale is wrong.
+- Still needs a user eyeball: pixelation gone, 125% geometry correct, edge light on all four sides.
+

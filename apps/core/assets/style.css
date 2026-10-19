@@ -143,21 +143,6 @@ body {
   clip-path: none;
 }
 
-/* Visual close: the host posts a "closing" control message, input is
-   already click-through, and the native lens flattens below. Only the
-   page's own paint fades — the glass surface is native and settles on
-   its own. The show push removes the class. */
-html.panel-closing #panel {
-  opacity: 0;
-  transition: opacity 170ms cubic-bezier(0.4, 0, 0.7, 1);
-}
-@media (prefers-reduced-motion: reduce) {
-  html.panel-closing #panel {
-    opacity: 1;
-    transition: none;
-  }
-}
-
 /* ── search row ───────────────────────────────────────────── */
 #search-row {
   display: flex;

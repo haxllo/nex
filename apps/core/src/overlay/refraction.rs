@@ -44,28 +44,33 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_COMPOSITE_MODE_PLUS,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_COMPOSITE_MODE_DESTINATION_IN, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    D2D1_COMPOSITE_MODE_PLUS,
     D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+};
+use windows_numerics::Matrix3x2;
+use windows::Win32::Graphics::DirectComposition::{
+    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_SCALING, DXGI_SCALING_NONE, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT, DXGI_SWAP_EFFECT_DISCARD,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter,
     IDXGIDevice, IDXGIFactory, IDXGIFactory2, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, IDXGISurface, IDXGISwapChain1,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_ALPHA_MODE_UNSPECIFIED,
+    DXGI_ALPHA_MODE_PREMULTIPLIED,
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Gdi::{
@@ -74,8 +79,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, RegisterClassW,
     SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_SHOWNA,
-    WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::Foundation::POINT;
@@ -115,20 +120,30 @@ const BLUR_STDDEV: f32 = 8.0;
 const CENTER_BLUR_STDDEV: f32 = 3.5;
 /// The RGB sample positions differ by at most 0.4 px at rest. This is
 /// dispersion in the lens, not a colored outline painted over the text.
-const ABERRATION: f32 = 0.08;
+const ABERRATION: f32 = 0.07;
 /// Backdrop vibrancy: the refracted image is lifted slightly so it does
 /// not read as greyed out behind the tint.
 const SATURATION: f32 = 1.2;
-const BEND_SCALE: f32 = 10.0;
+const BEND_SCALE: f32 = 14.0;
 /// Show spring settling deadline. No frame-count-dependent animation.
 /// One shot per show; nothing animates while hidden.
 const SWELL_MS: f32 = 420.0;
-/// Close lens release. Deliberately shorter than the show spring: a close
-/// should read as settling, not as an animation to wait through. The host
-/// cloaks a beat after this (CLOSE_ANIM_MS), so the last frame is not cut.
-const CLOSE_MS: f32 = 190.0;
 const BEZEL_MARGIN: f32 = 32.0;
-pub(crate) const CORNER_RADIUS: f32 = 8.0;
+/// Thickness tail: a real pane bends the backdrop across its whole body,
+/// not only inside the 32 px bevel. The extra inward sample decays with
+/// distance, so the rim stays the strong lens and the interior picks up a
+/// sub-pixel draw toward the nearest edge (glass thickness, not a zoom).
+const SLAB_BEND: f32 = 0.20;
+const SLAB_DECAY: f32 = 35.0;
+/// Device-pixel growth for the main window's native region. The page's
+/// own clip-path is antialiased; letting the region sit a pixel outside
+/// it keeps GDI's hard polygon edge from shaving that antialiasing off.
+const SILHOUETTE_GROW_PX: f64 = 1.0;
+pub(crate) const CORNER_RADIUS: f32 = 12.0;
+/// Statistics downsample size: enough for the 4x4 tint grid and a stable
+/// luminance average, small enough that the readback is noise.
+const SAMPLE_W: u32 = 16;
+const SAMPLE_H: u32 = 16;
 /// Material follows the backdrop, like Apple's vibrancy: a bright scene
 /// gets a light surface with dark text, a dark scene the reverse, so
 /// the text colour never fights what is behind the glass. Alpha is the
@@ -182,9 +197,6 @@ struct GlassConfig {
     /// from the backdrop.
     theme_dark: Option<bool>,
     scale: Option<f64>,
-    /// Visual close requested: release the lens over `CLOSE_MS` while the
-    /// host fades the page. A show cancels it; nothing is hidden here.
-    closing: Option<bool>,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -200,9 +212,11 @@ pub struct GlassLayer {
 struct GlassWindow {
     hwnd: HWND,
     /// Physical HWND size. The glass lives at max-panel size permanently;
-    /// resizes only shrink/grow the round region below, so DWM and the
-    /// swapchain never see a resize in steady state (no flash, no lag).
+    /// the composition visual transform + backbuffer alpha mask track the
+    /// panel, so DWM and the swapchain never see a resize in steady state
+    /// (no flash, no lag).
     hwnd_size: std::cell::Cell<(u32, u32)>,
+    /// Last panel size/scale applied to the main window's native region.
     last_region: std::cell::Cell<Option<(u32, u32, u64)>>,
 }
 
@@ -263,9 +277,9 @@ impl GlassLayer {
     /// owned by set_visible(), otherwise every resize would resurrect a
     /// parked glass layer (visible square edges behind opaque panels).
     ///
-    /// The HWND stays at max-panel size; only the round region tracks
-    /// the current height, so a resize is one synchronous region call —
-    /// no SetWindowPos, no swapchain resize, nothing to lag a frame.
+    /// HWND stays at max-panel size; the rounded silhouette is carried in
+    /// the composition backbuffer alpha, so a resize is one content rebuild
+    /// — no SetWindowPos, no swapchain resize, nothing to lag a frame.
     pub fn sync_to_main(
         &self,
         main_sys: isize,
@@ -279,9 +293,9 @@ impl GlassLayer {
         // async, so reading the window back yields the stale rect.
         let (w, h) = (physical_px(logical_w, scale), physical_px(logical_h, scale));
         self.window.ensure_window_max(main_sys, max_w_px, max_h_px);
-        self.window.apply_round_region(w, h, scale);
+        self.window.last_region.set(Some((w, h, scale.to_bits())));
         if self.visible.get() {
-            apply_lens_region(main_sys, w, h, scale);
+            apply_lens_region(main_sys, w, h, scale, SILHOUETTE_GROW_PX);
         }
         let _ = self.tx.send(GlassConfig {
             visible: None,
@@ -290,7 +304,6 @@ impl GlassLayer {
             panel_wh: Some((w, h)),
             theme_dark: None,
             scale: Some(scale),
-            closing: None,
         });
     }
 
@@ -300,7 +313,7 @@ impl GlassLayer {
         let was_visible = self.visible.replace(show);
         if show {
             if let Some((w, h, bits)) = self.window.last_region.get() {
-                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits));
+                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
             }
         } else if was_visible {
             unsafe { windows_sys::Win32::Graphics::Gdi::SetWindowRgn(self.main_sys as _, std::ptr::null_mut(), 1); }
@@ -315,22 +328,6 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
-            closing: None,
-        });
-    }
-
-    /// Regular hide: release the lens while the host fades the page, so
-    /// the panel settles instead of snapping off. Purely visual — input,
-    /// foreground and the cloak deadline belong to the host.
-    pub fn begin_close(&self) {
-        let _ = self.tx.send(GlassConfig {
-            visible: None,
-            main_sys: 0,
-            max_wh: None,
-            panel_wh: None,
-            theme_dark: None,
-            scale: None,
-            closing: Some(true),
         });
     }
 
@@ -340,7 +337,7 @@ impl GlassLayer {
     /// current pixels instead of the last session's.
     pub fn prepare_show(&self) {
         if let Some((w, h, bits)) = self.window.last_region.get() {
-            apply_lens_region(self.main_sys, w, h, f64::from_bits(bits));
+            apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
         }
         let _ = self.tx.send(GlassConfig {
             visible: Some(true),
@@ -349,7 +346,6 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
-            closing: None,
         });
     }
 
@@ -364,7 +360,6 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: Some(dark),
             scale: None,
-            closing: None,
         });
     }
 
@@ -372,7 +367,7 @@ impl GlassLayer {
     pub fn show_ready_frame(&self) {
         if self.ready.load(Ordering::Acquire) {
             if let Some((w, h, bits)) = self.window.last_region.get() {
-                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits));
+                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
             }
             self.window.show(true);
         }
@@ -445,8 +440,8 @@ fn set_glass_cloaked(hwnd: HWND, cloak: bool) {
 
 impl GlassWindow {
     /// Max-panel HWND, top-left aligned to the main window. The visible
-    /// shape comes from the round region (per-resize); the window and
-    /// swapchain buffers stay max-size so neither ever resizes.
+    /// shape is the backbuffer alpha mask (per panel resize); the window
+    /// and swapchain buffers stay max-size so neither ever resizes.
     fn create(main_sys: isize, max_w_px: u32, max_h_px: u32) -> Result<GlassWindow, String> {
         let instance: HMODULE = unsafe { GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e:?}"))? };
         let class = w!("NexGlassLayer");
@@ -476,7 +471,11 @@ impl GlassWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                WS_EX_NOACTIVATE
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_TOPMOST
+                    | WS_EX_NOREDIRECTIONBITMAP,
                 class,
                 w!("NexGlass"),
                 WS_POPUP,
@@ -587,19 +586,6 @@ impl GlassWindow {
         set_glass_cloaked(self.hwnd, !show);
         crate::logging::info(&format!("[nex][refract] glass visible={show}"));
     }
-
-    /// Match the panel's rounded corners so sharp desktop slivers never
-    /// peek past the glass. Skips identical regions: re-setting the same
-    /// region forces a repaint/recompose of the flip window (flash).
-    fn apply_round_region(&self, w_px: u32, h_px: u32, scale: f64) {
-        let key = (w_px, h_px, scale.to_bits());
-        if self.last_region.get() == Some(key) {
-            return;
-        }
-        if apply_lens_region(self.hwnd.0 as isize, w_px, h_px, scale) {
-            self.last_region.set(Some(key));
-        }
-    }
 }
 
 /// Worker-owned renderer: every D3D/D2D object. Built once at max
@@ -610,6 +596,11 @@ struct Engine {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain1,
+    /// Composition tree: the backbuffer alpha carries the rounded panel
+    /// silhouette, and the visual transform cancels DComp's DPI scale.
+    dcomp: IDCompositionDevice,
+    target: IDCompositionTarget,
+    visual: IDCompositionVisual,
     d2d: ID2D1DeviceContext,
     /// Size-agnostic effect graph, built once. Resizes replace source,
     /// geometry and lighting bitmaps without rebuilding the graph.
@@ -629,9 +620,20 @@ struct Engine {
     lights: Vec<ID2D1Bitmap1>,
     depth_grain: Option<ID2D1Bitmap1>,
     local_tint: Option<ID2D1Bitmap1>,
+    /// Panel-sized premultiplied alpha mask: 1 inside the rounded shape,
+    /// 0 outside, 1 px analytic AA. Composed with DESTINATION_IN.
+    mask: Option<ID2D1Bitmap1>,
     tint_grid: std::cell::RefCell<Option<Vec<[f32; 4]>>>,
     light_direction: std::cell::Cell<(f32, f32, bool)>,
     source: Option<ID2D1Bitmap1>,
+    /// GPU-resident backdrop crop the source bitmap wraps; captured
+    /// frames are copied straight into it (no CPU round trip).
+    source_tex: Option<ID3D11Texture2D>,
+    /// 16x16 GPU downsample of the source, read back for material/tint
+    /// statistics. One kilobyte per frame instead of the full panel.
+    sample_tex: ID3D11Texture2D,
+    sample_staging: ID3D11Texture2D,
+    sample_target: ID2D1Bitmap1,
     map: Option<ID2D1Bitmap1>,
     tint_brush: ID2D1SolidColorBrush,
     /// Swapchain buffer size (max panel; grow-only).
@@ -671,7 +673,7 @@ impl Engine {
         let factory: IDXGIFactory2 =
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }
                 .map_err(|e| format!("CreateDXGIFactory2 failed: {e:?}"))?;
-        let mut desc = DXGI_SWAP_CHAIN_DESC1 {
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: buf_w,
             Height: buf_h,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -679,59 +681,38 @@ impl Engine {
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 2,
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            Scaling: windows::Win32::Graphics::Dxgi::DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
             AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
             Flags: 0,
         };
-        let variants: [(&str, DXGI_SCALING, DXGI_ALPHA_MODE, u32, DXGI_SWAP_EFFECT); 4] = [
-            (
-                "premultiplied+stretch",
-                DXGI_SCALING_STRETCH,
-                DXGI_ALPHA_MODE_PREMULTIPLIED,
-                2,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            ),
-            (
-                "premultiplied+none",
-                DXGI_SCALING_NONE,
-                DXGI_ALPHA_MODE_PREMULTIPLIED,
-                2,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            ),
-            (
-                "bitblt+discard",
-                DXGI_SCALING_STRETCH,
-                DXGI_ALPHA_MODE_UNSPECIFIED,
-                1,
-                DXGI_SWAP_EFFECT_DISCARD,
-            ),
-            (
-                "unspecified+stretch",
-                DXGI_SCALING_STRETCH,
-                DXGI_ALPHA_MODE_UNSPECIFIED,
-                2,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            ),
-        ];
-        let mut swapchain: Option<IDXGISwapChain1> = None;
-        for (name, scaling, alpha, buffer_count, effect) in variants {
-            desc.Scaling = scaling;
-            desc.AlphaMode = alpha;
-            desc.BufferCount = buffer_count;
-            desc.SwapEffect = effect;
-            match unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None) } {
-                Ok(chain) => {
-                    crate::logging::info(&format!("[nex][refract] swapchain ok via {name}"));
-                    swapchain = Some(chain);
-                    break;
-                }
-                Err(error) => crate::logging::warn(&format!(
-                    "[nex][refract] swapchain {name} failed: {error:?}"
-                )),
-            }
+        // Composition, not HWND presentation: the backbuffer alpha is the
+        // panel silhouette, so the rounded edge is antialiased by the
+        // compositor instead of quantised by a GDI window region.
+        let swapchain: IDXGISwapChain1 =
+            unsafe { factory.CreateSwapChainForComposition(&device, &desc, None) }
+                .map_err(|e| format!("composition swapchain failed: {e:?}"))?;
+        let dxgi_device: IDXGIDevice = device
+            .cast()
+            .map_err(|e| format!("QI IDXGIDevice failed: {e:?}"))?;
+        let dcomp: IDCompositionDevice = unsafe { DCompositionCreateDevice(&dxgi_device) }
+            .map_err(|e| format!("DCompositionCreateDevice failed: {e:?}"))?;
+        let target: IDCompositionTarget = unsafe { dcomp.CreateTargetForHwnd(hwnd, true) }
+            .map_err(|e| format!("composition target failed: {e:?}"))?;
+        let visual: IDCompositionVisual = unsafe { dcomp.CreateVisual() }
+            .map_err(|e| format!("composition visual failed: {e:?}"))?;
+        unsafe {
+            visual
+                .SetContent(&swapchain)
+                .map_err(|e| format!("composition content failed: {e:?}"))?;
+            target
+                .SetRoot(&visual)
+                .map_err(|e| format!("composition root failed: {e:?}"))?;
+            dcomp
+                .Commit()
+                .map_err(|e| format!("composition commit failed: {e:?}"))?;
         }
-        let swapchain = swapchain.ok_or("all swapchain desc variants failed")?;
+        crate::logging::info("[nex][refract] swapchain ok via composition+premultiplied");
 
         let d2d = d2d_setup(&device)?;
         crate::logging::info(&format!(
@@ -810,13 +791,49 @@ impl Engine {
                 &D2D1_COMPOSITE_MODE_PLUS.0.to_ne_bytes(),
             ).map_err(|e| format!("RGB composite: {e:?}"))?;
         }
+        // Statistics surface: the source is box-downsampled to 16x16 on
+        // the GPU, then only 1 KiB crosses to the CPU. The material and
+        // tint grid never need the full captured panel.
+        let sample_tex = frame_texture(
+            &device,
+            SAMPLE_W,
+            SAMPLE_H,
+            D3D11_USAGE_DEFAULT,
+            D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            0,
+        )?;
+        let sample_staging = frame_texture(
+            &device,
+            SAMPLE_W,
+            SAMPLE_H,
+            D3D11_USAGE_STAGING,
+            0,
+            D3D11_CPU_ACCESS_READ.0 as u32,
+        )?;
+        let sample_surface: IDXGISurface = sample_tex
+            .cast()
+            .map_err(|e| format!("sample QI surface failed: {e:?}"))?;
+        let sample_target: ID2D1Bitmap1 = unsafe {
+            d2d.CreateBitmapFromDxgiSurface(
+                &sample_surface,
+                Some(&bitmap_props(D2D1_BITMAP_OPTIONS_TARGET) as *const _),
+            )
+            .map_err(|e| format!("sample target failed: {e:?}"))?
+        };
         let mut engine = Engine {
             scale: 1.0,
             device,
             context,
             swapchain,
+            dcomp,
+            target,
+            visual,
             d2d,
             source: None,
+            source_tex: None,
+            sample_tex,
+            sample_staging,
+            sample_target,
             map: None,
             tint_brush,
             width: buf_w,
@@ -837,11 +854,30 @@ impl Engine {
             lights: Vec::new(),
             depth_grain: None,
             local_tint: None,
+            mask: None,
             tint_grid: std::cell::RefCell::new(None),
-            light_direction: std::cell::Cell::new((-0.5, -0.7, true)),
+            light_direction: std::cell::Cell::new((0.0, 0.0, true)),
         };
         engine.rebuild_content()?;
         Ok(engine)
+    }
+
+    /// Keep DComp in physical pixels: its visual tree is DPI-scaled by the
+    /// host window, so a `1 / scale` visual transform cancels that scale.
+    /// The rounded silhouette lives in the backbuffer alpha (mask bitmap),
+    /// not in a hard visual clip.
+    fn apply_visual(&self) -> Result<(), String> {
+        let inv = 1.0 / self.scale.max(0.01) as f32;
+        let matrix = Matrix3x2::scale(inv, inv);
+        unsafe {
+            self.visual
+                .SetTransform2(&matrix)
+                .map_err(|e| format!("composition transform failed: {e:?}"))?;
+            self.dcomp
+                .Commit()
+                .map_err(|e| format!("composition commit failed: {e:?}"))?;
+        }
+        Ok(())
     }
 
     /// Rebuild source, normal/scatter map and native surface layers at the
@@ -851,7 +887,6 @@ impl Engine {
             self.panel_w as usize + BLUR_PAD as usize * 2,
             self.panel_h as usize + BLUR_PAD as usize * 2,
         );
-        let src_bytes = vec![0u8; w * h * 4];
         let mut map_bytes = vec![128u8; w * h * 4];
         for alpha in map_bytes.iter_mut().skip(3).step_by(4) {
             *alpha = 255;
@@ -864,18 +899,38 @@ impl Engine {
                 .copy_from_slice(&panel_map[src..src + self.panel_w as usize * 4]);
         }
         let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
+        // Captured frames land in this texture on the GPU, so the effect
+        // graph samples it directly. Clear it once: D3D leaves fresh
+        // textures undefined, and a resize must not show that garbage.
+        let source_tex = frame_texture(
+            &self.device,
+            w as u32,
+            h as u32,
+            D3D11_USAGE_DEFAULT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            0,
+        )?;
+        let clear = vec![0u8; w * h * 4];
+        let resource: ID3D11Resource = source_tex
+            .cast()
+            .map_err(|e| format!("source QI resource failed: {e:?}"))?;
+        unsafe {
+            self.context.UpdateSubresource(
+                &resource,
+                0,
+                None,
+                clear.as_ptr() as *const _,
+                (w * 4) as u32,
+                0,
+            );
+        }
+        let source_surface: IDXGISurface = source_tex
+            .cast()
+            .map_err(|e| format!("source QI surface failed: {e:?}"))?;
         let source: ID2D1Bitmap1 = unsafe {
             self.d2d
-                .CreateBitmap(
-                    D2D_SIZE_U {
-                        width: w as u32,
-                        height: h as u32,
-                    },
-                    Some(src_bytes.as_ptr() as *const _),
-                    (w * 4) as u32,
-                    &props as *const _,
-                )
-                .map_err(|e| format!("source CreateBitmap failed: {e:?}"))?
+                .CreateBitmapFromDxgiSurface(&source_surface, Some(&props as *const _))
+                .map_err(|e| format!("source bitmap failed: {e:?}"))?
         };
         let map: ID2D1Bitmap1 = unsafe {
             self.d2d
@@ -910,6 +965,7 @@ impl Engine {
             }
         }
         self.source = Some(source);
+        self.source_tex = Some(source_tex);
         self.map = Some(map);
         self.lights.clear();
         let layers = surface_layers(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
@@ -918,7 +974,13 @@ impl Engine {
         }
         self.depth_grain = Some(self.bitmap(self.panel_w, self.panel_h, &layers[4])?);
         self.local_tint = Some(self.bitmap(4, 4, &[0; 64])?);
+        self.mask = Some(self.bitmap(
+            self.panel_w,
+            self.panel_h,
+            &rounded_mask(self.panel_w, self.panel_h, self.scale as f32, CORNER_RADIUS),
+        )?);
         *self.tint_grid.borrow_mut() = None;
+        self.apply_visual()?;
         Ok(())
     }
 
@@ -928,41 +990,136 @@ impl Engine {
             .map_err(|e| format!("surface bitmap: {e:?}"))
     }
 
-    /// Upload one captured frame over the source bitmap. Size drift
-    /// (panel resized mid-flight) drops the frame; the rebuild already
-    /// queued covers the next one.
-    fn ingest_frame(&self, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
-        let source = self.source.as_ref().ok_or("no source bitmap")?;
-        let expected_w = self.panel_w + BLUR_PAD * 2;
-        let expected_h = self.panel_h + BLUR_PAD * 2;
-        if w != expected_w || h != expected_h {
-            return Err("size drift, dropped".to_string());
+    /// Copy a captured desktop crop straight into the GPU source texture.
+    /// Nothing touches the CPU: the effect graph samples the result.
+    /// A crop clamped by the monitor edge is copied at its true offset,
+    /// leaving the off-screen remainder as the cleared pad.
+    fn copy_crop(
+        &self,
+        src: &ID3D11Texture2D,
+        bx: u32,
+        by: u32,
+        bw: u32,
+        bh: u32,
+        dx: u32,
+        dy: u32,
+    ) -> Result<(), String> {
+        let dst = self.source_tex.as_ref().ok_or("no source texture")?;
+        let (ew, eh) = (
+            self.panel_w + BLUR_PAD * 2,
+            self.panel_h + BLUR_PAD * 2,
+        );
+        if bw == 0
+            || bh == 0
+            || dx.checked_add(bw).map(|r| r > ew).unwrap_or(true)
+            || dy.checked_add(bh).map(|r| r > eh).unwrap_or(true)
+        {
+            return Err(format!("crop {bw}x{bh} at {dx},{dy} outside source {ew}x{eh}"));
         }
-        if pixels.len() != (w * h * 4) as usize {
-            return Err("pixel size mismatch, dropped".to_string());
-        }
+        let right = bx.checked_add(bw).ok_or("crop x overflow")?;
+        let bottom = by.checked_add(bh).ok_or("crop y overflow")?;
+        let region = D3D11_BOX {
+            left: bx,
+            top: by,
+            front: 0,
+            right,
+            bottom,
+            back: 1,
+        };
         unsafe {
-            source
-                .CopyFromMemory(None, pixels.as_ptr() as *const _, w * 4)
-                .map_err(|e| format!("CopyFromMemory failed: {e:?}"))?;
+            self.context
+                .CopySubresourceRegion(dst, 0, dx, dy, 0, src, 0, Some(&region));
         }
         Ok(())
     }
 
-    /// Upload and present one frame with the current material's tint.
-    /// Uploading also refreshes the source bitmap after a resize.
-    fn present_frame(
-        &self,
-        pixels: &[u8],
-        w: u32,
-        h: u32,
-        material: &Material,
-        bend: f32,
-    ) -> Result<(), String> {
+    /// Test-only CPU upload for the offscreen probe (production frames
+    /// arrive by GPU copy in `copy_crop`).
+    #[cfg(test)]
+    fn upload_source(&self, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
+        let tex = self.source_tex.as_ref().ok_or("no source texture")?;
+        if w != self.panel_w + BLUR_PAD * 2 || h != self.panel_h + BLUR_PAD * 2 {
+            return Err("probe size drift".to_string());
+        }
+        if pixels.len() != (w * h * 4) as usize {
+            return Err("probe pixel size mismatch".to_string());
+        }
+        let resource: ID3D11Resource = tex
+            .cast()
+            .map_err(|e| format!("probe QI resource failed: {e:?}"))?;
+        unsafe {
+            self.context.UpdateSubresource(
+                &resource,
+                0,
+                None,
+                pixels.as_ptr() as *const _,
+                w * 4,
+                0,
+            );
+        }
+        Ok(())
+    }
+
+    /// Box-downsample the source to 16x16 on the GPU and read back 1 KiB.
+    /// This replaces the old full-panel Map, which was the single largest
+    /// per-frame CPU cost.
+    fn sample_backdrop(&self) -> Result<Vec<u8>, String> {
+        let source = self.source.as_ref().ok_or("no source bitmap")?;
+        let dest = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: SAMPLE_W as f32,
+            bottom: SAMPLE_H as f32,
+        };
+        unsafe {
+            // D2D's target must not be the swapchain while stats are
+            // taken; render_frame rebinds its own target afterwards.
+            self.d2d.SetTarget(&self.sample_target);
+            self.d2d.BeginDraw();
+            self.d2d
+                .DrawBitmap(source, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            self.d2d
+                .EndDraw(None, None)
+                .map_err(|e| format!("sample EndDraw failed: {e:?}"))?;
+            self.d2d.SetTarget(None);
+            self.context
+                .CopyResource(&self.sample_staging, &self.sample_tex);
+        }
+        let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+        unsafe {
+            self.context
+                .Map(
+                    &self.sample_staging,
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped as *mut _),
+                )
+                .map_err(|e| format!("sample Map failed: {e:?}"))?;
+        }
+        let mut out = vec![0u8; (SAMPLE_W * SAMPLE_H * 4) as usize];
+        for row in 0..SAMPLE_H as usize {
+            let src = unsafe {
+                (mapped.pData as *const u8).add(row * mapped.RowPitch as usize)
+            };
+            let dst = row * SAMPLE_W as usize * 4;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src,
+                    out.as_mut_ptr().add(dst),
+                    SAMPLE_W as usize * 4,
+                );
+            }
+        }
+        unsafe { self.context.Unmap(&self.sample_staging, 0) };
+        Ok(out)
+    }
+
+    /// Present the held source with the current material. Callers update
+    /// the source (via `copy_crop`) and its statistics first.
+    fn present(&self, material: &Material, bend: f32) -> Result<(), String> {
         self.set_tint(material.wash());
         self.set_bend(bend);
-        self.update_local_tint(pixels, w, h, material)?;
-        self.ingest_frame(pixels, w, h)?;
         self.render_frame()
     }
 
@@ -1026,6 +1183,9 @@ impl Engine {
         unsafe {
             self.d2d.SetTarget(&target);
             self.d2d.BeginDraw();
+            // Composition swapchain carries premultiplied alpha: start from
+            // fully transparent so the mask below owns the silhouette.
+            self.d2d.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             let source_rect = D2D_RECT_F {
                 left: BLUR_PAD as f32,
                 top: BLUR_PAD as f32,
@@ -1055,10 +1215,29 @@ impl Engine {
                 self.d2d.DrawBitmap(depth, Some(&panel), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
             }
             let (lx, ly, focused) = self.light_direction.get();
-            let weights = [(-lx).max(0.0), lx.max(0.0), (-ly).max(0.0), ly.max(0.0)];
-            for (light, weight) in self.lights.iter().zip(weights) {
-                let opacity = (0.06 + weight * 0.70) * if focused { 1.0 } else { 0.45 };
+            // Ambient-dominant: every edge keeps a strong base so all four
+            // corners match; the pointer adds a mild directional bias.
+            let bias = [
+                (-lx).clamp(0.0, 1.0),
+                lx.clamp(0.0, 1.0),
+                (-ly).clamp(0.0, 1.0),
+                ly.clamp(0.0, 1.0),
+            ];
+            for (light, bias) in self.lights.iter().zip(bias) {
+                let opacity = (0.75 + 0.45 * bias) * if focused { 1.0 } else { 0.6 };
                 self.d2d.DrawBitmap(light, Some(&panel), opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            }
+            if let Some(mask) = &self.mask {
+                let image: ID2D1Image = mask
+                    .cast()
+                    .map_err(|e| format!("mask as image failed: {e:?}"))?;
+                self.d2d.DrawImage(
+                    &image,
+                    None,
+                    None,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_COMPOSITE_MODE_DESTINATION_IN,
+                );
             }
             self.d2d
                 .EndDraw(None, None)
@@ -1134,15 +1313,14 @@ fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
     bitmap_props_with_alpha(options, D2D1_ALPHA_MODE_PREMULTIPLIED)
 }
 
-/// Swapchain backbuffers on this box come from the bitblt path, which
-/// carries no alpha — declaring PREMULTIPLIED there fails binding with
-/// E_INVALIDARG. IGNORE matches the surface; the layer is opaque and
-/// the page blends above it, so nothing is lost. CANNOT_DRAW is required
-/// for swapchain-bound targets.
+/// Composition swapchain backbuffers carry premultiplied alpha, so the
+/// target declares PREMULTIPLIED and our rounded mask can punch the
+/// silhouette into the alpha channel. CANNOT_DRAW is required for
+/// swapchain-bound targets.
 fn target_props() -> D2D1_BITMAP_PROPERTIES1 {
     bitmap_props_with_alpha(
         D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-        D2D1_ALPHA_MODE_IGNORE,
+        D2D1_ALPHA_MODE_PREMULTIPLIED,
     )
 }
 
@@ -1159,6 +1337,39 @@ fn bitmap_props_with_alpha(
         dpiY: 96.0,
         bitmapOptions: options,
         colorContext: std::mem::ManuallyDrop::new(None),
+    }
+}
+
+/// Create one BGRA texture for the capture/render path.
+fn frame_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+    usage: D3D11_USAGE,
+    bind: u32,
+    cpu: u32,
+) -> Result<ID3D11Texture2D, String> {
+    unsafe {
+        let mut texture: Option<ID3D11Texture2D> = None;
+        device
+            .CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: usage,
+                    BindFlags: bind,
+                    CPUAccessFlags: cpu,
+                    MiscFlags: 0,
+                },
+                None,
+                Some(&mut texture as *mut _),
+            )
+            .map_err(|e| format!("texture {width}x{height} failed: {e:?}"))?;
+        texture.ok_or_else(|| "texture came back empty".to_string())
     }
 }
 
@@ -1219,11 +1430,13 @@ fn dispersion_scales(bend: f32) -> [f32; 3] {
 fn scatter_weight(depth: f32) -> f32 {
     let t = (depth / BEZEL_MARGIN).clamp(0.0, 1.0);
     // Modest diffusion even at the center; smooth derivative at both ends.
-    0.12 + 0.78 * (1.0 - t * t * (3.0 - 2.0 * t))
+    0.10 + 0.45 * (1.0 - t * t * (3.0 - 2.0 * t))
 }
 
-/// Rounded superellipse (power 4) with continuous curvature into straight
-/// sides. Returns approximate inward distance and outward unit normal.
+/// Rounded-rectangle signed-distance field with a circular corner arc.
+/// Returns approximate inward distance and outward unit normal. The same
+/// circle is sampled for the GDI region and the CSS polygon, so the
+/// refracted bevel, native cut and page clip share one silhouette.
 fn lens_profile(x: f32, y: f32, w: f32, h: f32, radius: f32) -> (f32, f32, f32) {
     let px = x - w * 0.5;
     let py = y - h * 0.5;
@@ -1231,12 +1444,8 @@ fn lens_profile(x: f32, y: f32, w: f32, h: f32, radius: f32) -> (f32, f32, f32) 
     let qx = px.abs() - (w * 0.5 - radius);
     let qy = py.abs() - (h * 0.5 - radius);
     if qx > 0.0 && qy > 0.0 {
-        let (ax, ay) = (qx, qy);
-        let distance = (ax.powi(4) + ay.powi(4)).sqrt().sqrt() - radius;
-        let gx = ax.powi(3);
-        let gy = ay.powi(3);
-        let length = gx.hypot(gy).max(0.00001);
-        (-distance, gx / length * px.signum(), gy / length * py.signum())
+        let length = qx.hypot(qy).max(0.00001);
+        (radius - length, qx / length * px.signum(), qy / length * py.signum())
     } else if qx > qy {
         (radius - qx, px.signum(), 0.0)
     } else {
@@ -1251,13 +1460,10 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
             let (depth, nx, ny) = lens_profile(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, CORNER_RADIUS * scale);
             let depth = depth / scale;
             let ridge = rim_light(depth);
-            // Broad glints taper along each edge rather than drawing an
-            // equally bright inset frame. Opposite corners stay quiet.
-            let u = x as f32 / w.max(1) as f32;
-            let v = y as f32 / h.max(1) as f32;
-            let taper = |t: f32| 0.18 + 0.82 * (1.0 - t).powi(2);
-            let weights = [(-nx).max(0.0) * taper(v), nx.max(0.0) * taper(1.0 - v),
-                (-ny).max(0.0) * taper(u), ny.max(0.0) * taper(1.0 - u)];
+            // Uniform along each edge: directional variation is applied once
+            // per frame from the pointer light, so all four corners read the
+            // same brightness instead of two lit diagonals.
+            let weights = [(-nx).max(0.0), nx.max(0.0), (-ny).max(0.0), ny.max(0.0)];
             for (layer, facing) in layers[..4].iter_mut().zip(weights) {
                 let alpha = (ridge * facing * 255.0).clamp(0.0, 255.0) as u8;
                 layer.extend_from_slice(&[alpha, alpha, alpha, alpha]);
@@ -1270,7 +1476,7 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
             hash ^= hash >> 15;
             let white = hash & 1 != 0;
             let shade = if depth < BEZEL_MARGIN {
-                ((nx + ny).max(0.0) * (-depth.max(0.0) / 3.0).exp() * 0.025 * 255.0) as u8
+                ((nx + ny).max(0.0) * (-depth.max(0.0) / 6.0).exp() * 0.09 * 255.0) as u8
             } else { 0 };
             let alpha = shade.saturating_add(1);
             let color = if white { 1 } else { 0 };
@@ -1281,11 +1487,12 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
 }
 
 fn rim_light(depth: f32) -> f32 {
-    // Peak at the boundary, never an offset ridge/double outline. Smooth
-    // low-frequency reflection beneath the hairline supplies depth.
+    // Peak at the boundary, never an offset ridge/double outline. A
+    // narrow specular hairline sits on a wider glow; the glow is what
+    // makes the pane read as thick glass under a moving light.
     let depth = depth.max(0.0);
     if depth >= BEZEL_MARGIN { return 0.0; }
-    0.18 * (-(depth / 0.8).powi(2)).exp() + 0.018 * (-depth / 8.0).exp()
+    0.34 * (-(depth / 0.9).powi(2)).exp() + 0.055 * (-depth / 14.0).exp()
 }
 
 fn backdrop_grid(pixels: &[u8], w: usize, h: usize, wash: (f32, f32, f32, f32)) -> Vec<[f32; 4]> {
@@ -1295,8 +1502,11 @@ fn backdrop_grid(pixels: &[u8], w: usize, h: usize, wash: (f32, f32, f32, f32)) 
         for gx in 0..4 {
             let mut rgb = [0.0; 3];
             let mut count = 0.0;
-            for y in (gy * h / 4..(gy + 1) * h / 4).step_by(8) {
-                for x in (gx * w / 4..(gx + 1) * w / 4).step_by(8) {
+            // Statistics arrive as a 16x16 GPU downsample, so one cell is
+            // 4x4 pixels: average all of them. (The old step of 8 sampled
+            // a single corner of each cell.)
+            for y in gy * h / 4..(gy + 1) * h / 4 {
+                for x in gx * w / 4..(gx + 1) * w / 4 {
                     let i = (y * w + x) * 4;
                     for c in 0..3 { rgb[c] += pixels[i + 2 - c] as f32 / 255.0; }
                     count += 1.0;
@@ -1338,12 +1548,26 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
             let (depth, nx, ny) = lens_profile(x as f32 + 0.5, y as f32 + 0.5, width, height, CORNER_RADIUS * scale);
             let depth = depth / scale;
             let t = (depth / BEZEL_MARGIN).clamp(0.0, 1.0);
-            let (dx, dy) = if t >= 1.0 {
-                (0.0, 0.0)
-            } else {
-                let strength = (1.0 - t) * (1.0 - t);
-                (-nx * strength, -ny * strength)
-            };
+            // Rim bevel plus a slowly decaying thickness tail. The tail
+            // is continuous across the 32 px boundary (the rim term is
+            // already zero there), so the pane reads as one slab rather
+            // than a bevelled frame around a window. Its direction is
+            // radial from the pane center, not the nearest-edge normal:
+            // the latter flips across the medial axis and would leave a
+            // one-pixel seam through the middle of the glass.
+            let rim = if t >= 1.0 { 0.0 } else { (1.0 - t) * (1.0 - t) };
+            let px = x as f32 + 0.5 - width * 0.5;
+            let py = y as f32 + 0.5 - height * 0.5;
+            // Optical centre stays neutral; the radial bend grows toward
+            // the edges, like a slab whose thickness is felt at the rim.
+            let span = (width.min(height) * 0.5).max(1.0);
+            let reach = (px.hypot(py) / span).clamp(0.0, 1.0);
+            let slab = SLAB_BEND * reach * (-depth.max(0.0) / SLAB_DECAY).exp();
+            let radial = 1.0 / px.hypot(py).max(1.0);
+            let (dx, dy) = (
+                -nx * rim - px * radial * slab,
+                -ny * rim - py * radial * slab,
+            );
             let r = (128.0 + dx * 127.0).round().clamp(0.0, 255.0) as u8;
             let g = (128.0 + dy * 127.0).round().clamp(0.0, 255.0) as u8;
             let scatter = (scatter_weight(depth) * 255.0).round() as u8;
@@ -1355,12 +1579,15 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
 
 /// Same sampled continuous corner feeds GDI regions and the CSS polygon.
 /// Offsets are logical pixels from each corner; no independent CSS radius.
+/// Circular arc: a quarter circle of radius R removes 0.293R at the
+/// diagonal. The earlier sqrt-cos profile removed only 0.159R there,
+/// which read as a nearly square corner despite the radius.
 fn corner_offsets() -> Vec<(f32, f32)> {
-    (0..=16).map(|i| {
-        let angle = i as f32 / 16.0 * std::f32::consts::FRAC_PI_2;
+    const SAMPLES: u32 = 24;
+    (0..=SAMPLES).map(|i| {
+        let angle = i as f32 / SAMPLES as f32 * std::f32::consts::FRAC_PI_2;
         let (sin, cos) = angle.sin_cos();
-        (CORNER_RADIUS * (1.0 - cos.max(0.0).sqrt()),
-         CORNER_RADIUS * (1.0 - sin.max(0.0).sqrt()))
+        (CORNER_RADIUS * (1.0 - cos), CORNER_RADIUS * (1.0 - sin))
     }).collect()
 }
 
@@ -1380,22 +1607,86 @@ pub(crate) fn lens_clip_css() -> String {
     format!("polygon({})", points.join(","))
 }
 
-fn apply_lens_region(hwnd: isize, w: u32, h: u32, scale: f64) -> bool {
-    use windows_sys::Win32::Graphics::Gdi::{CreatePolygonRgn, SetWindowRgn, DeleteObject, WINDING};
+/// Panel-sized premultiplied alpha mask for the rounded silhouette.
+/// Analytic signed distance to a rounded rectangle, 1 px coverage ramp,
+/// so the compositor blends a smooth arc instead of a binary GDI region.
+fn rounded_mask(w: u32, h: u32, scale: f32, radius_logical: f32) -> Vec<u8> {
+    let rw = w as f32;
+    let rh = h as f32;
+    let half_w = rw * 0.5;
+    let half_h = rh * 0.5;
+    let r = (radius_logical * scale).min(half_w).min(half_h).max(0.0);
+    let inset_x = (half_w - r).max(0.0);
+    let inset_y = (half_h - r).max(0.0);
+    let mut out = vec![0u8; w as usize * h as usize * 4];
+    for y in 0..h {
+        let qy = (y as f32 + 0.5 - half_h).abs() - inset_y;
+        for x in 0..w {
+            let qx = (x as f32 + 0.5 - half_w).abs() - inset_x;
+            let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
+            let coverage = (0.5 - outside).clamp(0.0, 1.0);
+            let a = (coverage * 255.0).round() as u8;
+            let i = (y as usize * w as usize + x as usize) * 4;
+            out[i..i + 4].copy_from_slice(&[a, a, a, a]);
+        }
+    }
+    out
+}
+
+/// Polygon points for the lens silhouette in device pixels.
+/// `grow_px` expands the circular corner radially from its centre, so the
+/// cut stays a true circle. Growing x/y independently distorted the arc
+/// (1.41 px at the diagonal, 1 px at the tangents); points may sit just
+/// outside the window rect, where Windows clips them.
+fn lens_region_points(w: u32, h: u32, scale: f64, grow_px: f64) -> Vec<(f64, f64)> {
+    let radius = (CORNER_RADIUS as f64 * scale).max(1.0);
+    let factor = (radius + grow_px) / radius;
     let mut points = Vec::new();
     for corner in 0..4 {
         for (x, y) in corner_offsets() {
-            let x = x as f64 * scale;
-            let y = y as f64 * scale;
-            let (x, y) = match corner {
+            let ox = x as f64 * scale;
+            let oy = y as f64 * scale;
+            let x = radius + (ox - radius) * factor;
+            let y = radius + (oy - radius) * factor;
+            points.push(match corner {
                 0 => (x, y),
                 1 => (w as f64 - y, x),
                 2 => (w as f64 - x, h as f64 - y),
                 _ => (y, h as f64 - x),
-            };
-            points.push(windows_sys::Win32::Foundation::POINT { x: x.round() as i32, y: y.round() as i32 });
+            });
         }
     }
+    points
+}
+
+/// Offset of the client area's origin inside the window's own coordinates.
+///
+/// `SetWindowRgn` works in window coordinates, and a borderless tao window
+/// still carries an invisible resize frame, so the client does not start at
+/// (0, 0). Handing the region a client-sized polygon anchored at the window
+/// origin shaves the frame width (~8 px) off the page's right and bottom.
+fn client_origin_in_window(hwnd: isize) -> (i32, i32) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    let mut window = RECT::default();
+    let mut origin = POINT { x: 0, y: 0 };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd as _, &mut window);
+        windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd as _, &mut origin);
+    }
+    (origin.x - window.left, origin.y - window.top)
+}
+
+fn apply_lens_region(hwnd: isize, w: u32, h: u32, scale: f64, grow_px: f64) -> bool {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{CreatePolygonRgn, SetWindowRgn, DeleteObject, WINDING};
+    let (ox, oy) = client_origin_in_window(hwnd);
+    let points: Vec<POINT> = lens_region_points(w, h, scale, grow_px)
+        .into_iter()
+        .map(|(x, y)| POINT {
+            x: ox + x.round() as i32,
+            y: oy + y.round() as i32,
+        })
+        .collect();
     unsafe {
         let region = CreatePolygonRgn(points.as_ptr(), points.len() as i32, WINDING);
         if region.is_null() { return false; }
@@ -1403,10 +1694,12 @@ fn apply_lens_region(hwnd: isize, w: u32, h: u32, scale: f64) -> bool {
     }
 }
 
-/// Worker-owned capture: duplication session + full-frame staging.
+/// Worker-owned capture: duplication session + full-frame GPU mirror.
+/// The mirror is what makes exact re-crops free after a panel resize:
+/// the desktop image never has to come back to the CPU.
 struct Capture {
     duplication: IDXGIOutputDuplication,
-    staging: ID3D11Texture2D,
+    mirror: ID3D11Texture2D,
     frame_w: u32,
     frame_h: u32,
     origin_x: i32,
@@ -1421,14 +1714,6 @@ fn swell_bend(elapsed_ms: f32) -> f32 {
     let mut spring = Spring { value: 0.0, velocity: 0.0 };
     spring.step(1.0, elapsed_ms.max(0.0) / 1000.0);
     spring.value
-}
-
-/// Close lens release: 1 (resting curvature) at the start, 0 (flat) at
-/// `CLOSE_MS`. Smoothstep, no overshoot — a close should settle, not bounce.
-fn close_bend(elapsed_ms: Option<f32>) -> f32 {
-    let Some(ms) = elapsed_ms else { return 1.0 };
-    let t = (ms / CLOSE_MS).clamp(0.0, 1.0);
-    1.0 - t * t * (3.0 - 2.0 * t)
 }
 
 /// Exact solution of an underdamped spring. Retarget without throwing away
@@ -1570,9 +1855,10 @@ impl ShowCycle {
     }
 }
 
-/// Pull the desktop's newest frame into the staging mirror, if the
-/// desktop has produced one since the last acquire. Returns whether the
-/// mirror moved.
+/// Pull the desktop's newest frame into the GPU mirror, if the desktop
+/// has produced one since the last acquire. Returns whether the mirror
+/// moved. The copy stays on the GPU so a large desktop frame never crosses
+/// the bus just to be cropped.
 ///
 /// A show wants the desktop as it is *now*, not as the hidden poll last
 /// saw it: the poll runs every `HIDDEN_POLL_MS`, which is most of a
@@ -1583,7 +1869,7 @@ impl ShowCycle {
 /// miss. Nonblocking, and any failure (lost access, dead session) leaves
 /// the mirror untouched; the capture path proper handles a dead session
 /// on its next pass.
-fn refresh_staging(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
+fn refresh_mirror(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
     let mut info: windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO =
         unsafe { std::mem::zeroed() };
     let mut resource: Option<IDXGIResource> = None;
@@ -1600,7 +1886,7 @@ fn refresh_staging(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
             .ok_or("empty frame resource")?
             .cast()
             .map_err(|e| format!("frame QI texture failed: {e:?}"))?;
-        unsafe { context.CopySubresourceRegion(&cap.staging, 0, 0, 0, 0, &texture, 0, None) };
+        unsafe { context.CopySubresourceRegion(&cap.mirror, 0, 0, 0, 0, &texture, 0, None) };
         Ok(())
     })()
     .is_ok();
@@ -1682,7 +1968,6 @@ fn worker_main(
     let mut cycle = ShowCycle { refresh: false, swell: None };
     // Last presented capture box, fallback fill when the mirror is not
     // yet armed (static desktop + panel change before first frame).
-    let mut last_frame: Option<(Vec<u8>, u32, u32)> = None;
     // Straight failures in a row: a poisoned device/capture never heals
     // by retrying the same calls, so rebuild everything after a few.
     let mut n_fail = 0u32;
@@ -1693,8 +1978,6 @@ fn worker_main(
     let mut interaction = Spring { value: 1.0, velocity: 0.0 };
     let mut interaction_at = Instant::now();
     let mut interaction_dirty = false;
-    // When the current visual close began. Cleared by any show/hide config.
-    let mut close_at: Option<Instant> = None;
     let mut previous_panel = (0, 0);
 
     loop {
@@ -1704,8 +1987,6 @@ fn worker_main(
                     motion = crate::overlay::platform::animations_enabled();
                     interaction = Spring { value: 1.0, velocity: 0.0 };
                     interaction_at = Instant::now();
-                    // A show wins over any close still in flight.
-                    close_at = None;
                     // Fresh show: re-announce the material, the page may
                     // have re-seeded its palette to the system theme.
                     palette_sent = None;
@@ -1725,12 +2006,8 @@ fn worker_main(
                     cycle.swell = None;
                     cycle.refresh = false;
                     interaction_dirty = false;
-                    close_at = None;
                 }
                 visible = v;
-            }
-            if let Some(closing) = cfg.closing {
-                close_at = closing.then(Instant::now);
             }
             if cfg.main_sys != 0 {
                 main_sys = cfg.main_sys;
@@ -1811,10 +2088,12 @@ fn worker_main(
         let target = if pressed { 0.88 } else { 1.0 };
         let foreground = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
         let focused = foreground.0 as isize == main_sys;
+        // Resting light is neutral: no edge wins until the pointer moves
+        // over the panel, so all four sides stay equally lit at rest.
         let light = if inside && motion {
             (((pointer.x - mx) as f32 / pw.max(1) as f32 - 0.5) * 1.4,
              ((pointer.y - my) as f32 / ph.max(1) as f32 - 0.5) * 1.4, focused)
-        } else { (-0.5, -0.7, focused) };
+        } else { (0.0, 0.0, focused) };
         if let Some(e) = &engine {
             if e.light_direction.get() != light {
                 e.light_direction.set(light);
@@ -1832,11 +2111,7 @@ fn worker_main(
             interaction = Spring { value: 1.0, velocity: 0.0 };
         }
         previous_panel = (pw, ph);
-        // Close lens release: flat at the end, so the cloak that follows
-        // cuts a settled surface rather than a refraction mid-flight.
-        let close_elapsed = close_at.map(|t0| t0.elapsed().as_secs_f32() * 1000.0);
-        let closing = close_elapsed.is_some_and(|ms| ms < CLOSE_MS);
-        let bend = cycle.bend().0 * interaction.value * close_bend(close_elapsed);
+        let bend = cycle.bend().0 * interaction.value;
         if engine.is_none() {
             match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
                 Ok(mut e) => {
@@ -1896,11 +2171,11 @@ fn worker_main(
             // the next Present, while the desktop may stay still for a
             // while yet.
             let refresh = cycle.take_refresh();
-            // The swell and the close both re-present the held frame: the
-            // desktop is often static, so no captured frame would drive
-            // them. Capped like a captured frame, and only while the
-            // desktop has nothing of its own to paint it with.
-            let swell_due = (cycle.swelling() || interaction_dirty || closing)
+            // The swell re-presents the held frame: the desktop is often
+            // static, so no captured frame would drive the animation.
+            // Capped like a captured frame, and only while the desktop
+            // has nothing of its own to paint it with.
+            let swell_due = (cycle.swelling() || interaction_dirty)
                 && swell_pass_due(last_present.elapsed().as_millis() as u64);
             let swelling = swell_wants_mirror(swell_due, moving);
             // Swell passes are routine (a dozen per show): keep them out
@@ -1916,97 +2191,87 @@ fn worker_main(
                 && staged
                 && capture
                     .as_mut()
-                    .is_some_and(|cap| refresh_staging(cap, &e.context));
+                    .is_some_and(|cap| refresh_mirror(cap, &e.context));
             if live {
                 // A frame this fresh counts as the desktop moving: it *is*
                 // the desktop, taken seconds later than any pass could.
                 last_desktop_frame = Some(Instant::now());
             }
             if !warm && (rebuilt || refresh || swelling) {
-                // Fresh zeros after rebuild, or a reveal pending: present
-                // immediately. Exact crop from the staging mirror - never
-                // a stretched old frame; stretch is only the fallback
-                // when the mirror isn't armed yet.
-                let exact: Option<(Vec<u8>, u32, u32)> = if staged {
-                    capture.as_ref().and_then(|cap| {
+                // Re-present the held desktop image. The crop runs on the
+                // GPU, so a resize never needs the pixels on the CPU: the
+                // mirror still holds the full desktop, and the new panel
+                // box is cut out of it exactly.
+                if staged {
+                    if let Some(cap) = capture.as_ref() {
                         let pad = BLUR_PAD as i32;
-                        let (nbx, nby, nbw, nbh) = clamp_panel_box(
-                            mx - pad,
-                            my - pad,
+                        let want_x = mx - cap.origin_x - pad;
+                        let want_y = my - cap.origin_y - pad;
+                        let (bx, by, bw, bh) = clamp_panel_box(
+                            want_x,
+                            want_y,
                             pw + BLUR_PAD * 2,
                             ph + BLUR_PAD * 2,
-                            cap.origin_x,
-                            cap.origin_y,
+                            0,
+                            0,
                             cap.frame_w,
                             cap.frame_h,
                         );
-                        if nbw != pw + BLUR_PAD * 2 || nbh != ph + BLUR_PAD * 2 {
-                            return None;
-                        }
-                        crop_staging(
-                            &e.context,
-                            &e.device,
-                            &cap.staging,
-                            cap.frame_w,
-                            cap.frame_h,
-                            nbx,
-                            nby,
-                            nbw,
-                            nbh,
-                        )
-                        .ok()
-                        .map(|px| (px, nbw, nbh))
-                    })
-                } else {
-                    None
-                };
-                if let Some((fresh, fw, fh)) = exact {
-                    if material.fresh {
-                        material.update(&fresh);
-                        palette_sent = Some(material.light);
-                        let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
-                    }
-                    match e.present_frame(&fresh, fw, fh, &material, bend) {
-                        Ok(()) => {
-                            n_pre += 1;
-                            interaction_dirty = false;
-                            last_present = Instant::now();
-                            last_frame = Some((fresh, fw, fh));
-                            if announce {
-                                // live: the desktop had a newer frame than
-                                // the hidden poll's. mirror: it had none, so
-                                // the mirror already was the current desktop.
-                                let source = if live { "live" } else { "mirror" };
-                                crate::logging::info(&format!(
-                                    "[nex][refract] panel {pw}x{ph} re-presented in {}ms ({source})",
-                                    t0.elapsed().as_millis()
+                        let dx = (bx as i32 - want_x.max(0)).max(0) as u32;
+                        let dy = (by as i32 - want_y.max(0)).max(0) as u32;
+                        let cropped = e
+                            .copy_crop(&cap.mirror, bx, by, bw, bh, dx, dy)
+                            .inspect_err(|error| {
+                                crate::logging::warn(&format!(
+                                    "[nex][refract] re-crop failed: {error}"
                                 ));
-                            }
-                        }
-                        Err(error) => crate::logging::warn(&format!(
-                            "[nex][refract] resize re-present failed: {error}"
-                        )),
-                    }
-                } else if let Some((prev, cw, ch)) = last_frame.as_ref() {
-                    let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
-                    if prev.len() == (*cw as usize) * (*ch as usize) * 4 {
-                        let stretched = stretch_bgra_nearest(prev, *cw, *ch, ew, eh);
-                        match e.present_frame(&stretched, ew, eh, &material, bend) {
-                            Ok(()) => {
-                                n_pre += 1;
-                                interaction_dirty = false;
-                                last_present = Instant::now();
-                                last_frame = Some((stretched, ew, eh));
-                                if announce {
-                                    crate::logging::info(&format!(
-                                        "[nex][refract] panel {pw}x{ph} re-presented in {}ms (held)",
-                                        t0.elapsed().as_millis()
-                                    ));
+                            })
+                            .is_ok();
+                        if cropped {
+                            match e.sample_backdrop() {
+                                Ok(sample) => {
+                                    if material.fresh {
+                                        material.update(&sample);
+                                        palette_sent = Some(material.light);
+                                        let _ = proxy
+                                            .send_event(UiCommand::GlassPalette(material.light));
+                                    }
+                                    if let Err(error) = e.update_local_tint(
+                                        &sample,
+                                        SAMPLE_W,
+                                        SAMPLE_H,
+                                        &material,
+                                    ) {
+                                        crate::logging::warn(&format!(
+                                            "[nex][refract] tint grid failed: {error}"
+                                        ));
+                                    }
                                 }
+                                Err(error) => crate::logging::warn(&format!(
+                                    "[nex][refract] stats sample failed: {error}"
+                                )),
                             }
-                            Err(error) => crate::logging::warn(&format!(
-                                "[nex][refract] resize re-present failed: {error}"
-                            )),
+                            match e.present(&material, bend) {
+                                Ok(()) => {
+                                    n_pre += 1;
+                                    interaction_dirty = false;
+                                    last_present = Instant::now();
+                                    if announce {
+                                        // live: the desktop had a newer frame
+                                        // than the hidden poll's. mirror: it
+                                        // had none, so the mirror already was
+                                        // the current desktop.
+                                        let source = if live { "live" } else { "mirror" };
+                                        crate::logging::info(&format!(
+                                            "[nex][refract] panel {pw}x{ph} re-presented in {}ms ({source})",
+                                            t0.elapsed().as_millis()
+                                        ));
+                                    }
+                                }
+                                Err(error) => crate::logging::warn(&format!(
+                                    "[nex][refract] resize re-present failed: {error}"
+                                )),
+                            }
                         }
                     }
                 }
@@ -2088,47 +2353,52 @@ fn worker_main(
             continue;
         }
         let pad = BLUR_PAD as i32;
+        let want_x = mx - cap.origin_x - pad;
+        let want_y = my - cap.origin_y - pad;
         let (bx, by, bw, bh) = clamp_panel_box(
-            mx - pad, my - pad, pw + BLUR_PAD * 2, ph + BLUR_PAD * 2,
-            cap.origin_x, cap.origin_y, cap.frame_w, cap.frame_h,
+            want_x,
+            want_y,
+            pw + BLUR_PAD * 2,
+            ph + BLUR_PAD * 2,
+            0,
+            0,
+            cap.frame_w,
+            cap.frame_h,
         );
-        if bw != pw + BLUR_PAD * 2 || bh != ph + BLUR_PAD * 2 {
+        if bw == 0 || bh == 0 {
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             continue;
         }
-        let frame_ok = (|| -> Result<(u64, u64, Vec<u8>), String> {
+        let dx = (bx as i32 - want_x.max(0)).max(0) as u32;
+        let dy = (by as i32 - want_y.max(0)).max(0) as u32;
+        let frame_ok = (|| -> Result<(u64, u64), String> {
             let tex: ID3D11Texture2D = resource
                 .as_ref()
                 .ok_or("empty frame resource")?
                 .cast()
                 .map_err(|e| format!("frame QI texture failed: {e:?}"))?;
-            // Full-frame mirror into staging: the latest desktop image
-            // stays on the GPU, so a later resize crops the new box
-            // exactly (no stretched stale frame) without waiting for a
-            // desktop delta that may never come on a static screen.
+            // Keep the full desktop on the GPU: a later resize cuts a new
+            // panel box out of it for free, even if the desktop never
+            // changes again. Only the panel crop is fed to the effects;
+            // the mirror itself is never read on the CPU.
             unsafe {
                 eng.context.CopySubresourceRegion(
-                    &cap.staging, 0, 0, 0, 0, &tex, 0, None,
+                    &cap.mirror, 0, 0, 0, 0, &tex, 0, None,
                 );
             }
             let t0 = Instant::now();
-            let pixels = crop_staging(
-                &eng.context,
-                &eng.device,
-                &cap.staging,
-                cap.frame_w,
-                cap.frame_h,
-                bx,
-                by,
-                bw,
-                bh,
-            )?;
+            eng.copy_crop(&tex, bx, by, bw, bh, dx, dy)?;
             let us = t0.elapsed().as_micros() as u64;
             let render_t = Instant::now();
-            let flipped = material.update(&pixels);
-            // A hidden poll decides the material only: no upload, no draw.
+            // Material and tint statistics need pixels, but only a 16x16
+            // downsample of them. This keeps the per-frame CPU work at
+            // 1 KiB instead of a full-panel Map + memcpy + upload.
+            let sample = eng.sample_backdrop()?;
+            let flipped = material.update(&sample);
+            // A hidden poll decides the material only: no draw.
             if !warm {
-                eng.present_frame(&pixels, bw, bh, &material, bend)?;
+                eng.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                eng.present(&material, bend)?;
             }
             if flipped || palette_sent != Some(material.light) {
                 palette_sent = Some(material.light);
@@ -2136,15 +2406,14 @@ fn worker_main(
             }
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
-            Ok((us, render_us, pixels))
+            Ok((us, render_us))
         })();
         match frame_ok {
-            Ok((us, frame_render_us, pixels)) => {
+            Ok((us, frame_render_us)) => {
                 copy_us += us;
                 render_us += frame_render_us;
                 n_fail = 0;
                 staged = true;
-                last_frame = Some((pixels, bw, bh));
                 if !warm {
                     n_pre += 1;
                     interaction_dirty = false;
@@ -2257,31 +2526,18 @@ impl Capture {
         if unsafe { GetMonitorInfoW(monitor, &mut mi as *mut _) }.0 == 0 {
             return Err("GetMonitorInfoW failed".to_string());
         }
-        let staging: ID3D11Texture2D = unsafe {
-            let mut tex: Option<ID3D11Texture2D> = None;
-            device
-                .CreateTexture2D(
-                    &D3D11_TEXTURE2D_DESC {
-                        Width: fw,
-                        Height: fh,
-                        MipLevels: 1,
-                        ArraySize: 1,
-                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                        Usage: D3D11_USAGE_STAGING,
-                        BindFlags: 0,
-                        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                        MiscFlags: 0,
-                    },
-                    None,
-                    Some(&mut tex as *mut _),
-                )
-                .map_err(|e| format!("staging texture failed: {e:?}"))?;
-            tex.ok_or("staging texture came back empty")?
-        };
+        let mirror = frame_texture(
+            device,
+            fw,
+            fh,
+            D3D11_USAGE_DEFAULT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            0,
+        )
+        .map_err(|e| format!("mirror texture failed: {e}"))?;
         Ok(Capture {
             duplication,
-            staging,
+            mirror,
             frame_w: fw,
             frame_h: fh,
             origin_x: mi.rcMonitor.left,
@@ -2290,63 +2546,6 @@ impl Capture {
             protected_logged: false,
         })
     }
-}
-
-/// Crop a panel box out of the staging mirror: exact desktop pixels,
-/// never stretched. Out-of-range crops fail (callers fall back) rather
-/// than surfacing D3D11 range faults later as device-removed.
-fn crop_staging(
-    context: &ID3D11DeviceContext,
-    device: &ID3D11Device,
-    staging: &ID3D11Texture2D,
-    fw: u32,
-    fh: u32,
-    bx: u32,
-    by: u32,
-    bw: u32,
-    bh: u32,
-) -> Result<Vec<u8>, String> {
-    if bw == 0
-        || bh == 0
-        || bx.checked_add(bw).map(|r| r > fw).unwrap_or(true)
-        || by.checked_add(bh).map(|r| r > fh).unwrap_or(true)
-    {
-        return Err(format!("box {bx},{by} {bw}x{bh} outside staging {fw}x{fh}"));
-    }
-    let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
-    if let Err(e) = unsafe {
-        context.Map(
-            staging,
-            0,
-            D3D11_MAP_READ,
-            0,
-            Some(&mut mapped as *mut _),
-        )
-    } {
-        // Name the removal cause: TDR/hung/driver behave the
-        // same at Map, and the reason decides the next move.
-        let reason = match unsafe { device.GetDeviceRemovedReason() } {
-            Ok(()) => "healthy".to_string(),
-            Err(reason) => format!("0x{:08X}", reason.code().0 as u32),
-        };
-        return Err(format!("staging Map failed: {e:?} (removed reason={reason})"));
-    }
-    let mut pixels = vec![0u8; (bw * bh * 4) as usize];
-    let base = mapped.pData as *const u8;
-    let pitch = mapped.RowPitch as usize;
-    for row in 0..bh as usize {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                base.add(by as usize * pitch + row * pitch + bx as usize * 4),
-                pixels.as_mut_ptr().add(row * bw as usize * 4),
-                bw as usize * 4,
-            );
-        }
-    }
-    unsafe {
-        context.Unmap(staging, 0);
-    }
-    Ok(pixels)
 }
 
 /// Backdrop-driven material: smoothed luminance picks a light or dark
@@ -2428,7 +2627,14 @@ impl Material {
 /// Average luminance (BT.709) of a BGRA frame, sampled every 16th
 /// pixel: plenty for a tint response, ~free next to the crop.
 fn frame_luma(pixels: &[u8]) -> f32 {
-    const STEP_BYTES: usize = 64; // 16 BGRA pixels
+    // Full-panel frames are sampled sparsely; the 16x16 statistics
+    // surface is small enough to average completely (a 64-byte stride
+    // there would sample one column only).
+    let step = if pixels.len() <= (SAMPLE_W * SAMPLE_H * 4) as usize {
+        4
+    } else {
+        64
+    };
     let mut sum = 0.0f32;
     let mut n = 0.0f32;
     let mut i = 0usize;
@@ -2440,7 +2646,7 @@ fn frame_luma(pixels: &[u8]) -> f32 {
         );
         sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
         n += 1.0;
-        i += STEP_BYTES;
+        i += step;
     }
     if n == 0.0 {
         // No pixels (shouldn't happen): mid gray keeps the tint neutral.
@@ -2448,24 +2654,6 @@ fn frame_luma(pixels: &[u8]) -> f32 {
     } else {
         (sum / n / 255.0).clamp(0.0, 1.0)
     }
-}
-
-/// Nearest-neighbor BGRA stretch: fallback only, when the staging
-fn stretch_bgra_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
-    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
-    let mut out = vec![0u8; dw * dh * 4];
-    if sw == 0 || sh == 0 || src.len() != sw * sh * 4 {
-        return out;
-    }
-    for y in 0..dh {
-        let sy = y * sh / dh;
-        for x in 0..dw {
-            let sx = x * sw / dw;
-            out[(y * dw + x) * 4..(y * dw + x) * 4 + 4]
-                .copy_from_slice(&src[(sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4]);
-        }
-    }
-    out
 }
 
 /// Panel rect minus monitor origin, clamped to the frame. Zero area
@@ -2568,10 +2756,10 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, close_bend, desktop_recent, frame_luma, pass_plan,
-        stretch_bgra_nearest, swell_bend, swell_pass_due, swell_wants_mirror, Material, Pass,
-        ShowCycle, CLOSE_MS, DESKTOP_RECENT_MS, HIDDEN_POLL_MS, MATERIAL_HYSTERESIS,
-        MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        clamp_panel_box, desktop_recent, frame_luma, pass_plan, swell_bend,
+        swell_pass_due, swell_wants_mirror, Material, Pass, ShowCycle, DESKTOP_RECENT_MS,
+        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS,
+        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2587,7 +2775,12 @@ mod tests {
         let (w, h) = (160, 96);
         let map = super::bezel_bytes(w, h);
         let pixel = |x: usize, y: usize| &map[(y * w + x) * 4..(y * w + x) * 4 + 4];
-        assert_eq!(&pixel(w / 2, h / 2)[1..], &[128, 128, 255]);
+        // The thickness tail shifts the center by a fraction of a pixel,
+        // but must stay neutral (no RGB split) and within one level.
+        let centre = pixel(w / 2, h / 2);
+        assert!((centre[1] as i32 - 128).abs() <= 1, "center green: {centre:?}");
+        assert_eq!(centre[1], centre[2], "center must not split channels");
+        assert_eq!(centre[3], 255);
         assert!(pixel(1, h / 2)[2] > 240, "left edge samples inward");
         assert!(pixel(w - 2, h / 2)[2] < 16, "right edge samples inward");
         assert!(pixel(1, h / 2)[0] > pixel(w / 2, h / 2)[0]);
@@ -2616,6 +2809,66 @@ mod tests {
         let result = (|| -> Result<(), String> {
             let mut engine = Engine::build(window.hwnd(), 160, 96, 160, 96)?;
             let (w, h) = (160 + BLUR_PAD * 2, 96 + BLUR_PAD * 2);
+            // GPU frame path: copy a known desktop crop into the source
+            // texture, then verify the statistics readback sees it. This
+            // is the production route (no CPU upload between capture and
+            // effects), not just the offscreen optical draw.
+            {
+                let mut desktop_px = Vec::with_capacity((w * h * 4) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let x_hi = x >= w / 2;
+                        let y_hi = y >= h / 2;
+                        let px = match (x_hi, y_hi) {
+                            (false, false) => [0u8, 0, 255, 255],
+                            (true, false) => [0, 255, 0, 255],
+                            (false, true) => [255, 0, 0, 255],
+                            (true, true) => [255, 255, 255, 255],
+                        };
+                        desktop_px.extend_from_slice(&px);
+                    }
+                }
+                let desktop = frame_texture(
+                    &engine.device,
+                    w,
+                    h,
+                    D3D11_USAGE_DEFAULT,
+                    D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    0,
+                )?;
+                let resource: ID3D11Resource = desktop
+                    .cast()
+                    .map_err(|e| format!("probe desktop QI failed: {e:?}"))?;
+                unsafe {
+                    engine.context.UpdateSubresource(
+                        &resource,
+                        0,
+                        None,
+                        desktop_px.as_ptr() as *const _,
+                        w * 4,
+                        0,
+                    );
+                }
+                engine.copy_crop(&desktop, 0, 0, w, h, 0, 0)?;
+                let sample = engine.sample_backdrop()?;
+                let at = |x: u32, y: u32| {
+                    let i = ((y * SAMPLE_W + x) * 4) as usize;
+                    [sample[i], sample[i + 1], sample[i + 2], sample[i + 3]]
+                };
+                // Orientation matters: the statistics grid must line up
+                // with the page. TL red, TR green, BL blue, BR white.
+                let tl = at(1, 1);
+                let tr = at(SAMPLE_W - 2, 1);
+                let bl = at(1, SAMPLE_H - 2);
+                let br = at(SAMPLE_W - 2, SAMPLE_H - 2);
+                assert!(tl[2] > 200 && tl[0] < 40, "TL must be red: {tl:?}");
+                assert!(tr[1] > 200, "TR must be green: {tr:?}");
+                assert!(bl[0] > 200, "BL must be blue: {bl:?}");
+                assert!(
+                    br.iter().take(3).all(|c| *c > 200),
+                    "BR must be white: {br:?}"
+                );
+            }
             let target = unsafe { engine.d2d.CreateBitmap(
                 D2D_SIZE_U { width: 160, height: 96 }, None, 0,
                 &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
@@ -2625,7 +2878,7 @@ mod tests {
                 &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
             ) }.map_err(|e| format!("probe readback: {e:?}"))?;
             let draw = |pixels: &[u8], bend: f32| -> Result<Vec<u8>, String> {
-                engine.ingest_frame(pixels, w, h)?;
+                engine.upload_source(pixels, w, h)?;
                 engine.set_bend(bend);
                 unsafe {
                     engine.d2d.SetTarget(&target);
@@ -2688,11 +2941,16 @@ mod tests {
             engine.panel_h = 441;
             engine.resize_buffers(700, 441)?;
             eprintln!("full-panel content rebuild+buffer growth: {:.2}ms", start.elapsed().as_secs_f64() * 1000.0);
+            // Production per-frame path: frames already live on the GPU
+            // (copy_crop); only the 16x16 statistics cross back.
             let pixels = gray(128, ((700 + BLUR_PAD * 2) * (441 + BLUR_PAD * 2)) as usize);
+            engine.upload_source(&pixels, 700 + BLUR_PAD * 2, 441 + BLUR_PAD * 2)?;
             let material = Material { luma: Some(0.5), light: false, dwell: 0, fresh: false };
             let start = Instant::now();
             for _ in 0..30 {
-                engine.present_frame(&pixels, 700 + BLUR_PAD * 2, 441 + BLUR_PAD * 2, &material, 1.0)?;
+                let sample = engine.sample_backdrop()?;
+                engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                engine.present(&material, 1.0)?;
             }
             eprintln!("full material 700x441: {:.2}ms/frame CPU submission+Present (not GPU completion)", start.elapsed().as_secs_f64() * 1000.0 / 30.0);
             Ok(())
@@ -2767,6 +3025,81 @@ mod tests {
     }
 
     #[test]
+    fn rounded_mask_is_transparent_outside_and_opaque_inside() {
+        let (w, h) = (40u32, 24u32);
+        let mask = super::rounded_mask(w, h, 1.0, 8.0);
+        let alpha = |x: u32, y: u32| mask[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(w / 2, h / 2), 255, "centre must be opaque");
+        assert_eq!(alpha(0, 0), 0, "corner must be transparent");
+        assert_eq!(alpha(w - 1, h - 1), 0, "corner must be transparent");
+        assert_eq!(alpha(w / 2, 0), 255, "straight edge must stay opaque");
+        assert_eq!(alpha(0, h / 2), 255, "straight edge must stay opaque");
+    }
+
+    #[test]
+    fn thickness_tail_bends_past_the_bevel_but_not_the_center() {
+        let (w, h) = (160usize, 96usize);
+        let map = super::bezel_bytes(w, h);
+        let red = |x: usize, y: usize| map[(y * w + x) * 4 + 2] as i32;
+        let mid = h / 2;
+        // 40 px in, the 32 px rim is already zero; the slab tail must
+        // still bend toward the pane, and monotonically fall off inward.
+        let rim = red(4, mid);
+        let tail = red(40, mid);
+        let centre = red(w / 2, mid);
+        assert!(rim > tail, "rim {rim} must bend more than tail {tail}");
+        assert!(tail > centre + 2, "slab tail is gone at 40 px ({tail})");
+        assert!(
+            (centre - 128).abs() <= 1,
+            "center must stay neutral, got {centre}"
+        );
+    }
+
+    #[test]
+    fn silhouette_growth_only_expands_the_cut() {
+        let base = super::lens_region_points(700, 441, 1.0, 0.0);
+        let grown = super::lens_region_points(700, 441, 1.0, super::SILHOUETTE_GROW_PX);
+        assert_eq!(base.len(), grown.len());
+        let radius = super::CORNER_RADIUS as f64;
+        let per_corner = super::corner_offsets().len();
+        for (i, ((bx, by), (gx, gy))) in base.iter().zip(&grown).enumerate() {
+            let (cx, cy) = match i / per_corner {
+                0 => (radius, radius),
+                1 => (700.0 - radius, radius),
+                2 => (700.0 - radius, 441.0 - radius),
+                _ => (radius, 441.0 - radius),
+            };
+            let before = (bx - cx).hypot(by - cy);
+            let after = (gx - cx).hypot(gy - cy);
+            assert!(
+                (after - before - super::SILHOUETTE_GROW_PX).abs() < 0.001,
+                "corner {i} grew {before} -> {after}"
+            );
+            assert!(*gx >= -1.0 && *gy >= -1.0 && *gx <= 701.0 && *gy <= 442.0);
+        }
+    }
+
+    /// The region polygon spans the whole panel box, so translating it onto
+    /// the client origin (`client_origin_in_window`) lands its straight
+    /// edges on the client's far edges. Anchored at the window origin
+    /// instead, the region shaved the invisible frame width off the page's
+    /// right and bottom.
+    #[test]
+    fn region_polygon_spans_the_full_panel_box() {
+        let (w, h) = (700u32, 441u32);
+        let points = super::lens_region_points(w, h, 1.0, 0.0);
+        let (min_x, max_x) = points
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
+        let (min_y, max_y) = points
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+        assert!(min_x <= 0.0 && min_y <= 0.0, "box origin not covered");
+        assert!(max_x >= f64::from(w), "right edge short: {max_x}");
+        assert!(max_y >= f64::from(h), "bottom edge short: {max_y}");
+    }
+
+    #[test]
     fn local_tint_is_bounded_and_preserves_backdrop_hue() {
         let grid = super::backdrop_grid(&bgra(30, 60, 180, 64 * 64), 64, 64, (0.4, 0.4, 0.4, 0.2));
         for c in grid {
@@ -2788,10 +3121,21 @@ mod tests {
             assert!(current <= previous, "secondary ridge at depth {}", step as f32 / 10.0);
             previous = current;
         }
-        assert!(super::rim_light(2.0) < 0.015);
+        assert!(super::rim_light(2.0) < 0.055);
+        // Diagonal of a circular corner removes 0.293R, not the
+        // 0.159R a sqrt-cos profile did (which read as square).
+        let mid = super::corner_offsets();
+        let (dx, dy) = mid[mid.len() / 2];
+        let expected = super::CORNER_RADIUS * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+        assert!((dx - expected).abs() < 0.01 && (dy - expected).abs() < 0.01, "corner is not circular: {dx},{dy}");
         let layers = super::surface_layers(160, 96, 1.0);
         let alpha = |x: usize| layers[2][(160 + x) * 4 + 3];
-        assert!(alpha(16) > alpha(140), "top highlight must taper, not frame the pane");
+        assert!(
+            alpha(16) == alpha(140),
+            "top highlight must be uniform along the edge: {} vs {}",
+            alpha(16),
+            alpha(140)
+        );
     }
 
     /// Luminance of the glass: the wash composited over the backdrop.
@@ -2923,28 +3267,6 @@ mod tests {
     }
 
     #[test]
-    fn the_close_releases_the_lens_monotonically_without_overshoot() {
-        // No close: resting curvature, nothing pending.
-        assert_eq!(close_bend(None), 1.0);
-        // Start is the resting lens; end is flat; both are exact so the
-        // host's cloak deadline cannot cut a partially released lens off.
-        assert_eq!(close_bend(Some(0.0)), 1.0);
-        assert_eq!(close_bend(Some(CLOSE_MS)), 0.0);
-        assert_eq!(close_bend(Some(CLOSE_MS * 2.0)), 0.0, "no rebound");
-        // Strictly decreasing and smoothstepped (no early cliff): the
-        // midpoint sits at half, and no sample goes back up.
-        let mut previous = 1.0;
-        for step in 0..=20 {
-            let value = close_bend(Some(CLOSE_MS * step as f32 / 20.0));
-            assert!(value <= previous + f32::EPSILON, "close must not reverse");
-            assert!((-0.001..=1.001).contains(&value), "bend leaves its range");
-            previous = value;
-        }
-        let middle = close_bend(Some(CLOSE_MS * 0.5));
-        assert!((middle - 0.5).abs() < 0.001, "smoothstep midpoint: {middle}");
-    }
-
-    #[test]
     fn hidden_passes_poll_the_backdrop_on_an_interval() {
         // Hidden: the material must still track the backdrop, because the
         // host pushes the show state (palette included) before it reveals
@@ -3035,26 +3357,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fallback_stretch_keeps_channels_and_size() {
-        // 2x2 BGRA source stretched to 4x4: every output pixel is a copy
-        // of one source pixel. A stride or channel swap here paints the
-        // fallback fill as garbage instead of the last frame.
-        let src = [
-            1u8, 2, 3, 255, /* (0,0) */ 4, 5, 6, 255, /* (1,0) */
-            7, 8, 9, 255, /* (0,1) */ 10, 11, 12, 255, /* (1,1) */
-        ];
-        let out = stretch_bgra_nearest(&src, 2, 2, 4, 4);
-        assert_eq!(out.len(), 4 * 4 * 4);
-        let px = |x: usize, y: usize| {
-            let i = (y * 4 + x) * 4;
-            [out[i], out[i + 1], out[i + 2], out[i + 3]]
-        };
-        assert_eq!(px(0, 0), [1, 2, 3, 255]);
-        assert_eq!(px(3, 0), [4, 5, 6, 255], "nearest neighbour, no filtering");
-        assert_eq!(px(3, 3), [10, 11, 12, 255], "the far corner is the last source pixel");
-        // A source that does not match its stated size yields a zero
-        // buffer, never a partial or mis-strided copy.
-        assert!(stretch_bgra_nearest(&src, 3, 2, 2, 2).iter().all(|b| *b == 0));
-    }
 }

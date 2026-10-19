@@ -58,7 +58,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
 };
-use windows_numerics::Matrix3x2;
+use windows_numerics::{Matrix3x2, Vector2};
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
@@ -124,16 +124,25 @@ const ABERRATION: f32 = 0.07;
 /// Backdrop vibrancy: the refracted image is lifted slightly so it does
 /// not read as greyed out behind the tint.
 const SATURATION: f32 = 1.2;
-const BEND_SCALE: f32 = 14.0;
+/// Stronger than the original 14: the user wanted the backdrop to visibly
+/// converge into the rim, not merely soften at it. The bend is still
+/// confined to the bevel, so the interior stays a window.
+const BEND_SCALE: f32 = 24.0;
 /// Show spring settling deadline. No frame-count-dependent animation.
 /// One shot per show; nothing animates while hidden.
 const SWELL_MS: f32 = 420.0;
-const BEZEL_MARGIN: f32 = 32.0;
+/// Lens strength on the first presented frame of a show. The reveal lands
+/// ~40ms after the show is armed, so a spring starting at flat would read
+/// as the edge bend arriving late over an already-visible panel — the
+/// error was noticeable while the strip was still ramping in. Starting
+/// most of the way open keeps the settle, drops the wait.
+const SWELL_START: f32 = 0.85;
+const BEZEL_MARGIN: f32 = 40.0;
 /// Thickness tail: a real pane bends the backdrop across its whole body,
 /// not only inside the 32 px bevel. The extra inward sample decays with
 /// distance, so the rim stays the strong lens and the interior picks up a
 /// sub-pixel draw toward the nearest edge (glass thickness, not a zoom).
-const SLAB_BEND: f32 = 0.20;
+const SLAB_BEND: f32 = 0.30;
 const SLAB_DECAY: f32 = 35.0;
 /// Device-pixel growth for the main window's native region. The page's
 /// own clip-path is antialiased; letting the region sit a pixel outside
@@ -168,6 +177,18 @@ const LUMA_EMA: f32 = 0.10;
 /// monitor or the crop clamps and the worker drops frames, so the pad
 /// is kept to the blur's actual reach rather than padded for comfort.
 const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
+
+/// Room outside the panel for the contact shadow. A pane can only cast one
+/// if the surface it is drawn on reaches past its own edges, so the glass
+/// window, its backbuffer and the visual all carry this margin; the material
+/// still starts at `(SHADOW_MARGIN, SHADOW_MARGIN)` so the panel stays
+/// aligned with the page's client area.
+const SHADOW_MARGIN: u32 = 44;
+/// Contact shadow falloff radius and peak alpha, symmetric on all four
+/// sides. Physical px, like BLUR_PAD, so the cue reads the same at every
+/// display scale.
+const SHADOW_BLUR: f32 = 26.0;
+const SHADOW_STRENGTH: f32 = 0.30;
 
 /// Render cap: live frames present at most this often.
 const MIN_FRAME_MS: u128 = 16;
@@ -207,6 +228,9 @@ pub struct GlassLayer {
     ready: Arc<AtomicBool>,
     main_sys: isize,
     visible: std::cell::Cell<bool>,
+    /// The cloak is currently lifted. Reveals are idempotent (one per show)
+    /// and re-armed by `set_visible(false)`.
+    revealed: std::cell::Cell<bool>,
 }
 
 struct GlassWindow {
@@ -218,6 +242,10 @@ struct GlassWindow {
     hwnd_size: std::cell::Cell<(u32, u32)>,
     /// Last panel size/scale applied to the main window's native region.
     last_region: std::cell::Cell<Option<(u32, u32, u64)>>,
+    /// Size of the last frame the renderer presented. The reveal waits for
+    /// this to match `last_region`: a frame for the previous panel size
+    /// leaves the rows the page just grew into holding older pixels.
+    last_frame: std::cell::Cell<Option<(u32, u32)>>,
 }
 
 impl GlassLayer {
@@ -255,7 +283,14 @@ impl GlassLayer {
                 {
                     Ok(_) => {
                         crate::logging::info("[nex][refract] capture worker spawned");
-                        Some(GlassLayer { window, tx, ready, main_sys, visible: std::cell::Cell::new(false) })
+                        Some(GlassLayer {
+                            window,
+                            tx,
+                            ready,
+                            main_sys,
+                            visible: std::cell::Cell::new(false),
+                            revealed: std::cell::Cell::new(false),
+                        })
                     }
                     Err(error) => {
                         crate::logging::warn(&format!(
@@ -308,7 +343,9 @@ impl GlassLayer {
     }
 
     /// Show/hide with the panel. Cloaking remains immediate so launch and
-    /// focus restoration never wait for a visual effect.
+    /// focus restoration never wait for a visual effect. Revealing does not:
+    /// the cloak lifts only once the renderer has presented a frame at the
+    /// panel's current size, so the first thing seen is this backdrop.
     pub fn set_visible(&self, show: bool) {
         let was_visible = self.visible.replace(show);
         if show {
@@ -318,8 +355,13 @@ impl GlassLayer {
         } else if was_visible {
             unsafe { windows_sys::Win32::Graphics::Gdi::SetWindowRgn(self.main_sys as _, std::ptr::null_mut(), 1); }
         }
-        if !show || self.ready.load(Ordering::Acquire) {
-            self.window.show(show);
+        if !show {
+            self.revealed.set(false);
+            // A frame from the last session is not a frame for this show:
+            // forgetting its size forces the reveal to wait for a present
+            // made after the panel came back.
+            self.window.last_frame.set(None);
+            self.window.show(false);
         }
         let _ = self.tx.send(GlassConfig {
             visible: Some(show),
@@ -363,13 +405,30 @@ impl GlassLayer {
         });
     }
 
-    /// Reveal only after the renderer has presented a captured frame.
-    pub fn show_ready_frame(&self) {
-        if self.ready.load(Ordering::Acquire) {
-            if let Some((w, h, bits)) = self.window.last_region.get() {
+    /// Record that the renderer presented a frame at `w`x`h`.
+    pub fn note_frame(&self, w: u32, h: u32) {
+        self.window.last_frame.set(Some((w, h)));
+    }
+
+    /// Lift the cloak once a frame for the panel's *current* size has been
+    /// presented. A frame for the previous size leaves the rows the page
+    /// just grew into holding older pixels, so this waits for the resize
+    /// pass's own ack instead. Returns true only on the call that reveals;
+    /// `set_visible(false)` re-arms it.
+    pub fn reveal(&self) -> bool {
+        if self.revealed.get() || !self.ready.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.window.last_region.get() {
+            Some((w, h, bits)) if self.window.last_frame.get() == Some((w, h)) => {
                 apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
+                self.revealed.set(true);
+                self.window.show(true);
+                crate::logging::info(&format!("[nex][refract] glass revealed {w}x{h}"));
+                true
             }
-            self.window.show(true);
+            // A frame for another size: the resize pass acks again.
+            _ => false,
         }
     }
 
@@ -467,7 +526,13 @@ impl GlassWindow {
 
         let main = HWND(main_sys as *mut std::ffi::c_void);
         let (x, y) = main_origin(main_sys).unwrap_or((0, 0));
-        let (width, height) = (max_w_px, max_h_px);
+        // Grown by the shadow margin on every side and anchored so the panel
+        // box still lands on the main window's client origin.
+        let (x, y) = (x - SHADOW_MARGIN as i32, y - SHADOW_MARGIN as i32);
+        let (width, height) = (
+            max_w_px + SHADOW_MARGIN * 2,
+            max_h_px + SHADOW_MARGIN * 2,
+        );
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -544,6 +609,7 @@ impl GlassWindow {
             hwnd,
             hwnd_size: std::cell::Cell::new((width, height)),
             last_region: std::cell::Cell::new(None),
+            last_frame: std::cell::Cell::new(None),
         })
     }
 
@@ -555,6 +621,7 @@ impl GlassWindow {
     /// Steady-state resizes never come here: the region clips the
     /// max-size window, so no SetWindowPos churn per resize.
     fn ensure_window_max(&self, main_sys: isize, max_w: u32, max_h: u32) {
+        let (max_w, max_h) = (max_w + SHADOW_MARGIN * 2, max_h + SHADOW_MARGIN * 2);
         let cur = self.hwnd_size.get();
         if max_w <= cur.0 && max_h <= cur.1 {
             return;
@@ -567,8 +634,8 @@ impl GlassWindow {
             SetWindowPos(
                 self.hwnd,
                 Some(main),
-                x,
-                y,
+                x - SHADOW_MARGIN as i32,
+                y - SHADOW_MARGIN as i32,
                 max_w as i32,
                 max_h as i32,
                 SWP_NOACTIVATE,
@@ -585,6 +652,48 @@ impl GlassWindow {
         // the rendered frame, so un-hiding put an empty window on screen.
         set_glass_cloaked(self.hwnd, !show);
         crate::logging::info(&format!("[nex][refract] glass visible={show}"));
+    }
+}
+
+/// Frame-independent renderer layers for one panel box. Nothing here is
+/// derived from the backdrop, so a box can be rebuilt and reused verbatim.
+#[derive(Clone)]
+struct SizedGeometry {
+    map: ID2D1Bitmap1,
+    lights: Vec<ID2D1Bitmap1>,
+    depth_grain: ID2D1Bitmap1,
+    mask: ID2D1Bitmap1,
+    shadow: ID2D1Bitmap1,
+}
+
+/// Cache depth. Two is enough: hidden presents the bar box, visible the
+/// settled box, and each show promotes its own box, so that pair stays
+/// resident without pinning memory for every height a live resize crosses.
+const GEOMETRY_CACHE_DEPTH: usize = 2;
+
+/// Most-recently-used bounding cache keyed by (panel width, height, scale).
+/// A hit promotes, an insert evicts the oldest.
+struct GeometryCache<T> {
+    entries: Vec<((u32, u32, u64), T)>,
+}
+
+impl<T: Clone> GeometryCache<T> {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn get(&mut self, key: (u32, u32, u64)) -> Option<T> {
+        let index = self.entries.iter().position(|(k, _)| *k == key)?;
+        let entry = self.entries.remove(index);
+        let value = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(value)
+    }
+
+    fn put(&mut self, key: (u32, u32, u64), value: T) {
+        self.entries.retain(|(k, _)| *k != key);
+        self.entries.insert(0, (key, value));
+        self.entries.truncate(GEOMETRY_CACHE_DEPTH);
     }
 }
 
@@ -623,6 +732,14 @@ struct Engine {
     /// Panel-sized premultiplied alpha mask: 1 inside the rounded shape,
     /// 0 outside, 1 px analytic AA. Composed with DESTINATION_IN.
     mask: Option<ID2D1Bitmap1>,
+    /// Contact shadow around the panel: premultiplied black with the panel
+    /// interior cleared, drawn after the mask so it only reaches outward.
+    shadow: Option<ID2D1Bitmap1>,
+    /// Box-keyed copies of the layer set above. Every show re-lays the panel
+    /// at a height it has already used, and regenerating them costs ~40ms at
+    /// 700x441 on a pass whose frame the reveal is waiting for — so a repeat
+    /// box is a refcount bump, not work.
+    geometry: GeometryCache<SizedGeometry>,
     tint_grid: std::cell::RefCell<Option<Vec<[f32; 4]>>>,
     light_direction: std::cell::Cell<(f32, f32, bool)>,
     source: Option<ID2D1Bitmap1>,
@@ -855,6 +972,8 @@ impl Engine {
             depth_grain: None,
             local_tint: None,
             mask: None,
+            shadow: None,
+            geometry: GeometryCache::new(),
             tint_grid: std::cell::RefCell::new(None),
             light_direction: std::cell::Cell::new((0.0, 0.0, true)),
         };
@@ -880,24 +999,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Rebuild source, normal/scatter map and native surface layers at the
+    /// Rebuild the capture source and the frame-independent geometry at the
     /// current panel size. Live frames replace only the source and tint.
     fn rebuild_content(&mut self) -> Result<(), String> {
         let (w, h) = (
             self.panel_w as usize + BLUR_PAD as usize * 2,
             self.panel_h as usize + BLUR_PAD as usize * 2,
         );
-        let mut map_bytes = vec![128u8; w * h * 4];
-        for alpha in map_bytes.iter_mut().skip(3).step_by(4) {
-            *alpha = 255;
-        }
-        let panel_map = bezel_bytes_scaled(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
-        for row in 0..self.panel_h as usize {
-            let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
-            let src = row * self.panel_w as usize * 4;
-            map_bytes[dst..dst + self.panel_w as usize * 4]
-                .copy_from_slice(&panel_map[src..src + self.panel_w as usize * 4]);
-        }
         let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
         // Captured frames land in this texture on the GPU, so the effect
         // graph samples it directly. Clear it once: D3D leaves fresh
@@ -932,19 +1040,16 @@ impl Engine {
                 .CreateBitmapFromDxgiSurface(&source_surface, Some(&props as *const _))
                 .map_err(|e| format!("source bitmap failed: {e:?}"))?
         };
-        let map: ID2D1Bitmap1 = unsafe {
-            self.d2d
-                .CreateBitmap(
-                    D2D_SIZE_U {
-                        width: w as u32,
-                        height: h as u32,
-                    },
-                    Some(map_bytes.as_ptr() as *const _),
-                    (w * 4) as u32,
-                    &props as *const _,
-                )
-                .map_err(|e| format!("map CreateBitmap failed: {e:?}"))?
+        let key = (self.panel_w, self.panel_h, self.scale.to_bits());
+        let geometry = match self.geometry.get(key) {
+            Some(cached) => cached,
+            None => {
+                let built = self.build_geometry()?;
+                self.geometry.put(key, built.clone());
+                built
+            }
         };
+        let map = geometry.map.clone();
         // Re-point the shared effect graph at the new bitmaps. Effects
         // are size-agnostic; only the bitmaps track the panel.
         unsafe {
@@ -967,21 +1072,84 @@ impl Engine {
         self.source = Some(source);
         self.source_tex = Some(source_tex);
         self.map = Some(map);
-        self.lights.clear();
-        let layers = surface_layers(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
-        for bytes in &layers[..4] {
-            self.lights.push(self.bitmap(self.panel_w, self.panel_h, bytes)?);
-        }
-        self.depth_grain = Some(self.bitmap(self.panel_w, self.panel_h, &layers[4])?);
+        self.lights = geometry.lights;
+        self.depth_grain = Some(geometry.depth_grain);
+        self.mask = Some(geometry.mask);
+        self.shadow = Some(geometry.shadow);
         self.local_tint = Some(self.bitmap(4, 4, &[0; 64])?);
-        self.mask = Some(self.bitmap(
-            self.panel_w,
-            self.panel_h,
-            &rounded_mask(self.panel_w, self.panel_h, self.scale as f32, CORNER_RADIUS),
-        )?);
         *self.tint_grid.borrow_mut() = None;
         self.apply_visual()?;
         Ok(())
+    }
+
+    /// The frame-independent layers for the current panel box: refraction
+    /// map, edge lights, depth grain, silhouette mask and contact shadow.
+    /// Nothing here depends on the backdrop, so it is a pure function of
+    /// (panel width, panel height, scale) and `rebuild_content` caches it.
+    fn build_geometry(&self) -> Result<SizedGeometry, String> {
+        let (w, h) = (
+            self.panel_w as usize + BLUR_PAD as usize * 2,
+            self.panel_h as usize + BLUR_PAD as usize * 2,
+        );
+        let mut map_bytes = vec![128u8; w * h * 4];
+        for alpha in map_bytes.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        let panel_map = bezel_bytes_scaled(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
+        for row in 0..self.panel_h as usize {
+            let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
+            let src = row * self.panel_w as usize * 4;
+            map_bytes[dst..dst + self.panel_w as usize * 4]
+                .copy_from_slice(&panel_map[src..src + self.panel_w as usize * 4]);
+        }
+        let props = bitmap_props(D2D1_BITMAP_OPTIONS_NONE);
+        let map = unsafe {
+            self.d2d
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: w as u32,
+                        height: h as u32,
+                    },
+                    Some(map_bytes.as_ptr() as *const _),
+                    (w * 4) as u32,
+                    &props as *const _,
+                )
+                .map_err(|e| format!("map CreateBitmap failed: {e:?}"))?
+        };
+        let layers = surface_layers(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
+        let mut lights = Vec::with_capacity(4);
+        for bytes in &layers[..4] {
+            lights.push(self.bitmap(self.panel_w, self.panel_h, bytes)?);
+        }
+        let depth_grain = self.bitmap(self.panel_w, self.panel_h, &layers[4])?;
+        let mask = self.bitmap(
+            self.panel_w,
+            self.panel_h,
+            &rounded_mask(self.panel_w, self.panel_h, self.scale as f32, CORNER_RADIUS),
+        )?;
+        let (sw, sh) = (
+            self.panel_w + SHADOW_MARGIN * 2,
+            self.panel_h + SHADOW_MARGIN * 2,
+        );
+        let shadow = self.bitmap(
+            sw,
+            sh,
+            &shadow_bytes(
+                sw as usize,
+                sh as usize,
+                self.panel_w as usize,
+                self.panel_h as usize,
+                SHADOW_MARGIN as usize,
+                self.scale as f32,
+            ),
+        )?;
+        Ok(SizedGeometry {
+            map,
+            lights,
+            depth_grain,
+            mask,
+            shadow,
+        })
     }
 
     fn bitmap(&self, w: u32, h: u32, bytes: &[u8]) -> Result<ID2D1Bitmap1, String> {
@@ -1186,6 +1354,10 @@ impl Engine {
             // Composition swapchain carries premultiplied alpha: start from
             // fully transparent so the mask below owns the silhouette.
             self.d2d.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            let origin = Vector2 {
+                X: SHADOW_MARGIN as f32,
+                Y: SHADOW_MARGIN as f32,
+            };
             let source_rect = D2D_RECT_F {
                 left: BLUR_PAD as f32,
                 top: BLUR_PAD as f32,
@@ -1194,20 +1366,19 @@ impl Engine {
             };
             self.d2d.DrawImage(
                 &effect_output(displace)?,
-                None,
+                Some(&origin as *const _),
                 Some(&source_rect as *const _),
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 D2D1_COMPOSITE_MODE_SOURCE_OVER,
             );
-            let tint = D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: self.width as f32,
-                bottom: self.height as f32,
+            let panel = D2D_RECT_F {
+                left: origin.X,
+                top: origin.Y,
+                right: origin.X + self.panel_w as f32,
+                bottom: origin.Y + self.panel_h as f32,
             };
             self.d2d
-                .FillRectangle(&tint as *const _, &self.tint_brush);
-            let panel = D2D_RECT_F { left: 0.0, top: 0.0, right: self.panel_w as f32, bottom: self.panel_h as f32 };
+                .FillRectangle(&panel as *const _, &self.tint_brush);
             if let Some(local) = &self.local_tint {
                 self.d2d.DrawBitmap(local, Some(&panel), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
             }
@@ -1233,10 +1404,22 @@ impl Engine {
                     .map_err(|e| format!("mask as image failed: {e:?}"))?;
                 self.d2d.DrawImage(
                     &image,
-                    None,
+                    Some(&origin as *const _),
                     None,
                     D2D1_INTERPOLATION_MODE_LINEAR,
                     D2D1_COMPOSITE_MODE_DESTINATION_IN,
+                );
+            }
+            // Outside the panel only: the bitmap clears the panel interior,
+            // and drawing after the mask keeps it off the material.
+            if let Some(shadow) = &self.shadow {
+                self.d2d.DrawBitmap(
+                    shadow,
+                    None,
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None,
+                    None,
                 );
             }
             self.d2d
@@ -1633,6 +1816,62 @@ fn rounded_mask(w: u32, h: u32, scale: f32, radius_logical: f32) -> Vec<u8> {
     out
 }
 
+/// Contact shadow: premultiplied black, analytic rounded-rect falloff,
+/// panel interior cleared so the material is never darkened. `w`/`h` cover
+/// the panel plus `margin` on every side, the panel box starts at
+/// `(margin, margin)`, and the falloff is centred on it — no offset, so the
+/// pane reads as sitting on the desktop rather than lit from one side.
+fn shadow_bytes(
+    w: usize,
+    h: usize,
+    panel_w: usize,
+    panel_h: usize,
+    margin: usize,
+    scale: f32,
+) -> Vec<u8> {
+    let mut out = vec![0u8; w * h * 4];
+    if panel_w == 0 || panel_h == 0 || margin == 0 {
+        return out;
+    }
+    let radius = (CORNER_RADIUS * scale)
+        .min(panel_w as f32 * 0.5)
+        .min(panel_h as f32 * 0.5)
+        .max(0.0);
+    let blur = SHADOW_BLUR.max(1.0);
+    let cx = margin as f32 + panel_w as f32 * 0.5;
+    let cy = margin as f32 + panel_h as f32 * 0.5;
+    let half_w = panel_w as f32 * 0.5;
+    let half_h = panel_h as f32 * 0.5;
+    // Signed distance to the rounded panel rect.
+    let sdf = |x: f32, y: f32| {
+        let qx = (x - cx).abs() - (half_w - radius);
+        let qy = (y - cy).abs() - (half_h - radius);
+        if qx > 0.0 && qy > 0.0 {
+            qx.hypot(qy) - radius
+        } else {
+            qx.max(qy) - radius
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            // The material covers the panel: leave it untouched.
+            let d = sdf(px, py);
+            if d <= 0.0 {
+                continue;
+            }
+            let t = (d / blur).min(1.0);
+            let falloff = 1.0 - t * t * (3.0 - 2.0 * t);
+            let alpha = (SHADOW_STRENGTH * falloff * 255.0).round().clamp(0.0, 255.0) as u8;
+            if alpha > 0 {
+                out[(y * w + x) * 4 + 3] = alpha;
+            }
+        }
+    }
+    out
+}
+
 /// Polygon points for the lens silhouette in device pixels.
 /// `grow_px` expands the circular corner radially from its centre, so the
 /// cut stays a true circle. Growing x/y independently distorted the arc
@@ -1711,7 +1950,7 @@ struct Capture {
 /// Damped show response with a small overshoot and a finite deadline.
 fn swell_bend(elapsed_ms: f32) -> f32 {
     if elapsed_ms >= SWELL_MS { return 1.0; }
-    let mut spring = Spring { value: 0.0, velocity: 0.0 };
+    let mut spring = Spring { value: SWELL_START, velocity: 0.0 };
     spring.step(1.0, elapsed_ms.max(0.0) / 1000.0);
     spring.value
 }
@@ -2112,8 +2351,13 @@ fn worker_main(
         }
         previous_panel = (pw, ph);
         let bend = cycle.bend().0 * interaction.value;
+        // Backbuffer covers the max panel plus the shadow margin on every side.
+        let (buf_w, buf_h) = (
+            max_wh.0 + SHADOW_MARGIN * 2,
+            max_wh.1 + SHADOW_MARGIN * 2,
+        );
         if engine.is_none() {
-            match Engine::build(hwnd, max_wh.0, max_wh.1, pw, ph) {
+            match Engine::build(hwnd, buf_w, buf_h, pw, ph) {
                 Ok(mut e) => {
                     if e.scale != scale {
                         e.scale = scale;
@@ -2140,12 +2384,12 @@ fn worker_main(
             // meanwhile — never black.
             let mut rebuilt = false;
             let t0 = Instant::now();
-            if max_wh.0 > e.width || max_wh.1 > e.height {
+            if buf_w > e.width || buf_h > e.height {
                 // Rare (DPI/scale change): grow buffers (rebuilds inside).
                 e.panel_w = pw;
                 e.panel_h = ph;
                 e.scale = scale;
-                if let Err(error) = e.resize_buffers(max_wh.0, max_wh.1) {
+                if let Err(error) = e.resize_buffers(buf_w, buf_h) {
                     crate::logging::warn(&format!("[nex][refract] engine resize failed: {error}"));
                     note_engine_failure(&mut n_engine_fail, &proxy);
                     engine = None;
@@ -2399,6 +2643,12 @@ fn worker_main(
             if !warm {
                 eng.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
                 eng.present(&material, bend)?;
+                // Reveal handshake: the host lifts the glass cloak only on a
+                // frame that matches the panel size it is about to show, so
+                // the first thing seen is this backdrop rather than the last
+                // session's held buffer. Cheap to repeat; the host ignores
+                // every ack once it is revealed.
+                let _ = proxy.send_event(UiCommand::GlassPresented { w: pw, h: ph });
             }
             if flipped || palette_sent != Some(material.light) {
                 palette_sent = Some(material.light);
@@ -2419,9 +2669,9 @@ fn worker_main(
                     interaction_dirty = false;
                     last_present = Instant::now();
                 }
-                if !ready.swap(true, Ordering::AcqRel) {
-                    let _ = proxy.send_event(UiCommand::GlassReady);
-                }
+                // Whether the panel is revealed at all is the host's call;
+                // this only marks a frame as having been presented ever.
+                ready.store(true, Ordering::Release);
                 if prewarm_pending {
                     prewarm_pending = false;
                     if !visible {
@@ -2702,13 +2952,14 @@ pub(crate) fn physical_px(logical: f64, scale: f64) -> u32 {
 /// (grow path) and the worker (position follows).
 fn align_glass_to_main(glass: HWND, main_sys: isize, w: u32, h: u32) -> Option<(u32, u32)> {
     let (x, y) = main_origin(main_sys)?;
+    let (w, h) = (w + SHADOW_MARGIN * 2, h + SHADOW_MARGIN * 2);
     let main = HWND(main_sys as *mut std::ffi::c_void);
     if let Err(error) = unsafe {
         SetWindowPos(
             glass,
             Some(main),
-            x,
-            y,
+            x - SHADOW_MARGIN as i32,
+            y - SHADOW_MARGIN as i32,
             w as i32,
             h as i32,
             SWP_NOACTIVATE,
@@ -2757,9 +3008,10 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 mod tests {
     use super::{
         clamp_panel_box, desktop_recent, frame_luma, pass_plan, swell_bend,
-        swell_pass_due, swell_wants_mirror, Material, Pass, ShowCycle, DESKTOP_RECENT_MS,
-        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS, SWELL_MS,
-        TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
+        DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
+        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
+        SWELL_MS, SWELL_START, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -2786,7 +3038,12 @@ mod tests {
         assert!(pixel(1, h / 2)[0] > pixel(w / 2, h / 2)[0]);
         let scales = super::dispersion_scales(1.0);
         assert!(scales[0] > scales[1] && scales[1] > scales[2]);
-        assert!((scales[0] - scales[2]) * 0.5 < 1.0);
+        // Dispersion belongs to the lens, so it scales with the bend. 7%
+        // each side of a 24 px rim sample: under 1.7 px at the outermost
+        // pixel, under 1 px one bevel in — a chromatic edge, not a painted
+        // fringe.
+        let spread = (scales[0] - scales[2]) * 0.5;
+        assert!(spread > 0.5 && spread < 2.0, "rim dispersion {spread}px");
         assert_eq!(super::dispersion_scales(0.0), [0.0; 3]);
         let matrix = super::saturation_matrix(super::SATURATION);
         for output in 0..3 {
@@ -2807,7 +3064,13 @@ mod tests {
         use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
         let window = GlassWindow::create(0, 160, 96).expect("cloaked probe window");
         let result = (|| -> Result<(), String> {
-            let mut engine = Engine::build(window.hwnd(), 160, 96, 160, 96)?;
+            let mut engine = Engine::build(
+                window.hwnd(),
+                160 + SHADOW_MARGIN * 2,
+                96 + SHADOW_MARGIN * 2,
+                160,
+                96,
+            )?;
             let (w, h) = (160 + BLUR_PAD * 2, 96 + BLUR_PAD * 2);
             // GPU frame path: copy a known desktop crop into the source
             // texture, then verify the statistics readback sees it. This
@@ -2936,10 +3199,39 @@ mod tests {
             let start = Instant::now();
             for _ in 0..30 { draw(&stripes, 1.0)?; }
             eprintln!("optical graph probe 160x96: {:.2}ms/frame including GPU readback", start.elapsed().as_secs_f64() * 1000.0 / 30.0);
+            // Panel-size content rebuild: the show path pays this on the pass
+            // that resizes the panel (60 -> settled height), and the reveal
+            // waits for the frame it produces.
+            let start = Instant::now();
+            engine.panel_w = 700;
+            engine.panel_h = 60;
+            engine.rebuild_content()?;
+            let small = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            engine.panel_h = 441;
+            engine.rebuild_content()?;
+            eprintln!(
+                "content rebuild: 700x60 {small:.2}ms, 700x441 {:.2}ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            // The show cycle re-lays both boxes, and the reveal waits for the
+            // frame that comes out of the second one. With the geometry cache
+            // a repeat box is the capture source only.
+            let start = Instant::now();
+            engine.panel_h = 60;
+            engine.rebuild_content()?;
+            let warm_bar = start.elapsed().as_secs_f64() * 1000.0;
+            let start = Instant::now();
+            engine.panel_h = 441;
+            engine.rebuild_content()?;
+            eprintln!(
+                "cached content rebuild: 700x60 {warm_bar:.2}ms, 700x441 {:.2}ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
             let start = Instant::now();
             engine.panel_w = 700;
             engine.panel_h = 441;
-            engine.resize_buffers(700, 441)?;
+            engine.resize_buffers(700 + SHADOW_MARGIN * 2, 441 + SHADOW_MARGIN * 2)?;
             eprintln!("full-panel content rebuild+buffer growth: {:.2}ms", start.elapsed().as_secs_f64() * 1000.0);
             // Production per-frame path: frames already live on the GPU
             // (copy_crop); only the 16x16 statistics cross back.
@@ -2992,10 +3284,36 @@ mod tests {
     }
 
     #[test]
+    fn geometry_cache_keeps_the_two_hottest_boxes() {
+        // A show cycle is bar box, then settled box. Both must survive it:
+        // regenerating either is ~40ms of work the reveal waits on.
+        let mut cache: GeometryCache<u32> = GeometryCache::new();
+        cache.put((700, 60, 1), 1);
+        cache.put((700, 441, 1), 2);
+        assert_eq!(cache.get((700, 60, 1)), Some(1));
+        assert_eq!(cache.get((700, 441, 1)), Some(2));
+        // A third box evicts the coldest; the settled box lives on.
+        cache.put((700, 300, 1), 3);
+        assert_eq!(cache.get((700, 60, 1)), None, "coldest box is evicted");
+        assert_eq!(cache.get((700, 441, 1)), Some(2), "settled box survives a hide");
+        assert_eq!(cache.get((700, 300, 1)), Some(3));
+        assert_eq!(cache.entries.len(), GEOMETRY_CACHE_DEPTH);
+        // Identity includes scale: a DPI change must never reuse pixels.
+        assert_eq!(cache.get((700, 300, 2)), None);
+        // Re-inserting a box replaces it rather than deepening the cache.
+        cache.put((700, 300, 1), 4);
+        assert_eq!(cache.get((700, 300, 1)), Some(4));
+        assert_eq!(cache.entries.len(), GEOMETRY_CACHE_DEPTH);
+    }
+
+    #[test]
     fn spring_overshoots_slightly_then_settles_independent_of_frame_rate() {
-        assert_eq!(swell_bend(0.0), 0.0);
+        // Leaves most of the way open, then overshoots and settles.
+        assert_eq!(swell_bend(0.0), SWELL_START);
         let peak = (0..420).map(|ms| swell_bend(ms as f32)).fold(0.0_f32, f32::max);
-        assert!(peak > 1.01 && peak < 1.06);
+        // Overshoot is proportional to the distance left to travel: with the
+        // spring leaving from SWELL_START it is a hair, never a bounce.
+        assert!(peak > 1.001 && peak < 1.06, "overshoot out of band: {peak}");
         assert_eq!(swell_bend(SWELL_MS), 1.0);
         assert_eq!(swell_bend(SWELL_MS * 5.0), 1.0);
         let mut a = super::Spring { value: 0.0, velocity: 0.0 };
@@ -3077,6 +3395,26 @@ mod tests {
             );
             assert!(*gx >= -1.0 && *gy >= -1.0 && *gx <= 701.0 && *gy <= 442.0);
         }
+    }
+
+    /// Contact shadow stays clear under the panel and fades outward, so it
+    /// reads as a pane sitting on the desktop instead of a dark frame.
+    #[test]
+    fn shadow_is_clear_under_the_panel_and_fades_outward() {
+        let (pw, ph, margin) = (200usize, 120usize, super::SHADOW_MARGIN as usize);
+        let (w, h) = (pw + margin * 2, ph + margin * 2);
+        let bytes = super::shadow_bytes(w, h, pw, ph, margin, 1.0);
+        let alpha = |x: usize, y: usize| bytes[(y * w + x) * 4 + 3];
+        assert_eq!(alpha(margin + pw / 2, margin + ph / 2), 0, "panel interior darkened");
+        let near = alpha(margin + pw / 2, margin + ph + 2);
+        assert!(near > 0, "no shadow under the panel");
+        assert_eq!(alpha(margin + pw / 2, h - 1), 0, "shadow never reaches zero");
+        let far = alpha(margin + pw / 2, margin + ph + 18);
+        assert!(near > far, "shadow must fade outward: {near} vs {far}");
+        // Symmetric: a pane sitting flat casts the same on all four sides.
+        let (mx, my) = (margin + pw / 2, margin + ph / 2);
+        assert_eq!(alpha(mx - pw / 2 - 2, my), alpha(mx + pw / 2 + 1, my), "left/right differ");
+        assert_eq!(alpha(mx, my - ph / 2 - 2), alpha(mx, my + ph / 2 + 1), "top/bottom differ");
     }
 
     /// The region polygon spans the whole panel box, so translating it onto
@@ -3246,16 +3584,19 @@ mod tests {
     }
 
     #[test]
-    fn the_swell_starts_flat_and_ends_exactly_once() {
-        // The swell drives the lens from flat to full on a static desktop.
-        // It must end: a swell that stays armed re-presents forever.
+    fn the_swell_opens_most_of_the_way_and_ends_exactly_once() {
+        // The swell drives the lens from nearly open to full on a static
+        // desktop. It must end: a swell that stays armed re-presents forever.
         let mut c = ShowCycle { refresh: false, swell: None };
         assert_eq!(c.bend(), (1.0, false), "no show means no swell");
         assert!(!c.swelling());
         c.arm();
         assert!(c.swelling());
         let (start, running) = c.bend_at(0.0);
-        assert_eq!(start, 0.0);
+        // Opens most of the way on the first frame: the panel is already on
+        // screen when this runs, so a flat start reads as a late bend.
+        assert_eq!(start, SWELL_START);
+        assert!(start > 0.8, "the edge bend must be there on the reveal frame");
         assert!(running, "still running at its start");
         let (end, running) = c.bend_at(SWELL_MS);
         assert_eq!(end, 1.0);

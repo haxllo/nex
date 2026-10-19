@@ -283,3 +283,31 @@ User report on the composition-clip build: corners curved the right shape but **
 - Verification: debug refraction suite **21 passed, 1 ignored** (new `rounded_mask_is_transparent_outside_and_opaque_inside`); release GPU probe **0.53 ms optical / 3.08 ms full frame**; release binaries built and Nex restarted. The DPI transform direction assumes the compositor scales by window DPI (confirmed by the 125% overflow symptom); if a photo shows the panel too small instead, the sign of that scale is wrong.
 - Still needs a user eyeball: pixelation gone, 125% geometry correct, edge light on all four sides.
 
+### Continuation checkpoint: contact shadow, reveal handshake, geometry cache
+
+User reports across this round: the right edge lost its last ~8 px of glass and the scrollbar read as clipped; the pane still lacked a body ("3D" means the backdrop must visibly converge into the rim); the first frame of a show could be a picture from the previous session; and the show felt late — first the whole glass layer, then (after that was fixed) only the edge bend.
+
+**Right-edge clipping (committed in `1bcf284`).** The glass region was built at the client origin but the window it clipped sat at the *outer* origin, so the region stopped short of the right edge by the frame inset. `apply_lens_region` now translates the polygon onto `client_origin_in_window()`.
+
+**External contact shadow.** The main window is `SetWindowRgn`-clipped to the panel silhouette, so it cannot hold pixels outside the panel and the shadow belongs to the glass layer: the glass window, its backbuffer and its DComp visual all gained `SHADOW_MARGIN = 44` physical px, with the material still starting at the margin so the panel stays aligned with the page's client area. `shadow_bytes()` builds a premultiplied-black rounded-rect falloff (blur 26, peak 0.30), the panel interior is zeroed, and it is drawn after the alpha mask with a plain `DrawBitmap` (SOURCE_OVER), so it can only reach outward and never lifts the glass itself. There is no offset: the cue is identical on all four sides.
+
+**Reveal handshake.** A one-shot `GlassReady` was replaced by `UiCommand::GlassPresented { w, h }`: every present made while the layer is not warm acks its size, `GlassLayer::note_frame` records it, and `reveal()` lifts the cloak only when that size equals `last_region`. `set_visible(false)` re-arms and also forgets the frame size, so a reveal can never match the previous session's held buffer — the log had shown `glass revealed 700x441` landing before that show's `panel 700x441 re-presented`. The page keeps its painted panel until the reveal push and only then goes transparent.
+
+**Bend on the reveal frame.** The show swell ran a spring from flat, so the edge stretch was at 40-70 % when the panel became visible and finished ~100 ms later — read as the edge effect arriving late. `SWELL_START = 0.85` opens most of the way on the first frame; the settle (with a hair of overshoot) remains. `BEND_SCALE 14 -> 24`, `BEZEL_MARGIN 32 -> 40`, `SLAB_BEND 0.20 -> 0.30` for the requested border convergence.
+
+**Geometry cache (the show latency fix).** The reveal waits for a frame at the panel's current size, and the pass that produces it was regenerating ~42 ms of frame-independent layers at 700x441: refraction map 11.2, four edge lights + grain upload 18-20 (generation 11-14), mask 4-7, shadow 4-5. `SizedGeometry` (map, lights, grain, mask, shadow) now lives in a 2-deep MRU `GeometryCache` keyed by `(panel_w, panel_h, scale_bits)`; a hit is a refcount bump and only the capture source and effect pointers are rebuilt. Two entries is the show cycle itself — bar box while hidden, settled box while shown, each promoting itself — so the pair stays resident while a live resize that crosses other heights still rebuilds once per height. Live log after the change: `panel 700x441 re-presented` 32-54 ms -> 2-10 ms, and `glass revealed` lands with `show_latency host_ms` instead of a rebuild later. The same change removes a ~36 ms stall from every visible resize.
+
+**Verification at this tree.**
+- `cargo test -p nex --lib overlay::refraction::tests -- --test-threads=1`: **24 passed, 1 ignored** (new `geometry_cache_keeps_the_two_hottest_boxes`; `the_swell_opens_most_of_the_way_and_ends_exactly_once` and the shadow symmetry assertions retuned).
+- GPU probe (release): optical 160x96 0.59 ms/frame with readback; content rebuild 700x60 **8.51 ms**, 700x441 **35.79 ms**; cached rebuild of the same boxes **0.50 / 0.96 ms**; rebuild + buffer growth **2.01 ms**; full material ~7 ms/frame CPU submission + `Present` (not GPU completion).
+- Release binaries built; Nex restarted; ten consecutive shows logged from the live runtime.
+
+**Still mandatory.**
+1. Per-text contrast: the 4x4 scrim is backdrop-aware, not text-bound-aware.
+2. Full-frame performance: static vs moving release benchmark at 700x441 and max size, first-show, p95, and GPU completion separate from CPU submission.
+3. Accessibility live changes: transparency toggle while visible, opaque<->glass, re-check on show.
+4. Corner / shadow eyeball: composed silhouettes at 100 % and 125 %, contact shadow weight on light and dark desktops, edge light on all four sides.
+5. Context menus / edge hit testing / live resize with the composition surface; confirm the visual clip and the shadow margin track every resize and DPI change.
+6. Optional geometry morph; last.
+7. Cleanup: stale `swell` naming (no close animation any more), blur/saturation log text, unused DXGI imports, and the first show at a never-seen height still paying the uncached ~36 ms.
+

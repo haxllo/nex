@@ -235,8 +235,13 @@ pub(crate) enum UiCommand {
     Teardown(u64),
     /// The page painted after a push_state — trigger deferred show.
     Painted,
-    /// The first native glass frame was presented and can be revealed.
-    GlassReady,
+    /// The native glass renderer presented a frame at this panel size. The
+    /// layer is uncloaked only once such an ack matches the size the page
+    /// has, so the first pixels seen belong to the current backdrop.
+    GlassPresented {
+        w: u32,
+        h: u32,
+    },
     /// The glass material changed appearance (light surface + dark text,
     /// or the reverse). The page swaps its palette to follow.
     GlassPalette(bool),
@@ -512,20 +517,24 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
 
                         }
                     }
-                    UiCommand::GlassReady => {
-                        // The renderer has a frame. Record it so the page is
-                        // allowed to drop its painted surface, then reveal
-                        // the layer before that push lands: glass first, then
-                        // transparency, never the other way round.
-                        if let Ok(mut s) = state.lock() {
-                            s.glass_frame_ready = true;
+                    UiCommand::GlassPresented { w, h } => {
+                        // The renderer has a frame. Re-presenting one for the
+                        // size the page is on lifts the cloak — never the
+                        // last session's held buffer.
+                        if let Some(layer) = glass_layer.as_ref() {
+                            layer.note_frame(w, h);
                         }
                         let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
                             && state.lock().map(|s| s.visible).unwrap_or(false)
                             && glass_active(&state);
-                        if live {
-                            if let Some(layer) = glass_layer.as_ref() {
-                                layer.show_ready_frame();
+                        let revealed = live
+                            && glass_layer.as_ref().is_some_and(|layer| layer.reveal());
+                        // The page drops its painted surface exactly when the
+                        // layer shows through, so it is never see-through
+                        // over a cloaked glass.
+                        if revealed {
+                            if let Ok(mut s) = state.lock() {
+                                s.glass_frame_ready = true;
                             }
                             if ready {
                                 push_state(&webview, &state, &icon_cache, false);
@@ -1081,7 +1090,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window, &glass_layer);
+                    hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Cloak fallback: if focus is still ours the invisible
@@ -1145,7 +1154,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
                     RAW_WIN_DOWN.store(0, Ordering::SeqCst);
                     RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                    hide_overlay_window(hwnd, &window, &glass_layer);
+                    hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Same cloak fallback as Hide (see above).
@@ -1284,9 +1293,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             // Glass frame not ready yet: show the panel now
                             // anyway (its opaque surface covers the gap, the
                             // page only goes transparent once the renderer
-                            // reports a frame) and let the pending GlassReady
-                            // reveal the layer - blocking the whole panel on
-                            // first capture reads as a hung show.
+                            // acks a frame) and let that ack reveal the layer
+                            // - blocking the whole panel on first capture
+                            // reads as a hung show.
                             crate::runtime::log_info(
                                 "[nex] host Painted: glass frame pending, showing panel opaque",
                             );
@@ -1328,11 +1337,19 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = window.set_focus();
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // Start glass capture with the panel. Its HWND is
-                        // revealed only after the worker presents a frame.
+                        // revealed by the layer's own ack — a frame at the
+                        // size the page just settled on — or right here if
+                        // one for this size already landed.
                         // Parked in opaque panel modes (solid CSS covers it).
                         if glass_active(&state) {
                             if let Some(layer) = glass_layer.as_ref() {
                                 layer.set_visible(true);
+                                if layer.reveal() {
+                                    if let Ok(mut s) = state.lock() {
+                                        s.glass_frame_ready = true;
+                                    }
+                                    push_state(&webview, &state, &icon_cache, false);
+                                }
                             }
                         }
                         // Re-assert topmost Z-position. When the overlay
@@ -2899,10 +2916,16 @@ fn hide_overlay_window(
     hwnd: HWND,
     window: &Window,
     glass: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     // Spike glass vanishes with the panel.
     if let Some(layer) = glass {
         layer.set_visible(false);
+    }
+    // The page goes back to its painted panel while the glass is cloaked,
+    // so the next show never paints transparent over a stale layer.
+    if let Ok(mut s) = state.lock() {
+        s.glass_frame_ready = false;
     }
     // Transparent-hide first: cloak + click-through + child hidden.
     // WS_EX_TRANSPARENT on the parent does not stop hit-testing on the

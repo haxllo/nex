@@ -306,8 +306,9 @@ User reports across this round: the right edge lost its last ~8 px of glass and 
 1. Per-text contrast: the 4x4 scrim is backdrop-aware, not text-bound-aware.
 2. Full-frame performance: static vs moving release benchmark at 700x441 and max size, first-show, p95, and GPU completion separate from CPU submission.
 3. Accessibility live changes: transparency toggle while visible, opaque<->glass, re-check on show.
-4. Corner / shadow eyeball: composed silhouettes at 100 % and 125 %, contact shadow weight on light and dark desktops, edge light on all four sides.
-5. Context menus / edge hit testing / live resize with the composition surface; confirm the visual clip and the shadow margin track every resize and DPI change.
-6. Optional geometry morph; last.
-7. Cleanup: stale `swell` naming (no close animation any more), blur/saturation log text, unused DXGI imports, and the first show at a never-seen height still paying the uncached ~36 ms.
+4. Context menus / edge hit testing / live resize with the composition surface; confirm the visual clip and the shadow margin track every resize and DPI change.
+5. Optional geometry morph; last.
+6. Cleanup: stale `swell` naming (no close animation any more), blur/saturation log text, unused DXGI imports, and the first show at a never-seen height still paying the uncached ~36 ms.
+
+**Cleared by user eyeball (2.28.0).** Composed corners and contact shadow at 100 % and 125 % scale, edge light on all four sides, edge bend on the reveal frame, overall show feel: accepted. The contact-shadow and corner items that the previous list held were dropped from "Still mandatory".
 

@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1092,8 +1092,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // held. No-op unless the hotkey is Win.
                     crate::overlay::hotkey::hold_mask_before_hide();
                     register_raw_input_sink(hwnd);
-                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+                    reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
@@ -1156,8 +1155,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::HideSync(ack) => {
                     crate::overlay::hotkey::hold_mask_before_hide();
                     register_raw_input_sink(hwnd);
-                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+                    reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
@@ -3245,31 +3243,31 @@ unsafe extern "system" fn instance_signal_subclass(
                     // toggle via send_hotkey_event, never directly.
                     if is_win && crate::overlay::hotkey::is_win_key_hotkey() {
                         if (flags & RI_KEY_BREAK) != 0 {
-                            let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
-                            let chord = RAW_WIN_CHORD.swap(false, Ordering::SeqCst);
-                            // Start is blocked by the held menu-mask key, not
-                            // by NOHOTKEYS; bare Win key-up toggles regardless
-                            // of overlay visibility.
-                            if was_down != 0 && !chord {
+                            // Whichever detector sees the key-up first
+                            // consumes the press; the other gets false, so a
+                            // bare tap toggles exactly once. The decision
+                            // uses the shared chord flag, so a dropped raw
+                            // make event (Win+E) can no longer make this
+                            // press look bare.
+                            if crate::overlay::hotkey::finish_win_press() {
                                 crate::runtime::log_info(
-                                    "[nex::debug] WM_INPUT bare Win key-up, toggling",
+                                    "[nex::debug] WM_INPUT Win key-up, bare press, toggling",
                                 );
                                 let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                             }
-                        } else if RAW_WIN_DOWN
-                            .compare_exchange(0, vk as u32, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                        }
-                        if (flags & RI_KEY_BREAK) != 0 {
-                            RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                            crate::overlay::hotkey::release_mask_for_press();
+                        } else {
+                            crate::overlay::hotkey::note_win_press_start();
+                            // Covers the case where the hook did not see this
+                            // key-down (Chromium's hook runs first while the
+                            // overlay is focused).
+                            crate::overlay::hotkey::hold_mask_for_press();
                         }
                     } else if (flags & RI_KEY_BREAK) == 0 {
                         // Any other key pressed while Win is held makes this a
                         // chord (Win+E, Win+D…) — never a toggle.
-                        if RAW_WIN_DOWN.load(Ordering::SeqCst) != 0 {
-                            RAW_WIN_CHORD.store(true, Ordering::SeqCst);
+                        if vk != crate::overlay::hotkey::VK_MENU_MASK {
+                            crate::overlay::hotkey::note_chord_key();
                         }
                         // Non-Win hotkey detection via raw input.
                         // WH_KEYBOARD_LL may not fire when the overlay
@@ -3378,17 +3376,10 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
     0
 }
 
-/// Tracks raw-input VK of held Win key so we only send one toggle per press.
-static RAW_WIN_DOWN: AtomicU32 = AtomicU32::new(0);
-/// Set when another key is pressed while Win is held (Win+E, Win+D…) so the
-/// Win key-up is treated as a chord, not a bare toggle.
-static RAW_WIN_CHORD: AtomicBool = AtomicBool::new(false);
-
-/// Clear the raw-input Win tracking. Called after a live hotkey change so a
-/// half-finished press of the old combo can't swallow the new one.
+/// Clear the Win press tracking. Called after a live hotkey change and on
+/// hide so a half-finished press of the old binding can't decide the next one.
 pub(crate) fn reset_raw_win_state() {
-    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+    crate::overlay::hotkey::reset_win_press_state();
 }
 pub(crate) static RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 static RECORD_WIN_CHORD: AtomicBool = AtomicBool::new(false); //win+other seen

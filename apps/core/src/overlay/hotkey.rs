@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -42,9 +42,47 @@ struct HookContext {
 
 static HOOK_CTX: Mutex<Option<HookContext>> = Mutex::new(None);
 
-// Track VK of a Win key-down that was consumed by the hotkey, so the
-// matching key-up is also consumed.
-static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+/// One physical Win press, tracked once for every detector in this process.
+///
+/// The hook and the raw-input sink see the same keys but not the same
+/// events: raw input can drop a make event (observed: Win+E delivered only
+/// E's break), and Chromium's hook can run ahead of ours while the overlay
+/// is focused. Deciding from per-detector state let the detector that missed
+/// the chord call the press bare and toggle over Explorer. One state, written
+/// by any detector that saw a key, removes that whole class of misfire.
+static WIN_PRESS_ACTIVE: AtomicBool = AtomicBool::new(false);
+static WIN_CHORD_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// Start of a physical Win press. Idempotent — auto-repeat and the second
+/// detector both land here and neither may extend the press.
+pub(crate) fn note_win_press_start() {
+    WIN_CHORD_SEEN.store(false, Ordering::SeqCst);
+    WIN_PRESS_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// A real non-modifier key went down. Returns true when it landed inside a
+/// Win press, i.e. the press is a chord and must never toggle.
+pub(crate) fn note_chord_key() -> bool {
+    if !WIN_PRESS_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    WIN_CHORD_SEEN.store(true, Ordering::SeqCst);
+    true
+}
+
+/// End of the press, consumed exactly once. Returns true only when the press
+/// stayed bare, so the toggle fires at most once even though the hook and raw
+/// input both call this for the same key-up.
+pub(crate) fn finish_win_press() -> bool {
+    let active = WIN_PRESS_ACTIVE.swap(false, Ordering::SeqCst);
+    let chord = WIN_CHORD_SEEN.swap(false, Ordering::SeqCst);
+    active && !chord
+}
+
+pub(crate) fn reset_win_press_state() {
+    WIN_PRESS_ACTIVE.store(false, Ordering::SeqCst);
+    WIN_CHORD_SEEN.store(false, Ordering::SeqCst);
+}
 
 static OVERLAY_HAS_FOCUS: AtomicBool = AtomicBool::new(false);
 static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
@@ -301,6 +339,40 @@ fn is_key_down(vk: u32) -> bool {
 /// `#MenuMaskKey vkE8` — never conflicts with real keys.
 pub(crate) const VK_MENU_MASK: u16 = 0xE8;
 
+/// Whether this process currently holds the mask. Centralizes the pairing so
+/// a second detector cannot double-send, and a missed key-up cannot leave the
+/// mask stuck down.
+static MASK_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Hold the menu mask unless this process already holds it.
+pub(crate) fn mask_hold() {
+    if !MASK_HELD.swap(true, Ordering::SeqCst) {
+        send_mask_down();
+    }
+}
+
+/// Release the menu mask if this process holds it.
+pub(crate) fn mask_release() {
+    if MASK_HELD.swap(false, Ordering::SeqCst) {
+        send_mask_up();
+    }
+}
+
+/// Hold the mask unless the helper owns it.
+pub(crate) fn hold_mask_for_press() {
+    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+        mask_hold();
+    }
+}
+
+/// Release the mask unless the helper owns it — a release from this process
+/// while the helper still expects the mask held would end its suppression.
+pub(crate) fn release_mask_for_press() {
+    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+        mask_release();
+    }
+}
+
 /// Send a single key-down for the menu-mask key. The mask is held
 /// (no corresponding key-up) so raw input consumers see Win+mask
 /// simultaneously during the critical hide/window-hide window.
@@ -403,39 +475,58 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // --- Chord detection: non-mod key pressed while Win held ---
-    // Clear CONSUMED_WIN_VK so the matching Win key-up won't fire
-    // the hotkey — this makes Win+E/D/R pass through cleanly.
-    if ctx.target_is_win && !injected && is_keydown
-        && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
-        && vk != VK_LWIN && vk != VK_RWIN
-    {
-        let is_mod = vk == VK_LCONTROL || vk == VK_RCONTROL
-            || vk == VK_LMENU || vk == VK_RMENU
-            || vk == VK_LSHIFT || vk == VK_RSHIFT
-            || vk == VK_CTRL || vk == VK_ALT || vk == VK_SHIFT;
-        if !is_mod {
+    // --- Win press bookkeeping, shared with the raw-input sink ---
+    //
+    // Real keys only, and only when the hotkey is Win. The press is tracked
+    // once for every detector: a raw-input make event that never arrives
+    // (observed on Win+E) or a hook bypassed by Chromium's can no longer turn
+    // the same press into a bare tap in the other detector.
+    if ctx.target_is_win && !injected {
+        let is_win_vk = vk == VK_LWIN || vk == VK_RWIN;
+        let is_mod = matches!(
+            vk,
+            VK_LCONTROL | VK_RCONTROL | VK_LMENU | VK_RMENU | VK_LSHIFT | VK_RSHIFT
+        );
+
+        if is_win_vk && is_keydown {
+            note_win_press_start();
+            hold_mask_for_press();
+            SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
+            // DO NOT EAT — pass Win through so Win+ chords work. Nothing
+            // fires here; the key-up decides between chord and bare tap.
+            return unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                    std::ptr::null_mut(), n_code, w_param, l_param)
+            };
+        }
+
+        if !is_win_vk && is_keydown && !is_mod && note_chord_key() {
             crate::runtime::log_info(&format!(
                 "[nex::debug] Hook: chord detected vk={}, passing through",
                 vk,
             ));
-            send_mask_up();
-            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            // Let the OS own the chord with no mask in the way.
+            release_mask_for_press();
         }
-    }
 
-    // --- Win key-up: fire hotkey only if no chord was detected ---
-    // Chord detection clears CONSUMED_WIN_VK to 0, making this a no-op.
-    // No timer thread needed — everything runs in the hook pump.
-    if ctx.target_is_win && is_keyup && !injected && !HELPER_ACTIVE.load(Ordering::SeqCst) {
-        let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
-        if consumed_vk != 0 && vk == consumed_vk {
-            crate::runtime::log_info(&format!(
-                "[nex::debug] Hook: bare Win key-up vk={}, opening Nex",
-                vk,
-            ));
-            send_mask_up();
-            let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
+        if is_win_vk && is_keyup {
+            // The helper reports its own press, so when it is live it owns
+            // the decision; the raw sink consumes the press instead.
+            if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+                let bare = finish_win_press();
+                mask_release();
+                if bare {
+                    crate::runtime::log_info(&format!(
+                        "[nex::debug] Hook: bare Win key-up vk={}, opening Nex",
+                        vk,
+                    ));
+                    let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
+                }
+            }
+            return unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
+                    std::ptr::null_mut(), n_code, w_param, l_param)
+            };
         }
     }
 
@@ -452,15 +543,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         vk == ctx.target_key
     };
 
-    // Diagnostic: log target key matches
-    if is_target && !injected {
-        crate::runtime::log_info(&format!(
-            "[nex::diag] Hook: target key match vk={:?} target_is_win={} target_vk={:?}",
-            vk, ctx.target_is_win, ctx.target_key,
-        ));
-    }
-
-    if is_target && !injected {
+    if is_target && !injected && !ctx.target_is_win {
         let mods_ok = ctx.required_mods.iter().all(|&m| match m {
             VK_LWIN | VK_RWIN => is_key_down(VK_LWIN) || is_key_down(VK_RWIN),
             VK_CTRL => CTRL_DOWN.load(Ordering::SeqCst),
@@ -492,19 +575,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 };
             }
             if ctx.target_is_win {
-                // First Win key-down: mark active, send mask, DON'T EAT.
-                // Hotkey fires on Win key-up (no chord) to prevent race
-                // between chord detection and hotkey dispatch.
-                if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
-                    crate::runtime::log_info(&format!(
-                        "[nex::debug] Hook: Win key-down vk={}",
-                        vk,
-                    ));
-                    CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
-                    SUPPRESS_FOCUS_ESCAPE.store(true, Ordering::SeqCst);
-                    send_mask_down();
-                }
-                // DO NOT EAT — pass Win through so Win+ chords work
+                // Unreachable: the guard above requires a non-Win target.
                 return unsafe {
                     windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
                         std::ptr::null_mut(), n_code, w_param, l_param)
@@ -1179,7 +1250,7 @@ impl Drop for HotkeyListener {
             CTRL_DOWN.store(false, Ordering::SeqCst);
             ALT_DOWN.store(false, Ordering::SeqCst);
             SHIFT_DOWN.store(false, Ordering::SeqCst);
-            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+            reset_win_press_state();
             SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
             HELPER_ACTIVE.store(false, Ordering::SeqCst);
 
@@ -1404,7 +1475,7 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     }
     // Drop transient key state so a half-finished press of the previous
     // hotkey can't swallow the first press of the new one.
-    CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+    reset_win_press_state();
     CTRL_DOWN.store(false, Ordering::SeqCst);
     ALT_DOWN.store(false, Ordering::SeqCst);
     SHIFT_DOWN.store(false, Ordering::SeqCst);
@@ -1934,4 +2005,32 @@ mod tests {
     #[test] fn dispatch_numpad_bounds() { assert_eq!(dispatch_for(0x6F, false, true, false), DispatchReason::NumpadKey); assert_eq!(dispatch_for(0x5F, false, true, false), DispatchReason::SystemHotkey); assert_eq!(dispatch_for(0x70, false, true, false), DispatchReason::SystemHotkey); }
     #[test] fn dispatch_refused_wins_over_win() { assert_eq!(dispatch_for(0x20, true, true, true), DispatchReason::RefusedDemoted); }
     #[test] fn send_helper_key_down_without_pipe() { assert!(!send_helper_key("play_pause")); }
+
+    // One press tracker for every detector: bare taps fire once, chords never.
+    #[test] fn bare_press_fires_exactly_once() {
+        reset_win_press_state();
+        note_win_press_start();
+        note_win_press_start();              // key auto-repeat / second detector
+        assert!(finish_win_press());
+        assert!(!finish_win_press());        // other detector's key-up
+    }
+    #[test] fn chord_press_never_fires() {
+        reset_win_press_state();
+        note_win_press_start();
+        assert!(note_chord_key());           // Win+E key-down
+        assert!(note_chord_key());           // another chord key
+        assert!(!finish_win_press());
+    }
+    #[test] fn chord_flag_does_not_leak_into_next_press() {
+        reset_win_press_state();
+        note_win_press_start();
+        assert!(note_chord_key());
+        assert!(!finish_win_press());
+        note_win_press_start();
+        assert!(finish_win_press());
+    }
+    #[test] fn chord_key_outside_press_is_ignored() {
+        reset_win_press_state();
+        assert!(!note_chord_key());
+    }
 }

@@ -366,6 +366,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // start so bare-Win never opens Start; nex toggles on key-up.
     register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
     OVERLAY_HWND.store(hwnd as isize, Ordering::SeqCst);
+    // apply_window_chrome ran before the layer existed and before this HWND
+    // was cached, so settle the capture flag now that both are known.
+    sync_capture_exclusion(&state);
 
     // Start suppression is handled by RIDEV_NOHOTKEYS via
     // RegisterRawInputDevices instead of a focus-sink window.
@@ -2331,6 +2334,60 @@ fn refresh_pointer_over_panel(
     }
 }
 
+/// Whether a window showing this panel material has to stay out of screen
+/// capture. Only the native glass does: it samples the desktop through
+/// duplication, so its own composited frame would feed back into the blur.
+/// Opaque Black/White panels draw nothing that can feed back, so they must
+/// stay capturable — screenshots, OBS and Discord all read the same flag.
+fn capture_exclusion_needed(mode: crate::config::PanelBackground, glass_native: bool) -> bool {
+    glass_native && !mode.is_opaque()
+}
+
+/// The background the panel will actually paint with, after the transparency
+/// and glass-failure fallbacks.
+fn effective_panel_mode(
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) -> crate::config::PanelBackground {
+    let mut mode = state
+        .lock()
+        .map(|s| s.panel_background)
+        .unwrap_or(crate::config::PanelBackground::Glass);
+    if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
+        || crate::overlay::refraction::glass_failed()
+    {
+        mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
+            crate::config::PanelBackground::White
+        } else {
+            crate::config::PanelBackground::Black
+        };
+    }
+    mode
+}
+
+/// Keep the main window's capture affinity in step with the material. Cheap
+/// and idempotent: the flag is only touched when the answer changes, so this
+/// runs on every Show/Apply.
+fn sync_capture_exclusion(
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    static APPLIED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    let exclude = capture_exclusion_needed(
+        effective_panel_mode(state),
+        state.lock().map(|s| s.glass_native).unwrap_or(false),
+    );
+    let want = i8::from(exclude);
+    if APPLIED.load(Ordering::SeqCst) == want {
+        return;
+    }
+    if crate::overlay::refraction::set_capture_exclusion(hwnd, exclude) {
+        APPLIED.store(want, Ordering::SeqCst);
+    }
+}
+
 /// Match the WebView surface to the panel mode. Opaque modes get an
 /// opaque surface, which re-enables ClearType subpixel text (Chromium
 /// only subpixels over opaque — transparent always falls back to
@@ -2343,18 +2400,12 @@ fn sync_webview_background(
     webview: Option<&wry::WebView>,
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
+    // Capture visibility tracks the material, not the window (see
+    // sync_capture_exclusion). Before the early return so a live mode switch
+    // also updates the flag.
+    sync_capture_exclusion(state);
     let Some(wv) = webview else { return };
-    let mut mode = state
-        .lock()
-        .map(|s| s.panel_background)
-        .unwrap_or(crate::config::PanelBackground::Glass);
-    if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
-        || crate::overlay::refraction::glass_failed()
-    {
-        mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
-            crate::config::PanelBackground::White
-        } else { crate::config::PanelBackground::Black };
-    }
+    let mode = effective_panel_mode(state);
     static LAST_MODE: std::sync::Mutex<Option<crate::config::PanelBackground>> =
         std::sync::Mutex::new(None);
     if LAST_MODE.lock().map(|g| *g == Some(mode)).unwrap_or(false) {
@@ -3442,6 +3493,20 @@ mod snapshot_tests {
 
     fn push(s: &ShimState) -> Value {
         serde_json::from_str(&snapshot_state_with_transparency(s, false, true)).expect("snapshot is JSON")
+    }
+
+    #[test]
+    fn capture_exclusion_follows_the_material_not_the_window() {
+        use super::capture_exclusion_needed;
+        // Glass feeds off the desktop duplication: it must stay out of
+        // captures or it samples its own last frame.
+        assert!(capture_exclusion_needed(PanelBackground::Glass, true));
+        // Opaque panels never feed anything, so screenshots/OBS/Discord must
+        // see the app (regression: the flag used to be set for every mode).
+        assert!(!capture_exclusion_needed(PanelBackground::Black, true));
+        assert!(!capture_exclusion_needed(PanelBackground::White, true));
+        // No glass layer (creation failed / NEX_REFRACT_LAB=0): nothing to hide.
+        assert!(!capture_exclusion_needed(PanelBackground::Glass, false));
     }
 
     #[test]

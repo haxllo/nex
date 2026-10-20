@@ -79,12 +79,38 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, RegisterClassW,
     SetWindowDisplayAffinity, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SW_SHOWNA,
-    WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::Foundation::POINT;
 use windows::{core::w, Win32::System::LibraryLoader::GetModuleHandleW};
+
+/// Drive the window's capture affinity. `true` hides it from screenshots,
+/// screen sharing and desktop duplication (`WDA_EXCLUDEFROMCAPTURE`), which
+/// the native glass needs because its own feed would otherwise contain the
+/// panel's previous frame; `false` puts the window back in every capture
+/// (`WDA_NONE`) so opaque Black/White panels stay visible to the user's
+/// screenshot tool, OBS and Discord. Returns whether the request landed.
+pub(crate) fn set_capture_exclusion(hwnd: isize, exclude: bool) -> bool {
+    let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    match unsafe { SetWindowDisplayAffinity(HWND(hwnd as *mut _), affinity) } {
+        Ok(()) => {
+            crate::logging::info(&format!(
+                "[nex][refract] main window {} capture",
+                if exclude { "excluded from" } else { "visible to" }
+            ));
+            true
+        }
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "[nex][refract] capture affinity {:?} failed: {error:?}",
+                affinity
+            ));
+            false
+        }
+    }
+}
 
 /// Refraction is on by default; an explicit zero keeps the Acrylic fallback.
 pub fn enabled() -> bool {
@@ -524,7 +550,6 @@ impl GlassWindow {
             ));
         }
 
-        let main = HWND(main_sys as *mut std::ffi::c_void);
         let (x, y) = main_origin(main_sys).unwrap_or((0, 0));
         // Grown by the shadow margin on every side and anchored so the panel
         // box still lands on the main window's client origin.
@@ -555,16 +580,16 @@ impl GlassWindow {
             )
             .map_err(|e| format!("CreateWindowExW glass failed: {e:?} (last error {})", last_error_code()))?
         };
-        // Self-exclusion first: without it we'd capture our own panel
-        // into a feedback mirror. Failure is warn-and-continue for the
-        // spike (the log says which side refused).
-        for (label, target) in [("glass", hwnd), ("main", main)] {
-            match unsafe { SetWindowDisplayAffinity(target, WDA_EXCLUDEFROMCAPTURE) } {
-                Ok(()) => crate::logging::info(&format!("[nex][refract] {label} excluded from capture")),
-                Err(error) => crate::logging::warn(&format!(
-                    "[nex][refract] {label} exclusion failed: {error:?} (feedback risk)"
-                )),
-            }
+        // Self-exclusion only: without it we'd capture our own panel into a
+        // feedback mirror. The main window's affinity is the host's call
+        // (`set_capture_exclusion`) and follows the panel material, because
+        // opaque Black/White panels have nothing to feed back and must stay
+        // visible to screenshots and screen sharing.
+        match unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+            Ok(()) => crate::logging::info("[nex][refract] glass excluded from capture"),
+            Err(error) => crate::logging::warn(&format!(
+                "[nex][refract] glass exclusion failed: {error:?} (feedback risk)"
+            )),
         }
         // Shown once, cloaked from here on. Revealing a window that was
         // hidden put an empty window over the desktop: a hidden window

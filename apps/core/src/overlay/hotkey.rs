@@ -118,17 +118,20 @@ static HOTKEY_CLOCK: OnceLock<Instant> = OnceLock::new();
 /// - the helper's pipe is the ONLY path that sees elevated foreground
 ///   windows (UIPI blocks both raw input and the Medium-IL hook there).
 ///
-/// One press therefore reaches several of them within milliseconds, so the
-/// copy is dropped at the send site, where those timings are real. Keep it
-/// here. A receipt-time window in the runtime (removed in `87ac9f8`) failed
-/// whenever the worker was busy: the copies left the queue seconds apart,
-/// both passed, and one press toggled twice — the "one press acts like a
-/// double press, then it settles" complaint from the first seconds after
-/// launch. History: v2.10.0 "fixed" this by deleting the WM_INPUT Win
-/// toggle, 6854445 re-added it with the helper out of detection, and
-/// 055a47a re-enabled helper detection; two consumers came back with only
-/// the receipt window between them, and v2.26.0's single-consumer fix was
-/// reverted during bisect.
+/// The raw path and the hook both defer to the helper once it is live
+/// (`helper_active()`), so one press normally has exactly one owner. This
+/// send-site window stays as the backstop for the cases where they still
+/// overlap.
+///
+/// History: a receipt-time window in the runtime (removed in `87ac9f8`)
+/// failed whenever the worker was busy: the copies left the queue seconds
+/// apart, both passed, and one press toggled twice — the "one press acts
+/// like a double press, then it settles" complaint from the first seconds
+/// after launch. v2.10.0 "fixed" this by deleting the WM_INPUT Win toggle,
+/// 6854445 re-added it with the helper out of detection, and 055a47a
+/// re-enabled helper detection without re-gating the raw path; the 50 ms
+/// window papered over the double owner until startup load stretched the
+/// copies past it.
 pub(crate) fn send_hotkey_event(sender: &Sender<OverlayEvent>, hotkey_id: i32) -> bool {
     let now = HOTKEY_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64;
     let prev = HOTKEY_EVENT_AT_MS.swap(now, Ordering::SeqCst);

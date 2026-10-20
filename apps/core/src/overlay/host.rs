@@ -3249,7 +3249,17 @@ unsafe extern "system" fn instance_signal_subclass(
                             // uses the shared chord flag, so a dropped raw
                             // make event (Win+E) can no longer make this
                             // press look bare.
-                            if crate::overlay::hotkey::finish_win_press() {
+                            let bare = crate::overlay::hotkey::finish_win_press();
+                            // Same rule as the hook: when the elevated helper
+                            // is live it owns the decision and reports the
+                            // press over its pipe. This path still consumes
+                            // the press and releases the mask, but must not
+                            // also toggle - the two copies are only a few ms
+                            // apart on an idle machine and a whole 50 ms
+                            // window apart on the first press after launch,
+                            // where the second copy used to hide the overlay
+                            // the first one had just shown.
+                            if bare && !crate::overlay::hotkey::helper_active() {
                                 crate::runtime::log_info(
                                     "[nex::debug] WM_INPUT Win key-up, bare press, toggling",
                                 );
@@ -3276,8 +3286,13 @@ unsafe extern "system" fn instance_signal_subclass(
                         // hook which runs first), so we check the
                         // configured hotkey here. Overlaps the hook and
                         // the RegisterHotKeyW fallback: send through
-                        // send_hotkey_event, never directly.
-                        if crate::overlay::hotkey::check_raw_input_hotkey(vk) {
+                        // send_hotkey_event, never directly. With the
+                        // helper live it owns the decision (its own
+                        // RegisterHotKey/hook), so this copy stays out of
+                        // the way exactly like the hook's does.
+                        if !crate::overlay::hotkey::helper_active()
+                            && crate::overlay::hotkey::check_raw_input_hotkey(vk)
+                        {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] WM_INPUT hotkey vk={} sending toggle",
                                 vk,

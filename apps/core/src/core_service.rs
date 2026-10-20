@@ -1656,7 +1656,7 @@ impl CoreService {
 
         // Mid-run self-heal: if the index is None (schema bump or
         // corruption), reset and reopen while we hold the lock.
-        let tantivy_guard = if tantivy_guard.is_none() {
+        let mut tantivy_guard = if tantivy_guard.is_none() {
             crate::logging::info("[nex] Tantivy index missing or schema changed mid-run, resetting");
             drop(tantivy_guard);
             let healed = reset_tantivy_index(&tantivy_path);
@@ -1675,6 +1675,7 @@ impl CoreService {
             tantivy_guard
         };
 
+        let mut drop_index = false;
         if let Some(ref idx) = *tantivy_guard {
             let result = if tantivy_is_first {
                 idx.index_items(&items)
@@ -1694,9 +1695,20 @@ impl CoreService {
                     ));
                 }
                 Err(e) => {
-                    crate::logging::info(&format!("[nex] Tantivy index sync error: {e}"));
+                    // A failed sync may have committed only part of the
+                    // deletion/insertion batch, leaving documents the store no
+                    // longer has. Drop the index so searches fall back to the
+                    // in-memory cache (rebuilt from the store) instead of
+                    // serving removed items; the next rebuild reindexes.
+                    crate::logging::info(&format!(
+                        "[nex] Tantivy index sync error: {e}; dropping index until next rebuild"
+                    ));
+                    drop_index = true;
                 }
             }
+        }
+        if drop_index {
+            *tantivy_guard = None;
         }
         drop(tantivy_guard);
 

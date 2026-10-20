@@ -425,11 +425,15 @@ fn runtime_provider_reconfigure_applies_new_roots() {
     let mut cfg_b = cfg_a.clone();
     cfg_b.discovery_roots = vec![root_b.clone()];
     service.reconfigure_runtime_providers(&cfg_b).unwrap();
-    let _ = service.rebuild_index().unwrap();
+    let report = service.rebuild_index_incremental_with_report().unwrap();
 
     let after_a = service.search("alpharoot", 20).unwrap();
     let after_b = service.search("betaroot", 20).unwrap();
-    assert!(after_a.is_empty());
+    assert!(
+        after_a.is_empty(),
+        "stale results survived root reconfigure: after_a={after_a:?} removed={}",
+        report.removed_total
+    );
     assert!(!after_b.is_empty());
 
     drop(service);

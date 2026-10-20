@@ -128,7 +128,9 @@ impl TantivyIndex {
             return Ok(Vec::new());
         }
 
-        self.reader.reload().ok();
+        self.reader
+            .reload()
+            .map_err(|e| format!("tantivy reload error: {e}"))?;
 
         let searcher = self.reader.searcher();
         let query = build_prefix_query(
@@ -349,7 +351,11 @@ impl TantivyIndex {
         // The reader is independent from the writer — no writer lock needed.
         // This is the expensive part (iterates all live docs) and runs
         // outside the writer lock so concurrent searches are not blocked.
-        self.reader.reload().ok();
+        // A failed reload leaves a stale searcher whose view is missing live
+        // docs, which would silently skip their deletions — fail instead.
+        self.reader
+            .reload()
+            .map_err(|e| format!("tantivy reload error: {e}"))?;
         let reader = self.reader.searcher();
         let mut existing_ids: HashSet<String> = HashSet::new();
         for (segment_ord, segment_reader) in reader.segment_readers().iter().enumerate() {

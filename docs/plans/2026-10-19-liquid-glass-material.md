@@ -338,3 +338,18 @@ Reading: the frame fits the runtime's 16 ms cap with more than 2x headroom at th
 ### Checkpoint: capture visibility follows the material
 
 `SetWindowDisplayAffinity` used to be set on **both** the glass and the main HWND at layer creation, for every launch and every panel mode. That is the same flag screenshots, PrintScreen, OBS and Discord read, so the whole app vanished from captures in every mode - including Black/White, which never touch the glass and have nothing to feed back. The affinity now follows the material: `sync_capture_exclusion` (host) sets `WDA_EXCLUDEFROMCAPTURE` on the main window only while the native glass actually paints, and `WDA_NONE` for opaque panels and for `NEX_REFRACT_LAB=0`/glass-failure fallbacks. The glass window itself stays self-excluded always (its duplication feed would otherwise contain its own last frame). Known ceiling: while the glass material is live the app still cannot be captured - a window that refracts the live desktop cannot also be inside that same capture. Restoring glass captures means moving the material to a system-composited backdrop, which loses the refraction.
+
+### Checkpoint: DirectComposition composes in device pixels
+
+The `1 / scale` visual transform added with the composition swapchain was a
+regression, not a fix. DirectComposition targets a window's client area in
+device pixels (its clip, offsets and transforms are all pixel-space; content
+is clipped to the window rect), so cancelling a "window DPI scale" shrank the
+whole layer instead: at 125% a 988 px buffer painted at 790 px, leaving the
+page's content outside the right and bottom of the glass. `Engine::apply_visual`
+is gone and the visual keeps its identity transform. Buffers, the alpha mask,
+the contact shadow and the margin-compensated placement were already physical
+pixels, so they map 1:1 with no transform. The earlier 125% "overflow" that the
+transform was written for did not come from the compositor; treat it as
+misattributed. This is a no-op at 100% scale, which is why the 100% eyeball did
+not catch it.

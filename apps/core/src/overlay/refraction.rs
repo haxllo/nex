@@ -58,7 +58,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
 };
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
@@ -731,9 +731,16 @@ struct Engine {
     context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain1,
     /// Composition tree: the backbuffer alpha carries the rounded panel
-    /// silhouette, and the visual transform cancels DComp's DPI scale.
+    /// silhouette. DirectComposition composes in device pixels, so the
+    /// visual keeps its identity transform and the buffer maps 1:1.
+    ///
+    /// Held, not read: dropping the device/target/visual would tear the
+    /// tree down and blank the layer.
+    #[allow(dead_code)]
     dcomp: IDCompositionDevice,
+    #[allow(dead_code)]
     target: IDCompositionTarget,
+    #[allow(dead_code)]
     visual: IDCompositionVisual,
     d2d: ID2D1DeviceContext,
     /// Size-agnostic effect graph, built once. Resizes replace source,
@@ -1006,24 +1013,6 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Keep DComp in physical pixels: its visual tree is DPI-scaled by the
-    /// host window, so a `1 / scale` visual transform cancels that scale.
-    /// The rounded silhouette lives in the backbuffer alpha (mask bitmap),
-    /// not in a hard visual clip.
-    fn apply_visual(&self) -> Result<(), String> {
-        let inv = 1.0 / self.scale.max(0.01) as f32;
-        let matrix = Matrix3x2::scale(inv, inv);
-        unsafe {
-            self.visual
-                .SetTransform2(&matrix)
-                .map_err(|e| format!("composition transform failed: {e:?}"))?;
-            self.dcomp
-                .Commit()
-                .map_err(|e| format!("composition commit failed: {e:?}"))?;
-        }
-        Ok(())
-    }
-
     /// Rebuild the capture source and the frame-independent geometry at the
     /// current panel size. Live frames replace only the source and tint.
     fn rebuild_content(&mut self) -> Result<(), String> {
@@ -1103,7 +1092,6 @@ impl Engine {
         self.shadow = Some(geometry.shadow);
         self.local_tint = Some(self.bitmap(4, 4, &[0; 64])?);
         *self.tint_grid.borrow_mut() = None;
-        self.apply_visual()?;
         Ok(())
     }
 

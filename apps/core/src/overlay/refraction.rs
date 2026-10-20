@@ -3251,6 +3251,222 @@ mod tests {
         result.expect("optical GPU probe");
     }
 
+    /// Full-frame budget for a visible panel: CPU submission and GPU
+    /// completion kept apart, static backdrop against a moving one, at the
+    /// settled panel and at `MAX_HEIGHT` (the tallest the host asks for).
+    /// Reports p50/p95 plus the first show at a fresh size, which is the
+    /// frame the reveal waits on.
+    #[test]
+    #[ignore = "requires Windows GPU; run explicitly with --ignored"]
+    fn full_frame_perf_report() {
+        use super::*;
+        use windows::Win32::Graphics::Direct3D11::{
+            ID3D11Asynchronous, ID3D11Query, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
+        };
+
+        const FRAMES: usize = 120;
+        const WARM: usize = 20;
+
+        fn pct(mut v: Vec<f64>, p: f64) -> f64 {
+            if v.is_empty() {
+                return 0.0;
+            }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            v[((v.len() - 1) as f64 * p).round() as usize]
+        }
+
+        fn ms(t: Instant) -> f64 {
+            t.elapsed().as_secs_f64() * 1000.0
+        }
+
+        /// Desktop-ish backdrop: alternating bright blocks with dark
+        /// "text" bars, so the downsample has real contrast to read.
+        fn desktop_pixels(w: u32, h: u32) -> Vec<u8> {
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let cell = ((x / 24) + (y / 24)) % 2 == 0;
+                    let text = y % 24 < 5 && x % 40 < 28;
+                    let v = if text {
+                        28
+                    } else if cell {
+                        236
+                    } else {
+                        176
+                    };
+                    out.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            out
+        }
+
+        fn wait_gpu(ctx: &ID3D11DeviceContext, query: &ID3D11Asynchronous) -> Result<(), String> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                // S_FALSE (still pending) surfaces as Err; only a timeout is fatal.
+                if unsafe { ctx.GetData(query, None, 0, 0) }.is_ok() {
+                    return Ok(());
+                }
+                if Instant::now() > deadline {
+                    return Err("GPU completion wait timed out".to_string());
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        let material = Material {
+            luma: Some(0.5),
+            light: false,
+            dwell: 0,
+            fresh: false,
+        };
+        let fake_sample: Vec<u8> = (0..(SAMPLE_W * SAMPLE_H) as usize)
+            .flat_map(|i| {
+                let v = if i % 3 == 0 { 40 } else { 210 };
+                [v, v, v, 255]
+            })
+            .collect();
+        // 700x441 is the settled list box; 700x680 is MAX_HEIGHT at 100%.
+        for (pw, ph) in [(700u32, 441u32), (700u32, 680u32)] {
+            let window = GlassWindow::create(0, pw + SHADOW_MARGIN * 2, ph + SHADOW_MARGIN * 2)
+                .expect("cloaked perf window");
+            let result = (|| -> Result<(), String> {
+                let mut engine = Engine::build(
+                    window.hwnd(),
+                    pw + SHADOW_MARGIN * 2,
+                    ph + SHADOW_MARGIN * 2,
+                    pw,
+                    ph,
+                )?;
+                // Stands in for the duplication mirror: panel box plus slack
+                // to scroll through, so the moving case really moves.
+                let (ew, eh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
+                let (dw, dh) = (ew + 96, eh);
+                let desktop = frame_texture(
+                    &engine.device,
+                    dw,
+                    dh,
+                    D3D11_USAGE_DEFAULT,
+                    D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    0,
+                )?;
+                {
+                    let px = desktop_pixels(dw, dh);
+                    let resource: ID3D11Resource = desktop
+                        .cast()
+                        .map_err(|e| format!("desktop QI failed: {e:?}"))?;
+                    unsafe {
+                        engine.context.UpdateSubresource(
+                            &resource,
+                            0,
+                            None,
+                            px.as_ptr() as *const _,
+                            dw * 4,
+                            0,
+                        );
+                    }
+                }
+
+                // First show: no geometry cached for this box yet, then the
+                // frame the reveal waits for.
+                let cold = Instant::now();
+                engine.rebuild_content()?;
+                engine.copy_crop(&desktop, 8, 0, ew, eh, 0, 0)?;
+                let sample = engine.sample_backdrop()?;
+                engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                engine.present(&material, SWELL_START)?;
+                let first_show = ms(cold);
+
+                let mut raw: Option<ID3D11Query> = None;
+                unsafe {
+                    engine
+                        .device
+                        .CreateQuery(
+                            &D3D11_QUERY_DESC {
+                                Query: D3D11_QUERY_EVENT,
+                                MiscFlags: 0,
+                            },
+                            Some(&mut raw as *mut _),
+                        )
+                        .map_err(|e| format!("event query failed: {e:?}"))?;
+                }
+                let query: ID3D11Asynchronous = raw
+                    .ok_or("event query was not created")?
+                    .cast()
+                    .map_err(|e| format!("query cast failed: {e:?}"))?;
+
+                let mut line = format!(
+                    "glass frame {pw}x{ph}: first_show={first_show:.2}ms (cold rebuild + reveal frame)"
+                );
+                for moving in [false, true] {
+                    let (mut submit, mut full, mut gpu) =
+                        (Vec::new(), Vec::new(), Vec::new());
+                    for i in 0..(FRAMES + WARM) {
+                        let bx = if moving { 8 + (i % 80) as u32 } else { 8 };
+                        let bend = if moving {
+                            SWELL_START + (1.0 - SWELL_START) * (i % 32) as f32 / 31.0
+                        } else {
+                            1.0
+                        };
+                        // CPU submission only: crop, tint upload, draw, present.
+                        let t = Instant::now();
+                        engine.copy_crop(&desktop, bx, 0, ew, eh, 0, 0)?;
+                        engine.update_local_tint(&fake_sample, SAMPLE_W, SAMPLE_H, &material)?;
+                        engine.present(&material, bend)?;
+                        let submitted = ms(t);
+                        // Production frame: the 16x16 statistics cross back too,
+                        // which is the frame's built-in CPU/GPU sync point.
+                        let t = Instant::now();
+                        engine.copy_crop(&desktop, bx, 0, ew, eh, 0, 0)?;
+                        let sample = engine.sample_backdrop()?;
+                        engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                        engine.present(&material, bend)?;
+                        let frame = ms(t);
+                        // Same frame, then wait for the GPU to finish it.
+                        let t = Instant::now();
+                        engine.copy_crop(&desktop, bx, 0, ew, eh, 0, 0)?;
+                        let sample = engine.sample_backdrop()?;
+                        engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                        engine.present(&material, bend)?;
+                        unsafe { engine.context.End(&query) };
+                        wait_gpu(&engine.context, &query)?;
+                        let completed = ms(t);
+                        if i < WARM {
+                            continue;
+                        }
+                        submit.push(submitted);
+                        full.push(frame);
+                        gpu.push(completed);
+                    }
+                    let label = if moving { "moving" } else { "static" };
+                    line.push_str(&format!(
+                        "\n  {label:<6} submit p50={:5.2} p95={:5.2} | frame p50={:5.2} p95={:5.2} | gpu p50={:5.2} p95={:5.2} | fps(p95)={:5.1}",
+                        pct(submit.clone(), 0.5),
+                        pct(submit.clone(), 0.95),
+                        pct(full.clone(), 0.5),
+                        pct(full.clone(), 0.95),
+                        pct(gpu.clone(), 0.5),
+                        pct(gpu.clone(), 0.95),
+                        1000.0 / pct(gpu, 0.95).max(0.001),
+                    ));
+                    // The settled panel is the common case: its p95 has to fit
+                    // under the runtime's 16 ms frame cap or the glass is the
+                    // thing the user feels.
+                    if !moving && ph == 441 {
+                        assert!(
+                            pct(full, 0.95) < MIN_FRAME_MS as f64,
+                            "settled panel frame p95 must fit the {MIN_FRAME_MS}ms cap: {line}"
+                        );
+                    }
+                }
+                eprintln!("{line}");
+                Ok(())
+            })();
+            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(window.hwnd()); }
+            result.expect("full frame perf probe");
+        }
+    }
+
     /// Feed frames at one level; returns how many flips were reported.
     fn warm(m: &mut Material, level: u8, frames: usize) -> usize {
         (0..frames).filter(|_| m.update(&gray(level, 64))).count()

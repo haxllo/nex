@@ -330,6 +330,11 @@ fn send_mask_up() {
 /// window.set_visible(false), so raw input consumers see Win+mask
 /// during the hide's focus transition.
 pub(crate) fn hold_mask_before_hide() {
+    if !is_win_key_hotkey() || HELPER_ACTIVE.load(Ordering::SeqCst) {
+        // Non-Win hotkey needs no Start guard, and when the helper owns
+        // the mask a release from this process would drop it early.
+        return;
+    }
     send_mask_down();
     for _ in 0..10_000 {
         if is_key_down(VK_MENU_MASK as u32) {
@@ -341,6 +346,9 @@ pub(crate) fn hold_mask_before_hide() {
 
 /// Release mask after hide completes.
 pub(crate) fn release_mask_after_hide() {
+    if !is_win_key_hotkey() || HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
     send_mask_up();
 }
 

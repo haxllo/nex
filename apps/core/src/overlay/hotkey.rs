@@ -76,7 +76,14 @@ pub(crate) fn note_chord_key() -> bool {
 pub(crate) fn finish_win_press() -> bool {
     let active = WIN_PRESS_ACTIVE.swap(false, Ordering::SeqCst);
     let chord = WIN_CHORD_SEEN.swap(false, Ordering::SeqCst);
-    active && !chord
+    let bare = active && !chord;
+    if !bare {
+        // The press ended as a chord, so no toggle event will arrive to clear
+        // the focus-escape guard the key-down armed. Clear it here or the
+        // next focus loss looks like an in-flight press.
+        SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
+    }
+    bare
 }
 
 pub(crate) fn reset_win_press_state() {
@@ -2061,5 +2068,13 @@ mod tests {
     #[test] fn chord_key_outside_press_is_ignored() {
         reset_win_press_state();
         assert!(!note_chord_key());
+    }
+    #[test] fn chord_press_clears_focus_escape_guard() {
+        reset_win_press_state();
+        note_win_press_start();
+        set_suppress_focus_escape(true);
+        note_chord_key();
+        assert!(!finish_win_press());
+        assert!(!is_bare_win_press_active());
     }
 }

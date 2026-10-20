@@ -304,11 +304,33 @@ User reports across this round: the right edge lost its last ~8 px of glass and 
 
 **Still mandatory.**
 1. Per-text contrast: the 4x4 scrim is backdrop-aware, not text-bound-aware.
-2. Full-frame performance: static vs moving release benchmark at 700x441 and max size, first-show, p95, and GPU completion separate from CPU submission.
-3. Accessibility live changes: transparency toggle while visible, opaque<->glass, re-check on show.
-4. Context menus / edge hit testing / live resize with the composition surface; confirm the visual clip and the shadow margin track every resize and DPI change.
-5. Optional geometry morph; last.
-6. Cleanup: stale `swell` naming (no close animation any more), blur/saturation log text, unused DXGI imports, and the first show at a never-seen height still paying the uncached ~36 ms.
+2. Accessibility live changes: transparency toggle while visible, opaque<->glass, re-check on show.
+3. Context menus / edge hit testing / live resize with the composition surface; confirm the visual clip and the shadow margin track every resize and DPI change.
+4. Optional geometry morph; last.
+5. Cleanup: stale `swell` naming (no close animation any more), blur/saturation log text, unused DXGI imports, and the first show at a never-seen height still paying the uncached ~36 ms.
 
 **Cleared by user eyeball (2.28.0).** Composed corners and contact shadow at 100 % and 125 % scale, edge light on all four sides, edge bend on the reveal frame, overall show feel: accepted. The contact-shadow and corner items that the previous list held were dropped from "Still mandatory".
+
+### Checkpoint: full-frame perf, CPU submission vs GPU completion
+
+`overlay::refraction::tests::full_frame_perf_report` (ignored, needs a GPU) drives the real visible-panel sequence at both boxes: `copy_crop` from a stand-in duplication mirror, the 16x16 `sample_backdrop` readback, `update_local_tint`, `present`. Three variants per frame, so the costs cannot hide in each other:
+
+- **submit** — CPU submission only: crop, tint upload, D2D draw, `Present`.
+- **frame** — the production frame, including the 16x16 statistics map (this is the frame's built-in CPU/GPU sync point).
+- **gpu** — the same frame with a `D3D11_QUERY_EVENT` recorded after `Present` and waited on, i.e. GPU completion rather than CPU hand-off.
+
+Static runs hold the crop box and bend; moving runs scroll the crop through the mirror and sweep the bend from `SWELL_START` to resting.
+
+Release, 120 measured frames after 20 warm, `p50 / p95` in ms (second run; the first run's 700x441 `first_show` read 24.68 ms because it was the process's first effect build — it settles at ~12 ms):
+
+| box | mode | submit | frame | gpu | fps at gpu p95 |
+|---|---|---|---|---|---|
+| 700x441 | static | 3.82 / 5.22 | 4.34 / 5.97 | 4.17 / 5.67 | 176 |
+| 700x441 | moving | 3.94 / 5.42 | 4.40 / 6.04 | 4.13 / 5.69 | 176 |
+| 700x680 | static | 5.17 / 6.44 | 5.79 / 7.25 | 5.68 / 8.06 | 124 |
+| 700x680 | moving | 5.41 / 6.90 | 6.05 / 7.35 | 5.50 / 7.16 | 140 |
+
+First show at a fresh size (cold geometry, plus the frame the reveal waits on): **11.9 ms** at both 700x441 and 700x680.
+
+Reading: the frame fits the runtime's 16 ms cap with more than 2x headroom at the settled box and ~2x at `MAX_HEIGHT`, so `MIN_FRAME_MS` is the limiter and not the material. `gpu` tracks `frame` within a few tenths of a millisecond, so there is no GPU tail hiding behind the CPU hand-off: the per-frame 16x16 map already serialises on the GPU, and waiting on it explicitly costs almost nothing. Moving costs ~0-0.3 ms over static, i.e. the animated bend and the scrolling crop are not a special case. The probe asserts one ceiling (settled static frame p95 < `MIN_FRAME_MS`) so a real regression fails instead of only printing.
 

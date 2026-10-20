@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,16 +46,15 @@ pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 /// live hotkey updates) can re-register the raw-input sink.
 static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Re-arm the raw-input sink with the current hotkey's suppression
-/// requirement. Called after a live hotkey update — the sink's
-/// RIDEV_NOHOTKEYS flag is chosen at registration time, so it must be
-/// refreshed whenever is_win_key_hotkey() changes.
+/// Re-arm the raw-input sink after a live hotkey update. The registration
+/// itself no longer depends on the hotkey (see `register_raw_input_sink`);
+/// re-registering stays cheap and keeps the sink armed across updates.
 pub(crate) fn rearm_raw_input_sink() {
     let hwnd = OVERLAY_HWND.load(Ordering::SeqCst);
     if hwnd == 0 {
         return;
     }
-    register_raw_input_sink(hwnd as HWND, crate::overlay::hotkey::is_win_key_hotkey());
+    register_raw_input_sink(hwnd as HWND);
 }
 
 /// Set to `true` before `run_return` enters and `false` after it
@@ -133,7 +132,7 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RIDEV_INPUTSINK, RIDEV_NOHOTKEYS, RIDEV_REMOVE,
+    RIDEV_INPUTSINK, RIDEV_REMOVE,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -362,16 +361,21 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Task Manager, advanced settings, or other native Windows windows
     // have focus (the WH_KEYBOARD_LL hook thread may not receive events
     // for elevated/UWP windows).
-    // Win hotkey detection lives in raw input — arm NOHOTKEYS from the
-    // start so bare-Win never opens Start; nex toggles on key-up.
-    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+    // Win hotkey detection lives in raw input — registered with
+    // RIDEV_INPUTSINK only: the Start menu is kept shut by the injected
+    // menu-mask key, never by RIDEV_NOHOTKEYS (which also kills the
+    // user's own registered hotkeys, e.g. Win+Shift+S, while the overlay
+    // is focused). nex toggles on Win key-up.
+    register_raw_input_sink(hwnd);
     OVERLAY_HWND.store(hwnd as isize, Ordering::SeqCst);
     // apply_window_chrome ran before the layer existed and before this HWND
     // was cached, so settle the capture flag now that both are known.
     sync_capture_exclusion(&state);
 
-    // Start suppression is handled by RIDEV_NOHOTKEYS via
-    // RegisterRawInputDevices instead of a focus-sink window.
+    // Start suppression comes from the injected menu-mask key (see
+    // overlay::hotkey); raw input is registered with RIDEV_INPUTSINK
+    // only so registered system hotkeys keep working while nex is
+    // focused.
 
     // Build the WebView eagerly at startup so the page is fully
     // rendered in the background before the first show.  The WebView
@@ -1066,7 +1070,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // below checks actual foreground ownership.
                     let visible = state.lock().map(|s| s.visible).unwrap_or(false);
                     if visible {
-                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        register_raw_input_sink(hwnd);
                         request_foreground(hwnd);
                     }
                     window.set_focus();
@@ -1081,18 +1085,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::Hide => {
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
-                    // RIT to register it, so that when RIDEV_NOHOTKEYS is
-                    // removed and the window is hidden, the newly-foreground
-                    // window never sees a bare Win key — it sees Win+0xE8.
-                    // This prevents Start from opening during the hide
-                    // transition when the Win key is still physically held.
+                    // RIT to register it, so that when the window is hidden the
+                    // newly-foreground window never sees a bare Win key — it
+                    // sees Win+0xE8. This prevents Start from opening during
+                    // the hide transition when the Win key is still physically
+                    // held. No-op unless the hotkey is Win.
                     crate::overlay::hotkey::hold_mask_before_hide();
-                    // Keep NOHOTKEYS armed for Win hotkeys (bare Win = toggle,
-                    // Start must stay suppressed even while hidden); drop it
-                    // for other hotkeys so their combos reach apps normally.
-                    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
-                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+                    register_raw_input_sink(hwnd);
+                    reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
@@ -1154,9 +1154,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
                 UiCommand::HideSync(ack) => {
                     crate::overlay::hotkey::hold_mask_before_hide();
-                    register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
-                    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-                    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+                    register_raw_input_sink(hwnd);
+                    reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
                     restore_fg_stack(&mut fg_stack, hwnd);
@@ -1313,10 +1312,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // foreground.  This works around Chromium/WebView2
                         // installing its own WH_KEYBOARD_LL hook when focused
                         // (installed after ours, so Chromium eats the events
-                        // before our hook can process them).
-                        // For Win-key hotkeys, also enable RIDEV_NOHOTKEYS
-                        // to suppress Start at the RIT level.
-                        register_raw_input_sink(hwnd, crate::overlay::hotkey::is_win_key_hotkey());
+                        // before our hook can process them).  RIDEV_INPUTSINK
+                        // only — system hotkeys stay functional.
+                        register_raw_input_sink(hwnd);
                         // Prime DOM focus before revealing the window. Once
                         // visible, there must not be a gap where the overlay
                         // can receive WM_CHAR while no editable element owns
@@ -1521,16 +1519,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     }
                                     Ok(SettingsMessage::RecordHotkey(_)) => {
                                         RECORDING_HOTKEY.store(true, Ordering::SeqCst);
-                                        // Keep Start menu shut while capturing
-                                        register_raw_input_sink(record_hwnd, true);
+                                        // Raw input already swallows the keys;
+                                        // keep Start shut by holding the mask
+                                        // while Win is down (see handle_recording_key).
+                                        register_raw_input_sink(record_hwnd);
                                     }
                                     Ok(SettingsMessage::CancelRecord(_)) => {
                                         RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-                                        // Restore normal Win routing.
-                                        register_raw_input_sink(
-                                            record_hwnd,
-                                            crate::overlay::hotkey::is_win_key_hotkey(),
-                                        );
+                                        register_raw_input_sink(record_hwnd);
                                     }
                                     Ok(SettingsMessage::Minimize(_)) => {
                                         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -3208,9 +3204,10 @@ unsafe extern "system" fn instance_signal_subclass(
             return 0;
         }
         if msg == WM_INPUT {
-            // Detect Win key via raw input.  RIDEV_NOHOTKEYS blocks
-            // WH_KEYBOARD_LL for the keyboard, so we rely on raw input
-            // to catch toggle presses while the overlay is visible.
+            // Detect Win key via raw input. Raw input catches the toggle
+            // press even where the LL hook is bypassed (Chromium's own
+            // hook, elevated foreground); the Start menu is suppressed by
+            // the menu-mask key, never by RIDEV_NOHOTKEYS.
             let h_raw_input = lparam as windows_sys::Win32::Foundation::HANDLE;
             let header_sz = std::mem::size_of::<RAWINPUTHEADER>() as u32;
             let mut raw_input: std::mem::MaybeUninit<RAWINPUT> = std::mem::MaybeUninit::uninit();
@@ -3246,31 +3243,32 @@ unsafe extern "system" fn instance_signal_subclass(
                     // toggle via send_hotkey_event, never directly.
                     if is_win && crate::overlay::hotkey::is_win_key_hotkey() {
                         if (flags & RI_KEY_BREAK) != 0 {
-                            let was_down = RAW_WIN_DOWN.swap(0, Ordering::SeqCst);
-                            let chord = RAW_WIN_CHORD.swap(false, Ordering::SeqCst);
-                            // NOHOTKEYS is armed persistently for Win hotkeys,
-                            // so Start never appears; bare Win key-up toggles
-                            // regardless of overlay visibility.
-                            if was_down != 0 && !chord {
+                            // Whichever detector sees the key-up first
+                            // consumes the press; the other gets false, so a
+                            // bare tap toggles exactly once. The decision
+                            // uses the shared chord flag, so a dropped raw
+                            // make event (Win+E) can no longer make this
+                            // press look bare.
+                            if crate::overlay::hotkey::finish_win_press() {
                                 crate::runtime::log_info(
-                                    "[nex::debug] WM_INPUT bare Win key-up, toggling",
+                                    "[nex::debug] WM_INPUT Win key-up, bare press, toggling",
                                 );
+                                crate::overlay::hotkey::invalidate_start_gesture();
                                 let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                             }
-                        } else if RAW_WIN_DOWN
-                            .compare_exchange(0, vk as u32, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            RAW_WIN_CHORD.store(false, Ordering::SeqCst);
-                        }
-                        if (flags & RI_KEY_BREAK) != 0 {
-                            RAW_WIN_DOWN.store(0, Ordering::SeqCst);
+                            crate::overlay::hotkey::release_mask_for_press();
+                        } else {
+                            crate::overlay::hotkey::note_win_press_start();
+                            // Covers the case where the hook did not see this
+                            // key-down (Chromium's hook runs first while the
+                            // overlay is focused).
+                            crate::overlay::hotkey::hold_mask_for_press();
                         }
                     } else if (flags & RI_KEY_BREAK) == 0 {
                         // Any other key pressed while Win is held makes this a
                         // chord (Win+E, Win+D…) — never a toggle.
-                        if RAW_WIN_DOWN.load(Ordering::SeqCst) != 0 {
-                            RAW_WIN_CHORD.store(true, Ordering::SeqCst);
+                        if vk != crate::overlay::hotkey::VK_MENU_MASK {
+                            crate::overlay::hotkey::note_chord_key();
                         }
                         // Non-Win hotkey detection via raw input.
                         // WH_KEYBOARD_LL may not fire when the overlay
@@ -3379,17 +3377,10 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
     0
 }
 
-/// Tracks raw-input VK of held Win key so we only send one toggle per press.
-static RAW_WIN_DOWN: AtomicU32 = AtomicU32::new(0);
-/// Set when another key is pressed while Win is held (Win+E, Win+D…) so the
-/// Win key-up is treated as a chord, not a bare toggle.
-static RAW_WIN_CHORD: AtomicBool = AtomicBool::new(false);
-
-/// Clear the raw-input Win tracking. Called after a live hotkey change so a
-/// half-finished press of the old combo can't swallow the new one.
+/// Clear the Win press tracking. Called after a live hotkey change and on
+/// hide so a half-finished press of the old binding can't decide the next one.
 pub(crate) fn reset_raw_win_state() {
-    RAW_WIN_DOWN.store(0, Ordering::SeqCst);
-    RAW_WIN_CHORD.store(false, Ordering::SeqCst);
+    crate::overlay::hotkey::reset_win_press_state();
 }
 pub(crate) static RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 static RECORD_WIN_CHORD: AtomicBool = AtomicBool::new(false); //win+other seen
@@ -3398,20 +3389,16 @@ const RI_KEY_BREAK: u16 = 0x0001;
 const VK_LWIN: u16 = 0x5B;
 const VK_RWIN: u16 = 0x5C;
 
-/// Register keyboard raw input sink so the overlay receives `WM_INPUT`
-/// for all keyboard events while foreground.  When `suppress_win` is
-/// true, also adds `RIDEV_NOHOTKEYS` to suppress Win-key Start at the
-/// RIT level (required for Win-key hotkey).  Returns true on success.
-fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
-    let flags = if suppress_win {
-        RIDEV_NOHOTKEYS | RIDEV_INPUTSINK
-    } else {
-        RIDEV_INPUTSINK
-    };
+/// Register the keyboard raw-input sink so the overlay receives `WM_INPUT`
+/// for all keyboard events, foreground or not. `RIDEV_INPUTSINK` only:
+/// `RIDEV_NOHOTKEYS` would also suppress every registered system hotkey
+/// (Snipping Tool, shell chords) while nex has focus, and Start is kept
+/// shut by the injected menu-mask key instead. Returns true on success.
+fn register_raw_input_sink(hwnd: HWND) -> bool {
     let mut rid = RAWINPUTDEVICE {
         usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
         usUsage: 0x06,     // HID_USAGE_GENERIC_KEYBOARD
-        dwFlags: flags,
+        dwFlags: RIDEV_INPUTSINK,
         hwndTarget: hwnd,
     };
     let ok = unsafe {
@@ -3423,8 +3410,8 @@ fn register_raw_input_sink(hwnd: HWND, suppress_win: bool) -> bool {
         0
     };
     crate::runtime::log_info(&format!(
-        "[nex::debug] register_raw_input_sink: ok={} last_err={} suppress_win={}",
-        ok, err, suppress_win,
+        "[nex::debug] register_raw_input_sink: ok={} last_err={}",
+        ok, err,
     ));
     ok
 }

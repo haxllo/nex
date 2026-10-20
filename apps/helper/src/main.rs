@@ -353,6 +353,21 @@ fn send_mask_down() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
+/// Unassigned VK sent only to break a pending Start gesture — the same guard
+/// as nex's `hotkey::VK_START_GUARD`. A key-up of a key that was never down
+/// cannot type anything, but it cancels Start-menu-on-Win-key-up.
+const VK_START_GUARD: u16 = 0xFF;
+
+fn invalidate_start_gesture() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_START_GUARD, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
 fn send_alt_tap() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -535,6 +550,12 @@ fn spawn_cmd_pipe_server(cmd_path: String) {
 // Hook proc
 // ---------------------------------------------------------------------------
 
+/// Win key-up decision: only a press that stayed bare toggles. Kept pure so
+/// the chord/auto-repeat rules are testable without an input hook.
+fn win_press_fires(consumed_vk: u32, chord_detected: bool) -> bool {
+    consumed_vk != 0 && !chord_detected
+}
+
 unsafe extern "system" fn keyboard_hook_proc(
     n_code: i32,
     w_param: windows_sys::Win32::Foundation::WPARAM,
@@ -596,8 +617,16 @@ unsafe extern "system" fn keyboard_hook_proc(
             if is_keyup {
                 let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
                 if consumed_vk != 0 {
-                    CHORD_DETECTED.store(false, Ordering::SeqCst);
+                    let chord = CHORD_DETECTED.swap(false, Ordering::SeqCst);
                     release_mask();
+                    // Chord keys must never toggle — Win+E opens Explorer
+                    // and nothing else. CHORD_DETECTED is set by any real
+                    // non-modifier key-down during the press, and it is NOT
+                    // reset by Win auto-repeat (that re-arm made a held Win
+                    // key fire after every chord).
+                    if !win_press_fires(consumed_vk, chord) {
+                        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+                    }
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
@@ -614,6 +643,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                     // twice for the first seconds after launch.
                     HOTKEY_FIRED.store(true, Ordering::SeqCst);
                     WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+                    invalidate_start_gesture();
                     if let Some(tid) = HELPER_THREAD_ID.get() {
                         unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
                     }
@@ -625,10 +655,12 @@ unsafe extern "system" fn keyboard_hook_proc(
         if is_keydown && !is_mod && !is_win_vk
             && CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0
         {
-            // Chord detected — release the mask so the OS handles Win+X.
+            // Chord detected — release the mask so the OS handles Win+X and
+            // remember the chord until this press ends. CONSUMED_WIN_VK keeps
+            // its VK across Win auto-repeat on purpose: clearing it here let
+            // the next repeat start a *new* bare press that fired on key-up.
             CHORD_DETECTED.store(true, Ordering::SeqCst);
             release_mask();
-            CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
         }
     }
 
@@ -1599,6 +1631,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A held Win key fires after its auto-repeat only when no chord key ever
+    // went down: the chord flag lives for the whole press.
+    #[test]
+    fn win_press_fires_only_when_bare() {
+        assert!(win_press_fires(0x5B, false));
+        assert!(!win_press_fires(0x5B, true)); // Win+E
+        assert!(!win_press_fires(0, false));   // key-up without a press
+    }
 
     #[test]
     fn superseded_only_when_newer_claimed() {

@@ -353,6 +353,21 @@ fn send_mask_down() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
+/// Unassigned VK sent only to break a pending Start gesture — the same guard
+/// as nex's `hotkey::VK_START_GUARD`. A key-up of a key that was never down
+/// cannot type anything, but it cancels Start-menu-on-Win-key-up.
+const VK_START_GUARD: u16 = 0xFF;
+
+fn invalidate_start_gesture() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT { wVk: VK_START_GUARD, wScan: 0, dwFlags: KEYEVENTF_KEYUP, time: 0, dwExtraInfo: 0 };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
 fn send_alt_tap() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -628,6 +643,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                     // twice for the first seconds after launch.
                     HOTKEY_FIRED.store(true, Ordering::SeqCst);
                     WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
+                    invalidate_start_gesture();
                     if let Some(tid) = HELPER_THREAD_ID.get() {
                         unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
                     }

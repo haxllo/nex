@@ -344,6 +344,34 @@ pub(crate) const VK_MENU_MASK: u16 = 0xE8;
 /// mask stuck down.
 static MASK_HELD: AtomicBool = AtomicBool::new(false);
 
+/// Unassigned VK sent only to break a pending Start gesture.
+///
+/// Windows cancels the Start-menu-on-Win-key-up as soon as any other key
+/// event belongs to the same press. A key-up for a key that was never down is
+/// the cheapest such event: no app maps 0xFF, so nothing types. This is the
+/// guard Raycast uses, and it is the second line of defence behind the held
+/// menu mask — if the mask was ever released early (chord, helper restart,
+/// focus handoff), the Win key-up still cannot open Start.
+pub(crate) const VK_START_GUARD: u16 = 0xFF;
+
+/// Invalidate a pending Start gesture. Call this immediately before firing the
+/// bundle on Win key-up, before the shell processes that key-up.
+pub(crate) fn invalidate_start_gesture() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    let mut input: INPUT = unsafe { std::mem::zeroed() };
+    input.r#type = INPUT_KEYBOARD;
+    input.Anonymous.ki = KEYBDINPUT {
+        wVk: VK_START_GUARD,
+        wScan: 0,
+        dwFlags: KEYEVENTF_KEYUP,
+        time: 0,
+        dwExtraInfo: 0,
+    };
+    let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
+}
+
 /// Hold the menu mask unless this process already holds it.
 pub(crate) fn mask_hold() {
     if !MASK_HELD.swap(true, Ordering::SeqCst) {
@@ -520,6 +548,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                         "[nex::debug] Hook: bare Win key-up vk={}, opening Nex",
                         vk,
                     ));
+                    invalidate_start_gesture();
                     let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
                 }
             }

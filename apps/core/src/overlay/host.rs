@@ -3253,6 +3253,7 @@ unsafe extern "system" fn instance_signal_subclass(
                                 crate::runtime::log_info(
                                     "[nex::debug] WM_INPUT Win key-up, bare press, toggling",
                                 );
+                                crate::overlay::hotkey::invalidate_start_gesture();
                                 let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                             }
                             crate::overlay::hotkey::release_mask_for_press();

@@ -139,7 +139,7 @@ DXGI is about to replace, and a live one would make `ResizeBuffers` fail.
 **Result:** one COM allocation per buffer per swapchain generation instead of
 one per frame.
 
-### 7. Clip the glass HWND to the panel (weight) — `[ ]`
+### 7. Clip the glass HWND to the panel (weight) — `[x]`, awaiting visual check
 The glass window is permanently max-panel size plus shadow margin
 (`refraction.rs:526-530`); DWM composites the whole alpha surface even when
 the panel is 60 px tall.
@@ -147,6 +147,21 @@ the panel is 60 px tall.
 Fix: `SetWindowRgn` on the glass HWND to panel + shadow margin, updated on
 resize. Verify it clips the DComp surface with `WS_EX_NOREDIRECTIONBITMAP`;
 fall back to a DComp clip if not.
+
+**Implemented.** `apply_glass_region` (rect: panel + `SHADOW_MARGIN` on every
+side) runs from the same `apply_region` funnel that writes the main window's
+silhouette, so it shares the (size, scale) dedupe and lands on sync/show/
+prepare/reveal. `ensure_window_max` drops the dedupe key when the HWND grows,
+so a grown window does not keep an old smaller region.
+
+Rectangular on purpose: the rounded silhouette and its AA come from the
+backbuffer alpha mask, and GDI regions have hard edges. Soft shadow falls off
+inside the 44 px margin (`SHADOW_BLUR` 26), so nothing is cut.
+
+Not yet confirmed: whether DWM honours the region for a
+`WS_EX_NOREDIRECTIONBITMAP` + DComp surface. If composition area does not drop
+(and the visuals are unchanged), the fallback is a DComp clip on the visual —
+not worth doing unless the region proves inert.
 
 Acceptance: compositor work scales with the visible panel; smoother desktop
 animation behind the panel, especially on iGPU/4K.
@@ -229,6 +244,10 @@ for the remaining show latency and feel. 11-13 opportunistic.
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
   monitor/DPI change; show appears at its retained height with one rebuild.
+- 2026-10-21 — 7 implemented (uncommitted pending visual check): glass HWND
+  region = panel + shadow margin, applied through `apply_region`, invalidated
+  when the window grows. Needs eyes: shadow intact on all four sides, panel
+  content never cut when growing/shrinking, alignment after a DPI move.
 - 2026-10-21 — 6 implemented: D2D target wrapper cached per swapchain buffer
   (COM identity), cache cleared on ResizeBuffers. Release build passes. To
   verify: normal glass use on a DPI change (drag between monitors) still
@@ -267,4 +286,9 @@ for the remaining show latency and feel. 11-13 opportunistic.
 - Weight (5): no GPU stall per presented frame. Expect lower `render_avg` in
   the refract log, steadier frames while typing/animating, and less contention
   with the compositor on iGPUs. Tint/material may lag one frame; not visible.
+- Weight (6): no per-frame COM wrapper allocation; CPU per presented frame
+  drops a little, mostly visible as smoother pacing under load.
+- Weight (7): DWM composites panel + shadow margin instead of the whole
+  max-panel surface. Biggest effect when the panel is collapsed (bar height)
+  on a large window: most of the composited pixels are gone.
 

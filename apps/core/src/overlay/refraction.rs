@@ -454,6 +454,7 @@ impl GlassLayer {
             return;
         }
         apply_lens_region(self.main_sys, w, h, scale, SILHOUETTE_GROW_PX);
+        apply_glass_region(self.window.hwnd.0 as isize, w, h);
         self.window.region.set(Some(key));
     }
 
@@ -696,6 +697,9 @@ impl GlassWindow {
             crate::logging::warn(&format!("[nex][refract] glass grow failed: {error:?}"));
         } else {
             self.hwnd_size.set((max_w, max_h));
+            // The old region still clips to the old window; drop it so the
+            // next apply_region rebuilds one that covers the grown window.
+            self.region.set(None);
         }
     }
 
@@ -2012,6 +2016,37 @@ fn client_origin_in_window(hwnd: isize) -> (i32, i32) {
     (origin.x - window.left, origin.y - window.top)
 }
 
+/// Clip the glass window to the panel plus its shadow margin.
+///
+/// The glass HWND is permanently max-panel sized so a resize never touches
+/// the swapchain, which means DWM composites the whole max surface even when
+/// the panel is a 60 px bar. The region makes the window cover only what it
+/// can paint: the panel and the margin its shadow reaches into. Rectangular
+/// on purpose - the rounded silhouette is the backbuffer alpha mask's job,
+/// and a GDI region cannot carry soft edges anyway.
+fn apply_glass_region(hwnd: isize, w: u32, h: u32) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+    let (w, h) = glass_region_size(w, h);
+    unsafe {
+        let region = CreateRectRgn(0, 0, w as i32, h as i32);
+        if region.is_null() {
+            return false;
+        }
+        if SetWindowRgn(hwnd as _, region, 1) == 0 {
+            DeleteObject(region);
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// Rect the glass region covers, in physical px: the panel box plus the
+/// margin its shadow falls into on every side.
+fn glass_region_size(w: u32, h: u32) -> (u32, u32) {
+    (w + SHADOW_MARGIN * 2, h + SHADOW_MARGIN * 2)
+}
+
 fn apply_lens_region(hwnd: isize, w: u32, h: u32, scale: f64, grow_px: f64) -> bool {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Graphics::Gdi::{CreatePolygonRgn, SetWindowRgn, DeleteObject, WINDING};
@@ -3138,7 +3173,8 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, desktop_recent, frame_luma, pass_plan, refresh_wait_ms, swell_bend,
+        clamp_panel_box, desktop_recent, frame_luma, glass_region_size, pass_plan,
+        refresh_wait_ms, swell_bend,
         swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
         DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
         HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
@@ -3993,6 +4029,16 @@ mod tests {
         assert!(!desktop_recent(Some(1000)));
         // Never saw a frame (startup, dead session): not moving.
         assert!(!desktop_recent(None));
+    }
+
+    #[test]
+    fn the_glass_region_keeps_the_shadow_and_drops_the_rest() {
+        // The window is max-panel sized; the region must be the panel plus
+        // the shadow margin on every side, or the contact shadow is cut off
+        // at the window edge.
+        assert_eq!(glass_region_size(700, 60), (700 + 88, 60 + 88));
+        // And it must actually save composition area on a collapsed panel.
+        assert!(glass_region_size(700, 60).1 < glass_region_size(700, 600).1);
     }
 
     #[test]

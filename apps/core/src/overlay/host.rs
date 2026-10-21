@@ -1335,14 +1335,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // inactive fallback.
                         request_foreground(hwnd);
                         window.set_visible(true);
-                        // Set focus on the native host after activation, then
-                        // restore DOM focus to the WebView's search control.
-                        // Foreground activation alone can leave focus on the
-                        // previous window or the host HWND during first show.
-                        let _ = window.set_focus();
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
-                        // Start glass capture with the panel. Its HWND is
-                        // revealed by the layer's own ack — a frame at the
+                        // Reveal the glass before the focus work: the page is
+                        // on screen now, so this only shortens the gap where
+                        // the panel has no backdrop, and nothing here can put
+                        // glass on screen without the page under it. Its HWND
+                        // is revealed by the layer's own ack — a frame at the
                         // size the page just settled on — or right here if
                         // one for this size already landed.
                         // Parked in opaque panel modes (solid CSS covers it).
@@ -1357,6 +1355,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 }
                             }
                         }
+                        // Set focus on the native host after activation, then
+                        // restore DOM focus to the WebView's search control.
+                        // Foreground activation alone can leave focus on the
+                        // previous window or the host HWND during first show.
+                        let _ = window.set_focus();
                         // Re-assert topmost Z-position. When the overlay
                         // Explorer from exposing the taskbar. Depending on
                         // WebView2/tao focus notifications, the next show can

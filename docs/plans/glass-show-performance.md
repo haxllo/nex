@@ -192,7 +192,7 @@ eviction/trim path that drops its PNG.
 thread, but only once); every later push is a hash lookup plus a JSON copy.
 Test: `a_data_uri_is_encoded_once_per_icon` (padding + cache-hit identity).
 
-### 9. Reveal and push state before focus work (quickness) — `[ ]`
+### 9. Reveal and push state before focus work (quickness) — `[x]`
 `Painted` uncloaks, activates, focuses, evaluates script, re-asserts topmost,
 then reveals and pushes state (`host.rs:1326-1355`).
 
@@ -201,6 +201,18 @@ uncloak where they are.
 
 Acceptance: 2-6 ms less to first visible frame; no frame with an opaque page
 over already-revealed glass. No WM_CHAR beep regression.
+
+**Implemented.** The glass block (`set_visible(true)` → `reveal()` → state
+push) moved from after `set_focus()` to just after `window.set_visible(true)`,
+so the panel no longer spends the focus/topmost work without its backdrop.
+`register_raw_input_sink`, `focus_input` (DOM focus primed before the window is
+visible — that is what prevents the WM_CHAR beep) and the foreground request
+stay exactly where they were.
+
+First attempt moved it earlier still, ahead of `request_foreground`/
+`set_visible`, and produced a visible flash: glass on screen before the page
+was. The reveal must follow the page becoming visible, or the backdrop appears
+alone. `OVERLAY_VISIBLE` also stays with the show, not with the focus step.
 
 ### 10. Arm the open animation at reveal (quality) — `[ ]`
 `prepare_show` arms the swell and the interaction spring before the reveal
@@ -260,6 +272,10 @@ for the remaining show latency and feel. 11-13 opportunistic.
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
   monitor/DPI change; show appears at its retained height with one rebuild.
+- 2026-10-21 — 9 implemented: glass reveal + state push now run after the page
+  is shown but before the focus/topmost calls. First attempt (reveal ahead of
+  the show) flashed glass without the page; narrowing the move fixed it.
+  Visual check passed. To verify: 2-6 ms less to the first complete frame.
 - 2026-10-21 — 8 implemented: data URI cached beside the PNG in `IconCache`;
   every push after the first per icon is a lookup. Targeted lib tests pass
   (`a_data_uri_is_encoded_once_per_icon`). To verify: open twice in a row and
@@ -315,4 +331,7 @@ for the remaining show latency and feel. 11-13 opportunistic.
   boot still encodes each icon once; after that, Show and every keystroke push
   copy cached strings instead of encoding. Most visible with a full result
   list of distinct app icons.
+- Quickness (9): the panel no longer waits for the foreground request and
+  focus assignment before its backdrop appears. Expect 2-6 ms less to the
+  first complete frame, and the open looking the same otherwise.
 

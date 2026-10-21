@@ -5,6 +5,10 @@ fn main() {
     }
 
     let mut res = winres::WindowsResource::new();
+    println!("cargo:rerun-if-changed=../assets/nex.ico");
+    if std::path::Path::new("../assets/nex.ico").exists() {
+        res.set_icon("../assets/nex.ico");
+    }
     res.set("FileDescription", "Nex Helper");
     res.set("InternalName", "NexHelper");
     res.set("OriginalFilename", "NexHelper.exe");

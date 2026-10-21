@@ -214,7 +214,7 @@ First attempt moved it earlier still, ahead of `request_foreground`/
 was. The reveal must follow the page becoming visible, or the backdrop appears
 alone. `OVERLAY_VISIBLE` also stays with the show, not with the focus step.
 
-### 10. Arm the open animation at reveal (quality) — `[ ]`
+### 10. Arm the open animation at reveal (quality) - `[x]`
 `prepare_show` arms the swell and the interaction spring before the reveal
 (`refraction.rs:406-418`), and the first content resize adds a ±1.5 velocity
 kick (`2340-2347`) as the panel appears.
@@ -224,6 +224,16 @@ after show.
 
 Acceptance: the 420 ms settle is visible from the moment the panel appears; no
 wobble at appearance. Honour reduced motion.
+
+**Implemented.** `ShowCycle::arm` now only arms the held re-present; the settle
+is a second arm (`arm_swell`) sent by `reveal()` itself as a `GlassConfig
+{ revealed: true }`, so every reveal path (Painted, and the `GlassPresented`
+ack) starts the spring at the moment the panel becomes visible. Skipped
+entirely when animations are disabled.
+
+The typing kick is gated on `kick_ready`, false from show until that reveal
+config: the page's first measurement resize would otherwise wobble the panel
+exactly as it appears.
 
 ### 11. Adaptive frame cap (smoothness) — `[ ]`
 `MIN_FRAME_MS = 16` (`refraction.rs:220`) caps follow at 60 Hz.
@@ -272,6 +282,10 @@ for the remaining show latency and feel. 11-13 opportunistic.
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
   monitor/DPI change; show appears at its retained height with one rebuild.
+- 2026-10-21 — 10 implemented: the settle is armed by `reveal()` (new
+  `GlassConfig { revealed }`) instead of by the show, and the typing kick is
+  suppressed until then. Visual check passed. To verify: open over a static
+  desktop — the full settle should play, with no wobble as the panel appears.
 - 2026-10-21 — 9 implemented: glass reveal + state push now run after the page
   is shown but before the focus/topmost calls. First attempt (reveal ahead of
   the show) flashed glass without the page; narrowing the move fixed it.
@@ -334,4 +348,8 @@ for the remaining show latency and feel. 11-13 opportunistic.
 - Quickness (9): the panel no longer waits for the foreground request and
   focus assignment before its backdrop appears. Expect 2-6 ms less to the
   first complete frame, and the open looking the same otherwise.
+- Quality (10): the full 420 ms settle plays while the panel is visible
+  instead of running behind the page's first paint, and the panel no longer
+  wobbles from the appearance resize. Reduced-motion users get no settle at
+  all, same as before.
 

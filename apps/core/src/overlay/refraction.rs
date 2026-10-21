@@ -249,6 +249,11 @@ struct GlassConfig {
     /// from the backdrop.
     theme_dark: Option<bool>,
     scale: Option<f64>,
+    /// The panel is on screen now (the cloak lifted). The show's settle is
+    /// armed from here, not from `visible`: the page still had to paint
+    /// when the show was prepared, and running the spring through that
+    /// wait left only its tail visible.
+    revealed: bool,
 }
 
 /// Host-facing handle. All methods are UI-thread window ops plus a
@@ -378,6 +383,7 @@ impl GlassLayer {
             panel_wh: Some((w, h)),
             theme_dark: None,
             scale: Some(scale),
+            revealed: false,
         });
     }
 
@@ -410,6 +416,7 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
+            revealed: false,
         });
     }
 
@@ -428,6 +435,7 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: None,
             scale: None,
+            revealed: false,
         });
     }
 
@@ -442,6 +450,7 @@ impl GlassLayer {
             panel_wh: None,
             theme_dark: Some(dark),
             scale: None,
+            revealed: false,
         });
     }
 
@@ -477,6 +486,18 @@ impl GlassLayer {
                 self.apply_region(w, h, f64::from_bits(bits));
                 self.revealed.set(true);
                 self.window.show(true);
+                // The panel is on screen: the settle starts here, so the
+                // spring the user sees is the whole animation rather than
+                // whatever is left of it after the page finished painting.
+                let _ = self.tx.send(GlassConfig {
+                    visible: None,
+                    main_sys: 0,
+                    max_wh: None,
+                    panel_wh: None,
+                    theme_dark: None,
+                    scale: None,
+                    revealed: true,
+                });
                 crate::logging::info(&format!("[nex][refract] glass revealed {w}x{h}"));
                 true
             }
@@ -2202,9 +2223,16 @@ struct ShowCycle {
 }
 
 impl ShowCycle {
-    /// Arm a fresh show: present the held mirror and swell the lens in.
+    /// A show is coming: re-present the held mirror before the reveal. The
+    /// settle is a separate arm (`arm_swell`) that waits for the reveal.
     fn arm(&mut self) {
         self.refresh = true;
+    }
+
+    /// The panel is on screen: start the settle. Arming it with the show
+    /// spent most of `SWELL_MS` while the page was still painting, so the
+    /// visible part was only the tail of the spring.
+    fn arm_swell(&mut self) {
         self.swell = Some(Instant::now());
     }
 
@@ -2366,6 +2394,8 @@ fn worker_main(
     let mut interaction_at = Instant::now();
     let mut interaction_dirty = false;
     let mut previous_panel = (0, 0);
+    // The appearance resize gets no typing kick; the reveal allows one.
+    let mut kick_ready = false;
     // Configs consumed by the idle wait below: drained at the top of the
     // next pass instead of being lost with the wake-up.
     let mut pending_cfgs: Vec<GlassConfig> = Vec::new();
@@ -2393,10 +2423,15 @@ fn worker_main(
                     material.fresh = true;
                     material.dwell = 0;
                     if let Some(e) = &engine { *e.tint_grid.borrow_mut() = None; }
-                    // Present the held mirror before the reveal and swell
-                    // the lens in: a pane of glass settling, not a surface
-                    // snapping on.
+                    // Present the held mirror before the reveal. The settle
+                    // waits for the reveal itself (`arm_swell`), so it runs
+                    // while the panel is visible instead of behind the
+                    // page's first paint.
                     cycle.arm();
+                    cycle.swell = None;
+                    // No typing kick before the panel is on screen: the
+                    // page's first measurement would wobble at appearance.
+                    kick_ready = false;
                     if !motion { cycle.swell = None; }
                 }
                 if !v {
@@ -2405,6 +2440,15 @@ fn worker_main(
                     interaction_dirty = false;
                 }
                 visible = v;
+            }
+            if cfg.revealed && visible && motion {
+                // The panel is on screen: run the settle from here. The
+                // panel is up and static for `SWELL_MS`, so the mirror
+                // needs to keep re-presenting (see `swelling`).
+                cycle.arm_swell();
+                // Typing kicks are wanted again now that the appearance
+                // resize is behind us.
+                kick_ready = true;
             }
             if cfg.main_sys != 0 {
                 main_sys = cfg.main_sys;
@@ -2506,7 +2550,7 @@ fn worker_main(
             }
         }
         if motion && visible {
-            if previous_panel != (0, 0) && previous_panel != (pw, ph) {
+            if kick_ready && previous_panel != (0, 0) && previous_panel != (pw, ph) {
                 interaction.velocity += if ph > previous_panel.1 { -1.5 } else { 1.5 };
             }
             let before = interaction.value;
@@ -3967,13 +4011,17 @@ mod tests {
     }
 
     #[test]
-    fn the_swell_opens_most_of_the_way_and_ends_exactly_once() {
+    fn the_swell_waits_for_the_reveal_and_ends_exactly_once() {
         // The swell drives the lens from nearly open to full on a static
         // desktop. It must end: a swell that stays armed re-presents forever.
+        // A show arms only the held re-present; the settle waits for the
+        // reveal, otherwise it runs while the page is still painting and the
+        // user sees its tail.
         let mut c = ShowCycle { refresh: false, swell: None };
         assert_eq!(c.bend(), (1.0, false), "no show means no swell");
-        assert!(!c.swelling());
         c.arm();
+        assert!(!c.swelling(), "arming a show does not start the settle");
+        c.arm_swell();
         assert!(c.swelling());
         let (start, running) = c.bend_at(0.0);
         // Opens most of the way on the first frame: the panel is already on

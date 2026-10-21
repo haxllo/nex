@@ -999,22 +999,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     deferred_hide_armed.store(false, Ordering::SeqCst);
                     deferred_hide_epoch.fetch_add(1, Ordering::SeqCst);
                     position_window(&window, hwnd);
-                    // Spike glass follows the main window: same rect,
-                    // ordered directly below it (never activating).
+                    // No forced resize here. The window keeps the height it
+                    // had when hidden (cloaked, nothing visible) and the
+                    // page's first measurement drives both window and glass:
+                    // forcing 60 px made every show rebuild the lens twice
+                    // (60, then the idle height) and threw the first
+                    // presented frame away. Still re-sync the glass so a
+                    // monitor/DPI move while hidden is reflected.
+                    let scale = window.scale_factor();
+                    let current_h = window.inner_size().to_logical::<f64>(scale).height;
+                    last_applied_height = current_h;
                     if let Some(layer) = glass_layer.as_mut() {
-                        let scale = window.scale_factor();
                         layer.sync_to_main(
                             hwnd as isize,
                             scale,
                             WINDOW_WIDTH,
-                            INITIAL_HEIGHT,
+                            current_h,
                             crate::overlay::refraction::physical_px(WINDOW_WIDTH, scale),
                             crate::overlay::refraction::physical_px(MAX_HEIGHT, scale),
                         );
                     }
-                    // Start at search-bar height — JS sends resize when content appears.
-                    apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
-                    last_applied_height = INITIAL_HEIGHT;
                     pending_resize = None;
                     first_resize_after_show = true;
                     // Re-detect platform look on every show — accent color and

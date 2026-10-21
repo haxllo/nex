@@ -54,7 +54,8 @@ use windows::Win32::Graphics::Direct3D::{
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
+    D3D11_MAP_READ,
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
 };
@@ -272,6 +273,9 @@ struct GlassWindow {
     /// this to match `last_region`: a frame for the previous panel size
     /// leaves the rows the page just grew into holding older pixels.
     last_frame: std::cell::Cell<Option<(u32, u32)>>,
+    /// Silhouette currently written to the main window. Guards against a
+    /// full GDI region rebuild on every presented frame.
+    region: std::cell::Cell<Option<(u32, u32, u64)>>,
 }
 
 impl GlassLayer {
@@ -356,7 +360,12 @@ impl GlassLayer {
         self.window.ensure_window_max(main_sys, max_w_px, max_h_px);
         self.window.last_region.set(Some((w, h, scale.to_bits())));
         if self.visible.get() {
-            apply_lens_region(main_sys, w, h, scale, SILHOUETTE_GROW_PX);
+            // Grow the region with the window. Deferring until the renderer
+            // acks reads as growth lagging a frame behind typing, which is
+            // worse than the rare band of not-yet-painted glass: the wake is
+            // immediate and the resize pass re-presents from the mirror
+            // before the next composition in practice.
+            self.apply_region(w, h, scale);
         }
         let _ = self.tx.send(GlassConfig {
             visible: None,
@@ -376,10 +385,11 @@ impl GlassLayer {
         let was_visible = self.visible.replace(show);
         if show {
             if let Some((w, h, bits)) = self.window.last_region.get() {
-                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
+                self.apply_region(w, h, f64::from_bits(bits));
             }
         } else if was_visible {
             unsafe { windows_sys::Win32::Graphics::Gdi::SetWindowRgn(self.main_sys as _, std::ptr::null_mut(), 1); }
+            self.window.region.set(None);
         }
         if !show {
             self.revealed.set(false);
@@ -405,7 +415,7 @@ impl GlassLayer {
     /// current pixels instead of the last session's.
     pub fn prepare_show(&self) {
         if let Some((w, h, bits)) = self.window.last_region.get() {
-            apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
+            self.apply_region(w, h, f64::from_bits(bits));
         }
         let _ = self.tx.send(GlassConfig {
             visible: Some(true),
@@ -431,6 +441,18 @@ impl GlassLayer {
         });
     }
 
+    /// Write the rounded silhouette to the main window, unless that exact
+    /// size/scale is already applied (a repeated sync must not rebuild the
+    /// GDI region).
+    fn apply_region(&self, w: u32, h: u32, scale: f64) {
+        let key = (w, h, scale.to_bits());
+        if self.window.region.get() == Some(key) {
+            return;
+        }
+        apply_lens_region(self.main_sys, w, h, scale, SILHOUETTE_GROW_PX);
+        self.window.region.set(Some(key));
+    }
+
     /// Record that the renderer presented a frame at `w`x`h`.
     pub fn note_frame(&self, w: u32, h: u32) {
         self.window.last_frame.set(Some((w, h)));
@@ -447,7 +469,7 @@ impl GlassLayer {
         }
         match self.window.last_region.get() {
             Some((w, h, bits)) if self.window.last_frame.get() == Some((w, h)) => {
-                apply_lens_region(self.main_sys, w, h, f64::from_bits(bits), SILHOUETTE_GROW_PX);
+                self.apply_region(w, h, f64::from_bits(bits));
                 self.revealed.set(true);
                 self.window.show(true);
                 crate::logging::info(&format!("[nex][refract] glass revealed {w}x{h}"));
@@ -635,6 +657,7 @@ impl GlassWindow {
             hwnd_size: std::cell::Cell::new((width, height)),
             last_region: std::cell::Cell::new(None),
             last_frame: std::cell::Cell::new(None),
+            region: std::cell::Cell::new(None),
         })
     }
 
@@ -781,7 +804,12 @@ struct Engine {
     /// 16x16 GPU downsample of the source, read back for material/tint
     /// statistics. One kilobyte per frame instead of the full panel.
     sample_tex: ID3D11Texture2D,
-    sample_staging: ID3D11Texture2D,
+    /// Two staging mirrors so the readback never maps the copy the GPU may
+    /// still be writing: read last frame's, write this frame's.
+    sample_staging: [ID3D11Texture2D; 2],
+    /// Staging slot to copy into next, and the slot holding the last copy.
+    sample_next: std::cell::Cell<usize>,
+    sample_prev: std::cell::Cell<Option<usize>>,
     sample_target: ID2D1Bitmap1,
     map: Option<ID2D1Bitmap1>,
     tint_brush: ID2D1SolidColorBrush,
@@ -951,14 +979,24 @@ impl Engine {
             D3D11_BIND_RENDER_TARGET.0 as u32 | D3D11_BIND_SHADER_RESOURCE.0 as u32,
             0,
         )?;
-        let sample_staging = frame_texture(
-            &device,
-            SAMPLE_W,
-            SAMPLE_H,
-            D3D11_USAGE_STAGING,
-            0,
-            D3D11_CPU_ACCESS_READ.0 as u32,
-        )?;
+        let sample_staging = [
+            frame_texture(
+                &device,
+                SAMPLE_W,
+                SAMPLE_H,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?,
+            frame_texture(
+                &device,
+                SAMPLE_W,
+                SAMPLE_H,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?,
+        ];
         let sample_surface: IDXGISurface = sample_tex
             .cast()
             .map_err(|e| format!("sample QI surface failed: {e:?}"))?;
@@ -982,6 +1020,8 @@ impl Engine {
             source_tex: None,
             sample_tex,
             sample_staging,
+            sample_next: std::cell::Cell::new(0),
+            sample_prev: std::cell::Cell::new(None),
             sample_target,
             map: None,
             tint_brush,
@@ -1244,8 +1284,8 @@ impl Engine {
     /// Box-downsample the source to 16x16 on the GPU and read back 1 KiB.
     /// This replaces the old full-panel Map, which was the single largest
     /// per-frame CPU cost.
-    fn sample_backdrop(&self) -> Result<Vec<u8>, String> {
-        let source = self.source.as_ref().ok_or("no source bitmap")?;
+    fn sample_backdrop(&self) -> Option<Vec<u8>> {
+        let source = self.source.as_ref()?;
         let dest = D2D_RECT_F {
             left: 0.0,
             top: 0.0,
@@ -1259,24 +1299,40 @@ impl Engine {
             self.d2d.BeginDraw();
             self.d2d
                 .DrawBitmap(source, Some(&dest), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-            self.d2d
-                .EndDraw(None, None)
-                .map_err(|e| format!("sample EndDraw failed: {e:?}"))?;
+            self.d2d.EndDraw(None, None).ok()?;
             self.d2d.SetTarget(None);
-            self.context
-                .CopyResource(&self.sample_staging, &self.sample_tex);
         }
-        let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+        // Copy this frame out, then read the copy made last frame. Mapping
+        // the copy just issued would stall until the GPU drains; a frame of
+        // lag costs nothing here (material and tint move at ~4 Hz). The
+        // first read after an engine build blocks once, so callers (and the
+        // probe tests) get real pixels immediately instead of a placeholder.
+        let write_idx = self.sample_next.get();
+        let prev = self.sample_prev.get();
         unsafe {
             self.context
-                .Map(
-                    &self.sample_staging,
-                    0,
-                    D3D11_MAP_READ,
-                    0,
-                    Some(&mut mapped as *mut _),
-                )
-                .map_err(|e| format!("sample Map failed: {e:?}"))?;
+                .CopyResource(&self.sample_staging[write_idx], &self.sample_tex);
+        }
+        self.sample_next.set(1 - write_idx);
+        self.sample_prev.set(Some(write_idx));
+        let (read_idx, flags) = match prev {
+            Some(read) => (read, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32),
+            None => (write_idx, 0),
+        };
+        let mut mapped: D3D11_MAPPED_SUBRESOURCE = unsafe { std::mem::zeroed() };
+        if unsafe {
+            self.context.Map(
+                &self.sample_staging[read_idx],
+                0,
+                D3D11_MAP_READ,
+                flags,
+                Some(&mut mapped as *mut _),
+            )
+        }
+        .is_err()
+        {
+            // Still in flight: keep the current material for this frame.
+            return None;
         }
         let mut out = vec![0u8; (SAMPLE_W * SAMPLE_H * 4) as usize];
         for row in 0..SAMPLE_H as usize {
@@ -1292,8 +1348,8 @@ impl Engine {
                 );
             }
         }
-        unsafe { self.context.Unmap(&self.sample_staging, 0) };
-        Ok(out)
+        unsafe { self.context.Unmap(&self.sample_staging[read_idx], 0) };
+        Some(out)
     }
 
     /// Present the held source with the current material. Callers update
@@ -2231,9 +2287,19 @@ fn worker_main(
     let mut interaction_at = Instant::now();
     let mut interaction_dirty = false;
     let mut previous_panel = (0, 0);
+    // Configs consumed by the idle wait below: drained at the top of the
+    // next pass instead of being lost with the wake-up.
+    let mut pending_cfgs: Vec<GlassConfig> = Vec::new();
 
     loop {
-        while let Ok(cfg) = rx.try_recv() {
+        loop {
+            let cfg = match pending_cfgs.pop() {
+                Some(cfg) => cfg,
+                None => match rx.try_recv() {
+                    Ok(cfg) => cfg,
+                    Err(_) => break,
+                },
+            };
             if let Some(v) = cfg.visible {
                 if v && !visible {
                     motion = crate::overlay::platform::animations_enabled();
@@ -2296,7 +2362,15 @@ fn worker_main(
         // ponytail: one idle session at 4Hz; no present while hidden.
         let plan = pass_plan(visible, prewarm_pending, last_warm.elapsed().as_millis() as u64);
         if plan == Pass::Wait {
-            std::thread::sleep(Duration::from_millis(10));
+            // Sleep until the next material poll, but wake at once for a
+            // config: a show must not wait out a timer, and a 10 ms spin is
+            // 100 wakeups/s for nothing.
+            let wait_ms = HIDDEN_POLL_MS
+                .saturating_sub(last_warm.elapsed().as_millis() as u64)
+                .max(1);
+            if let Ok(cfg) = rx.recv_timeout(Duration::from_millis(wait_ms)) {
+                pending_cfgs.push(cfg);
+            }
             continue;
         }
         if plan == Pass::Poll {
@@ -2485,28 +2559,23 @@ fn worker_main(
                             })
                             .is_ok();
                         if cropped {
-                            match e.sample_backdrop() {
-                                Ok(sample) => {
-                                    if material.fresh {
-                                        material.update(&sample);
-                                        palette_sent = Some(material.light);
-                                        let _ = proxy
-                                            .send_event(UiCommand::GlassPalette(material.light));
-                                    }
-                                    if let Err(error) = e.update_local_tint(
-                                        &sample,
-                                        SAMPLE_W,
-                                        SAMPLE_H,
-                                        &material,
-                                    ) {
-                                        crate::logging::warn(&format!(
-                                            "[nex][refract] tint grid failed: {error}"
-                                        ));
-                                    }
+                            if let Some(sample) = e.sample_backdrop() {
+                                if material.fresh {
+                                    material.update(&sample);
+                                    palette_sent = Some(material.light);
+                                    let _ = proxy
+                                        .send_event(UiCommand::GlassPalette(material.light));
                                 }
-                                Err(error) => crate::logging::warn(&format!(
-                                    "[nex][refract] stats sample failed: {error}"
-                                )),
+                                if let Err(error) = e.update_local_tint(
+                                    &sample,
+                                    SAMPLE_W,
+                                    SAMPLE_H,
+                                    &material,
+                                ) {
+                                    crate::logging::warn(&format!(
+                                        "[nex][refract] tint grid failed: {error}"
+                                    ));
+                                }
                             }
                             match e.present(&material, bend) {
                                 Ok(()) => {
@@ -2650,11 +2719,16 @@ fn worker_main(
             // Material and tint statistics need pixels, but only a 16x16
             // downsample of them. This keeps the per-frame CPU work at
             // 1 KiB instead of a full-panel Map + memcpy + upload.
-            let sample = eng.sample_backdrop()?;
-            let flipped = material.update(&sample);
+            let sample = eng.sample_backdrop();
+            let flipped = match &sample {
+                Some(pixels) => material.update(pixels),
+                None => false,
+            };
             // A hidden poll decides the material only: no draw.
             if !warm {
-                eng.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
+                if let Some(pixels) = &sample {
+                    eng.update_local_tint(pixels, SAMPLE_W, SAMPLE_H, &material)?;
+                }
                 eng.present(&material, bend)?;
                 // Reveal handshake: the host lifts the glass cloak only on a
                 // frame that matches the panel size it is about to show, so
@@ -3126,7 +3200,7 @@ mod tests {
                     );
                 }
                 engine.copy_crop(&desktop, 0, 0, w, h, 0, 0)?;
-                let sample = engine.sample_backdrop()?;
+                let sample = engine.sample_backdrop().ok_or("no sample")?;
                 let at = |x: u32, y: u32| {
                     let i = ((y * SAMPLE_W + x) * 4) as usize;
                     [sample[i], sample[i + 1], sample[i + 2], sample[i + 3]]
@@ -3253,7 +3327,7 @@ mod tests {
             let material = Material { luma: Some(0.5), light: false, dwell: 0, fresh: false };
             let start = Instant::now();
             for _ in 0..30 {
-                let sample = engine.sample_backdrop()?;
+                let sample = engine.sample_backdrop().ok_or("no sample")?;
                 engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
                 engine.present(&material, 1.0)?;
             }
@@ -3385,7 +3459,7 @@ mod tests {
                 let cold = Instant::now();
                 engine.rebuild_content()?;
                 engine.copy_crop(&desktop, 8, 0, ew, eh, 0, 0)?;
-                let sample = engine.sample_backdrop()?;
+                let sample = engine.sample_backdrop().ok_or("no sample")?;
                 engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
                 engine.present(&material, SWELL_START)?;
                 let first_show = ms(cold);
@@ -3431,14 +3505,14 @@ mod tests {
                         // which is the frame's built-in CPU/GPU sync point.
                         let t = Instant::now();
                         engine.copy_crop(&desktop, bx, 0, ew, eh, 0, 0)?;
-                        let sample = engine.sample_backdrop()?;
+                        let sample = engine.sample_backdrop().ok_or("no sample")?;
                         engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
                         engine.present(&material, bend)?;
                         let frame = ms(t);
                         // Same frame, then wait for the GPU to finish it.
                         let t = Instant::now();
                         engine.copy_crop(&desktop, bx, 0, ew, eh, 0, 0)?;
-                        let sample = engine.sample_backdrop()?;
+                        let sample = engine.sample_backdrop().ok_or("no sample")?;
                         engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)?;
                         engine.present(&material, bend)?;
                         unsafe { engine.context.End(&query) };

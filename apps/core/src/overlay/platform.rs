@@ -28,6 +28,27 @@ const CLASS_NAME: &str = "NexOverlayWindowClass";
 const SIGNAL_SHOW_REGISTERED: &str = "Nex.ExternalShow.v1";
 const SIGNAL_QUIT_REGISTERED: &str = "Nex.ExternalQuit.v1";
 
+/// Accent + theme as last detected. Both are several registry reads plus a
+/// log line, and a show needs no fresher answer than the last settings
+/// change. Invalidated by the overlay's subclass proc on WM_SETTINGCHANGE.
+static LOOK: std::sync::Mutex<Option<(Option<String>, Theme)>> = std::sync::Mutex::new(None);
+
+/// Cached `(accent, theme)`: the pair a Show re-applies to the acrylic tint.
+pub(crate) fn detect_look() -> (Option<String>, Theme) {
+    let mut cache = LOOK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(look) = cache.as_ref() {
+        return look.clone();
+    }
+    let look = (detect_accent_color(), detect_system_theme());
+    *cache = Some(look.clone());
+    look
+}
+
+/// Windows settings changed: the next show re-reads the accent and theme.
+pub(crate) fn invalidate_look_cache() {
+    *LOOK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 pub(crate) fn detect_system_theme() -> Theme {
     let key = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     let value = to_wide("AppsUseLightTheme");

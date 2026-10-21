@@ -1021,13 +1021,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     pending_resize = None;
                     first_resize_after_show = true;
-                    // Re-detect platform look on every show — accent color and
-                    // theme may have changed in Windows settings while nex was
-                    // hidden. The window is still invisible here, so re-applying
-                    // the acrylic tint cannot flicker.
+                    // Re-detect platform look on show - accent color and
+                    // theme may have changed in Windows settings while nex
+                    // was hidden. Cached between shows and invalidated on
+                    // WM_SETTINGCHANGE, so this is a plain field copy unless
+                    // Windows actually said something changed.
                     if let Ok(mut s) = state.lock() {
-                        s.accent_color = crate::overlay::platform::detect_accent_color();
-                        s.theme = crate::overlay::platform::detect_system_theme();
+                        let (accent, theme) = crate::overlay::platform::detect_look();
+                        s.accent_color = accent;
+                        s.theme = theme;
                         // Deliberately not re-seeding the glass palette
                         // from the theme here. While hidden the worker
                         // keeps the material current from the desktop and
@@ -2321,14 +2323,14 @@ fn capture_exclusion_needed(mode: crate::config::PanelBackground, glass_native: 
 fn effective_panel_mode(
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) -> crate::config::PanelBackground {
-    let mut mode = state
+    let (mut mode, light) = state
         .lock()
-        .map(|s| s.panel_background)
-        .unwrap_or(crate::config::PanelBackground::Glass);
+        .map(|s| (s.panel_background, s.theme == Theme::Light))
+        .unwrap_or((crate::config::PanelBackground::Glass, false));
     if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
         || crate::overlay::refraction::glass_failed()
     {
-        mode = if state.lock().map(|s| s.theme == Theme::Light).unwrap_or(false) {
+        mode = if light {
             crate::config::PanelBackground::White
         } else {
             crate::config::PanelBackground::Black
@@ -2968,20 +2970,33 @@ fn hide_overlay_window(
 }
 
 /// Find the WRY_WEBVIEW child HWND (null when the WebView isn't built).
+/// Cached for the session: the child is created once with the overlay and
+/// every click/visibility/resize asks for it.
 fn find_webview_child(window: &Window) -> HWND {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, GetClassNameW, IsWindow,
+    };
+    static CACHED: std::sync::Mutex<Option<(isize, isize)>> = std::sync::Mutex::new(None);
+    let parent = window.hwnd() as isize;
+    if let Some((cached_parent, cached_child)) = *CACHED.lock().unwrap_or_else(|e| e.into_inner()) {
+        if cached_parent == parent && unsafe { IsWindow(cached_child as HWND) } != 0 {
+            return cached_child as HWND;
+        }
+    }
     struct Search {
         found: HWND,
     }
     unsafe extern "system" fn find_webview(hwnd: HWND, param: isize) -> i32 {
         const WRY_WEBVIEW: &[u16] = &[
             b'W' as u16, b'R' as u16, b'Y' as u16, b'_' as u16, b'W' as u16, b'E' as u16,
-            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16, 0,
+            b'B' as u16, b'V' as u16, b'I' as u16, b'E' as u16, b'W' as u16,
         ];
         let search = &mut *(param as *mut Search);
         let mut name = [0u16; 32];
         let len = GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32);
-        if len > 0 && name[..len as usize] == WRY_WEBVIEW[..len as usize] {
+        // Exact match only: a longer class name must not index past
+        // WRY_WEBVIEW (that was a panic, in a window callback).
+        if len as usize == WRY_WEBVIEW.len() && name[..len as usize] == WRY_WEBVIEW[..] {
             search.found = hwnd;
             return 0;
         }
@@ -2996,6 +3011,10 @@ fn find_webview_child(window: &Window) -> HWND {
             Some(find_webview),
             &mut search as *mut Search as isize,
         );
+    }
+    if !search.found.is_null() {
+        *CACHED.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((parent, search.found as isize));
     }
     search.found
 }
@@ -3171,6 +3190,10 @@ unsafe extern "system" fn instance_signal_subclass(
         if msg == ctx.msg_quit {
             let _ = ctx.event_tx.send(OverlayEvent::ExternalQuit);
             return 0;
+        }
+        if msg == windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE {
+            // Theme or accent changed: the next show re-reads the registry.
+            crate::overlay::platform::invalidate_look_cache();
         }
         if msg == WM_INPUT {
             // Detect Win key via raw input. Raw input catches the toggle

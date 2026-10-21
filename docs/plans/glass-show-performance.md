@@ -235,13 +235,26 @@ The typing kick is gated on `kick_ready`, false from show until that reveal
 config: the page's first measurement resize would otherwise wobble the panel
 exactly as it appears.
 
-### 11. Adaptive frame cap (smoothness) — `[ ]`
+### 11. Adaptive frame cap (smoothness) — `[x]`
 `MIN_FRAME_MS = 16` (`refraction.rs:220`) caps follow at 60 Hz.
 
 Fix: 8 ms when the monitor refresh is ≥120 Hz.
 
 Acceptance: growth follows within one refresh interval on high-refresh
 displays.
+
+**Implemented, plus the ceiling that made the constant almost moot.** The cap
+is now one desktop frame at the panel monitor's own rate
+(`display_frame_cap_ms` over `EnumDisplaySettingsW`): 16 ms at 60/75 Hz, 8 at
+120, 6 at 144/165, clamped to 4–16 ms and to 16 when the display cannot be
+read. Recomputed on show, on scale change, and when the panel follows to
+another monitor.
+
+The 16 ms constant was not the only limit: on `DXGI_ERROR_WAIT_TIMEOUT` the
+loop slept 2 ms, and a short Windows sleep rounds up to the default 15.6 ms
+timer — 64 fps whatever the display could do. The pass now blocks in
+`AcquireNextFrame(wait_ms)` instead, which wakes on the frame itself at driver
+precision. Frames rejected by the cap are released without sleeping.
 
 ### 12. Correct mixed-DPI placement (correctness) — `[ ]`
 `position_window` centres with the window's current scale, i.e. the monitor it
@@ -253,13 +266,25 @@ re-measure content.
 Acceptance: first show after moving to a different-DPI monitor is centred and
 does not resize after appearing.
 
-### 13. Minor cleanups — `[ ]`
+### 13. Minor cleanups — `[x]`
 - Cache accent/theme detection instead of registry reads on every Show
   (`host.rs:1023-1025`); invalidate on `WM_SETTINGCHANGE`.
 - Skip `keep_webview_viewport_max` when already at max.
 - Guard `find_webview_child` against class names longer than `WRY_WEBVIEW`
   (slice panic risk) and cache the child HWND.
 - `effective_panel_mode` reads state under two locks (`host.rs:2344-2359`).
+
+**Implemented.** `platform::detect_look()` caches `(accent, theme)` and the
+overlay's subclass proc clears it on `WM_SETTINGCHANGE`, so a show copies two
+fields unless Windows said something changed. `find_webview_child` matches the
+class name exactly (a longer name used to index past `WRY_WEBVIEW` — a panic
+inside a window callback) and caches `(parent, child)`, re-checking `IsWindow`.
+`effective_panel_mode` takes one lock.
+
+Not done: skipping `keep_webview_viewport_max` at max height. The call sits
+right after `set_inner_size`, where wry has already snapped the child to the
+new window size, so it has to be re-asserted on every resize; the only
+unconditional call is the one-time oversize at startup.
 
 ## Measurement
 
@@ -278,6 +303,17 @@ for the remaining show latency and feel. 11-13 opportunistic.
 ## Progress log
 
 - 2026-10-21 — Audit done, doc created. No code changes yet.
+- 2026-10-21 — 11 implemented: present cap from the panel monitor's refresh
+  (`display_frame_cap_ms` / `monitor_refresh_hz`), and the capture pass blocks
+  in `AcquireNextFrame` instead of sleeping 2 ms, which the OS timer rounds to
+  15.6 ms. New log line at worker start: `display refresh N Hz, present cap M
+  ms`. To verify: on a high-refresh display the panel follow should keep up with
+  the window instead of stepping at 60 Hz; watch `captured/s` while dragging a
+  window behind the panel.
+- 2026-10-21 — 13 implemented: cached accent/theme (`detect_look`) invalidated
+  on `WM_SETTINGCHANGE`, exact-match guard + cached handle in
+  `find_webview_child`, one lock in `effective_panel_mode`. The viewport-max
+  skip was dropped: the re-assert is required after every resize.
 - 2026-10-21 — 1, 2, 3 implemented; release build (`--bin Nex --bin NexHelper`)
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
@@ -352,4 +388,11 @@ for the remaining show latency and feel. 11-13 opportunistic.
   instead of running behind the page's first paint, and the panel no longer
   wobbles from the appearance resize. Reduced-motion users get no settle at
   all, same as before.
+- Smoothness (11): the glass follows at the panel monitor's refresh instead of
+  at a 60 Hz cap, and the passed-frame rate is no longer rounded up to the
+  Windows 15.6 ms timer. On a 144 Hz display: roughly 60 → 140 presents/s
+  while the desktop moves; on 60 Hz nothing changes.
+- Cleanups (13): one show no longer reads four registry values and writes a
+  log line for the accent; the webview-child lookup is a cached handle; a
+  window-callback panic on an unexpected class name is gone.
 

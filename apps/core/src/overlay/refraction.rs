@@ -217,8 +217,45 @@ const SHADOW_MARGIN: u32 = 44;
 const SHADOW_BLUR: f32 = 26.0;
 const SHADOW_STRENGTH: f32 = 0.30;
 
-/// Render cap: live frames present at most this often.
+/// Render cap when the display's refresh is unknown: one 60 Hz frame.
 const MIN_FRAME_MS: u128 = 16;
+
+/// Present cap for the panel's display: one desktop frame at the display's
+/// own rate, so a 120/144/165 Hz panel is not throttled to 60. Clamped on
+/// both ends — never faster than 240 Hz, never slower than the 60 Hz
+/// default — so a bad or absent refresh reading cannot spin the loop.
+fn display_frame_cap_ms(refresh_hz: u32) -> u64 {
+    if refresh_hz < 30 {
+        return MIN_FRAME_MS as u64;
+    }
+    (1000 / refresh_hz as u64).clamp(4, MIN_FRAME_MS as u64)
+}
+
+/// Refresh rate of the monitor the panel is on, in Hz. `0` when unknown
+/// (no monitor, no mode, or a driver that reports nonsense) — the caller
+/// then keeps the 60 Hz cap.
+fn monitor_refresh_hz(hwnd: HWND) -> u32 {
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow, DEVMODEW, ENUM_CURRENT_SETTINGS,
+        MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+    };
+    let monitor = unsafe { MonitorFromWindow(hwnd.0, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return 0;
+    }
+    let mut info: MONITORINFOEXW = unsafe { std::mem::zeroed() };
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _) } == 0 {
+        return 0;
+    }
+    let mut mode: DEVMODEW = unsafe { std::mem::zeroed() };
+    mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    if unsafe { EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) } == 0
+    {
+        return 0;
+    }
+    mode.dmDisplayFrequency
+}
 
 /// How recently the desktop must have handed us a frame for the backdrop
 /// to count as moving. Comfortably longer than a 30fps frame interval,
@@ -2162,10 +2199,10 @@ fn pass_plan(visible: bool, prewarm_pending: bool, since_poll_ms: u64) -> Pass {
 }
 
 /// Present pacing for swell passes: a static desktop never sends a frame,
-/// so the swell re-presents the held mirror — paced like a capture, so a
+/// so the swell re-presents the held mirror - paced like a capture, so a
 /// stalled desktop cannot spin the loop.
-fn swell_pass_due(since_present_ms: u64) -> bool {
-    since_present_ms >= MIN_FRAME_MS as u64
+fn swell_pass_due(since_present_ms: u64, frame_cap_ms: u64) -> bool {
+    since_present_ms >= frame_cap_ms
 }
 
 /// Does the desktop count as producing frames of its own?
@@ -2347,6 +2384,13 @@ fn worker_main(
     // Build and render one frame while hidden, so the first show has a
     // ready surface instead of waiting for D3D/capture initialization.
     let mut prewarm_pending = true;
+    // Present cap follows the panel's display: a 144 Hz monitor should not
+    // get 60 Hz glass. Recomputed when the panel changes monitor.
+    let refresh_hz = monitor_refresh_hz(hwnd);
+    let mut frame_cap_ms = display_frame_cap_ms(refresh_hz);
+    crate::logging::info(&format!(
+        "[nex][refract] display refresh {refresh_hz} Hz, present cap {frame_cap_ms} ms"
+    ));
     let mut last_present = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
@@ -2460,6 +2504,12 @@ fn worker_main(
                 cfg_panel = Some(p);
             }
             if let Some(s) = cfg.scale { scale = s; }
+            if cfg.scale.is_some() || cfg.main_sys != 0 {
+                // A new window/monitor: the panel may have moved to a
+                // display with a different refresh. Cheap (one GDI query)
+                // and only on show/move, never per frame.
+                frame_cap_ms = display_frame_cap_ms(monitor_refresh_hz(hwnd));
+            }
             if let Some(dark) = cfg.theme_dark {
                 // The theme seeds the material once, before any backdrop
                 // has been seen. After that the backdrop rules: seeding
@@ -2515,6 +2565,8 @@ fn worker_main(
             align_glass_to_main(hwnd, main_sys, max_wh.0, max_wh.1);
             crate::logging::info(&format!("[nex][refract] glass follows panel to ({mx},{my})"));
             last_glass_at = (mx, my);
+            // May have landed on a monitor with a different refresh.
+            frame_cap_ms = display_frame_cap_ms(monitor_refresh_hz(hwnd));
         }
         // Buffers + HWND cover the max panel; the region clips the
         // current size. Panel changes rebuild content bitmaps in place
@@ -2630,7 +2682,7 @@ fn worker_main(
             // Capped like a captured frame, and only while the desktop
             // has nothing of its own to paint it with.
             let swell_due = (cycle.swelling() || interaction_dirty)
-                && swell_pass_due(last_present.elapsed().as_millis() as u64);
+                && swell_pass_due(last_present.elapsed().as_millis() as u64, frame_cap_ms);
             let swelling = swell_wants_mirror(swell_due, moving);
             // Swell passes are routine (a dozen per show): keep them out
             // of the log, only rebuilds and reveal refreshes are news.
@@ -2766,17 +2818,25 @@ fn worker_main(
                 continue;
             }
         };
-        // Poll one frame (nonblocking).
+        // Poll one frame (nonblocking), then block for the next one. A
+        // sleep-poll rounds up to the OS timer (15.6 ms by default), which
+        // would cap every display at 64 fps no matter what it can do; a
+        // blocking acquire wakes on the frame itself, at driver precision.
         let mut info: windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO =
             unsafe { std::mem::zeroed() };
         let mut resource: Option<IDXGIResource> = None;
-        match unsafe {
+        let acquired = match unsafe {
             cap.duplication
                 .AcquireNextFrame(0, &mut info as *mut _, &mut resource as *mut _)
         } {
+            Ok(()) => true,
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(2));
-                continue;
+                let wait_ms = frame_cap_ms.max(1) as u32;
+                unsafe {
+                    cap.duplication
+                        .AcquireNextFrame(wait_ms, &mut info as *mut _, &mut resource as *mut _)
+                }
+                .is_ok()
             }
             Err(e) => {
                 crate::logging::warn(&format!("[nex][refract] acquire failed: {e:?} — restarting capture"));
@@ -2784,8 +2844,11 @@ fn worker_main(
                 std::thread::sleep(Duration::from_millis(250));
                 continue;
             }
-            Ok(()) => last_desktop_frame = Some(Instant::now()),
+        };
+        if !acquired {
+            continue;
         }
+        last_desktop_frame = Some(Instant::now());
         n_cap += 1;
         if info.ProtectedContentMaskedOut.0 != 0 {
             if !cap.protected_logged {
@@ -2795,10 +2858,10 @@ fn worker_main(
                 );
             }
         }
-        // FPS cap: skip upload/draw but always release.
-        if Instant::now().duration_since(last_present) < Duration::from_millis(MIN_FRAME_MS as u64) {
+        // FPS cap: skip upload/draw but always release. No sleep: the next
+        // pass blocks on the next desktop frame, so this costs one acquire.
+        if Instant::now().duration_since(last_present) < Duration::from_millis(frame_cap_ms) {
             let _ = unsafe { cap.duplication.ReleaseFrame() };
-            std::thread::sleep(Duration::from_millis(2));
             continue;
         }
         let pad = BLUR_PAD as i32;
@@ -3217,8 +3280,8 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, desktop_recent, frame_luma, glass_region_size, pass_plan,
-        refresh_wait_ms, swell_bend,
+        clamp_panel_box, desktop_recent, display_frame_cap_ms, frame_luma, glass_region_size,
+        pass_plan, refresh_wait_ms, swell_bend,
         swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
         DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
         HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
@@ -4058,9 +4121,23 @@ mod tests {
     fn swell_passes_are_frame_paced() {
         // Swell passes re-present the held mirror; a stalled desktop must
         // not spin the loop faster than a captured frame would.
-        assert!(!swell_pass_due(0));
-        assert!(!swell_pass_due(MIN_FRAME_MS as u64 - 1));
-        assert!(swell_pass_due(MIN_FRAME_MS as u64));
+        let cap = display_frame_cap_ms(60);
+        assert!(!swell_pass_due(0, cap));
+        assert!(!swell_pass_due(cap - 1, cap));
+        assert!(swell_pass_due(cap, cap));
+    }
+
+    #[test]
+    fn the_present_cap_follows_the_display_rate() {
+        // A 60 Hz display keeps the old 16 ms cap; a 144/165 Hz panel must
+        // not be throttled to 60. Unknown or absurd rates fall back to 16.
+        assert_eq!(display_frame_cap_ms(0), 16, "unknown refresh keeps 60 Hz");
+        assert_eq!(display_frame_cap_ms(60), 16);
+        assert_eq!(display_frame_cap_ms(75), 13);
+        assert_eq!(display_frame_cap_ms(120), 8);
+        assert_eq!(display_frame_cap_ms(144), 6);
+        assert_eq!(display_frame_cap_ms(165), 6);
+        assert_eq!(display_frame_cap_ms(240), 4, "clamped so the loop cannot spin");
     }
 
     #[test]

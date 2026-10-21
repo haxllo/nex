@@ -39,6 +39,11 @@ pub struct IconCache {
 
 struct Inner {
     png: LruCache<PathBuf, Arc<Vec<u8>>>,
+    /// `data:` URIs derived from the PNGs above, keyed identically. The
+    /// host pushes a state snapshot on every show and keystroke, and it
+    /// used to re-encode every visible icon each time; the URI is stable
+    /// for a cache entry, so encode once and keep it next to its source.
+    uri: HashMap<PathBuf, Arc<str>>,
     last_touch: HashMap<PathBuf, Instant>,
     max_entries: NonZeroUsize,
     idle_trim: Duration,
@@ -49,14 +54,16 @@ impl Inner {
         self.last_touch.insert(key, Instant::now());
     }
 
-    /// Remove last_touch entries whose keys are no longer in the LRU.
-    /// Called after put() to prevent unbounded HashMap growth when
-    /// LRU eviction removes png entries but last_touch retains them.
-    fn clean_orphaned_touches(&mut self) {
-        if self.last_touch.len() <= self.png.cap().get() {
-            return; // No orphans possible
+    /// Remove bookkeeping for keys the LRU no longer holds. Called after
+    /// put()/pop() to prevent unbounded growth when LRU eviction removes
+    /// entries the side maps still reference.
+    fn clean_orphans(&mut self) {
+        if self.last_touch.len() > self.png.cap().get() {
+            self.last_touch.retain(|k, _| self.png.contains(k));
         }
-        self.last_touch.retain(|k, _| self.png.contains(k));
+        if self.uri.len() > self.png.len() {
+            self.uri.retain(|k, _| self.png.contains(k));
+        }
     }
 }
 
@@ -72,6 +79,7 @@ impl IconCache {
         Self {
             inner: Mutex::new(Inner {
                 png: LruCache::new(max_entries),
+                uri: HashMap::new(),
                 last_touch: HashMap::new(),
                 max_entries,
                 idle_trim: Duration::from_millis(idle_trim_ms as u64),
@@ -99,7 +107,7 @@ impl IconCache {
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.put(key.clone(), bytes.clone());
             inner.touch(key);
-            inner.clean_orphaned_touches();
+            inner.clean_orphans();
         }
         Some(bytes)
     }
@@ -115,6 +123,35 @@ impl IconCache {
         let bytes = inner.png.get(&key).cloned()?;
         inner.touch(key);
         Some(bytes)
+    }
+
+    /// `data:image/png;base64,…` for `path`, encoded once per cache entry.
+    ///
+    /// Non-blocking like `png_bytes_cached`: an icon that has not been
+    /// decoded yet is missing from this push and arrives with a later
+    /// `ApplyIcons`. The encoding used to run on the host thread for every
+    /// visible icon on every state push, which made each show pay for the
+    /// same 48 base64 strings again.
+    pub fn data_uri_cached(&self, path: &str) -> Option<Arc<str>> {
+        if path.is_empty() {
+            return None;
+        }
+        let key = cache_key(path);
+        {
+            let mut inner = self.inner.lock().ok()?;
+            if let Some(uri) = inner.uri.get(&key).cloned() {
+                inner.touch(key);
+                return Some(uri);
+            }
+        }
+        let bytes = self.png_bytes_cached(path)?;
+        let uri: Arc<str> = Arc::from(data_uri(&bytes));
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.uri.insert(key.clone(), uri.clone());
+            inner.touch(key);
+            inner.clean_orphans();
+        }
+        Some(uri)
     }
 
     pub(crate) fn trim_unused(&self) -> usize {
@@ -138,6 +175,7 @@ impl IconCache {
             .collect();
         for k in &stale {
             inner.png.pop(k);
+            inner.uri.remove(k);
             inner.last_touch.remove(k);
         }
         stale.len()
@@ -146,6 +184,7 @@ impl IconCache {
     pub(crate) fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.png.clear();
+            inner.uri.clear();
             inner.last_touch.clear();
         }
     }
@@ -160,7 +199,7 @@ impl IconCache {
                     break;
                 }
             }
-            inner.clean_orphaned_touches();
+            inner.clean_orphans();
         }
     }
 
@@ -188,6 +227,7 @@ impl IconCache {
         inner.idle_trim = Duration::from_millis(trim_ms as u64);
         if inner.png.cap().get() != new_max.get() {
             inner.png.resize(new_max);
+            inner.clean_orphans();
         }
     }
 
@@ -197,6 +237,36 @@ impl IconCache {
         let budget = (target_mb as usize).saturating_mul(1024 * 1024) / 10;
         (budget / 4096).max(32).min(512)
     }
+}
+
+/// Encode PNG bytes as a `data:image/png;base64,...` URI for inline
+/// embedding in JSON. Used because WebView2 custom protocols don't
+/// support sub-resource loading for `<img>` tags - the browser
+/// silently ignores `nexasset://localhost/icon/...` URLs. See
+/// `docs/plans/robustness-audit.md` "Investigation Log" for details.
+pub(crate) fn data_uri(bytes: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(22 + bytes.len() * 4 / 3 + 4);
+    out.push_str("data:image/png;base64,");
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() >= 2 {
+            out.push(CHARS[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() >= 3 {
+            out.push(CHARS[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 /// Decode an icon file to PNG-encoded bytes.
@@ -1542,6 +1612,38 @@ mod tests {
         assert!(cache
             .png_bytes(path.to_string_lossy().as_ref())
             .is_none());
+    }
+
+    #[test]
+    fn a_data_uri_is_encoded_once_per_icon() {
+        // The tail rules are where a hand-rolled base64 encoder breaks.
+        assert_eq!(data_uri(b"abc"), "data:image/png;base64,YWJj");
+        assert_eq!(data_uri(b"ab"), "data:image/png;base64,YWI=");
+        assert_eq!(data_uri(b"a"), "data:image/png;base64,YQ==");
+        assert_eq!(data_uri(b""), "data:image/png;base64,");
+
+        // Non-blocking: an undecoded icon is skipped, not decoded here.
+        let cache = IconCache::default();
+        assert!(cache.data_uri_cached("").is_none());
+        assert!(cache
+            .data_uri_cached(r"C:\nex-icon-test-missing-c.ico")
+            .is_none());
+
+        // And a warm icon hands back the same string without re-encoding.
+        let png = rgba_to_png(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([10, 20, 30, 255]),
+        ))
+        .expect("png encode");
+        let path = std::env::temp_dir().join("nex-data-uri-test.png");
+        std::fs::write(&path, &png).expect("write test png");
+        let key = path.to_string_lossy().to_string();
+        assert!(cache.png_bytes(&key).is_some());
+        let first = cache.data_uri_cached(&key).expect("uri");
+        let second = cache.data_uri_cached(&key).expect("uri");
+        assert!(Arc::ptr_eq(&first, &second), "second call re-encoded");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

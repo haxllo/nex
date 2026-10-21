@@ -1910,36 +1910,6 @@ fn empty_response() -> Response<std::borrow::Cow<'static, [u8]>> {
     Response::new(std::borrow::Cow::Borrowed(&b""[..]))
 }
 
-/// Encode PNG bytes as a `data:image/png;base64,...` URI for inline
-/// embedding in JSON. Used because WebView2 custom protocols don't
-/// support sub-resource loading for `<img>` tags — the browser
-/// silently ignores `nexasset://localhost/icon/...` URLs. See
-/// `docs/plans/robustness-audit.md` "Investigation Log" for details.
-fn base64_data_uri(bytes: &[u8]) -> String {
-    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(22 + bytes.len() * 4 / 3 + 4);
-    out.push_str("data:image/png;base64,");
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((n >> 18) & 63) as usize] as char);
-        out.push(CHARS[((n >> 12) & 63) as usize] as char);
-        if chunk.len() >= 2 {
-            out.push(CHARS[((n >> 6) & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() >= 3 {
-            out.push(CHARS[(n & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
 /// Parse one IPC message from the page and act on it. The body is
 /// strictly deserialized into [`crate::overlay::ipc::OverlayMessage`]:
 /// malformed JSON, unknown message types, and unknown fields are
@@ -2634,15 +2604,11 @@ fn snapshot_icon_subset_json(
         .filter(|r| wanted.contains(r.icon_path.as_str()))
         .filter(|r| seen.insert(r.icon_path.clone()))
         .filter_map(|r| {
-            let b64 = icons
-                .png_bytes_cached(&r.icon_path)
-                .map(|arc| base64_data_uri(arc.as_ref()))
-                .unwrap_or_default();
-            if b64.is_empty() {
-                None
-            } else {
-                Some((r.icon_path.clone(), serde_json::Value::String(b64)))
-            }
+            let uri = icons.data_uri_cached(&r.icon_path)?;
+            Some((
+                r.icon_path.clone(),
+                serde_json::Value::String(uri.as_ref().to_owned()),
+            ))
         })
         .collect();
 
@@ -2670,15 +2636,11 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
         .filter(|r| !r.icon_path.is_empty())
         .filter(|r| seen.insert(r.icon_path.clone()))
         .filter_map(|r| {
-            let b64 = icons
-                .png_bytes_cached(&r.icon_path)
-                .map(|arc| base64_data_uri(arc.as_ref()))
-                .unwrap_or_default();
-            if b64.is_empty() {
-                None
-            } else {
-                Some((r.icon_path.clone(), serde_json::Value::String(b64)))
-            }
+            let uri = icons.data_uri_cached(&r.icon_path)?;
+            Some((
+                r.icon_path.clone(),
+                serde_json::Value::String(uri.as_ref().to_owned()),
+            ))
         })
         .collect();
 

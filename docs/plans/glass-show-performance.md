@@ -166,7 +166,7 @@ not worth doing unless the region proves inert.
 Acceptance: compositor work scales with the visible panel; smoother desktop
 animation behind the panel, especially on iGPU/4K.
 
-### 8. Move icon encoding off the UI thread (quickness) — `[ ]`
+### 8. Move icon encoding off the UI thread (quickness) — `[x]`
 `push_state` base64-encodes icon PNGs synchronously (`host.rs:2429-2460`),
 called at Show and again after reveal, plus on Hide. Cold decode can block.
 
@@ -175,6 +175,22 @@ without icons and follow up when the worker finishes.
 
 Acceptance: show and reveal never block on PNG encode; worst case (first open
 after boot) improves the most.
+
+**Implemented (root cause, cheaper than the written fix).** The decode was
+already off the UI thread and already progressive (`png_bytes_cached` +
+`ApplyIcons`); what repeated was the *encoding*: every push re-base64'd every
+visible icon, up to 48 of them per show and again per keystroke. The cache now
+keeps the `data:` URI next to the PNG (`IconCache::data_uri_cached`), encodes
+once per cache entry, and drops the URI with the entry on evict/clear/resize.
+`data_uri` moved from `host.rs` to `icons.rs` with it.
+
+No (path, mtime, size) keying: the cache key already carries the
+normalization version, and a changed file on disk is picked up by the same
+eviction/trim path that drops its PNG.
+
+**Result:** first show after boot still pays one encode per icon (on the host
+thread, but only once); every later push is a hash lookup plus a JSON copy.
+Test: `a_data_uri_is_encoded_once_per_icon` (padding + cache-hit identity).
 
 ### 9. Reveal and push state before focus work (quickness) — `[ ]`
 `Painted` uncloaks, activates, focuses, evaluates script, re-asserts topmost,
@@ -244,10 +260,14 @@ for the remaining show latency and feel. 11-13 opportunistic.
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
   monitor/DPI change; show appears at its retained height with one rebuild.
-- 2026-10-21 — 7 implemented (uncommitted pending visual check): glass HWND
-  region = panel + shadow margin, applied through `apply_region`, invalidated
-  when the window grows. Needs eyes: shadow intact on all four sides, panel
-  content never cut when growing/shrinking, alignment after a DPI move.
+- 2026-10-21 — 8 implemented: data URI cached beside the PNG in `IconCache`;
+  every push after the first per icon is a lookup. Targeted lib tests pass
+  (`a_data_uri_is_encoded_once_per_icon`). To verify: open twice in a row and
+  compare `show_latency ... show_arm_ms` / `painted_wait_ms`; the second should
+  not pay encoding.
+- 2026-10-21 — 7 implemented: glass HWND region = panel + shadow margin,
+  applied through `apply_region`, invalidated when the window grows. Visual
+  check passed (shadow intact, no clipping on grow/shrink). Committed.
 - 2026-10-21 — 6 implemented: D2D target wrapper cached per swapchain buffer
   (COM identity), cache cleared on ResizeBuffers. Release build passes. To
   verify: normal glass use on a DPI change (drag between monitors) still
@@ -291,4 +311,8 @@ for the remaining show latency and feel. 11-13 opportunistic.
 - Weight (7): DWM composites panel + shadow margin instead of the whole
   max-panel surface. Biggest effect when the panel is collapsed (bar height)
   on a large window: most of the composited pixels are gone.
+- Quickness (8): icon base64 no longer repeats per push. The first show after
+  boot still encodes each icon once; after that, Show and every keystroke push
+  copy cached strings instead of encoding. Most visible with a full result
+  list of distinct app icons.
 

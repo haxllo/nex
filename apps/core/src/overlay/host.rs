@@ -2680,9 +2680,11 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
-    // Native glass already shades its own edge. A second system frame
-    // reads as an unrelated hard outline (especially on bright backdrops).
-    let border_color: u32 = if glass_native && !opaque_panel { 0xFFFFFFFE } else { 0xFFFFFFFF };
+    // Native glass already shades its own edge, and an opaque panel is a
+    // solid fill with the same CSS radius - a system frame line reads as an
+    // unrelated hard outline over either (worst on bright backdrops). The
+    // acrylic fallback keeps the system edge: it has no shading of its own.
+    let border_color: u32 = if glass_native || opaque_panel { 0xFFFFFFFE } else { 0xFFFFFFFF };
     let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
 
     // Keep DWM acrylic for the fallback path. With the native refraction

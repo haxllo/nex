@@ -80,7 +80,7 @@ poll (1-250 ms). A config consumed by the wait is pushed into `pending_cfgs`
 and drained at the top of the next pass, so it is not lost.
 
 
-### 4. Wait for a live desktop frame on show refresh (quality) — `[ ]`
+### 4. Wait for a live desktop frame on show refresh (quality) — `[x]`
 `refresh_mirror` uses `AcquireNextFrame(0)` (`refraction.rs:2130`), so on a
 static or slow desktop the reveal carries the held mirror, up to
 `HIDDEN_POLL_MS` (250 ms) old, then jumps to live.
@@ -89,6 +89,17 @@ Fix: wait up to ~8 ms for the show's refresh pass only.
 
 Acceptance: no visible backdrop jump when the overlay opens over moving
 content; +0-8 ms only when the desktop is still.
+
+**Implemented differently than written.** Waiting unconditionally would
+charge every show over a still desktop up to 8 ms to prove nothing changed —
+and over a still desktop the mirror is already current, so the wait buys
+nothing. The wait is now gated on `moving` (`desktop_recent`, the same signal
+the swell uses): animating desktop → up to `SHOW_REFRESH_WAIT_MS` (8 ms, one
+120 Hz frame) for a fresh frame; still desktop → 0 ms. Policy lives in
+`refresh_wait_ms`, with a unit test (`a_show_waits_only_on_a_desktop_that_can_answer`).
+
+**Result:** reveal carries a current backdrop over video/animations; static
+opens pay nothing.
 
 ### 5. Remove the per-frame GPU readback stall (weight) — `[x]`
 `sample_backdrop` (`refraction.rs:1247-1295`) does D2D `EndDraw` →
@@ -113,11 +124,20 @@ engine-reset failure budget.
 by one frame (it already moved at hysteresis speed, so nothing visible).
 
 
-### 6. Cache the D2D target bitmap per swapchain buffer (weight) — `[ ]`
+### 6. Cache the D2D target bitmap per swapchain buffer (weight) — `[x]`
 `render_frame` calls `CreateBitmapFromDxgiSurface` every frame
 (`refraction.rs:1352-1360`) because flip-model buffers rotate.
 
 Acceptance: no per-frame bitmap creation; lower CPU per presented frame.
+
+**Implemented.** `Engine::targets` caches the wrapper keyed on the buffer's
+COM identity (`as_raw()`), so the two alternating flip-model buffers each get
+one bitmap and every frame after the first two is a cache hit. `resize_buffers`
+clears the cache *after* `SetTarget(None)` — the wrappers point at the buffers
+DXGI is about to replace, and a live one would make `ResizeBuffers` fail.
+
+**Result:** one COM allocation per buffer per swapchain generation instead of
+one per frame.
 
 ### 7. Clip the glass HWND to the panel (weight) — `[ ]`
 The glass window is permanently max-panel size plus shadow margin
@@ -209,6 +229,17 @@ for the remaining show latency and feel. 11-13 opportunistic.
   passes. Still to verify on a live session: region gate has no visible growth
   lag beyond one frame; region dedupe does not leave a stale silhouette on
   monitor/DPI change; show appears at its retained height with one rebuild.
+- 2026-10-21 — 6 implemented: D2D target wrapper cached per swapchain buffer
+  (COM identity), cache cleared on ResizeBuffers. Release build passes. To
+  verify: normal glass use on a DPI change (drag between monitors) still
+  renders and resizes without "ResizeBuffers failed"; per-frame CPU no longer
+  pays the wrapper allocation.
+- 2026-10-21 — 4 implemented: show refresh waits up to 8 ms for a newer
+  desktop frame, but only when the desktop is animating (the still case is
+  already current and would just burn show latency). Release build + test
+  target compile pass. To verify: open over playing video — the first glass
+  frame should already be the current frame; open over a still desktop —
+  unchanged.
 - 2026-10-21 — 5 implemented: double-buffered statistics readback, non-blocking
   map of the previous frame. Release build passes. To verify: `render_avg` in
   the per-second refract log should drop and stay flat under typing; material

@@ -226,6 +226,10 @@ const MIN_FRAME_MS: u128 = 16;
 /// off the held mirror.
 const DESKTOP_RECENT_MS: u64 = 60;
 
+/// How long the show's refresh pass waits for a newer desktop frame while
+/// the desktop is animating. One 120 Hz frame; see `refresh_wait_ms`.
+const SHOW_REFRESH_WAIT_MS: u32 = 8;
+
 /// While hidden, poll the desktop at most this often to keep the backdrop
 /// material current. The palette the page opens with comes from this, so
 /// a slow poll is enough, and presenting is skipped.
@@ -812,6 +816,11 @@ struct Engine {
     sample_prev: std::cell::Cell<Option<usize>>,
     sample_target: ID2D1Bitmap1,
     map: Option<ID2D1Bitmap1>,
+    /// D2D target per swapchain buffer, keyed by the buffer's COM identity.
+    /// Flip-model buffers alternate, so rebuilding the wrapper every frame
+    /// is pure churn; the cache is dropped when ResizeBuffers replaces the
+    /// textures (see `resize_buffers`).
+    targets: std::cell::RefCell<Vec<(usize, ID2D1Bitmap1)>>,
     tint_brush: ID2D1SolidColorBrush,
     /// Swapchain buffer size (max panel; grow-only).
     width: u32,
@@ -1024,6 +1033,7 @@ impl Engine {
             sample_prev: std::cell::Cell::new(None),
             sample_target,
             map: None,
+            targets: std::cell::RefCell::new(Vec::new()),
             tint_brush,
             width: buf_w,
             height: buf_h,
@@ -1412,10 +1422,26 @@ impl Engine {
         let surface: IDXGISurface = texture
             .cast()
             .map_err(|e| format!("QI IDXGISurface failed: {e:?}"))?;
-        let target: ID2D1Bitmap1 = unsafe {
-            self.d2d
-                .CreateBitmapFromDxgiSurface(&surface, Some(&target_props() as *const _))
-                .map_err(|e| format!("target bind failed: {e:?}"))?
+        // Reuse the wrapper for this buffer if it is already cached; the
+        // buffer is the same texture until the swapchain is resized.
+        let key = texture.as_raw() as usize;
+        let target = {
+            let mut targets = self.targets.borrow_mut();
+            match targets.iter().find(|(k, _)| *k == key) {
+                Some((_, cached)) => cached.clone(),
+                None => {
+                    let created: ID2D1Bitmap1 = unsafe {
+                        self.d2d
+                            .CreateBitmapFromDxgiSurface(
+                                &surface,
+                                Some(&target_props() as *const _),
+                            )
+                            .map_err(|e| format!("target bind failed: {e:?}"))?
+                    };
+                    targets.push((key, created.clone()));
+                    created
+                }
+            }
         };
         unsafe {
             self.d2d.SetTarget(&target);
@@ -1510,8 +1536,10 @@ impl Engine {
     fn resize_buffers(&mut self, width: u32, height: u32) -> Result<(), String> {
         // D2D retains the last target even after render_frame's local bitmap
         // is dropped. Detach it before ResizeBuffers or DXGI sees a live
-        // backbuffer reference and rejects the resize.
+        // backbuffer reference and rejects the resize. The cached wrappers
+        // point at the buffers being replaced, so they go too.
         unsafe { self.d2d.SetTarget(None) };
+        self.targets.borrow_mut().clear();
         let result = unsafe {
             self.swapchain.ResizeBuffers(
                 0,
@@ -2112,6 +2140,21 @@ fn swell_wants_mirror(swell_due: bool, desktop_recent: bool) -> bool {
     swell_due && !desktop_recent
 }
 
+/// How long the show's refresh pass waits for a newer desktop frame.
+///
+/// Only an animating desktop can produce one inside the wait; a still one
+/// has already been captured by the hidden poll, so waiting there would
+/// spend the reveal's frame budget to prove nothing changed. One frame at
+/// 120 Hz is the ceiling: enough to catch a 60/120 Hz refresh, short
+/// enough that a stalled desktop costs a fraction of the show.
+fn refresh_wait_ms(desktop_recent: bool) -> u32 {
+    if desktop_recent {
+        SHOW_REFRESH_WAIT_MS
+    } else {
+        0
+    }
+}
+
 /// Per-show state the worker arms on a fresh show and consumes while it
 /// presents: one held re-present and one lens swell.
 struct ShowCycle {
@@ -2174,16 +2217,17 @@ impl ShowCycle {
 /// AcquireNextFrame only yields when the desktop changed, so this either
 /// hands us the current image or proves nothing has changed since the
 /// poll - and then the mirror is already current, so a timeout is not a
-/// miss. Nonblocking, and any failure (lost access, dead session) leaves
-/// the mirror untouched; the capture path proper handles a dead session
-/// on its next pass.
-fn refresh_mirror(cap: &mut Capture, context: &ID3D11DeviceContext) -> bool {
+/// miss. `wait_ms` is therefore spent only on a desktop that is animating
+/// but slower than the wait. Nonblocking at 0, and any failure (lost
+/// access, dead session) leaves the mirror untouched; the capture path
+/// proper handles a dead session on its next pass.
+fn refresh_mirror(cap: &mut Capture, context: &ID3D11DeviceContext, wait_ms: u32) -> bool {
     let mut info: windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO =
         unsafe { std::mem::zeroed() };
     let mut resource: Option<IDXGIResource> = None;
     match unsafe {
         cap.duplication
-            .AcquireNextFrame(0, &mut info as *mut _, &mut resource as *mut _)
+            .AcquireNextFrame(wait_ms, &mut info as *mut _, &mut resource as *mut _)
     } {
         Ok(()) => {}
         Err(_) => return false,
@@ -2520,9 +2564,9 @@ fn worker_main(
             // one first and fall back to the mirror when it has none.
             let live = refresh
                 && staged
-                && capture
-                    .as_mut()
-                    .is_some_and(|cap| refresh_mirror(cap, &e.context));
+                && capture.as_mut().is_some_and(|cap| {
+                    refresh_mirror(cap, &e.context, refresh_wait_ms(moving))
+                });
             if live {
                 // A frame this fresh counts as the desktop moving: it *is*
                 // the desktop, taken seconds later than any pass could.
@@ -3094,11 +3138,11 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_panel_box, desktop_recent, frame_luma, pass_plan, swell_bend,
+        clamp_panel_box, desktop_recent, frame_luma, pass_plan, refresh_wait_ms, swell_bend,
         swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
         DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
         HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
-        SWELL_MS, SWELL_START, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
+        SHOW_REFRESH_WAIT_MS, SWELL_MS, SWELL_START, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
@@ -3949,6 +3993,16 @@ mod tests {
         assert!(!desktop_recent(Some(1000)));
         // Never saw a frame (startup, dead session): not moving.
         assert!(!desktop_recent(None));
+    }
+
+    #[test]
+    fn a_show_waits_only_on_a_desktop_that_can_answer() {
+        // Still desktop: the hidden poll already holds its frame, so any
+        // wait is pure latency on the reveal.
+        assert_eq!(refresh_wait_ms(false), 0);
+        // Animating: bounded by one 120 Hz frame, never a full poll.
+        assert_eq!(refresh_wait_ms(true), SHOW_REFRESH_WAIT_MS);
+        assert!(SHOW_REFRESH_WAIT_MS < MIN_FRAME_MS as u32);
     }
 
     #[test]

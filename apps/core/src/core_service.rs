@@ -760,6 +760,15 @@ impl CoreService {
                     if item.last_accessed_epoch_secs <= 0 {
                         item.last_accessed_epoch_secs = previous.last_accessed_epoch_secs;
                     }
+                    // Usage counters belong to the user, not the scanner:
+                    // a rescan must never reset launch history, or the
+                    // idle "your apps" list empties itself every scan.
+                    if item.launch_count == 0 {
+                        item.launch_count = previous.launch_count;
+                    }
+                    if item.last_launched_at <= 0 {
+                        item.last_launched_at = previous.last_launched_at;
+                    }
                 }
 
                 discovered_ids.insert(item.id.clone());

@@ -222,22 +222,64 @@ pub fn get_quick_launch_items(
         return Ok(result);
     }
 
-    let remaining = max_items.saturating_sub(result.len());
-    if remaining > 0 {
-        // Fill from launch history (apps with launch_count > 0)
-        let mut stmt = db.prepare(
+    if result.len() >= max_items {
+        return Ok(result);
+    }
+
+    // Two signals, both must surface: what gets clicked most, then what was
+    // clicked last. Overlap is dropped, so the recent pass only adds new
+    // items instead of repeating the frequent ones.
+    let mut seen_ids = seen_ids;
+    let passes = [
+        ("launch_count DESC, last_launched_at DESC", usize::div_ceil(max_items - result.len(), 2)),
+        ("last_launched_at DESC", max_items - result.len()),
+    ];
+    for (order_by, limit) in passes {
+        if result.len() >= max_items {
+            break;
+        }
+        let sql = format!(
             "SELECT id, kind, title, path, subtitle FROM item
              WHERE kind = 'app' AND launch_count > 0
-             ORDER BY launch_count DESC, last_launched_at DESC
-             LIMIT ?1",
-        )?;
-        let mut rows = stmt.query(params![remaining as i64])?;
+             ORDER BY {order_by}
+             LIMIT ?1"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let mut rows = stmt.query(params![limit as i64])?;
         while let Some(row) = rows.next()? {
             if result.len() >= max_items {
                 break;
             }
             let id: String = row.get(0)?;
-            if !seen_ids.contains(&id) {
+            if seen_ids.insert(id.clone()) {
+                let kind: String = row.get(1)?;
+                let title: String = row.get(2)?;
+                let path: String = row.get(3)?;
+                let subtitle: String = row.get(4)?;
+                let icon_path = path.clone();
+                result.push((id, kind, title, path, subtitle, icon_path, false));
+            }
+        }
+    }
+
+    // Cold start: nothing pinned and no launch history yet (fresh index, or
+    // a reset). Show the first indexed apps so the idle panel is never
+    // blank; the usage passes take over as soon as anything is opened.
+    // A list that already has pins or history is never padded alphabetically.
+    if result.is_empty() {
+        let mut stmt = db.prepare(
+            "SELECT id, kind, title, path, subtitle FROM item
+             WHERE kind = 'app'
+             ORDER BY title COLLATE NOCASE
+             LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![max_items as i64])?;
+        while let Some(row) = rows.next()? {
+            if result.len() >= max_items {
+                break;
+            }
+            let id: String = row.get(0)?;
+            if seen_ids.insert(id.clone()) {
                 let kind: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let path: String = row.get(3)?;
@@ -517,4 +559,80 @@ fn migration_v5(conn: &Connection) -> Result<(), StoreError> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SearchItem;
+
+    fn app(id: &str, title: &str, launches: u32, last: i64) -> SearchItem {
+        SearchItem::from_owned_with_usage(
+            id.into(),
+            "app".into(),
+            title.into(),
+            format!("C:\\Program Files\\{title}\\{title}.exe"),
+            String::new(),
+            0,
+            0,
+            launches,
+            last,
+        )
+    }
+
+    #[test]
+    fn quick_launch_auto_fill_mixes_frequent_and_recent() {
+        let db = open_memory().unwrap();
+        // a: most clicked, oldest click. b: clicked often, newer. c: newest
+        // click. d: never launched — must not appear.
+        upsert_item(&db, &app("a", "Alpha", 9, 1_000)).unwrap();
+        upsert_item(&db, &app("b", "Bravo", 5, 2_000)).unwrap();
+        upsert_item(&db, &app("c", "Charlie", 1, 9_000)).unwrap();
+        upsert_item(&db, &app("d", "Delta", 0, 0)).unwrap();
+
+        let items = get_quick_launch_items(&db, &[], 4, true).unwrap();
+        let titles: Vec<&str> = items.iter().map(|item| item.2.as_str()).collect();
+        assert_eq!(titles.len(), 3);
+        assert_eq!(titles[0], "Alpha", "most clicked leads");
+        assert!(titles.contains(&"Charlie"), "newest click is listed");
+        assert!(!titles.contains(&"Delta"), "unused apps stay out");
+        let unique: std::collections::HashSet<_> = titles.iter().collect();
+        assert_eq!(unique.len(), titles.len(), "no duplicates between passes");
+    }
+
+    #[test]
+    fn quick_launch_cold_start_lists_indexed_apps() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &app("a", "Zulu", 0, 0)).unwrap();
+        upsert_item(&db, &app("b", "Alpha", 0, 0)).unwrap();
+        let items = get_quick_launch_items(&db, &[], 6, true).unwrap();
+        let titles: Vec<&str> = items.iter().map(|item| item.2.as_str()).collect();
+        assert_eq!(titles, vec!["Alpha", "Zulu"], "alphabetical cold start");
+        assert!(items.iter().all(|item| !item.6), "fallback items are not pinned");
+    }
+
+    #[test]
+    fn cold_start_stays_off_once_something_is_pinned() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &app("a", "Alpha", 0, 0)).unwrap();
+        upsert_item(&db, &app("b", "Bravo", 0, 0)).unwrap();
+        let items = get_quick_launch_items(
+            &db,
+            &["C:\\Program Files\\Alpha\\Alpha.exe".to_string()],
+            6,
+            true,
+        )
+        .unwrap();
+        let titles: Vec<&str> = items.iter().map(|item| item.2.as_str()).collect();
+        assert_eq!(titles, vec!["Alpha"], "no alphabetical tail beside a pin");
+    }
+
+    #[test]
+    fn quick_launch_pinned_leads_and_autofill_does_not_repeat_it() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &app("a", "Alpha Beta", 9, 1_000)).unwrap();
+        let items = get_quick_launch_items(&db, &["Alpha Beta".to_string()], 3, true).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].6, "explicitly pinned item reports is_pinned");
+    }
 }

@@ -590,6 +590,11 @@ fn media_control(action: crate::media::MediaAction, overlay: &NativeOverlayShell
 /// nothing while keeping the service write lock idle.
 const RECENT_DOCUMENTS_REFRESH_SECS: i64 = 600;
 
+/// The "Show all apps" result row is parked: the expanded view browses
+/// usage-ranked apps instead, and a full-index row inside every app query
+/// is noise. Flip back to `true` to restore it.
+const SHOW_ALL_APPS_ENTRY: bool = false;
+
 /// Apply the recent-documents recency overlay on a background thread.
 ///
 /// Takes the service write lock, so it must never run on the event-loop
@@ -1031,7 +1036,8 @@ impl RuntimeWorker {
 
     /// Show Quick Launch items in idle state if available.
     fn show_idle_or_quick_launch(&mut self) {
-        if self.runtime_config.quick_launch.enabled
+        if self.runtime_config.view_mode.shows_idle_feed()
+            && self.runtime_config.quick_launch.enabled
             && !self.quick_launch_items.is_empty()
         {
             crate::runtime_overlay_rows::set_quick_launch_overlay_state(
@@ -1049,6 +1055,16 @@ impl RuntimeWorker {
     /// Pin an app to Quick Launch by title.
     fn pin_app_to_quick_launch(&mut self, title: &str) {
         let raw_title = title.trim();
+        if raw_title.is_empty() {
+            return;
+        }
+        // The pin icon sends the row's path/URL whenever it has one — only
+        // bare titles need the index lookup. Treating a path as a title is
+        // what produced "app 'shell:AppsFolder\...' not found".
+        if looks_like_pin_path(raw_title) {
+            self.add_to_quick_launch(raw_title);
+            return;
+        }
         let title = raw_title.strip_prefix("Open ").unwrap_or(raw_title).trim();
         let direct_url = crate::config::normalize_bookmark_url(raw_title).ok();
         let url_pin = self.runtime_config.quick_launch.pinned.iter()
@@ -1459,7 +1475,7 @@ impl RuntimeWorker {
                                 let rows = overlay_rows_ext(
                                     &self.current_results,
                                     false,
-                                    self.apps_expanded.is_none(),
+                                    SHOW_ALL_APPS_ENTRY,
                                 );
                                 self.current_rows = rows;
                                 self.overlay.set_results(&self.current_rows, self.selected_index.min(self.current_results.len().saturating_sub(1)));
@@ -2053,6 +2069,12 @@ impl RuntimeWorker {
                                 self.overlay.set_panel_background(
                                     self.runtime_config.panel_background,
                                 );
+                                // Switching between compact and expanded
+                                // changes the idle panel, so repaint it now
+                                // instead of waiting for the next show.
+                                if self.overlay.query_text().trim().is_empty() {
+                                    self.show_idle_or_quick_launch();
+                                }
                                 if let Ok(meta) = std::fs::metadata(&updated.config_path) {
                                     if let Ok(mtime) = meta.modified() {
                                         self.config_watcher.last_modified = Some(mtime);
@@ -2531,7 +2553,7 @@ impl RuntimeWorker {
                                                     &self.current_results,
                                                     pending.previous_command_mode,
                                                     !pending.previous_command_mode
-                                                        && self.apps_expanded.is_none(),
+                                                        && SHOW_ALL_APPS_ENTRY,
                                                 );
                                                 self.current_rows = rows;
                                                 self.overlay.set_results(&self.current_rows, self.selected_index);
@@ -2610,7 +2632,7 @@ impl RuntimeWorker {
                             let rows = overlay_rows_ext(
                                 &self.current_results,
                                 pending.previous_command_mode,
-                                !pending.previous_command_mode && self.apps_expanded.is_none(),
+                                !pending.previous_command_mode && SHOW_ALL_APPS_ENTRY,
                             );
                             self.current_rows = rows;
                             self.overlay.set_results(&self.current_rows, self.selected_index);
@@ -3048,7 +3070,7 @@ fn apply_search_results(
         let rows = overlay_rows_ext(
             current_results,
             command_mode,
-            !command_mode && !explicit_mode && !is_idle && !expanded,
+            !command_mode && !explicit_mode && !is_idle && SHOW_ALL_APPS_ENTRY,
         );
         *current_rows = rows;
         // During expansion the intermediate apps-only view is NOT pushed —
@@ -3179,9 +3201,30 @@ fn copy_to_clipboard(text: &str) -> bool {
     true
 }
 
+/// True when a pin payload is a launch target (path / AUMID) rather than a
+/// bare title. The pin icon sends the row's path whenever it has one, so a
+/// title lookup on it can never match.
+fn looks_like_pin_path(value: &str) -> bool {
+    value.contains('\\')
+        || value.as_bytes().get(1) == Some(&b':')
+        || value.to_ascii_lowercase().ends_with(".exe")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_payload_paths_are_not_titles() {
+        // Pin icon posts the row's path when it has one.
+        assert!(looks_like_pin_path(r"shell:AppsFolder\Raycast.Raycast_qypenmj9wpt2a!Raycast"));
+        assert!(looks_like_pin_path(r"C:\Riot Games\Riot Client\RiotClientServices.exe"));
+        assert!(looks_like_pin_path(r"\\?\C:\Tools\app.exe"));
+        assert!(looks_like_pin_path("notepad.exe"));
+        // Bare titles and URLs still take the lookup / bookmark path.
+        assert!(!looks_like_pin_path("Raycast"));
+        assert!(!looks_like_pin_path("https://nexapp.live"));
+    }
 
     fn sample_items() -> Vec<crate::overlay::model::QuickLaunchItem> {
         vec![crate::overlay::model::QuickLaunchItem {

@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 22;
+pub const CURRENT_CONFIG_VERSION: u32 = 24;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -48,6 +48,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "game_mode_enabled",
     "grid_view",
     "panel_background",
+    "view_mode",
     "plugin_paths",
     "idle_cache_trim_ms",
     "active_memory_target_mb",
@@ -277,6 +278,13 @@ impl WebBookmark {
 
 pub fn normalize_bookmark_url(input: &str) -> Result<String, String> {
     let value = input.trim();
+    // Filesystem paths are not bookmarks. `url::Url` happily parses
+    // "C:\Program Files\App\app.exe" as https://c/Program%20Files/..., which
+    // silently turned an app pin into a bogus web bookmark and left the app
+    // itself unpinned.
+    if value.contains('\\') || value.as_bytes().get(1) == Some(&b':') {
+        return Err("not a bookmark URL".into());
+    }
     let with_scheme = if value.contains("://") {
         value.to_string()
     } else {
@@ -298,7 +306,9 @@ impl Default for QuickLaunchConfig {
             enabled: true,
             max_items: 6,
             pinned: Vec::new(),
-            auto_fill: false,
+            // The idle panel is the expanded browse view: with nothing
+            // typed it should show the apps the user actually opens.
+            auto_fill: true,
         }
     }
 }
@@ -333,6 +343,80 @@ impl PanelBackground {
     /// Opaque modes paint solid and park the glass layer.
     pub fn is_opaque(self) -> bool {
         !matches!(self, Self::Glass)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    /// 60px search bar when idle; the results view appears once you type.
+    Compact,
+    /// Idle shows the Quick Launch / recent-apps feed with tabs and preview.
+    #[default]
+    Expanded,
+}
+
+impl ViewMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "compact" | "bar" | "minimal" => Some(Self::Compact),
+            "expanded" | "full" | "feed" => Some(Self::Expanded),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Expanded => "expanded",
+        }
+    }
+
+    /// Only the expanded view fills the idle panel with apps.
+    pub fn shows_idle_feed(self) -> bool {
+        matches!(self, Self::Expanded)
+    }
+}
+
+#[cfg(test)]
+mod view_mode_tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_defaults_to_expanded() {
+        assert_eq!(ViewMode::parse("Compact"), Some(ViewMode::Compact));
+        assert_eq!(ViewMode::parse(" expanded "), Some(ViewMode::Expanded));
+        assert_eq!(ViewMode::parse("neon"), None);
+        assert_eq!(ViewMode::default(), ViewMode::Expanded);
+        // Only the expanded view fills the idle panel with apps.
+        assert!(!ViewMode::Compact.shows_idle_feed());
+        assert!(ViewMode::Expanded.shows_idle_feed());
+    }
+}
+
+#[cfg(test)]
+mod bookmark_url_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_real_urls() {
+        assert_eq!(
+            normalize_bookmark_url("example.com").unwrap(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            normalize_bookmark_url("https://nexapp.live/x").unwrap(),
+            "https://nexapp.live/x"
+        );
+    }
+
+    #[test]
+    fn rejects_filesystem_paths() {
+        // Pinning an app posts its path; treating that as a URL created a
+        // phantom bookmark and left the app unpinned.
+        assert!(normalize_bookmark_url(r"C:\Program Files\App\app.exe").is_err());
+        assert!(normalize_bookmark_url(r"C:/Program Files/App/app.exe").is_err());
+        assert!(normalize_bookmark_url(r"\\server\share\app.exe").is_err());
     }
 }
 
@@ -405,6 +489,8 @@ pub struct Config {
     pub game_mode_enabled: bool,
     pub grid_view: bool,
     pub panel_background: PanelBackground,
+    /// Compact (bar-only when idle) or expanded (idle app feed).
+    pub view_mode: ViewMode,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     /// How long (ms) the WebView stays resident after the overlay is
@@ -488,6 +574,7 @@ impl Default for Config {
             game_mode_enabled: false,
             grid_view: true,
             panel_background: PanelBackground::Glass,
+            view_mode: ViewMode::Expanded,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
@@ -921,6 +1008,12 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# Panel background: glass (live refraction) | black (opaque) | white (opaque)\n");
     text.push_str("panel_background = ");
     text.push_str(&json_string(cfg.panel_background.as_str()));
+    text.push('\n');
+    text.push_str(
+        "# View: expanded (idle app feed) | compact (bare search bar until you type)\n",
+    );
+    text.push_str("view_mode = ");
+    text.push_str(&json_string(cfg.view_mode.as_str()));
     text.push('\n');
     text.push_str("plugin_paths = ");
     text.push_str(&plugin_paths_section);
@@ -1412,6 +1505,21 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
 
     if source_version < 22 && !raw_has_key(raw, "panel_background") {
         cfg.panel_background = Config::default().panel_background;
+        changed = true;
+    }
+
+    if source_version < 23 {
+        // The idle panel is the expanded browse view: with nothing typed it
+        // lists pinned apps plus the ones actually opened, so auto-fill is
+        // the default now. The setting still turns it back off.
+        cfg.quick_launch.auto_fill = true;
+        changed = true;
+    }
+
+    if source_version < 24 && !raw_has_key(raw, "view_mode") {
+        // Existing installs keep the expanded idle feed they already have;
+        // compact is opt-in from Settings.
+        cfg.view_mode = ViewMode::Expanded;
         changed = true;
     }
 

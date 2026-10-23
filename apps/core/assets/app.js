@@ -15,6 +15,14 @@
   const searchIcon = $("search-icon");
   const bodyEl = $("body");
   const footerEl = $("footer");
+  const tabsEl = $("tabs");
+  const previewCard = $("preview-card");
+  const previewEmpty = $("preview-empty");
+  const previewIcon = $("preview-icon");
+  const previewKind = $("preview-kind");
+  const previewTitle = $("preview-title");
+  const previewSubtitle = $("preview-subtitle");
+  const previewOpen = $("preview-open");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -23,7 +31,6 @@
   const powerPanelTop = $("power-panel-top");
   const contextMenu = $("context-menu");
   const completionEl = $("completion");
-  const hintComplete = $("hint-complete");
   const updateNotice = $("update-notice");
   const updateBtn = $("update-btn");
   const updateBtnLabel = updateBtn.querySelector("span");
@@ -40,6 +47,7 @@
   const mediaDur = $("media-dur");
   const mediaPlayIcon = $("media-play-icon");
   const mediaPauseIcon = $("media-pause-icon");
+  const mediaEq = $("media-eq");
   const mediaVolumeInline = $("media-volume-inline");
   const mediaVolumeSlider = $("media-volume-slider");
   const mediaVolIcon = $("media-vol-icon");
@@ -165,6 +173,9 @@
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
+  // Active category tab. Filtering is client-side: hidden rows keep their
+  // Rust-side index, so submit/pin/context-menu still address the right row.
+  let activeTab = "all";
   let pendingShow = false; // show occurred, waiting for first real results
   // Last cursor position — lets a re-render keep the selection under a
   // stationary mouse (hover only fires on mousemove).
@@ -305,10 +316,26 @@
   }
 
   // ── render ───────────────────────────────────────────────
+  function tabMatches(r) {
+    if (activeTab === "all") return true;
+    if (r.role === "header" || r.role === "status") return true;
+    const kind = r.kind || "";
+    switch (activeTab) {
+      case "apps":
+        return kind === "app" || r.role === "quick_launch" || r.role === "show_all_apps";
+      case "files":
+        return kind === "file";
+      case "folders":
+        return kind === "folder";
+      default:
+        return true;
+    }
+  }
+
   function selectableIndices() {
     const out = [];
     rows.forEach((r, i) => {
-      if (r.selectable) out.push(i);
+      if (r.selectable && tabMatches(r)) out.push(i);
     });
     return out;
   }
@@ -518,6 +545,7 @@
     }
 
     const usedKeys = new Set();
+    const liByIndex = [];
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const key = rowKey(r);
@@ -555,6 +583,7 @@
         }
       }
       frag.appendChild(li);
+      liByIndex[i] = li;
     }
 
     // Rows that no longer exist.
@@ -571,6 +600,36 @@
     rowMap = new Map();
     for (const li of list.children) {
       if (li.classList.contains("row")) rowMap.set(Number(li.dataset.index), li);
+    }
+
+    // Tab filter — hide nodes that don't belong to the active tab. Hidden
+    // rows keep their original index, so hover/click/submit stay correct.
+    // A section header hides when every row under it is filtered out.
+    let sectionLi = null;
+    let sectionVisible = false;
+    let visibleRows = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const li = liByIndex[i];
+      if (!li) continue;
+      if (r.role === "header" || r.role === "status") {
+        if (sectionLi) {
+          // Tabs already name the category — no section label inside them.
+          sectionLi.classList.toggle("tab-hidden", !sectionVisible || activeTab !== "all");
+        }
+        sectionLi = r.role === "header" ? li : null;
+        sectionVisible = false;
+        continue;
+      }
+      const vis = tabMatches(r);
+      li.classList.toggle("tab-hidden", !vis);
+      if (vis) {
+        visibleRows++;
+        sectionVisible = true;
+      }
+    }
+    if (sectionLi) {
+      sectionLi.classList.toggle("tab-hidden", !sectionVisible || activeTab !== "all");
     }
 
     // The swap applied the pushed selected=0, but row hover only updates
@@ -610,17 +669,28 @@
     // Status / empty state.
     const hasRows = rows.some((r) => r.role !== "status");
     const hasStatusRows = rows.some((r) => r.role === "status");
-    if (!hasRows && statusEl.dataset.text) {
+    if (visibleRows === 0 && hasRows) {
+      statusEl.textContent = "Nothing in this tab";
+      statusEl.classList.remove("hidden");
+    } else if (!hasRows && statusEl.dataset.text) {
       statusEl.textContent = statusEl.dataset.text;
       statusEl.classList.remove("hidden");
     } else {
       statusEl.classList.add("hidden");
     }
 
-    // Idle state: hide divider + list area and footer when no rows.
-    // Keep the body visible when status rows are present (e.g.
-    // "Clipboard history is empty") so the message is actually rendered.
+    // Idle state: the expanded shell stays visible (tabs + preview), so the
+    // class only marks "nothing to list" for spacing.
     bodyEl.classList.toggle("idle", !hasRows && !hasStatusRows);
+    // Nothing to list at all: drop the expanded shell and leave the bare
+    // search bar. In compact view the idle panel is always just the bar.
+    document.documentElement.classList.toggle("bare", !hasRows && !hasStatusRows);
+    // Grid and bento views need the whole width; the preview column is
+    // list-results only.
+    bodyEl.classList.toggle(
+      "no-preview",
+      list.classList.contains("grid-view") || list.classList.contains("bento-view")
+    );
     // Footer hints only with regular results — hidden in the idle
     // window and in the quick-launch (pinned items) view.
     const qlOnly =
@@ -643,8 +713,65 @@
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();
 
+    renderPreview();
     measure();
   }
+
+  // Right-hand preview for the highlighted row: big icon, title, subtitle,
+  // and the same action Enter would take.
+  function renderPreview() {
+    const r = currentRows[selected];
+    const fullWidth =
+      list.classList.contains("grid-view") || list.classList.contains("bento-view");
+    const ok = r && r.selectable && tabMatches(r) && !fullWidth;
+    if (!ok) {
+      previewCard.classList.add("hidden");
+      previewEmpty.classList.remove("hidden");
+      previewEmpty.textContent = rows.length ? "Nothing in this tab" : "Search apps, files and actions";
+      return;
+    }
+    previewEmpty.classList.add("hidden");
+    previewCard.classList.remove("hidden");
+    previewKind.textContent = r.kind || (r.role === "quick_launch" ? "App" : "");
+    previewTitle.textContent = r.title || "";
+    previewSubtitle.textContent = r.subtitle || "";
+    const li = rowMap.get(selected);
+    const img = li ? li.querySelector("img.icon") : null;
+    if (img && img.src) {
+      if (previewIcon.src !== img.src) previewIcon.src = img.src;
+      previewIcon.classList.remove("hidden");
+    } else {
+      previewIcon.classList.add("hidden");
+      previewIcon.removeAttribute("src");
+    }
+  }
+
+  function syncTabButtons() {
+    for (const btn of tabsEl.children) {
+      const on = btn.dataset.tab === activeTab;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    }
+  }
+
+  function setActiveTab(tab) {
+    if (!tab || tab === activeTab) return;
+    activeTab = tab;
+    syncTabButtons();
+    clampSelected();
+    render();
+    if (selected >= 0) post("select", selected);
+    // Typing must keep working — the tab click must not steal the caret.
+    input.focus({ preventScroll: true });
+  }
+
+  tabsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab");
+    if (btn) setActiveTab(btn.dataset.tab);
+  });
+  previewOpen.addEventListener("click", () => {
+    if (selected >= 0) post("submit", selected);
+  });
 
   function setSelected(i, scroll) {
     if (i === selected) {
@@ -666,7 +793,8 @@
       list.removeAttribute("aria-activedescendant");
     }
     if (scroll) scrollToSelected();
-    post("select", selected);
+    renderPreview();
+    if (selected >= 0) post("select", selected);
   }
 
   // Helper: set scrollTop but bypass CSS scroll-behavior (smooth)
@@ -791,6 +919,8 @@
       for (const [img, dataUri] of pending) {
         if (img.isConnected && img.src !== dataUri) img.src = dataUri;
       }
+      // The preview mirrors the row icon, so a late decode must reach it too.
+      renderPreview();
     };
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(apply);
@@ -845,7 +975,6 @@
       input.value.length < completion.length;
     if (!showSuffix) {
       completionEl.textContent = "";
-      hintComplete.classList.add("hidden");
       input.placeholder = inCommandMode
         ? "Type a command…"
         : pushedPlaceholder || "Search for apps, files and actions…";
@@ -858,7 +987,6 @@
     completionEl.style.left = typedWidth + "px";
     completionEl.style.transform =
       `translateY(calc(-50% - 1px)) translateX(${-input.scrollLeft}px)`;
-    hintComplete.classList.remove("hidden");
     input.placeholder = "";
   }
 
@@ -931,9 +1059,11 @@
   }
 
   // ── delayed hover hints ────────────────────────────────────
-  // [data-tip] shows a custom hint after 200ms; optional
+  // [data-tip] shows a custom hint after TIP_DELAY_MS; optional
   // [data-shortcut] renders a kbd chip beside the label. Static
   // [title] attributes migrate here so every hint shares one look.
+  // Long enough that sweeping across the toolbar doesn't trail popups.
+  const TIP_DELAY_MS = 450;
   for (const el of document.querySelectorAll("[title]")) {
     el.dataset.tip = el.title;
     el.removeAttribute("title");
@@ -976,10 +1106,14 @@
     const target = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
     if (!target || target.disabled) return;
     window.clearTimeout(tipTimer);
-    tipTimer = window.setTimeout(() => showTip(target), 200);
+    tipTimer = window.setTimeout(() => showTip(target), TIP_DELAY_MS);
   });
   document.addEventListener("mouseout", (event) => {
-    if (event.target && event.target.closest && event.target.closest("[data-tip]")) hideTip();
+    const from = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
+    if (!from) return;
+    // Moving between children of the same control is not a leave.
+    if (event.relatedTarget && from.contains(event.relatedTarget)) return;
+    hideTip();
   });
   document.addEventListener("scroll", hideTip, true);
 
@@ -3142,6 +3276,12 @@
       if (typeof state.overlayVisible === "boolean") {
         overlayVisible = state.overlayVisible;
       }
+      // Every show starts on All: the tab is a within-session filter, not
+      // a remembered preference.
+      if (showPush && activeTab !== "all") {
+        activeTab = "all";
+        syncTabButtons();
+      }
       // The remembered pointer position only describes the pointer while
       // it is over the panel. If the show finds it elsewhere, drop it:
       // row hover fires on mousemove alone, and recalling a position from
@@ -3294,9 +3434,20 @@
   // renders the pushed state, otherwise the window appears blank.
   post("ready");
 
-  // ── settings button ─────────────────────────────────────────
-  document.getElementById("footer-settings-btn").addEventListener("click", () => {
-    post("settings");
+  // ── footer actions (icon list expands on hover) ─────────────
+  const footerActions = $("footer-actions");
+  const FOOTER_LINKS = {
+    github: "https://github.com/haxllo/nex",
+    website: "https://nexapp.live",
+  };
+
+  footerActions.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-footer-action]");
+    if (!button) return;
+    const action = button.dataset.footerAction;
+    if (action === "settings") post("settings");
+    else if (FOOTER_LINKS[action]) post("openExternal", FOOTER_LINKS[action]);
+    input.focus();
   });
 
   // ── update button ───────────────────────────────────────────
@@ -3692,6 +3843,7 @@
     const playing = m.status === "playing";
     mediaPlayIcon.classList.toggle("hidden", playing);
     mediaPauseIcon.classList.toggle("hidden", !playing);
+    mediaEq.classList.toggle("paused", !playing);
     syncVolumeUi(m);
     renderMediaDots(m);
     paintMediaProgress();
@@ -3839,6 +3991,7 @@
     const playing = mediaPlayIcon.classList.contains("hidden");
     mediaPlayIcon.classList.toggle("hidden", !playing);
     mediaPauseIcon.classList.toggle("hidden", playing);
+    mediaEq.classList.toggle("paused", playing);
     post("mediaToggle");
   });
   document.getElementById("media-next").addEventListener("click", () => post("mediaNext"));

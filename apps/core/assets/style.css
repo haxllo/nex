@@ -266,13 +266,160 @@ body {
 }
 
 #body {
+  display: flex;
+  flex-direction: column;
 }
-#body.idle {
-  visibility: hidden;
+
+/* Nothing to list: the panel is the search bar and nothing else. Compact
+   view relies on this for its 60px idle height; expanded view falls back to
+   it when Quick Launch has no rows to show. */
+html.bare #body,
+html.bare #footer {
+  display: none;
 }
-/* Idle: divider must not occupy layout — it would leak 7px (1px + 6px
-   margin) past the 60px idle window after a power-menu back. */
-#body.idle #divider {
+
+/* ── expanded view: tabs + list + preview ─────────────────── */
+#tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 10px 8px;
+}
+.tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.tab:hover {
+  color: var(--text);
+  background: var(--kbd-bg);
+}
+.tab.active {
+  color: var(--text);
+  background: var(--sel);
+}
+.tab:focus-visible {
+  outline: 1px solid var(--border-strong);
+}
+.tab-end {
+  margin-left: auto;
+}
+
+/* Tab filtering hides rows client-side so every node keeps its original
+   index (submit still addresses the Rust-side row by index). */
+.row.tab-hidden,
+.section.tab-hidden {
+  display: none;
+}
+
+#body-cols {
+  display: flex;
+  align-items: stretch;
+  /* Fixed expanded height: six 46px rows. More results scroll inside the
+     list instead of growing the panel, so the window never resizes while
+     typing. */
+  height: 288px;
+}
+/* Grid and bento views size themselves. */
+#body.no-preview #body-cols {
+  height: auto;
+}
+#results-col {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Expanded list fills the fixed column and scrolls past six rows. */
+#body:not(.no-preview) #list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+#preview {
+  flex: 0 0 268px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 18px 22px;
+  border-left: 1px solid var(--divider);
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+}
+/* Grid and bento views own the full width. */
+#body.no-preview #preview {
+  display: none;
+}
+#preview-empty {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  max-width: 180px;
+}
+#preview-icon {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  margin-bottom: 12px;
+}
+#preview-kind {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+#preview-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+#preview-subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#preview-open {
+  margin-top: 16px;
+  height: 32px;
+  padding: 0 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--kbd-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+#preview-open:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+}
+#preview-subtitle:empty,
+#preview-kind:empty {
   display: none;
 }
 
@@ -733,11 +880,11 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 /* ── footer ───────────────────────────────────────────────── */
-/* Hidden when results / quick-launch rows are shown; only the
-   idle window (no rows) carries the hint bar. */
+/* Visible in every search-mode state — the expanded panel keeps its
+   keyboard hints even when the list is empty. */
 #footer {
   position: relative;
-  display: none;
+  display: flex;
   align-items: center;
   height: 46px;
   margin-top: 0;
@@ -746,93 +893,109 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 11px;
   color: var(--text-faint);
 }
-#footer.idle {
-  display: flex;
-}
-#footer.ql {
-  display: flex;
-  height: 6px;
-  margin-top: 0;
-  border-top: none;
-  padding: 0;
-}
-#footer.ql .hints {
-  display: none;
-}
-#footer.ql .footer-settings {
-  display: none;
-}
-#footer .hints {
+/* Brand mark, footer left. It is a watermark, not a control: color comes
+   from the active theme's text token, so light/dark/glass-light/glass-dark
+   all get a mark that matches instead of a hardcoded grey tile. */
+.footer-mark {
   position: absolute;
-  top: 50%;
   left: var(--pad-x);
+  top: 50%;
   transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  width: 24px;
+  height: 24px;
+  color: var(--text);
+  opacity: 0.13;
   pointer-events: none;
-  white-space: nowrap;
 }
-.footer-settings {
+/* Glass has no panel fill behind it, so the mark needs a touch more
+   presence to survive a bright or busy backdrop. */
+html.glass-native .footer-mark {
+  opacity: 0.2;
+}
+/* Footer actions: a compact trigger that expands the icon list leftwards on
+   hover or keyboard focus. No dropup — the icons are the menu. */
+#footer-actions {
   position: absolute;
   right: var(--pad-x);
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   align-items: center;
+  gap: 2px;
+  pointer-events: auto;
+}
+.footer-action-list {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.18s ease, opacity 0.14s ease;
+}
+#footer-actions:hover .footer-action-list,
+#footer-actions:focus-within .footer-action-list {
+  max-width: 96px;
+  opacity: 1;
+}
+.footer-icon-btn {
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
-  pointer-events: auto;
 }
-.footer-settings:hover {
-  background: var(--kbd-bg);
+.footer-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.footer-icon-btn:hover,
+.footer-icon-btn:focus-visible {
   color: var(--text);
+  /* Opaque mix so it reads as a real control in both light and dark. */
+  background: color-mix(in srgb, var(--bg-opaque) 78%, var(--text) 22%);
 }
-.footer-settings svg {
-  width: 14px;
-  height: 14px;
+.footer-icon-btn:active {
+  background: color-mix(in srgb, var(--bg-opaque) 70%, var(--text) 30%);
 }
-.hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 8px;
-  background: var(--kbd-pill-bg);
-  border: none;
-  border-radius: 6px;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+.footer-icon-btn:focus-visible {
+  outline: 1px solid var(--border-strong);
+  outline-offset: 1px;
 }
-.hint .kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 3px;
-  background: var(--kbd-cap-bg);
-  border: 1px solid var(--kbd-cap-border);
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1;
-  color: var(--text);
-  box-shadow:
-    0 1px 0 0 rgba(255, 255, 255, 0.05) inset,
-    0 1px 1px 0 rgba(0, 0, 0, 0.30);
+/* Frosted materials: the chip follows the panel instead of painting an
+   opaque block on top of it. */
+html[data-native-material="acrylic"] .footer-icon-btn:hover,
+html[data-native-material="acrylic"] .footer-icon-btn:focus-visible,
+html.glass-native .footer-icon-btn:hover,
+html.glass-native .footer-icon-btn:focus-visible {
+  background: color-mix(in srgb, var(--bg-opaque) 52%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
 }
-.hint .lbl {
-  color: var(--text);
-  font-weight: 500;
+html[data-native-material="acrylic"] .footer-icon-btn:active,
+html.glass-native .footer-icon-btn:active {
+  background: color-mix(in srgb, var(--bg-opaque) 74%, transparent);
+}
+/* Solid panel modes keep the hover chip opaque. */
+html.bg-black .footer-icon-btn:hover,
+html.bg-white .footer-icon-btn:hover,
+html.bg-black .footer-icon-btn:focus-visible,
+html.bg-white .footer-icon-btn:focus-visible {
+  background: color-mix(in srgb, var(--bg-opaque) 80%, var(--text) 20%);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html.bg-black .footer-icon-btn:active,
+html.bg-white .footer-icon-btn:active {
+  background: color-mix(in srgb, var(--bg-opaque) 72%, var(--text) 28%);
 }
 
 /* ── power button + menu ─────────────────────────────────── */
@@ -873,8 +1036,8 @@ html[data-theme="light"] img.icon.glyph {
   position: relative;
   flex-direction: row;
   align-items: center;
-  gap: 16px;
-  padding: 16px 20px 14px;
+  gap: 20px;
+  padding: 20px 24px 18px;
 }
 
 #panel.media-open #media-view {
@@ -932,10 +1095,10 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 #media-art {
-  width: 120px;
-  height: 120px;
+  width: 148px;
+  height: 148px;
   flex: 0 0 auto;
-  border-radius: 12px;
+  border-radius: 14px;
   object-fit: cover;
   background: var(--icon-bg);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
@@ -953,6 +1116,49 @@ html[data-theme="light"] img.icon.glyph {
   flex: 1 1 auto;
   min-width: 0;
   gap: 2px;
+}
+
+/* "Now playing" eyebrow with a live equalizer — bars animate only while
+   the session is actually playing. */
+.media-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 7px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.media-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+}
+.media-eq i {
+  display: block;
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--accent);
+  transform-origin: bottom;
+  animation: mediaEq 900ms ease-in-out infinite;
+}
+.media-eq i:nth-child(2) { animation-delay: -300ms; }
+.media-eq i:nth-child(3) { animation-delay: -600ms; }
+.media-eq i:nth-child(4) { animation-delay: -150ms; }
+.media-eq.paused i {
+  animation-play-state: paused;
+  transform: scaleY(0.35);
+}
+@keyframes mediaEq {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-eq i { animation: none; }
 }
 
 .media-title {
@@ -1444,20 +1650,20 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-history-empty { padding: 16px 10px; color: var(--text-faint); font-size: 11px; text-align: center; }
 
 .chat-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 12px 22px 8px; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
-.chat-empty { max-width: 480px; margin: clamp(32px, 9vh, 86px) auto 32px; text-align: center; }
+.chat-empty { max-width: 520px; margin: clamp(32px, 9vh, 86px) auto 32px; text-align: center; }
 .chat-empty-mark { height: 34px; display: flex; justify-content: center; align-items: end; gap: 4px; margin-bottom: 13px; }
 .chat-empty-mark span { width: 5px; border-radius: 4px; background: var(--accent); opacity: 0.76; }
 .chat-empty-mark span:nth-child(1) { height: 13px; opacity: .46; }
 .chat-empty-mark span:nth-child(2) { height: 26px; }
 .chat-empty-mark span:nth-child(3) { height: 18px; opacity: .6; }
 .chat-empty-title { font-size: 19px; line-height: 24px; font-weight: 550; letter-spacing: -0.035em; text-wrap: balance; }
-.chat-empty-copy { max-width: 350px; margin: 7px auto 0; color: var(--text-faint); font-size: 12px; line-height: 18px; text-wrap: pretty; }
+.chat-empty-copy { max-width: 400px; margin: 7px auto 0; color: var(--text-faint); font-size: 12px; line-height: 18px; text-wrap: pretty; }
 .chat-suggestions { display: flex; justify-content: center; flex-wrap: wrap; gap: 7px; margin-top: 21px; }
 .chat-suggestions button { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 11px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text-dim); font: 11px var(--font); cursor: pointer; }
 .chat-suggestions button:hover { background: var(--hover); color: var(--text); }
 .chat-suggestions button span { color: var(--text-faint); }
 
-#chat-messages { display: flex; flex-direction: column; gap: 11px; max-width: 590px; margin: 0 auto; }
+#chat-messages { display: flex; flex-direction: column; gap: 11px; max-width: 680px; margin: 0 auto; }
 .chat-message { width: fit-content; max-width: min(86%, 550px); min-width: 0; color: var(--text); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .chat-message.user { align-self: flex-end; padding: 7px 11px; border-radius: 11px 11px 3px 11px; background: rgba(255,255,255,0.075); color: var(--text); }
 [data-theme="light"] .chat-message.user { background: rgba(0,0,0,0.055); }
@@ -1499,7 +1705,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg-opaque) 92%, transparent); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0,0,0,.22); color: var(--text); font-size: 11px; line-height: 1.3; pointer-events: none; }
 .nex-tip .kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 3px; background: var(--kbd-cap-bg); border: 1px solid var(--kbd-cap-border); font-size: 10px; font-weight: 500; line-height: 1; color: var(--text); }
 
-.chat-live-status { min-height: 16px; max-width: 590px; margin: 6px auto 0; color: var(--text-faint); font-size: 10px; }
+.chat-live-status { min-height: 16px; max-width: 680px; margin: 6px auto 0; color: var(--text-faint); font-size: 10px; }
 .chat-live-status:empty { display: none; }
 /* Status surfaces off: no equivalent in their UI; elements and logic
    stay for later. */
@@ -1524,7 +1730,7 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 #chat-input::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
 #chat-input::placeholder { color: var(--text-faint); }
 .chat-composer-tools { display: flex; flex: 0 0 auto; align-items: center; align-self: center; gap: 3px; }
-.chat-composer-footer { max-width: 590px; min-height: 16px; display: flex; align-items: center; gap: 12px; margin: 3px auto 0; }
+.chat-composer-footer { max-width: 680px; min-height: 16px; display: flex; align-items: center; gap: 12px; margin: 3px auto 0; }
 .chat-send-button { width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer; transition: opacity 120ms ease, transform 120ms ease; }
 .chat-send-button:disabled { opacity: .42; cursor: default; }
 .chat-send-button:not(:disabled):active { transform: scale(0.96); }

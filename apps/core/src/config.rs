@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 24;
+pub const CURRENT_CONFIG_VERSION: u32 = 25;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -242,8 +242,6 @@ impl WebSearchProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickLaunchConfig {
-    /// Enable the Quick Launch feature (show pinned/frequent apps on idle).
-    pub enabled: bool,
     /// Maximum number of items shown in Quick Launch.
     pub max_items: u8,
     /// Apps pinned by the user — always appear first, in this order.
@@ -303,7 +301,6 @@ pub fn normalize_bookmark_url(input: &str) -> Result<String, String> {
 impl Default for QuickLaunchConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             max_items: 6,
             pinned: Vec::new(),
             // The idle panel is the expanded browse view: with nothing
@@ -391,6 +388,14 @@ mod view_mode_tests {
         // Only the expanded view fills the idle panel with apps.
         assert!(!ViewMode::Compact.shows_idle_feed());
         assert!(ViewMode::Expanded.shows_idle_feed());
+    }
+
+    #[test]
+    fn section_bool_reads_the_removed_switch() {
+        let raw = "grid_view = true\n[quick_launch]\nenabled = false\nmax_items = 9\n\n[web]\nenabled = true\n";
+        assert_eq!(raw_section_bool(raw, "quick_launch", "enabled"), Some(false));
+        assert_eq!(raw_section_bool(raw, "web", "enabled"), Some(true));
+        assert_eq!(raw_section_bool(raw, "missing", "enabled"), None);
     }
 }
 
@@ -1019,11 +1024,8 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str(&plugin_paths_section);
     text.push_str("\n\n");
 
-    text.push_str("# Quick Launch: show pinned/frequent apps when the overlay is idle (empty query).\n");
+    text.push_str("# Quick Launch: the idle app list. Compact view mode hides it.\n");
     text.push_str("[quick_launch]\n");
-    text.push_str("enabled = ");
-    text.push_str(if cfg.quick_launch.enabled { "true" } else { "false" });
-    text.push('\n');
     text.push_str("# Maximum number of Quick Launch items (valid range: 3..12)\n");
     text.push_str("max_items = ");
     text.push_str(&cfg.quick_launch.max_items.to_string());
@@ -1457,9 +1459,6 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
             let mut quick_launch = Config::default().quick_launch;
             
             // Try to read old flat format keys
-            if raw_has_key(raw, "quick_launch_enabled") {
-                quick_launch.enabled = raw_extract_bool(raw, "quick_launch_enabled").unwrap_or(true);
-            }
             if raw_has_key(raw, "quick_launch_max_items") {
                 quick_launch.max_items = raw_extract_u8(raw, "quick_launch_max_items").unwrap_or(6);
             }
@@ -1520,6 +1519,18 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         // Existing installs keep the expanded idle feed they already have;
         // compact is opt-in from Settings.
         cfg.view_mode = ViewMode::Expanded;
+        changed = true;
+    }
+
+    if source_version < 25 {
+        // Quick Launch lost its own on/off switch: the View setting owns the
+        // idle feed now. Anyone who had turned it off gets compact, so the
+        // upgrade does not suddenly fill their idle panel.
+        let was_enabled = raw_section_bool(raw, "quick_launch", "enabled")
+            .or_else(|| raw_extract_bool(raw, "quick_launch_enabled"));
+        if was_enabled == Some(false) {
+            cfg.view_mode = ViewMode::Compact;
+        }
         changed = true;
     }
 
@@ -1599,6 +1610,33 @@ fn raw_extract_bool(raw: &str, key: &str) -> Option<bool> {
     for pattern in &patterns {
         if raw.contains(pattern.as_str()) {
             return Some(false);
+        }
+    }
+    None
+}
+
+/// Extract `key` from a TOML table. Needed for settings that were removed from
+/// the struct: the migration has to read the old file directly.
+fn raw_section_bool(raw: &str, section: &str, key: &str) -> Option<bool> {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line.eq_ignore_ascii_case(&header);
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(key) {
+            if let Some(value) = rest.trim_start().strip_prefix('=') {
+                return match value.trim() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                };
+            }
         }
     }
     None

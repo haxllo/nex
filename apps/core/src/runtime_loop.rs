@@ -838,12 +838,6 @@ impl RuntimeWorker {
     }
 
     fn load_quick_launch_items(&mut self) {
-        if !self.runtime_config.quick_launch.enabled {
-            self.quick_launch_items.clear();
-            self.quick_launch_loaded = true;
-            return;
-        }
-
         let max_items = self.runtime_config.quick_launch.max_items as usize;
         let pinned = &self.runtime_config.quick_launch.pinned;
         log_info(&format!("[nex] quick_launch loading pinned={:?}", pinned));
@@ -900,11 +894,6 @@ impl RuntimeWorker {
     /// Load Quick Launch items from in-memory config (no disk read).
     /// Used after pin/unpin to avoid race with config reloader.
     fn load_quick_launch_items_from_config(&mut self) {
-        if !self.runtime_config.quick_launch.enabled {
-            self.quick_launch_items.clear();
-            return;
-        }
-
         let max_items = self.runtime_config.quick_launch.max_items as usize;
         // Use the in-memory pinned list (already updated)
         let pinned = self.runtime_config.quick_launch.pinned.clone();
@@ -985,7 +974,7 @@ impl RuntimeWorker {
     /// page skips re-animation and nothing visibly pops.
     fn prepare_idle_content(&mut self) {
         self.load_quick_launch_items();
-        if self.runtime_config.quick_launch.enabled && !self.quick_launch_loaded {
+        if !self.quick_launch_loaded {
             let snap = Self::load_ql_snapshot_from(&Self::ql_snapshot_path());
             if !snap.is_empty() {
                 self.quick_launch_items = snap.clone();
@@ -1037,7 +1026,6 @@ impl RuntimeWorker {
     /// Show Quick Launch items in idle state if available.
     fn show_idle_or_quick_launch(&mut self) {
         if self.runtime_config.view_mode.shows_idle_feed()
-            && self.runtime_config.quick_launch.enabled
             && !self.quick_launch_items.is_empty()
         {
             crate::runtime_overlay_rows::set_quick_launch_overlay_state(
@@ -1701,7 +1689,6 @@ impl RuntimeWorker {
         // path opens the overlay immediately even when the service lock is
         // contended, so fill the idle view as soon as the lock frees.
         if !self.quick_launch_loaded
-            && self.runtime_config.quick_launch.enabled
             && self.overlay.is_visible()
             && self.overlay.query_text().trim().is_empty()
         {

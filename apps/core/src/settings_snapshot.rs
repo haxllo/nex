@@ -14,8 +14,6 @@ struct SettingsSaveCfg {
     grid_view: Option<bool>,
     #[serde(default, rename = "maxResults")]
     max_results: Option<u16>,
-    #[serde(default, rename = "quickLaunchEnabled")]
-    quick_launch_enabled: Option<bool>,
     #[serde(default, rename = "quickLaunchMaxItems")]
     quick_launch_max_items: Option<u8>,
     #[serde(default, rename = "quickLaunchAutoFill")]
@@ -73,9 +71,6 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
         crate::settings::validate_max_results(v)
             .map_err(|e| format!("invalid maxResults: {e}"))?;
         cfg.max_results = v;
-    }
-    if let Some(v) = cfg_obj.quick_launch_enabled {
-        cfg.quick_launch.enabled = v;
     }
     if let Some(v) = cfg_obj.quick_launch_max_items {
         if !(3..=12).contains(&v) {
@@ -138,7 +133,6 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
     serde_json::json!({
         "gridView": cfg.grid_view,
         "maxResults": cfg.max_results,
-        "quickLaunchEnabled": cfg.quick_launch.enabled,
         "quickLaunchMaxItems": cfg.quick_launch.max_items,
         "quickLaunchAutoFill": cfg.quick_launch.auto_fill,
         "indexMaxItemsTotal": cfg.index_max_items_total,

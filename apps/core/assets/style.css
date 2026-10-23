@@ -11,6 +11,8 @@
   --radius: 8px;
   --row-radius: 8px;
   --pad-x: 16px;
+  /* Width of the detail pane; the body divider anchors to it. */
+  --preview-w: 268px;
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   /* dark palette */
@@ -266,8 +268,26 @@ body {
 }
 
 #body {
+  position: relative;
   display: flex;
   flex-direction: column;
+}
+
+/* Column divider between results and the detail pane. It lives on the body,
+   not the preview, so it runs the full height — up through the tab row —
+   instead of starting below the tabs. */
+#body::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: var(--preview-w);
+  width: 1px;
+  background: var(--divider);
+  pointer-events: none;
+}
+#body.no-preview::after {
+  display: none;
 }
 
 /* Nothing to list: the panel is the search bar and nothing else. Compact
@@ -346,14 +366,13 @@ html.bare #footer {
 }
 
 #preview {
-  flex: 0 0 268px;
+  flex: 0 0 var(--preview-w);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 2px;
   padding: 18px 22px;
-  border-left: 1px solid var(--divider);
   text-align: center;
   min-width: 0;
   overflow: hidden;

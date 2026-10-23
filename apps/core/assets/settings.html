@@ -300,10 +300,18 @@
     line-height: 1;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  .field:hover { border-color: var(--border-strong); }
+  /* Dropdowns have no hover edge: the popup is the feedback. */
+  .field:not(.dropdown):hover { border-color: var(--border-strong); }
   .field:focus-within {
     border-color: var(--field-focus-border);
     box-shadow: inset 0 0 0 1px var(--field-focus-inner);
+  }
+  /* A dropdown is driven by a button, so focusing its trigger must not paint
+     the field focus ring on the whole control. Open state has its own
+     hairline (.dropdown.open). */
+  .field.dropdown:not(.open):focus-within {
+    border-color: var(--input-border);
+    box-shadow: none;
   }
   .field input {
     width: 56px;
@@ -379,8 +387,10 @@
     color: var(--fg);
   }
   .dropdown.open {
+    /* One light hairline. The inset highlight that used to sit here read as
+       a second, whiter border around the trigger. */
     border-color: var(--field-focus-border);
-    box-shadow: inset 0 0 0 1px var(--field-focus-inner);
+    box-shadow: none;
   }
 
   .dd-popup {
@@ -802,7 +812,7 @@
             <div class="row">
               <div class="row-label">
                 <span class="name">View</span>
-                <span class="hint">Compact keeps a bare search bar until you type; expanded lists your apps while idle.</span>
+                <span class="hint">Compact hides the idle app list</span>
               </div>
               <div class="field row-control field-wrap dropdown" id="viewMode"
                    data-options='[{"v":"expanded","l":"Expanded"},{"v":"compact","l":"Compact"}]'>
@@ -825,16 +835,8 @@
           <div class="group-rows">
             <div class="row">
               <div class="row-label">
-                <span class="name">Enable Quick Launch</span>
-              </div>
-              <label class="toggle row-control">
-                <input type="checkbox" id="quickLaunchEnabled"/>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="row">
-              <div class="row-label">
                 <span class="name">Auto-Fill Selection</span>
+                <span class="hint">Fill unused slots with the apps you open most</span>
               </div>
               <label class="toggle row-control">
                 <input type="checkbox" id="quickLaunchAutoFill"/>

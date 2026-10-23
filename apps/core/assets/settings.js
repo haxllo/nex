@@ -3,7 +3,6 @@ const FIELDS = [
   ["showFiles", "checked"],
   ["showFolders", "checked"],
   ["launchAtStartup", "checked"],
-  ["quickLaunchEnabled", "checked"],
   ["quickLaunchAutoFill", "checked"],
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],

@@ -371,6 +371,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // apply_window_chrome ran before the layer existed and before this HWND
     // was cached, so settle the capture flag now that both are known.
     sync_capture_exclusion(&state);
+    // Boot-ghost probe: log any nex top-level window DWM would compose while
+    // the panel is hidden (see spawn_boot_watchdog doc).
+    spawn_boot_watchdog(hwnd, &state);
 
     // Start suppression comes from the injected menu-mask key (see
     // overlay::hotkey); raw input is registered with RIDEV_INPUTSINK
@@ -2307,6 +2310,136 @@ fn refresh_pointer_over_panel(
     if let Ok(mut s) = state.lock() {
         s.pointer_over_panel = inside;
     }
+}
+
+/// Boot-ghost watchdog. A reported startup artifact — a ~2px DWM border ring
+/// around a ~760x60 area at the cascade position — survives until the first
+/// hotkey press and dies when the first show-hide cycle flips the host from
+/// `hidden` to `cloaked` and re-anchors it, so something nex-owned is being
+/// composed while everything is supposed to be hidden. It does not reproduce
+/// on manual restarts (verified: 8 restart cycles, 160 frames, nothing
+/// composed); it needs the boot environment. This watchdog samples every
+/// process top-level window (IsWindowVisible, DWMWA_CLOAK, DWMWA_BORDER_COLOR,
+/// GetWindowRect) for 120 s after startup and logs with change detection, so
+/// a live boot records the composed-while-hidden culprit's class and rect.
+/// Log-only; no behavior change. Remove once the boot artifact is identified.
+fn spawn_boot_watchdog(hwnd: HWND, state: &Arc<Mutex<ShimState>>) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmGetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    #[derive(Default, Clone, PartialEq)]
+    struct Row {
+        hwnd: isize,
+        class: String,
+        vis: bool,
+        cloak: Option<u32>,
+        border: Option<u32>,
+        l: i32,
+        t: i32,
+        r: i32,
+        b: i32,
+    }
+
+    let fmt_row = |r: &Row| -> String {
+        format!(
+            "hwnd=0x{:X} cls={} vis={} cloak={:?} border={:?} rect=({},{})-({},{}) size={}x{}",
+            r.hwnd as usize,
+            r.class,
+            r.vis as u8,
+            r.cloak,
+            r.border,
+            r.l, r.t, r.r, r.b,
+            r.r - r.l, r.b - r.t
+        )
+    };
+
+    unsafe extern "system" fn each_row(h: HWND, param: isize) -> i32 {
+        let rows = &mut *(param as *mut Vec<Row>);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(h, &mut pid);
+        if pid != GetCurrentProcessId() {
+            return 1;
+        }
+        let mut class_buf = [0u16; 64];
+        let len = GetClassNameW(h, class_buf.as_mut_ptr(), 64);
+        let class = String::from_utf16_lossy(&class_buf[..(len as usize).min(64)]);
+        let glob = |attr: u32| -> Option<u32> {
+            let mut v: u32 = 0;
+            let hr = DwmGetWindowAttribute(h, attr, &mut v as *mut u32 as *mut std::ffi::c_void, 4);
+            if hr >= 0 { Some(v) } else { None }
+        };
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(h, &mut rc);
+        rows.push(Row {
+            hwnd: h as isize,
+            class,
+            vis: IsWindowVisible(h) != 0,
+            cloak: glob(DWMWA_CLOAKED as u32),
+            border: glob(DWMWA_BORDER_COLOR as u32),
+            l: rc.left,
+            t: rc.top,
+            r: rc.right,
+            b: rc.bottom,
+        });
+        1
+    }
+
+    let probe_all = |rows: &mut Vec<Row>| {
+        rows.clear();
+        unsafe {
+            EnumWindows(Some(each_row), rows as *mut _ as isize);
+        }
+    };
+
+    let _ = hwnd;
+    let state = state.clone();
+    std::thread::Builder::new()
+        .name("nex-boot-watch".into())
+        .spawn(move || {
+            let start = std::time::Instant::now();
+            let deadline = start + std::time::Duration::from_secs(120);
+            let mut prev_rows: Vec<Row> = Vec::new();
+            let mut rows: Vec<Row> = Vec::new();
+            let mut first = true;
+            let mut anomaly_frames = 0u32;
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                probe_all(&mut rows);
+                let shown = state.lock().map(|s| s.visible).unwrap_or(false);
+                for row in &rows {
+                    if first || !prev_rows.iter().any(|p| p == row) {
+                        crate::logging::info(&format!(
+                            "[nex][boot-watch] t={}ms {}",
+                            start.elapsed().as_millis(),
+                            fmt_row(row)
+                        ));
+                    }
+                    // Ghost candidate: composed (visible + uncloaked) while the
+                    // panel is supposed to be hidden.
+                    if !shown && row.vis && row.cloak.unwrap_or(1) == 0 && row.r > row.l && row.b > row.t {
+                        anomaly_frames += 1;
+                        crate::logging::warn(&format!(
+                            "[nex][boot-watch] COMPOSED-WHILE-HIDDEN t={}ms {}",
+                            start.elapsed().as_millis(),
+                            fmt_row(row)
+                        ));
+                    }
+                }
+                prev_rows.clone_from(&rows);
+                first = false;
+            }
+            crate::logging::info(&format!(
+                "[nex][boot-watch] done composed_while_hidden_frames={}",
+                anomaly_frames
+            ));
+        })
+        .ok();
 }
 
 /// Whether a window showing this panel material has to stay out of screen

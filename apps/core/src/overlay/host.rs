@@ -1112,6 +1112,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+                    crate::overlay_state::OverlayState::notify_show_painted();
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Cloak fallback: if focus is still ours the invisible
                     // window owns the foreground and typing would land in
@@ -1175,6 +1176,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     reset_raw_win_state();
                     hide_overlay_window(hwnd, &window, &glass_layer, &state);
                     OVERLAY_VISIBLE.store(false, Ordering::SeqCst);
+                    crate::overlay_state::OverlayState::notify_show_painted();
                     restore_fg_stack(&mut fg_stack, hwnd);
                     // Same cloak fallback as Hide (see above).
                     if unsafe { GetForegroundWindow() } == hwnd {
@@ -1349,6 +1351,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         request_foreground(hwnd);
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
+                        // The window is really on screen now; further hotkey
+                        // presses toggle/refocus through the normal paths.
+                        crate::overlay_state::OverlayState::notify_show_painted();
                         // Reveal the glass before the focus work: the page is
                         // on screen now, so this only shortens the gap where
                         // the panel has no backdrop, and nothing here can put

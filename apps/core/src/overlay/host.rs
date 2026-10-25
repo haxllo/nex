@@ -314,11 +314,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .map_err(|e| format!("failed to create overlay window: {e}"))?;
 
     let hwnd = window.hwnd() as HWND;
+    strip_caption_frame(hwnd);
     crate::overlay::hotkey::set_overlay_hwnd(hwnd as isize);
     if let Ok(mut s) = state.lock() {
         s.hwnd = hwnd as isize;
     }
-    let acrylic_available = apply_window_chrome(&window, &state);
     // Native refraction layer (enabled by default; NEX_REFRACT_LAB=0 opts
     // out) sits below the WebView. Create it before build_webview so it
     // stays lower in z-order without needing the WebView HWND. Any
@@ -342,6 +342,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         // both per frame (the worker reports back via GlassPalette).
         s.glass_light = s.theme == Theme::Light;
     }
+    // Chrome must wait for the glass_native latch above. Applied before it,
+    // the hidden host sat with DWMWA_BORDER_COLOR=DEFAULT + rounded corners +
+    // a TRANSIENTWINDOW backdrop — and DWM composed that default frame as a
+    // ~2px ring around the never-shown 760x60 window (the boot ghost). With
+    // the latch first, glass sessions start border-NONE + DONOTROUND.
+    // Border stays suppressed regardless of panel mode: DWM composes the
+    // frame ring around the hidden window even for opaque panels.
+    let acrylic_available = apply_window_chrome(&window, &state, true);
     // The worker seeds its material from the same theme before the
     // first frame, so page palette and native tint start in step.
     if let Some(layer) = glass_layer.as_ref() {
@@ -1051,7 +1059,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             .unwrap_or(true);
                         layer.set_theme(dark);
                     }
-                    apply_window_chrome(&window, &state);
+                    apply_window_chrome(&window, &state, false);
                     // Wake the renderer before the page paints: its present
                     // lands while the glass window is still cloaked, so the
                     // reveal carries this desktop, not the last session's.
@@ -2794,7 +2802,11 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 // ─────────────────────────────────────────────────────────────────
 
 /// Apply DWM's real desktop acrylic, with legacy acrylic as a Windows 10 fallback.
-fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
+/// `suppress_border` is for the creation-time call, before the host is ever
+/// shown: DWM composes the default frame ring around the hidden window (the
+/// boot ghost), so the border must stay NONE until the first show re-applies
+/// real chrome.
+fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_border: bool) -> bool {
     let (dark, glass_native, opaque_panel) = state.lock().map(|s| {
         (
             s.theme == Theme::Dark,
@@ -2815,7 +2827,7 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>) -> bool {
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
     // Native glass already shades its own edge. A second system frame
     // reads as an unrelated hard outline (especially on bright backdrops).
-    let border_color: u32 = if glass_native && !opaque_panel { 0xFFFFFFFE } else { 0xFFFFFFFF };
+    let border_color: u32 = if suppress_border || (glass_native && !opaque_panel) { 0xFFFFFFFE } else { 0xFFFFFFFF };
     let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
 
     // Keep DWM acrylic for the fallback path. With the native refraction
@@ -2865,6 +2877,40 @@ fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
             value as *const T as *const std::ffi::c_void,
             std::mem::size_of::<T>() as u32,
         ) >= 0
+    }
+}
+
+/// Remove the caption frame tao always adds (window_state.rs forces
+/// WS_CAPTION on every window). While the host was never shown, DWM still
+/// composes that frame even with `DWMWA_BORDER_COLOR=NONE`: first as a
+/// rounded ~2px ring, and once the border color is suppressed as a dark
+/// 1px top line (`DWMWA_VISIBLE_FRAME_BORDER_THICKNESS=1`). Verified live:
+/// stripping the caption bits + WS_POPUP removes both. The overlay is
+/// decoration-less and never moves via a caption, so the style is dead
+/// weight; the first show re-applies real chrome for the visible panel.
+/// (tao re-derives styles on its own state syncs, but the only pre-show
+/// sync happens at creation — after that the host goes cloak-on-hide,
+/// which DWM does not compose.)
+fn strip_caption_frame(hwnd: HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongW, SetWindowPos, SetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU,
+    };
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let stripped = (style & !(WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
+            | WS_POPUP;
+        SetWindowLongW(hwnd, GWL_STYLE, stripped as i32);
+        let _ = SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 

@@ -2663,10 +2663,19 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
             };
             // r.icon_path carries the real executable/filesystem path.
             // r.path is the display subtitle (publisher name for UWP apps).
-            let file_path = if r.icon_path.is_empty() {
+            // Start-menu shortcuts arrive as shell:AppsFolder\{GUID}\… URIs;
+            // clients launching / copying / locating files need the real
+            // path when one exists.
+            let raw_target = r.icon_path.trim().to_string();
+            let resolved = if raw_target.is_empty() {
+                None
+            } else {
+                crate::action_executor::resolve_shell_appsfolder_path(&raw_target)
+            };
+            let file_path = if raw_target.is_empty() {
                 serde_json::Value::Null
             } else {
-                serde_json::Value::String(r.icon_path.clone())
+                serde_json::Value::String(resolved.unwrap_or(raw_target))
             };
             let tile_size = r.tile_size.as_ref().map(|t| match t {
                 TileSize::Small => "small",
@@ -2686,6 +2695,9 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
                 "clipboardThumbnail": r.clipboard_thumbnail,
                 "clipboardFullImage": r.clipboard_full_image,
                 "tileSize": tile_size,
+                "commandKind": r.command_kind,
+                "launchCount": r.launch_count,
+                "lastLaunchedAt": r.last_launched_at,
             })
         })
         .collect();

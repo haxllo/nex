@@ -24,6 +24,14 @@ pub struct OverlayRow {
     pub clipboard_full_image: Option<String>,
     /// Tile size for bento grid layout.
     pub tile_size: Option<TileSize>,
+    /// Stable glyph key for command rows ("" when the row already has an
+    /// icon path or is not a command). Derived from the action id prefix
+    /// in `result_row`; the page maps it to an inline SVG icon.
+    pub command_kind: String,
+    /// Launch stats for the detail pane ("Launched N times · 2h ago").
+    /// Zero when the row carries no usage history.
+    pub launch_count: u32,
+    pub last_launched_at: i64,
 }
 
 /// Tile sizes for the clipboard history bento grid.

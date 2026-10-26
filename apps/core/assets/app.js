@@ -22,6 +22,12 @@
   const previewKind = $("preview-kind");
   const previewTitle = $("preview-title");
   const previewSubtitle = $("preview-subtitle");
+  const previewPath = $("preview-path");
+  const previewStats = $("preview-stats");
+  const previewGlyph = $("preview-glyph");
+  const previewOpenRow = $("preview-open-row");
+  const previewMore = $("preview-more");
+  const previewDropup = $("preview-dropup");
   const previewOpen = $("preview-open");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
@@ -233,6 +239,41 @@
   function webIcon() {
     return document.documentElement.dataset.theme === "light" ? WEB_ICON_DARK : WEB_ICON_LIGHT;
   }
+
+  // ── command-row glyph icons (@ command mode) ─────────────
+  // Inline SVGs (stroke follows --text via currentColor) — no icon decode,
+  // no cache. Keyed by the Rust-pushed commandKind; anything unknown gets
+  // the generic bolt. Each factory returns a fresh <svg>.
+  function cmdSvg(paths, strokeWidth) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "24");
+    svg.setAttribute("height", "24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", String(strokeWidth || 1.6));
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.innerHTML = paths;
+    return svg;
+  }
+  const COMMAND_ICONS = {
+    clipboard: () => cmdSvg('<rect x="5" y="4" width="14" height="17" rx="2.5"/><path d="M9 4.5V3.6a1.6 1.6 0 0 1 1.6 -1.6h2.8a1.6 1.6 0 0 1 1.6 1.6v0.9"/><line x1="8.6" y1="10" x2="15.4" y2="10"/><line x1="8.6" y1="13.5" x2="15.4" y2="13.5"/>'),
+    logs: () => cmdSvg('<rect x="5" y="3.5" width="14" height="17" rx="2.5"/><line x1="8.6" y1="9.5" x2="15.4" y2="9.5"/><line x1="8.6" y1="13" x2="15.4" y2="13"/><line x1="8.6" y1="16.5" x2="12.4" y2="16.5"/>'),
+    config: () => cmdSvg('<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2" fill="var(--bg)"/><circle cx="14.5" cy="12" r="2" fill="var(--bg)"/><circle cx="8" cy="17" r="2" fill="var(--bg)"/>'),
+    update: () => cmdSvg('<path d="M20 12a8 8 0 1 1-2.34-5.66"/><polyline points="20.5 3.5 20 8 15.5 7.4"/>'),
+    uninstall: () => cmdSvg('<path d="M4.5 6.5h15"/><path d="M9.5 6.5V4.9a1.4 1.4 0 0 1 1.4 -1.4h2.2a1.4 1.4 0 0 1 1.4 1.4v1.6"/><path d="M6.2 6.6l0.9 13a1.6 1.6 0 0 0 1.6 1.4h6.6a1.6 1.6 0 0 0 1.6 -1.4l0.9 -13"/>'),
+    folder: () => cmdSvg('<path d="M3.5 6.2a1.8 1.8 0 0 1 1.8 -1.8h4.2l2.2 2.4h6.9a1.7 1.7 0 0 1 1.7 1.7v9.4a1.9 1.9 0 0 1-1.9 1.9H5.3a1.8 1.8 0 0 1-1.8 -1.8z"/>'),
+    create_folder: () => cmdSvg('<path d="M3.5 6.2a1.8 1.8 0 0 1 1.8 -1.8h4.2l2.2 2.4h6.9a1.7 1.7 0 0 1 1.7 1.7v9.4a1.9 1.9 0 0 1-1.9 1.9H5.3a1.8 1.8 0 0 1-1.8 -1.8z"/><line x1="12" y1="11.5" x2="12" y2="17.5"/><line x1="9" y1="14.5" x2="15" y2="14.5"/>'),
+    file: () => cmdSvg('<path d="M6.5 3.8h7.2L18 8v11.2a1.3 1.3 0 0 1-1.3 1.3H7.8a1.3 1.3 0 0 1-1.3 -1.3z"/><polyline points="13.4 3.9 13.4 8.1 17.9 8.1"/>'),
+    create_file: () => cmdSvg('<path d="M6.5 3.8h7.2L18 8v11.2a1.3 1.3 0 0 1-1.3 1.3H7.8a1.3 1.3 0 0 1-1.3 -1.3z"/><polyline points="13.4 3.9 13.4 8.1 17.9 8.1"/><line x1="10" y1="14.5" x2="14" y2="14.5"/><line x1="12" y1="12.5" x2="12" y2="16.5"/>'),
+    url: () => cmdSvg('<circle cx="12" cy="12" r="8.2"/><path d="M4 12h16"/><path d="M12 3.8c2.6 2.3 3.9 5 3.9 8.2s-1.3 5.9-3.9 8.2c-2.6-2.3-3.9-5-3.9-8.2s1.3-5.9 3.9-8.2z"/>'),
+    web: () => cmdSvg('<circle cx="12" cy="12" r="8.2"/><path d="M4 12h16"/><path d="M12 3.8c2.6 2.3 3.9 5 3.9 8.2s-1.3 5.9-3.9 8.2c-2.6-2.3-3.9-5-3.9-8.2s1.3-5.9 3.9-8.2z"/>'),
+    settings: () => cmdSvg('<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2"/><circle cx="14.5" cy="12" r="2"/><circle cx="8" cy="17" r="2"/>'),
+  };
+  const ICON_GENERIC_COMMAND = () => cmdSvg('<path d="M12.6 3.2L6.4 12.4h4.4L9.8 20.8 17.6 9.6h-4.2z"/>');
 
   const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatPickerNavigate", "chatPickerAdd"]);
   function post(t, v) {
@@ -474,17 +515,28 @@
         ph.className = "icon placeholder";
         li.appendChild(ph);
       }
-      // Web search row — use themed web icon
-      if (r.kind === "action" && r.title && r.title.startsWith("Search Web for")) {
-        const img = document.createElement("img");
-        img.className = "icon";
-        img.src = webIcon();
-        li.appendChild(img);
+      // Command rows (built-ins, uninstall, create/open file/folder) draw
+      // an inline glyph instead of a decoded file icon. Web-search/URL rows
+      // already got the web icon above, so only still-empty rows reach this.
+      if (r.kind === "action" && !li.querySelector(":scope > .icon")) {
+        const glyph = document.createElement("div");
+        const svg = COMMAND_ICONS[r.commandKind] || ICON_GENERIC_COMMAND;
+        glyph.className = "icon cmd-icon";
+        glyph.appendChild(svg());
+        li.appendChild(glyph);
       }
     }
 
+    // Icon-less rows (calculator, command actions) get a hidden spacer so
+    // the text column starts where icon rows start — otherwise mixed
+    // results show text jumping between two left edges.
+    if (!li.querySelector(":scope > .icon")) {
+      const spacer = document.createElement("div");
+      spacer.className = "icon icon-spacer";
+      li.appendChild(spacer);
+    }
+
     const text = document.createElement("div");
-    text.className = "text";
     const title = document.createElement("div");
     title.className = "title";
     title.textContent = r.title;
@@ -718,7 +770,7 @@
   }
 
   // Right-hand preview for the highlighted row: big icon, title, subtitle,
-  // and the same action Enter would take.
+  // full launch path, usage stats and secondary actions.
   function renderPreview() {
     const r = currentRows[selected];
     const fullWidth =
@@ -732,18 +784,143 @@
     }
     previewEmpty.classList.add("hidden");
     previewCard.classList.remove("hidden");
-    previewKind.textContent = r.kind || (r.role === "quick_launch" ? "App" : "");
-    previewTitle.textContent = r.title || "";
-    previewSubtitle.textContent = r.subtitle || "";
+
+    // Calculator rows carry "= expr" in title and the result in subtitle —
+    // show the result big, the input expression small.
+    const isCalc = r.kind === "calculator";
+    previewKind.textContent = isCalc ? "Calculator"
+      : (r.kind || (r.role === "quick_launch" ? "App" : ""));
+    previewTitle.textContent = isCalc ? (r.subtitle || "") : (r.title || "");
+    previewTitle.classList.toggle("big", isCalc);
+    previewSubtitle.textContent = isCalc ? (r.title || "") : (r.subtitle || "");
+
+    // Full un-abbreviated launch path (rows show only 3 path segments).
+    const fp = (!r.url && !isCalc && typeof r.filePath === "string") ? r.filePath : "";
+    const showPath = fp
+      && (/^[a-z]:[\\/]/i.test(fp) || fp.startsWith("\\\\"))
+      && !fp.endsWith(".png")
+      && fp !== r.subtitle;
+    previewPath.textContent = showPath ? fp : "";
+    previewPath.classList.toggle("hidden", !showPath);
+
+    previewStats.textContent = r.launchCount > 0
+      ? `Launched ${r.launchCount}×${r.lastLaunchedAt > 0 ? " · " + relTime(r.lastLaunchedAt) : ""}`
+      : "";
+    previewStats.classList.toggle("hidden", !previewStats.textContent);
+
+    closePreviewDropup();
+    renderPreviewVerbs(r);
+
+    // Icon mirrors the row's image; command rows carry an inline SVG glyph
+    // instead of an img — clone it into the preview.
     const li = rowMap.get(selected);
     const img = li ? li.querySelector("img.icon") : null;
+    const glyphNode = li && !img ? li.querySelector(".icon.cmd-icon") : null;
     if (img && img.src) {
       if (previewIcon.src !== img.src) previewIcon.src = img.src;
       previewIcon.classList.remove("hidden");
+      previewGlyph.classList.add("hidden");
+      previewGlyph.replaceChildren();
+    } else if (glyphNode) {
+      previewIcon.classList.add("hidden");
+      previewIcon.removeAttribute("src");
+      const svg = glyphNode.querySelector("svg");
+      previewGlyph.replaceChildren(svg ? svg.cloneNode(true) : null);
+      previewGlyph.classList.remove("hidden");
     } else {
       previewIcon.classList.add("hidden");
       previewIcon.removeAttribute("src");
+      previewGlyph.classList.add("hidden");
+      previewGlyph.replaceChildren();
     }
+  }
+
+  // Drop-up beside Open: every context-menu verb (minus Open itself) for
+  // the highlighted row, with the same visibility rules as the context
+  // menu and matching order.
+  function renderPreviewVerbs(r) {
+    previewDropup.replaceChildren();
+    const mk = (action, label) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.dataset.action = action;
+      b.setAttribute("role", "menuitem");
+      b.textContent = label;
+      previewDropup.appendChild(b);
+    };
+    const divider = () => {
+      const hr = document.createElement("hr");
+      previewDropup.appendChild(hr);
+    };
+    if (r && r.role !== "show_all_apps" && r.kind !== "calculator") {
+      const isWebAction = r.kind === "action" && isWebResult(r);
+      const isApp = r.kind === "app" || r.role === "quick_launch"
+        || (r.kind === "action" && !isWebAction && !r.title.startsWith("Search Web"));
+      const isFile = r.kind === "file" || r.kind === "folder"
+        || (r.subtitle && r.subtitle.length > 0 && r.kind !== "action");
+      // File verbs only for real filesystem targets. shell: URIs (UWP apps),
+      // ms-settings:/sysdm.cpl dialogs and http targets have no containing
+      // folder to browse and must not offer Copy Path / Run As either.
+      const target = itemTarget(r);
+      const isFsTarget = /^[a-z]:[\\/]/i.test(target) || (target.startsWith("\\\\") && target.length > 2);
+      const showFileVerbs = isFsTarget && !!r.subtitle && !isWebAction;
+      if (showFileVerbs && (isApp || isFile) && r.kind !== "folder")
+        mk("runas", "Run as Administrator");
+      if (showFileVerbs) mk("openfolder", "Open File Location");
+      if (showFileVerbs) mk("copypath", "Copy Path");
+      const pinTarget = itemTarget(r);
+      const pinned = isItemPinned(pinTarget);
+      if (r.kind === "app" || isWebAction || r.kind === "bookmark")
+        mk("pin", pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch");
+      if (r.kind === "app") {
+        divider();
+        mk("uninstall", "Uninstall");
+      }
+    }
+    previewMore.classList.toggle("hidden", !previewDropup.childElementCount);
+    if (!previewDropup.childElementCount) {
+      previewMore.classList.remove("open");
+      previewDropup.classList.add("hidden");
+    }
+  }
+
+  function closePreviewDropup() {
+    previewDropup.classList.add("hidden");
+    previewMore.classList.remove("open");
+  }
+
+  previewMore.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (previewDropup.childElementCount) {
+      const open = previewDropup.classList.toggle("hidden");
+      previewMore.classList.toggle("open", !open);
+    }
+  });
+
+  previewDropup.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    const r = currentRows[selected];
+    if (!r) return;
+    const action = b.dataset.action;
+    closePreviewDropup();
+    if (action === "pin") {
+      const path = itemTarget(r);
+      post(isItemPinned(path) ? "unpin" : "pin", path || r.title);
+    } else {
+      post("contextAction", { action, title: r.title || "", path: itemTarget(r) });
+    }
+    input.focus();
+  });
+
+  function relTime(epochSecs) {
+    const d = Date.now() / 1000 - epochSecs;
+    if (d < 0) return "now";
+    if (d < 60) return "just now";
+    if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+    if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+    if (d < 86400 * 30) return `${Math.floor(d / 86400)}d ago`;
+    return new Date(epochSecs * 1000).toLocaleDateString();
   }
 
   function syncTabButtons() {
@@ -983,10 +1160,12 @@
     completionEl.textContent = completion.slice(input.value.length);
     // Position the suffix right after the typed text so it reads as a
     // continuous hint — measure the typed width and offset the element.
+    // X only: the CSS already centers the suffix vertically (top:50% +
+    // margin-top), and adding translateY(-50%) here floated it half its
+    // own height above the input baseline.
     const typedWidth = measureTextWidth(input.value);
     completionEl.style.left = typedWidth + "px";
-    completionEl.style.transform =
-      `translateY(calc(-50% - 1px)) translateX(${-input.scrollLeft}px)`;
+    completionEl.style.transform = `translateX(${-input.scrollLeft}px)`;
     input.placeholder = "";
   }
 
@@ -1433,6 +1612,10 @@
     if (topPower.isOpen() && !topPower.isMenuTarget(e.target)) topPower.closeMenu();
     if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
       hideContextMenu();
+    }
+    if (!previewDropup.classList.contains("hidden")
+      && !previewOpenRow.contains(e.target)) {
+      closePreviewDropup();
     }
   });
 

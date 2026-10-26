@@ -1400,23 +1400,20 @@ impl RuntimeWorker {
             }
             "openfolder" => {
                 if path.is_empty() { return; }
-                let parent = std::path::Path::new(path).parent();
-                let folder = parent
-                    .map(|p| p.to_string_lossy().to_string())
+                // Resolve shell:AppsFolder known-folder URIs to their real
+                // file first; what survives must be a filesystem path —
+                // ms-settings:/.cpl/UWP AUMIDs have no containing folder,
+                // so silently ignore instead of opening a wrong directory.
+                let target = crate::action_executor::resolve_shell_appsfolder_path(&path)
                     .unwrap_or_else(|| path.to_string());
-                if folder.is_empty() { return; }
-                // Use explorer /select to highlight the file/folder, works for
-                // both filesystem paths and shell: URIs.
-                let folder_arg = if folder.starts_with("shell:") {
-                    folder.clone()
-                } else {
-                    folder.to_string()
-                };
+                if crate::action_executor::is_non_filesystem_open_target(&target) {
+                    return;
+                }
                 self.overlay.hide_sync();
                 self.overlay_state.on_escape();
-                match crate::action_executor::launch_open_target(&folder_arg) {
+                match crate::action_executor::open_file_location(&target) {
                     Ok(()) => {
-                        log_info(&format!("[nex] opened file location: '{}'", folder));
+                        log_info(&format!( "[nex] opened file location: '{}'", target));
                         reset_overlay_session(
                             &self.overlay,
                             &mut self.current_results,
@@ -2894,6 +2891,9 @@ fn apply_query_change(
                         clipboard_thumbnail: None,
                         clipboard_full_image: None,
                         tile_size: None,
+                        command_kind: String::new(),
+                        launch_count: 0,
+                        last_launched_at: 0,
                     };
                     overlay.set_results(&[row], 0);
                 }
@@ -2907,6 +2907,9 @@ fn apply_query_change(
                         url: None,
                         icon_path: String::new(),
                         clipboard_thumbnail: None,
+                        command_kind: String::new(),
+                        launch_count: 0,
+                        last_launched_at: 0,
                         clipboard_full_image: None,
                         tile_size: None,
                     };

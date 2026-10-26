@@ -419,12 +419,57 @@ html.bare #footer {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-#preview-open {
+/* Full un-abbreviated launch path under the subtitle. */
+#preview-path {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-faint);
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+}
+/* Launch-history line. */
+#preview-stats {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+/* Command rows have no image — clone their inline SVG glyph here. */
+#preview-glyph {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+}
+#preview-glyph svg {
+  width: 44px;
+  height: 44px;
+}
+/* Calculator: result in the big slot, expression in the subtitle. */
+#preview-title.big {
+  font-size: 22px;
+  margin-top: 4px;
+}
+/* Open + chevron pair; the chevron opens the remaining-action dropup. */
+/* Open + chevron pair — a joined split button: Open keeps the left
+   rounded corners, the chevron the right; the chevron's left border is
+   the seam divider between them. */
+#preview-open-row {
+  position: relative;
+  display: inline-flex;
+  gap: 0;
   margin-top: 16px;
+}
+#preview-open {
   height: 32px;
   padding: 0 18px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: 8px 0 0 8px;
   background: var(--kbd-bg);
   color: var(--text);
   font: inherit;
@@ -436,6 +481,64 @@ html.bare #footer {
 #preview-open:hover {
   background: var(--hover);
   border-color: var(--border-strong);
+}
+#preview-more {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 0 8px 8px 0;
+  background: var(--kbd-bg);
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+#preview-more:hover,
+#preview-more.open {
+  color: var(--text);
+  background: var(--hover);
+}
+#preview-more svg {
+  transition: transform 0.12s ease;
+}
+#preview-more.open svg {
+  transform: rotate(180deg);
+}
+/* Drop-up menu of actions not already surfaced as a quick verb button. */
+#preview-dropup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 170px;
+  padding: 5px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-opaque) 92%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22), inset 0 0 0 1px var(--border-strong);
+  z-index: 60;
+}
+#preview-dropup button {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+#preview-dropup button:hover {
+  background: var(--hover);
+}
+#preview-dropup hr {
+  border: none;
+  border-top: 1px solid var(--divider);
+  margin: 4px 2px;
 }
 #preview-subtitle:empty,
 #preview-kind:empty {
@@ -682,6 +785,18 @@ html[data-native-material="acrylic"] .row.selected::before {
   width: 24px;
   height: 24px;
   object-fit: contain;
+}
+/* JS-inserted spacer keeps icon-less rows (calculator, commands) on the
+   same text column as icon rows. Hidden: it reserves space only. */
+.row .icon.icon-spacer {
+  visibility: hidden;
+}
+/* Command-row glyphs (inline SVG in a div) keep the icon grid slot and
+   color from the theme text token. */
+.row .icon.cmd-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text);
 }
 .grid-view .row .icon {
   width: 36px;

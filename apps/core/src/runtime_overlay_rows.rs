@@ -160,6 +160,9 @@ pub(crate) fn overlay_rows_ext(
             clipboard_thumbnail: None,
             clipboard_full_image: None,
             tile_size: None,
+            command_kind: String::new(),
+            launch_count: 0,
+            last_launched_at: 0,
         });
     }
     append_group_rows(&mut rows, "Folders", &kind_buckets[1], results, command_mode);
@@ -259,6 +262,47 @@ pub(crate) fn result_row(
         clipboard_thumbnail: None,
         clipboard_full_image: None,
         tile_size: None,
+        command_kind: command_kind_for(item),
+        launch_count: item.launch_count,
+        last_launched_at: item.last_launched_at,
+    }
+}
+
+/// Stable glyph key for command rows. Empty for rows that already carry a
+/// real icon (favicon paths, uninstall source dirs) — the page only draws
+/// its inline SVG when this is set and no icon image was rendered.
+/// Non-classified action ids (plugin actions) get the generic glyph.
+/// Web search and direct-URL actions resolve to favicons/web icons already.
+fn command_kind_for(item: &SearchItem) -> String {
+    if !item.kind.eq_ignore_ascii_case("action") {
+        return String::new();
+    }
+    let id = item.id.as_str();
+    use crate::action_registry::*;
+
+    if id.starts_with(ACTION_CREATE_FOLDER_PREFIX) {
+        "create_folder".into()
+    } else if id.starts_with(ACTION_CREATE_FILE_PREFIX) {
+        "create_file".into()
+    } else if id.starts_with(ACTION_OPEN_URL_PREFIX) || item.path.starts_with("http") {
+        "url".into()
+    } else if id.starts_with(ACTION_WEB_SEARCH_PREFIX) {
+        "web".into()
+    } else if id.starts_with(uninstall_registry::ACTION_UNINSTALL_PREFIX) {
+        "uninstall".into()
+    } else if id == ACTION_OPEN_LOGS_ID {
+        "logs".into()
+    } else if id == ACTION_CLIPBOARD_HISTORY_ID {
+        "clipboard".into()
+    } else if id == ACTION_OPEN_CONFIG_ID {
+        "config".into()
+    } else if id == ACTION_CHECK_UPDATES_ID {
+        "update".into()
+    } else if id.starts_with("__nex_action_open_settings__") {
+        "settings".into()
+    } else {
+        // Plugin actions and unknown built-ins share the generic glyph.
+        "action".into()
     }
 }
 
@@ -276,6 +320,9 @@ pub(crate) fn header_row(label: &str) -> OverlayRow {
         url: None,
         icon_path: String::new(),
         clipboard_thumbnail: None,
+        command_kind: String::new(),
+        launch_count: 0,
+        last_launched_at: 0,
         clipboard_full_image: None,
         tile_size: None,
     }
@@ -684,6 +731,9 @@ pub(crate) fn build_quick_launch_rows(
                 .kind
                 .eq_ignore_ascii_case("bookmark")
                 .then(|| item.path.clone()),
+                command_kind: String::new(),
+                launch_count: 0,
+                last_launched_at: 0,
             icon_path: item.icon_path.clone(),
             clipboard_thumbnail: None,
             clipboard_full_image: None,
@@ -755,6 +805,9 @@ pub(crate) fn build_clipboard_bento_rows(entries: &[ClipboardEntry]) -> Vec<Over
                 clipboard_thumbnail: thumbnail,
                 clipboard_full_image: full_image,
                 tile_size: Some(tile_size),
+                command_kind: String::new(),
+                launch_count: 0,
+                last_launched_at: 0,
             }
         })
         .collect()
@@ -793,6 +846,9 @@ pub(crate) fn set_status_row_overlay_state(overlay: &NativeOverlayShell, message
         result_index: None,
         kind: "status".to_string(),
         title: message.to_string(),
+        command_kind: String::new(),
+        launch_count: 0,
+        last_launched_at: 0,
         path: String::new(),
         url: None,
         icon_path: String::new(),

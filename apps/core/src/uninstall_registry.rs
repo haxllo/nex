@@ -14,6 +14,8 @@ struct UninstallEntry {
     publisher: String,
     uninstall_command: String,
     fallback_uninstall_command: Option<String>,
+    display_icon: String,
+    install_location: String,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +96,72 @@ pub fn publishers_by_display_name() -> Result<HashMap<String, String>, String> {
         }
     }
     Ok(out)
+}
+
+/// Resolve a desktop-program AUMID ("Brave", "com.squirrel.Discord.Discord")
+/// to a real filesystem path via the uninstall registry (prefer the exe in
+/// DisplayIcon, then install-location with the app exe, then the install
+/// folder itself). UWP package identities ("…!App") have no file — None.
+#[cfg(target_os = "windows")]
+pub fn app_path_by_aumid(aumid: &str) -> Option<String> {
+    let trimmed = aumid.trim();
+    if trimmed.is_empty() || trimmed.contains('!') {
+        return None;
+    }
+    // The result list is keyed by display name; AUMIDs don't match display
+    // names directly, so try the whole alias and its trailing segment
+    // (e.g. "Discord" for com.squirrel.Discord.Discord).
+    let trail = trimmed.rsplit('.').next().unwrap_or(trimmed);
+    let mut wanted = Vec::new();
+    for candidate in [trimmed, trail] {
+        let normalized = normalize_for_search(candidate);
+        if !normalized.is_empty() && !wanted.contains(&normalized) {
+            wanted.push(normalized);
+        }
+    }
+    if wanted.is_empty() {
+        return None;
+    }
+    let entries = load_cached_entries(false).ok()?;
+    for entry in entries.iter() {
+        if !wanted.contains(&normalize_for_search(entry.display_name.as_str())) {
+            continue;
+        }
+        if let Some(path) = app_path_from_entry(entry, trail) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn app_path_from_entry(entry: &UninstallEntry, exe_hint: &str) -> Option<String> {
+    // DisplayIcon is "<path>,<icon index>" for exes or a bare .ico; only an
+    // existing .exe is a valid launch/copy target.
+    let icon = entry.display_icon.trim();
+    if !icon.is_empty() {
+        let primary = match icon.rfind(',') {
+            Some(idx) if icon[idx + 1..].trim().chars().all(|c| c.is_ascii_digit()) => {
+                icon[..idx].trim()
+            }
+            _ => icon,
+        };
+        if primary.to_ascii_lowercase().ends_with(".exe")
+            && std::path::Path::new(primary).exists()
+        {
+            return Some(primary.to_string());
+        }
+    }
+    let install_dir = entry.install_location.trim();
+    if !install_dir.is_empty() && std::path::Path::new(install_dir).exists() {
+        let exe = format!("{install_dir}\\{exe_hint}.exe");
+        if std::path::Path::new(&exe).exists() {
+            return Some(exe);
+        }
+        // The install folder itself is the "file location".
+        return Some(install_dir.to_string());
+    }
+    None
 }
 
 fn publisher_lookup_keys(display_name: &str) -> Vec<String> {
@@ -532,6 +600,8 @@ fn collect_appx_packages(out: &mut Vec<UninstallEntry>) -> Result<(), String> {
                 "powershell -NoProfile -NonInteractive -Command \"Remove-AppxPackage -Package '{full_name}'\""
             ),
             fallback_uninstall_command: None,
+            display_icon: String::new(),
+            install_location: String::new(),
         });
     }
     Ok(())
@@ -572,6 +642,8 @@ fn read_uninstall_entry(
     let publisher = read_reg_string_value(app_key, "Publisher").unwrap_or_default();
     let quiet_uninstall = read_reg_string_value(app_key, "QuietUninstallString");
     let uninstall = read_reg_string_value(app_key, "UninstallString");
+    let display_icon = read_reg_string_value(app_key, "DisplayIcon").unwrap_or_default();
+    let install_location = read_reg_string_value(app_key, "InstallLocation").unwrap_or_default();
     let release_type = read_reg_string_value(app_key, "ReleaseType").unwrap_or_default();
     let parent_key = read_reg_string_value(app_key, "ParentKeyName").unwrap_or_default();
     let system_component = read_reg_dword_value(app_key, "SystemComponent").unwrap_or(0);
@@ -610,6 +682,8 @@ fn read_uninstall_entry(
         publisher: publisher.trim().to_string(),
         uninstall_command: uninstall_command.trim().to_string(),
         fallback_uninstall_command,
+        display_icon,
+        install_location,
     }))
 }
 
@@ -1023,6 +1097,8 @@ mod tests {
                 publisher: "Discord Inc.".to_string(),
                 uninstall_command: "C:\\Tools\\uninstall_discord.exe".to_string(),
                 fallback_uninstall_command: None,
+                display_icon: String::new(),
+                install_location: String::new(),
             },
             UninstallEntry {
                 token: "2".to_string(),
@@ -1030,6 +1106,8 @@ mod tests {
                 publisher: "Microsoft".to_string(),
                 uninstall_command: "C:\\Tools\\uninstall_vscode.exe".to_string(),
                 fallback_uninstall_command: None,
+                display_icon: String::new(),
+                install_location: String::new(),
             },
             UninstallEntry {
                 token: "3".to_string(),
@@ -1037,6 +1115,8 @@ mod tests {
                 publisher: "VSCodium".to_string(),
                 uninstall_command: "C:\\Tools\\uninstall_codium.exe".to_string(),
                 fallback_uninstall_command: None,
+                display_icon: String::new(),
+                install_location: String::new(),
             },
         ];
 

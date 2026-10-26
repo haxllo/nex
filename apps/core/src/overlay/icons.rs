@@ -1592,6 +1592,9 @@ mod tests {
                 clipboard_thumbnail: None,
                 clipboard_full_image: None,
                 tile_size: None,
+                command_kind: String::new(),
+                launch_count: 0,
+                last_launched_at: 0,
             })
             .collect();
         let head_end = VIEWPORT_ROWS.min(rows.len());

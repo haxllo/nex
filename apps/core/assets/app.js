@@ -1076,6 +1076,8 @@
   }
   let tipEl = null;
   let tipTimer = 0;
+  let tipsArmed = true;
+  let tipsArmTimer = 0;
   function hideTip() {
     window.clearTimeout(tipTimer);
     tipTimer = 0;
@@ -1109,6 +1111,7 @@
     tipEl.style.top = `${y}px`;
   }
   document.addEventListener("mouseover", (event) => {
+    if (!tipsArmed) return;
     const target = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
     if (!target || target.disabled) return;
     window.clearTimeout(tipTimer);
@@ -3382,6 +3385,12 @@
         }
         // Transient model-settings state must not survive hide/show.
         setChatSettingsOpen(false);
+        // Suppress hover tooltips during the reveal so a stale or
+        // spurious "Settings" popup can't flash over the panel.
+        hideTip();
+        tipsArmed = false;
+        window.clearTimeout(tipsArmTimer);
+        tipsArmTimer = window.setTimeout(() => { tipsArmed = true; }, 600);
       }
       render();
 

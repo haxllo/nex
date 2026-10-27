@@ -816,6 +816,17 @@ html[data-theme="light"] img.icon.glyph {
   font-size: 12px;
   color: var(--text-faint);
 }
+/* Nothing in this tab: the status owns the whole column so it lands in
+   the middle instead of under an empty stretched list. */
+#body.empty-tab #list {
+  flex: 0 0 auto;
+}
+#body.empty-tab #status {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: 0 var(--pad-x);
+}
 
 /* ── footer ───────────────────────────────────────────────── */
 /* Visible in every search-mode state — the expanded panel keeps its

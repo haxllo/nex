@@ -718,9 +718,13 @@
       statusEl.classList.add("hidden");
     }
 
-    // Idle state: the expanded shell stays visible (tabs + preview), so the
+    // Idle state: the expanded shell stays visible (tabs + list), so the
     // class only marks "nothing to list" for spacing.
     bodyEl.classList.toggle("idle", !hasRows && !hasStatusRows);
+    // Every row filtered out by the tab: the status line is the only
+    // content, so let it own the column instead of sitting under an
+    // empty stretched list.
+    bodyEl.classList.toggle("empty-tab", visibleRows === 0 && hasRows);
     // Nothing to list at all: drop the expanded shell and leave the bare
     // search bar. In compact view the idle panel is always just the bar.
     document.documentElement.classList.toggle("bare", !hasRows && !hasStatusRows);

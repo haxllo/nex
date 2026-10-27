@@ -22,12 +22,6 @@
   const previewKind = $("preview-kind");
   const previewTitle = $("preview-title");
   const previewSubtitle = $("preview-subtitle");
-  const previewPath = $("preview-path");
-  const previewStats = $("preview-stats");
-  const previewGlyph = $("preview-glyph");
-  const previewOpenRow = $("preview-open-row");
-  const previewMore = $("preview-more");
-  const previewDropup = $("preview-dropup");
   const previewOpen = $("preview-open");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
@@ -770,7 +764,7 @@
   }
 
   // Right-hand preview for the highlighted row: big icon, title, subtitle,
-  // full launch path, usage stats and secondary actions.
+  // and the same action Enter would take.
   function renderPreview() {
     const r = currentRows[selected];
     const fullWidth =
@@ -784,143 +778,18 @@
     }
     previewEmpty.classList.add("hidden");
     previewCard.classList.remove("hidden");
-
-    // Calculator rows carry "= expr" in title and the result in subtitle —
-    // show the result big, the input expression small.
-    const isCalc = r.kind === "calculator";
-    previewKind.textContent = isCalc ? "Calculator"
-      : (r.kind || (r.role === "quick_launch" ? "App" : ""));
-    previewTitle.textContent = isCalc ? (r.subtitle || "") : (r.title || "");
-    previewTitle.classList.toggle("big", isCalc);
-    previewSubtitle.textContent = isCalc ? (r.title || "") : (r.subtitle || "");
-
-    // Full un-abbreviated launch path (rows show only 3 path segments).
-    const fp = (!r.url && !isCalc && typeof r.filePath === "string") ? r.filePath : "";
-    const showPath = fp
-      && (/^[a-z]:[\\/]/i.test(fp) || fp.startsWith("\\\\"))
-      && !fp.endsWith(".png")
-      && fp !== r.subtitle;
-    previewPath.textContent = showPath ? fp : "";
-    previewPath.classList.toggle("hidden", !showPath);
-
-    previewStats.textContent = r.launchCount > 0
-      ? `Launched ${r.launchCount}×${r.lastLaunchedAt > 0 ? " · " + relTime(r.lastLaunchedAt) : ""}`
-      : "";
-    previewStats.classList.toggle("hidden", !previewStats.textContent);
-
-    closePreviewDropup();
-    renderPreviewVerbs(r);
-
-    // Icon mirrors the row's image; command rows carry an inline SVG glyph
-    // instead of an img — clone it into the preview.
+    previewKind.textContent = r.kind || (r.role === "quick_launch" ? "App" : "");
+    previewTitle.textContent = r.title || "";
+    previewSubtitle.textContent = r.subtitle || "";
     const li = rowMap.get(selected);
     const img = li ? li.querySelector("img.icon") : null;
-    const glyphNode = li && !img ? li.querySelector(".icon.cmd-icon") : null;
     if (img && img.src) {
       if (previewIcon.src !== img.src) previewIcon.src = img.src;
       previewIcon.classList.remove("hidden");
-      previewGlyph.classList.add("hidden");
-      previewGlyph.replaceChildren();
-    } else if (glyphNode) {
-      previewIcon.classList.add("hidden");
-      previewIcon.removeAttribute("src");
-      const svg = glyphNode.querySelector("svg");
-      previewGlyph.replaceChildren(svg ? svg.cloneNode(true) : null);
-      previewGlyph.classList.remove("hidden");
     } else {
       previewIcon.classList.add("hidden");
       previewIcon.removeAttribute("src");
-      previewGlyph.classList.add("hidden");
-      previewGlyph.replaceChildren();
     }
-  }
-
-  // Drop-up beside Open: every context-menu verb (minus Open itself) for
-  // the highlighted row, with the same visibility rules as the context
-  // menu and matching order.
-  function renderPreviewVerbs(r) {
-    previewDropup.replaceChildren();
-    const mk = (action, label) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.dataset.action = action;
-      b.setAttribute("role", "menuitem");
-      b.textContent = label;
-      previewDropup.appendChild(b);
-    };
-    const divider = () => {
-      const hr = document.createElement("hr");
-      previewDropup.appendChild(hr);
-    };
-    if (r && r.role !== "show_all_apps" && r.kind !== "calculator") {
-      const isWebAction = r.kind === "action" && isWebResult(r);
-      const isApp = r.kind === "app" || r.role === "quick_launch"
-        || (r.kind === "action" && !isWebAction && !r.title.startsWith("Search Web"));
-      const isFile = r.kind === "file" || r.kind === "folder"
-        || (r.subtitle && r.subtitle.length > 0 && r.kind !== "action");
-      // File verbs only for real filesystem targets. shell: URIs (UWP apps),
-      // ms-settings:/sysdm.cpl dialogs and http targets have no containing
-      // folder to browse and must not offer Copy Path / Run As either.
-      const target = itemTarget(r);
-      const isFsTarget = /^[a-z]:[\\/]/i.test(target) || (target.startsWith("\\\\") && target.length > 2);
-      const showFileVerbs = isFsTarget && !!r.subtitle && !isWebAction;
-      if (showFileVerbs && (isApp || isFile) && r.kind !== "folder")
-        mk("runas", "Run as Administrator");
-      if (showFileVerbs) mk("openfolder", "Open File Location");
-      if (showFileVerbs) mk("copypath", "Copy Path");
-      const pinTarget = itemTarget(r);
-      const pinned = isItemPinned(pinTarget);
-      if (r.kind === "app" || isWebAction || r.kind === "bookmark")
-        mk("pin", pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch");
-      if (r.kind === "app") {
-        divider();
-        mk("uninstall", "Uninstall");
-      }
-    }
-    previewMore.classList.toggle("hidden", !previewDropup.childElementCount);
-    if (!previewDropup.childElementCount) {
-      previewMore.classList.remove("open");
-      previewDropup.classList.add("hidden");
-    }
-  }
-
-  function closePreviewDropup() {
-    previewDropup.classList.add("hidden");
-    previewMore.classList.remove("open");
-  }
-
-  previewMore.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (previewDropup.childElementCount) {
-      const open = previewDropup.classList.toggle("hidden");
-      previewMore.classList.toggle("open", !open);
-    }
-  });
-
-  previewDropup.addEventListener("click", (e) => {
-    const b = e.target.closest("button");
-    if (!b) return;
-    const r = currentRows[selected];
-    if (!r) return;
-    const action = b.dataset.action;
-    closePreviewDropup();
-    if (action === "pin") {
-      const path = itemTarget(r);
-      post(isItemPinned(path) ? "unpin" : "pin", path || r.title);
-    } else {
-      post("contextAction", { action, title: r.title || "", path: itemTarget(r) });
-    }
-    input.focus();
-  });
-
-  function relTime(epochSecs) {
-    const d = Date.now() / 1000 - epochSecs;
-    if (d < 0) return "now";
-    if (d < 60) return "just now";
-    if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-    if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-    if (d < 86400 * 30) return `${Math.floor(d / 86400)}d ago`;
-    return new Date(epochSecs * 1000).toLocaleDateString();
   }
 
   function syncTabButtons() {
@@ -1613,10 +1482,6 @@
     if (!contextMenu.classList.contains("hidden") && !contextMenu.contains(e.target)) {
       hideContextMenu();
     }
-    if (!previewDropup.classList.contains("hidden")
-      && !previewOpenRow.contains(e.target)) {
-      closePreviewDropup();
-    }
   });
 
   // ── context menu ──────────────────────────────────────────
@@ -1669,7 +1534,7 @@
       else if (action === "openfolder") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "copypath") b.classList.toggle("hidden", !row.subtitle);
       else if (action === "pin") {
-        const target = itemTarget(row);
+        const target = row.pinPath || itemTarget(row);
         const pinned = isItemPinned(target);
         b.textContent = pinned ? "Unpin from Quick Launch" : "Pin to Quick Launch";
         b.classList.toggle("hidden", row.kind !== "app" && !isWebAction && !isBookmark);
@@ -1726,7 +1591,12 @@
 
     const title = ctxRow.title || "";
     const path = itemTarget(ctxRow);
-    const pinned = isItemPinned(path);
+    // Pin/unpin need the canonical index path (`pinPath`); `path` is the
+    // resolved launch target, which is a real file for apps — pinning that
+    // stores a path no index row matches, so the unpin label and the tile
+    // resolve to an unrelated folder.
+    const pinPath = ctxRow.pinPath || path;
+    const pinned = isItemPinned(pinPath);
 
     if (action === "open") {
       hideContextMenu();
@@ -1734,9 +1604,9 @@
     } else if (action === "pin") {
       hideContextMenu();
       if (pinned) {
-        post("unpin", path || title);
+        post("unpin", pinPath || title);
       } else {
-        post("pin", path || title);
+        post("pin", pinPath || title);
       }
     } else {
       // All other actions sent to Rust

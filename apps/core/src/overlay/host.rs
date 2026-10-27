@@ -2688,6 +2688,14 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
                 "subtitle": r.path,
                 "kind": r.kind,
                 "url": r.url.clone(),
+                // Canonical index identity for pin/unpin. `filePath` is the
+                // resolved launch target (real path); pinning must use the
+                // path the item was indexed under or the lookup misses and
+                // resolves to an unrelated file/folder.
+                "pinPath": match r.url.as_deref() {
+                    Some(url) if !url.is_empty() => url.to_string(),
+                    _ => r.icon_path.clone(),
+                },
                 "icon": icon,
                 "filePath": file_path,
                 "selectable": selectable,

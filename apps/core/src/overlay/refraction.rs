@@ -270,7 +270,7 @@ const SHOW_REFRESH_WAIT_MS: u32 = 8;
 /// While hidden, poll the desktop at most this often to keep the backdrop
 /// material current. The palette the page opens with comes from this, so
 /// a slow poll is enough, and presenting is skipped.
-const HIDDEN_POLL_MS: u64 = 250;
+const HIDDEN_POLL_MS: u64 = 500;
 
 /// Host -> worker config. `main_sys == 0` / `None` means unchanged.
 struct GlassConfig {
@@ -3056,7 +3056,7 @@ fn worker_main(
                 std::thread::sleep(Duration::from_millis(250));
             }
         }
-        if stat_t.elapsed() >= Duration::from_secs(1) {
+        if stat_t.elapsed() >= Duration::from_secs(5) {
             let avg = if n_pre > 0 { copy_us / n_pre } else { 0 };
             let render_avg = if n_pre > 0 { render_us / n_pre } else { 0 };
             crate::logging::info(&format!(

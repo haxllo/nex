@@ -16,13 +16,6 @@
   const bodyEl = $("body");
   const footerEl = $("footer");
   const tabsEl = $("tabs");
-  const previewCard = $("preview-card");
-  const previewEmpty = $("preview-empty");
-  const previewIcon = $("preview-icon");
-  const previewKind = $("preview-kind");
-  const previewTitle = $("preview-title");
-  const previewSubtitle = $("preview-subtitle");
-  const previewOpen = $("preview-open");
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -759,37 +752,7 @@
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();
 
-    renderPreview();
     measure();
-  }
-
-  // Right-hand preview for the highlighted row: big icon, title, subtitle,
-  // and the same action Enter would take.
-  function renderPreview() {
-    const r = currentRows[selected];
-    const fullWidth =
-      list.classList.contains("grid-view") || list.classList.contains("bento-view");
-    const ok = r && r.selectable && tabMatches(r) && !fullWidth;
-    if (!ok) {
-      previewCard.classList.add("hidden");
-      previewEmpty.classList.remove("hidden");
-      previewEmpty.textContent = rows.length ? "Nothing in this tab" : "Search apps, files and actions";
-      return;
-    }
-    previewEmpty.classList.add("hidden");
-    previewCard.classList.remove("hidden");
-    previewKind.textContent = r.kind || (r.role === "quick_launch" ? "App" : "");
-    previewTitle.textContent = r.title || "";
-    previewSubtitle.textContent = r.subtitle || "";
-    const li = rowMap.get(selected);
-    const img = li ? li.querySelector("img.icon") : null;
-    if (img && img.src) {
-      if (previewIcon.src !== img.src) previewIcon.src = img.src;
-      previewIcon.classList.remove("hidden");
-    } else {
-      previewIcon.classList.add("hidden");
-      previewIcon.removeAttribute("src");
-    }
   }
 
   function syncTabButtons() {
@@ -814,9 +777,6 @@
   tabsEl.addEventListener("click", (e) => {
     const btn = e.target.closest(".tab");
     if (btn) setActiveTab(btn.dataset.tab);
-  });
-  previewOpen.addEventListener("click", () => {
-    if (selected >= 0) post("submit", selected);
   });
 
   function setSelected(i, scroll) {
@@ -965,8 +925,6 @@
       for (const [img, dataUri] of pending) {
         if (img.isConnected && img.src !== dataUri) img.src = dataUri;
       }
-      // The preview mirrors the row icon, so a late decode must reach it too.
-      renderPreview();
     };
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(apply);

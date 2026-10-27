@@ -322,22 +322,17 @@
 
   function createAddIcon(item) {
     const addIcon = document.createElement('div');
-    const target = item.url || item.filePath || item.icon;
+    // Canonical index identity (`pinPath`), not the resolved launch target:
+    // `filePath` is a real path for apps, which no index row is pinned under,
+    // so pin state never matched and the click stored an unusable path.
+    const target = item.pinPath || item.url || item.filePath || item.icon;
     const pinned = isItemPinned(target);
     addIcon.className = 'add-icon' + (pinned ? ' pinned' : '');
     addIcon.innerHTML = pinned ? pinIconPinnedSvg : addIconSvg;
     addIcon.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      if (target) {
-        if (pinned) {
-          post('unpin', target);
-        } else if (item.url) {
-          post('pin', target);
-        } else {
-          post('addToQuickLaunch', target);
-        }
-      }
+      if (target) post(pinned ? 'unpin' : 'pin', target);
       input.focus();
     });
     return addIcon;
@@ -524,6 +519,7 @@
     }
 
     const text = document.createElement("div");
+    text.className = "text";
     const title = document.createElement("div");
     title.className = "title";
     title.textContent = r.title;

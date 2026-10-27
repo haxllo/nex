@@ -893,30 +893,100 @@ struct Engine {
     panel_h: u32,
 }
 
+/// Pick the DXGI adapter that owns the monitor the panel lives on. On
+/// hybrid-GPU laptops (Optimus / AMD dual) the display output is on the
+/// iGPU adapter while the system-default device may be the dGPU; creating
+/// the device on the default adapter makes every later `DuplicateOutput`
+/// fail with a device/adapter mismatch and the glass never presents. Falls
+/// back to `None` (system default) when no adapter owns the monitor.
+fn adapter_for_monitor(monitor: HMONITOR) -> Option<IDXGIAdapter> {
+    let factory: IDXGIFactory = unsafe {
+        CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?
+    };
+    let mut ai = 0u32;
+    loop {
+        let adapter: IDXGIAdapter = match unsafe { factory.EnumAdapters(ai) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        ai += 1;
+        let mut oi = 0u32;
+        loop {
+            let output: IDXGIOutput = match unsafe { adapter.EnumOutputs(oi) } {
+                Ok(o) => o,
+                Err(_) => break,
+            };
+            oi += 1;
+            let matches = unsafe {
+                output
+                    .GetDesc()
+                    .map(|desc| desc.Monitor == monitor)
+                    .unwrap_or(false)
+            };
+            if matches {
+                return Some(adapter);
+            }
+        }
+    }
+    None
+}
+
 impl Engine {
     /// Build everything at max-panel buffers with the current panel
     /// content size: device, swapchain (first working desc wins), D2D
     /// graph, and effect resources.
     fn build(hwnd: HWND, buf_w: u32, buf_h: u32, panel_w: u32, panel_h: u32) -> Result<Engine, String> {
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        let mut feature_level = D3D_FEATURE_LEVEL_11_0;
-        unsafe {
-            windows::Win32::Graphics::Direct3D11::D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE(std::ptr::null_mut()),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device as *mut _),
-                Some(&mut feature_level as *mut _),
-                Some(&mut context as *mut _),
+        use windows::Win32::Graphics::Direct3D11::D3D11CreateDevice;
+        let monitor = unsafe {
+            windows::Win32::Graphics::Gdi::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        };
+        let (device, context, feature_level) = if let Some(adapter) = adapter_for_monitor(monitor) {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+            unsafe {
+                D3D11CreateDevice(
+                    Some(&adapter),
+                    windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE(std::ptr::null_mut()),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device as *mut _),
+                    Some(&mut feature_level as *mut _),
+                    Some(&mut context as *mut _),
+                )
+                .map_err(|e| format!("D3D11CreateDevice (adapter) failed: {e:?}"))?;
+            }
+            (
+                device.ok_or("D3D11CreateDevice returned no device")?,
+                context.ok_or("D3D11CreateDevice returned no context")?,
+                feature_level,
             )
-            .map_err(|e| format!("D3D11CreateDevice failed: {e:?}"))?;
-        }
-        let device = device.ok_or("D3D11CreateDevice returned no device")?;
-        let context = context.ok_or("D3D11CreateDevice returned no context")?;
+        } else {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            let mut feature_level = D3D_FEATURE_LEVEL_11_0;
+            unsafe {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    HMODULE(std::ptr::null_mut()),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION,
+                    Some(&mut device as *mut _),
+                    Some(&mut feature_level as *mut _),
+                    Some(&mut context as *mut _),
+                )
+                .map_err(|e| format!("D3D11CreateDevice failed: {e:?}"))?;
+            }
+            (
+                device.ok_or("D3D11CreateDevice returned no device")?,
+                context.ok_or("D3D11CreateDevice returned no context")?,
+                feature_level,
+            )
+        };
 
         let factory: IDXGIFactory2 =
             unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) }

@@ -1857,6 +1857,9 @@ impl RuntimeWorker {
                 if self.overlay.query_text().trim().is_empty() {
                     self.prepare_idle_content();
                 }
+                // Drop any stale status (e.g. "Settings applied") left by a
+                // config reload so it can't linger into the next show.
+                self.overlay.set_status_text("");
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
                 // Same as ShowAndFocus: revalidate media on show so a

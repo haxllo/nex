@@ -379,7 +379,9 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             } else if hotkey_changed {
                 overlay.set_status_text("Hotkey updated");
             } else {
-                overlay.set_status_text("Settings applied");
+                // Generic apply: don't leave a lingering "Settings applied"
+                // status that resurfaces on the next show.
+                overlay.set_status_text("");
             }
             return hotkey_changed;
         }

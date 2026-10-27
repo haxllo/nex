@@ -2503,6 +2503,11 @@ fn worker_main(
     // Engine build/rebuild failures in a row. Kept separate from capture
     // failures: one is a poisoned GPU graph, the other a stale session.
     let mut n_engine_fail = 0u32;
+    // Capture-start failures in a row. Escalate to the opaque fallback
+    // after a few so a laptop that can never duplicate its output (hybrid
+    // GPU, protected session) stops rendering a transparent panel.
+    let mut n_capture_fail = 0u32;
+    let mut capture_failed_escalated = false;
     let mut motion = crate::overlay::platform::animations_enabled();
     let mut interaction = Spring { value: 1.0, velocity: 0.0 };
     let mut interaction_at = Instant::now();
@@ -2867,6 +2872,7 @@ fn worker_main(
             capture = None;
             match Capture::start(&eng.device, monitor_now) {
                 Ok(c) => {
+                    n_capture_fail = 0;
                     crate::logging::info(&format!(
                         "[nex][refract] capture live {}x{}px",
                         c.frame_w, c.frame_h
@@ -2875,7 +2881,18 @@ fn worker_main(
                     staged = false;
                 }
                 Err(error) => {
-                    crate::logging::warn(&format!("[nex][refract] capture start failed: {error}"));
+                    n_capture_fail += 1;
+                    crate::logging::warn(&format!(
+                        "[nex][refract] capture start failed ({n_capture_fail}): {error}"
+                    ));
+                    if n_capture_fail >= 6 && !capture_failed_escalated {
+                        capture_failed_escalated = true;
+                        mark_glass_failed();
+                        crate::logging::warn(
+                            "[nex][refract] capture failed repeatedly - requesting opaque fallback",
+                        );
+                        let _ = proxy.send_event(UiCommand::GlassFailed);
+                    }
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }

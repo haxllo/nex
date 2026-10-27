@@ -1364,6 +1364,14 @@ html.bg-white .footer-icon-btn:active {
   transition: all 200ms ease;
 }
 
+/* The id rules below beat the UA [hidden] rule, so the attribute alone never
+   hid these pills - an idle Update button rendered as a bare icon next to
+   What's new. */
+#update-btn[hidden],
+#whats-new-btn[hidden] {
+  display: none !important;
+}
+
 #update-btn:hover,
 #whats-new-btn:hover {
   background: rgba(74, 222, 128, 0.25);

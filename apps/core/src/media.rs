@@ -280,6 +280,11 @@ fn set_last_pick(app_id: &str) {
     }
 }
 
+/// Pure: position moved meaningfully backward (new track / seek back).
+fn position_went_backward(anchor_pos: f64, pos: f64) -> bool {
+    pos + ADVANCE_EPS_SECS < anchor_pos
+}
+
 /// Pure part of stuck detection, unit-tested. Fresh when the position
 /// advanced since the anchor, or the anchor is younger than the grace.
 fn advancement_fresh(anchor_pos: f64, anchor_time_ms: u64, pos: f64, now_ms: u64) -> bool {
@@ -305,6 +310,13 @@ fn effectively_playing(app_id: &str, session: &Session, now_ms: u64) -> bool {
         return true;
     };
     let entry = guard.entry(app_id.to_string()).or_insert((pos, now_ms));
+    // A backward position means a new track or a seek back: re-anchor
+    // instead of treating the drop as a stall (which would wrongly
+    // silence a freshly started track).
+    if position_went_backward(entry.0, pos) {
+        *entry = (pos, now_ms);
+        return true;
+    }
     if advancement_fresh(entry.0, entry.1, pos, now_ms) {
         if pos > entry.0 + ADVANCE_EPS_SECS {
             *entry = (pos, now_ms);
@@ -566,7 +578,9 @@ fn endpoint_volume() -> Option<
 pub fn volume_state() -> Option<(f32, bool)> {
     let volume = endpoint_volume()?;
     let level = unsafe { volume.GetMasterVolumeLevelScalar().ok()? };
-    let muted = unsafe { volume.GetMute().ok()?.as_bool() };
+    // Mute state is best-effort: a failure to read it must not hide the
+    // whole slider when the level itself is readable.
+    let muted = unsafe { volume.GetMute().map(|b| b.as_bool()).unwrap_or(false) };
     Some((clamp01(level), muted))
 }
 
@@ -942,6 +956,14 @@ mod tests {
         assert!(session_rank(true, true) < session_rank(false, true));
         assert!(session_rank(false, true) < session_rank(true, false));
         assert!(session_rank(true, false) < session_rank(false, false));
+    }
+
+    #[test]
+    fn position_went_backward_detects_new_track() {
+        assert!(position_went_backward(100.0, 0.0));
+        assert!(position_went_backward(100.0, 99.4));
+        assert!(!position_went_backward(100.0, 100.0));
+        assert!(!position_went_backward(100.0, 100.6));
     }
 
     #[test]

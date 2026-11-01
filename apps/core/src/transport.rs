@@ -48,7 +48,7 @@ pub fn handle_json(service: &CoreService, payload: &str) -> String {
         },
     };
 
-    serde_json::to_string(&response).expect("transport response should serialize")
+    serde_json::to_string(&response).unwrap_or_else(|_| "{\"status\":\"err\",\"error\":{\"code\":\"store\",\"message\":\"response serialization failed\"}}".to_string())
 }
 
 fn map_service_error(error: ServiceError) -> ErrorResponse {

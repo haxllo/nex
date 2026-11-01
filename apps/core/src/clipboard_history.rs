@@ -286,7 +286,8 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
     }
     let encoded = serde_json::to_string(entries)
         .map_err(|e| format!("failed to encode clipboard history: {e}"))?;
-    let blob = dpapi_encrypt(encoded.as_bytes());
+    let blob = dpapi_encrypt(encoded.as_bytes())
+        .ok_or_else(|| "Could not securely encrypt clipboard history.".to_string())?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, blob)
         .map_err(|e| format!("failed to write clipboard history: {e}"))?;
@@ -331,7 +332,7 @@ struct DPAPIBlob {
 
 /// Encrypt plaintext bytes using Windows DPAPI (CryptProtectData).
 /// On non-Windows, returns the input unchanged.
-fn dpapi_encrypt(plaintext: &[u8]) -> Vec<u8> {
+fn dpapi_encrypt(plaintext: &[u8]) -> Option<Vec<u8>> {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::Security::Cryptography::CryptProtectData;
@@ -361,17 +362,15 @@ fn dpapi_encrypt(plaintext: &[u8]) -> Vec<u8> {
                 let mut result = DPAPI_MAGIC.to_vec();
                 result.extend_from_slice(ciphertext);
                 windows_sys::Win32::Foundation::LocalFree(data_out.pb_data as _);
-                return result;
+                return Some(result);
             }
         }
-        // Fallback: plaintext (encryption failed, which is rare)
-        let mut fallback = DPAPI_MAGIC.to_vec();
-        fallback.extend_from_slice(plaintext);
-        fallback
+        // Do not silently fall back to plaintext storage for clipboard data.
+        None
     }
     #[cfg(not(target_os = "windows"))]
     {
-        plaintext.to_vec()
+        Some(plaintext.to_vec())
     }
 }
 

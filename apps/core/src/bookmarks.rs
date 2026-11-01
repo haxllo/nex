@@ -75,12 +75,37 @@ pub(crate) fn download_favicon(url: &str) -> Result<PathBuf, String> {
     if let Ok(parsed) = url::Url::parse(&icon_url) {
         if let Some(host) = parsed.host_str() {
             let lowered = host.to_ascii_lowercase();
-            if lowered == "localhost"
+            let blocked = lowered == "localhost"
                 || lowered == "::1"
                 || lowered.starts_with("127.")
                 || lowered == "0.0.0.0"
-            {
+                || lowered.starts_with("10.")
+                || lowered.starts_with("192.168.")
+                || lowered.starts_with("169.254.")
+                || lowered.starts_with("172.16.")
+                || lowered.starts_with("172.17.")
+                || lowered.starts_with("172.18.")
+                || lowered.starts_with("172.19.")
+                || lowered.starts_with("172.2")
+                || lowered.starts_with("172.30.")
+                || lowered.starts_with("172.31.");
+            if blocked {
                 return Err("favicon host is not allowed".into());
+            }
+            // Reject IP literals in private ranges more generally.
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                match ip {
+                    std::net::IpAddr::V4(v4) => {
+                        if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                            return Err("favicon host is not allowed".into());
+                        }
+                    }
+                    std::net::IpAddr::V6(v6) => {
+                        if v6.is_loopback() {
+                            return Err("favicon host is not allowed".into());
+                        }
+                    }
+                }
             }
         }
     }

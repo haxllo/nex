@@ -282,8 +282,14 @@ fn chatgpt_request(agent: &ureq::Agent, method: &str, url: &str) -> Result<ureq:
 const CHATGPT_MODELS_CLIENT_VERSION: &str = "0.162.0";
 
 fn chatgpt_models_url() -> String {
-    let mut url = url::Url::parse(&format!("{}/models", crate::codex_auth::CODEX_BASE_URL))
-        .expect("valid ChatGPT model endpoint");
+    let Ok(mut url) = url::Url::parse(&format!("{}/models", crate::codex_auth::CODEX_BASE_URL))
+    else {
+        return format!(
+            "{}/models?client_version={}",
+            crate::codex_auth::CODEX_BASE_URL,
+            CHATGPT_MODELS_CLIENT_VERSION
+        );
+    };
     url.query_pairs_mut()
         .append_pair("client_version", CHATGPT_MODELS_CLIENT_VERSION);
     url.to_string()
@@ -1297,7 +1303,11 @@ fn store_config(config: &StoredConfig) -> Result<(), String> {
     let path = config_path();
     let parent = path.parent().ok_or("Could not locate Nex app data.")?;
     std::fs::create_dir_all(parent).map_err(|_| "Could not create Nex app data.".to_string())?;
-    let temp = path.with_extension("dpapi.tmp");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = path.with_extension(format!("dpapi.{}.tmp", stamp));
     std::fs::write(&temp, encrypted)
         .map_err(|_| "Could not write provider settings.".to_string())?;
     #[cfg(windows)]
@@ -1314,12 +1324,6 @@ fn store_config(config: &StoredConfig) -> Result<(), String> {
     #[cfg(not(windows))]
     std::fs::rename(temp, path).map_err(|_| "Could not replace provider settings.".to_string())?;
     Ok(())
-}
-
-#[repr(C)]
-struct DataBlob {
-    cb_data: u32,
-    pb_data: *mut u8,
 }
 
 fn dpapi_encrypt(input: &[u8]) -> Option<Vec<u8>> {

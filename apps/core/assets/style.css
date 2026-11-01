@@ -79,6 +79,7 @@ html[data-theme="light"] {
 }
 
 html[data-native-material="acrylic"] {
+  --text-faint: #c3c9d2;
   --panel-surface: rgba(17, 20, 27, 0.12);
   --panel-highlight: rgba(255, 255, 255, 0.24);
   --panel-edge: rgba(255, 255, 255, 0.2);

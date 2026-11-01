@@ -5,13 +5,11 @@
 // Uses node:child_process so hooks work under both Bun (OpenCode CLI/TUI)
 // and Node (OpenCode Desktop's Electron sidecar). See #2014.
 //
-// One file serves both plugin APIs, through its only export. The two
-// loaders cannot share a shape: OpenCode 1 before v1.3 calls every export as
-// a function (an object export crashes OpenCode), and OpenCode 2 requires the
-// default export to be an {id, setup} object. So the default export is chosen
-// when the module loads: OpenCode 1 sets OPENCODE=1 in its own environment
-// and gets the plugin function; anything else gets {id, server, setup}
-// (OpenCode 1.3+ also accepts that object, through `server`).
+// OpenCode 2 validates the default export as {id, effect} or {id, setup} and
+// rejects a bare function, so that object is the unconditional default. The
+// environment cannot pick the shape: OpenCode 2 sets OPENCODE=1 too. The v1
+// hooks implementation below is kept for a v1 loader build, unusable from the
+// same file once the default must be the v2 definition.
 import { spawn, spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -1147,4 +1145,4 @@ async function entireSetup(ctx: any) {
   }
 }
 
-export default process.env.OPENCODE === "1" ? EntirePlugin : { id: "entire", server: EntirePlugin, setup: entireSetup }
+export default { id: "entire", setup: entireSetup }

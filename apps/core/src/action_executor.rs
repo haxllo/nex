@@ -203,6 +203,10 @@ pub fn open_file_location(target: &str) -> Result<(), LaunchError> {
     if clean.is_empty() {
         return Err(LaunchError::EmptyPath);
     }
+    // Guard against quote injection in the /select argument: drop any
+    // embedded double quotes so a crafted path cannot break out of the
+    // quoted argument passed to explorer.exe.
+    let clean = clean.replace('"', "");
 
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;

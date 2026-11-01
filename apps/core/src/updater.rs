@@ -249,9 +249,10 @@ fn spawn_updater_detached(
         AllowSetForegroundWindow(ASFW_ANY);
     }
 
+    let script_display = script_path.display().to_string().replace('"', "");
     let command_line = format!(
         "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\" -Channel {}",
-        script_path.display(),
+        script_display,
         channel.as_arg()
     );
     let mut command_line: Vec<u16> =

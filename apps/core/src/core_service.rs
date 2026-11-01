@@ -1653,7 +1653,7 @@ impl CoreService {
         // Derive tantivy path before taking the tantivy lock to avoid
         // holding config RwLock + tantivy Mutex simultaneously.
         let tantivy_path = {
-            let cfg = self.config.read().unwrap();
+            let cfg = self.config.read().unwrap_or_else(|poisoned| poisoned.into_inner());
             let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
             index_dir.join("index.tantivy")
         };

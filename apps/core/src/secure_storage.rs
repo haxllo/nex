@@ -34,10 +34,14 @@ pub(crate) fn protect(input: &[u8], marker: &[u8]) -> Option<Vec<u8>> {
     }
     let encrypted = if output.cb_data == 0 {
         Vec::new()
+    } else if output.pb_data.is_null() {
+        return None;
     } else {
         unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() }
     };
-    unsafe { windows_sys::Win32::Foundation::LocalFree(output.pb_data as _) };
+    if !output.pb_data.is_null() {
+        unsafe { windows_sys::Win32::Foundation::LocalFree(output.pb_data as _) };
+    }
 
     let mut protected = marker.to_vec();
     protected.extend(encrypted);
@@ -73,10 +77,14 @@ pub(crate) fn unprotect(input: &[u8], marker: &[u8]) -> Option<Vec<u8>> {
     }
     let plain = if output.cb_data == 0 {
         Vec::new()
+    } else if output.pb_data.is_null() {
+        return None;
     } else {
         unsafe { std::slice::from_raw_parts(output.pb_data, output.cb_data as usize).to_vec() }
     };
-    unsafe { windows_sys::Win32::Foundation::LocalFree(output.pb_data as _) };
+    if !output.pb_data.is_null() {
+        unsafe { windows_sys::Win32::Foundation::LocalFree(output.pb_data as _) };
+    }
     Some(plain)
 }
 

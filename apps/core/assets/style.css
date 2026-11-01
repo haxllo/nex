@@ -423,6 +423,7 @@ html.bare #footer {
   background: var(--hover);
   opacity: 0;
   pointer-events: none;
+  transition: background 100ms ease, opacity 100ms ease;
 }
 .row > * {
   position: relative;

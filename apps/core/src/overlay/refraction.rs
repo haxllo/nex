@@ -142,6 +142,15 @@ fn mark_glass_failed() {
     GLASS_FAILED.store(true, std::sync::atomic::Ordering::Release);
 }
 
+/// Clear the latch once the worker presents a frame again. Capture and device
+/// losses are usually transient (ACCESS_LOST, a fullscreen exclusive app), and
+/// the worker recovers on its own; without this the panel stayed opaque for the
+/// rest of the process even though glass was rendering. Returns true when the
+/// fallback had been announced, so the host can re-engage the layer.
+fn mark_glass_ok() -> bool {
+    GLASS_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 /// Wide diffusion branch; the center primarily uses the tight branch.
 const BLUR_STDDEV: f32 = 8.0;
 const CENTER_BLUR_STDDEV: f32 = 3.5;
@@ -2873,6 +2882,7 @@ fn worker_main(
             match Capture::start(&eng.device, monitor_now) {
                 Ok(c) => {
                     n_capture_fail = 0;
+                    capture_failed_escalated = false;
                     crate::logging::info(&format!(
                         "[nex][refract] capture live {}x{}px",
                         c.frame_w, c.frame_h
@@ -3023,6 +3033,14 @@ fn worker_main(
                 copy_us += us;
                 render_us += frame_render_us;
                 n_fail = 0;
+                // Frames are flowing again: drop the opaque fallback so the
+                // host re-engages the layer instead of waiting for a restart.
+                if mark_glass_ok() {
+                    crate::logging::info(
+                        "[nex][refract] renderer recovered — restoring glass",
+                    );
+                    let _ = proxy.send_event(UiCommand::Apply);
+                }
                 staged = true;
                 if !warm {
                     n_pre += 1;
@@ -4311,6 +4329,17 @@ mod tests {
             clamp_panel_box(4000, 4000, 700, 441, 0, 0, frame.0, frame.1),
             (1920, 1080, 0, 0)
         );
+    }
+
+    #[test]
+    fn glass_fallback_latch_clears_on_recovery() {
+        assert!(!super::glass_failed());
+        super::mark_glass_failed();
+        assert!(super::glass_failed());
+        // The first recovery is the one the host has to hear about.
+        assert!(super::mark_glass_ok());
+        assert!(!super::glass_failed());
+        assert!(!super::mark_glass_ok());
     }
 
 }

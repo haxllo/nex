@@ -563,9 +563,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         crate::logging::warn(
                             "[nex] glass engine failed persistently — switching to opaque panel",
                         );
-                        if let Some(layer) = glass_layer.as_ref() {
-                            layer.set_visible(false);
-                        }
+                        // Through the shared sync so the applied-material memo
+                        // matches: a direct park here left it claiming "engaged"
+                        // and blocked the re-engage on recovery.
+                        sync_glass_layer(&glass_layer, &state);
                         sync_webview_background(webview.as_ref(), &state);
                         if ready {
                             push_state(&webview, &state, &icon_cache, false);
@@ -599,13 +600,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     {
                         push_state(&webview, &state, &icon_cache, false);
                     }
-                    // Opaque panel modes park the glass layer immediately
-                    // (no waiting for the next show/hide cycle).
-                    if !glass_active(&state) {
-                        if let Some(layer) = glass_layer.as_ref() {
-                            layer.set_visible(false);
-                        }
-                    }
+                    // The panel material can flip at runtime: park the glass
+                    // layer for opaque panels, engage it again for glass.
+                    sync_glass_layer(&glass_layer, &state);
                     sync_webview_background(webview.as_ref(), &state);
                 }
                 UiCommand::ApplyStatus => {
@@ -2289,6 +2286,49 @@ fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::S
         && state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
 }
 
+/// What a panel-material change asks of the native layer: `Some(active)`
+/// only when the answer differs from the last one applied.
+fn glass_transition(active: bool, applied: Option<bool>) -> Option<bool> {
+    (applied != Some(active)).then_some(active)
+}
+
+/// Engage or park the native layer when the panel material changes at
+/// runtime. Parking used to be final: switching back to glass left the
+/// layer hidden and the page transparent over an empty window (black,
+/// square borders) until a restart. Re-engaging re-clips the rounded
+/// region and wakes the renderer; its next frame lifts the cloak
+/// (GlassPresented). Only fires on a change — Apply runs per keystroke.
+fn sync_glass_layer(
+    glass_layer: &Option<crate::overlay::refraction::GlassLayer>,
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) {
+    static APPLIED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+    let active = glass_active(state);
+    let applied = match APPLIED.load(Ordering::SeqCst) {
+        -1 => None,
+        0 => Some(false),
+        _ => Some(true),
+    };
+    let Some(active) = glass_transition(active, applied) else {
+        return;
+    };
+    APPLIED.store(i8::from(active), Ordering::SeqCst);
+    let Some(layer) = glass_layer.as_ref() else { return };
+    if !active {
+        layer.set_visible(false);
+        // The page must not claim glass-native while the layer is parked.
+        if let Ok(mut s) = state.lock() {
+            s.glass_frame_ready = false;
+        }
+        return;
+    }
+    // Hidden: the show path engages the layer itself. Waking the renderer
+    // here would run it at full rate behind a cloaked panel.
+    if state.lock().map(|s| s.visible).unwrap_or(false) {
+        layer.set_visible(true);
+    }
+}
+
 /// Wake the renderer a beat before the panel is revealed so its next
 /// present lands while the glass window is still cloaked. Revealing
 /// first would uncloak whatever the last session left presented.
@@ -3705,6 +3745,21 @@ mod snapshot_tests {
         assert!(!capture_exclusion_needed(PanelBackground::White, true));
         // No glass layer (creation failed / NEX_REFRACT_LAB=0): nothing to hide.
         assert!(!capture_exclusion_needed(PanelBackground::Glass, false));
+    }
+
+    #[test]
+    fn glass_layer_follows_a_runtime_material_switch() {
+        use super::glass_transition;
+        // Startup / first Apply: unknown, so the layer gets settled.
+        assert_eq!(glass_transition(true, None), Some(true));
+        assert_eq!(glass_transition(false, None), Some(false));
+        // Glass → black parks it; black → glass must engage it again
+        // (regression: the park stuck and the panel stayed black + square).
+        assert_eq!(glass_transition(false, Some(true)), Some(false));
+        assert_eq!(glass_transition(true, Some(false)), Some(true));
+        // Unchanged answer on every keystroke: nothing to do.
+        assert_eq!(glass_transition(true, Some(true)), None);
+        assert_eq!(glass_transition(false, Some(false)), None);
     }
 
     #[test]

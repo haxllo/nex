@@ -70,6 +70,20 @@ pub(crate) fn favicon_url(url: &str) -> Result<String, String> {
 pub(crate) fn download_favicon(url: &str) -> Result<PathBuf, String> {
     let url = crate::config::normalize_bookmark_url(url)?;
     let icon_url = favicon_url(&url)?;
+    // Avoid using the favicon fetcher as an SSRF probe against the
+    // local machine: only fetch from public-ish hosts.
+    if let Ok(parsed) = url::Url::parse(&icon_url) {
+        if let Some(host) = parsed.host_str() {
+            let lowered = host.to_ascii_lowercase();
+            if lowered == "localhost"
+                || lowered == "::1"
+                || lowered.starts_with("127.")
+                || lowered == "0.0.0.0"
+            {
+                return Err("favicon host is not allowed".into());
+            }
+        }
+    }
     let path = favicon_cache_path(&url);
     if path.is_file() {
         return Ok(path);

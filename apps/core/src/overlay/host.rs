@@ -128,7 +128,6 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_DEFAULT,
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
@@ -524,7 +523,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
                             position_window(&window, hwnd);
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, INITIAL_HEIGHT);
+                            apply_window_height(
+                                &window,
+                                webview.as_ref(),
+                                &mut glass_layer,
+                                INITIAL_HEIGHT,
+                                opaque_panel_mode(&state),
+                            );
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
                             first_resize_after_show = true;
@@ -1229,7 +1234,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(
+                                &window,
+                                webview.as_ref(),
+                                &mut glass_layer,
+                                h,
+                                opaque_panel_mode(&state),
+                            );
                         }
                     } else if first_resize_after_show {
                         // First resize after show: apply immediately to
@@ -1239,7 +1250,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         pending_resize = None;
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(
+                                &window,
+                                webview.as_ref(),
+                                &mut glass_layer,
+                                h,
+                                opaque_panel_mode(&state),
+                            );
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
                         // Large growth: apply immediately so the window is
@@ -1247,7 +1264,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         first_resize_after_show = false;
                         pending_resize = None;
                         last_applied_height = h;
-                        apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                        apply_window_height(
+                            &window,
+                            webview.as_ref(),
+                            &mut glass_layer,
+                            h,
+                            opaque_panel_mode(&state),
+                        );
                     } else {
                         // Growth request: debounce to coalesce rapid
                         // resize requests and prevent DWM acrylic flash
@@ -1265,7 +1288,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if let Some(h) = pending_resize.take() {
                         if (h - last_applied_height).abs() > 0.5 {
                             last_applied_height = h;
-                            apply_window_height(&window, webview.as_ref(), &mut glass_layer, h);
+                            apply_window_height(
+                                &window,
+                                webview.as_ref(),
+                                &mut glass_layer,
+                                h,
+                                opaque_panel_mode(&state),
+                            );
                         }
                     }
                 }
@@ -1341,6 +1370,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // uncloak + child visible before first frame.
                         set_overlay_cloaked(hwnd, false);
                         set_webview_child_visible(&window, true);
+                        // Uncloaking/frame changes can cause DWM to refresh the
+                        // host geometry; restore the opaque rounded clip just
+                        // before the first visible frame.
+                        sync_opaque_window_region(&window, opaque_panel_mode(&state));
                         // Single activation path (helper owns foreground;
                         // local force only without helper). Request before
                         // first visible frame so DWM doesn't show Acrylic's
@@ -2525,6 +2558,18 @@ fn effective_panel_mode(
     mode
 }
 
+fn opaque_panel_mode(
+    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
+) -> bool {
+    state
+        .lock()
+        .map(|s| {
+            s.panel_background.is_opaque()
+                || !crate::overlay::platform::transparency_enabled()
+        })
+        .unwrap_or(false)
+}
+
 /// Keep the main window's capture affinity in step with the material. Cheap
 /// and idempotent: the flag is only touched when the answer changes, so this
 /// runs on every Show/Apply.
@@ -2883,16 +2928,24 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_
     let transitions_disabled = 1_i32;
     let immersive_dark = i32::from(dark);
     // Native glass uses the same continuous profile for both HWND regions
-    // and CSS. Opaque/acrylic modes retain the system's default corners.
+    // and CSS. Opaque/acrylic modes use explicit rounded DWM corners so
+    // opaque surface clipping matches the visible window silhouette.
     let rounded_corners = if glass_native && !opaque_panel {
         windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
-    } else { DWMWCP_DEFAULT };
+    } else {
+        windows_sys::Win32::Graphics::Dwm::DWMWCP_ROUND
+    };
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+    sync_opaque_window_region(window, opaque_panel);
     // Native glass already shades its own edge. A second system frame
     // reads as an unrelated hard outline (especially on bright backdrops).
-    let border_color: u32 = if suppress_border || (glass_native && !opaque_panel) { 0xFFFFFFFE } else { 0xFFFFFFFF };
+    let border_color: u32 = if suppress_border || opaque_panel || (glass_native && !opaque_panel) {
+        0xFFFFFFFE
+    } else {
+        0xFFFFFFFF
+    };
     let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
 
     // Keep DWM acrylic for the fallback path. With the native refraction
@@ -2942,6 +2995,48 @@ fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
             value as *const T as *const std::ffi::c_void,
             std::mem::size_of::<T>() as u32,
         ) >= 0
+    }
+}
+
+/// Clip the opaque WebView surface to the panel silhouette. Opaque WebView
+/// backgrounds are required for ClearType, but otherwise fill the rounded
+/// CSS corners with a rectangular black/white surface.
+fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateRoundRectRgn, SetWindowRgn,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let hwnd = window.hwnd() as HWND;
+    if !opaque_panel {
+        unsafe {
+            SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+        }
+        return;
+    }
+
+    let mut window_rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0 {
+        return;
+    }
+    let scale = window.scale_factor() as f32;
+    let radius = (8.0 * scale).round() as i32;
+    let width = window_rect.right - window_rect.left;
+    let height = window_rect.bottom - window_rect.top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    unsafe {
+        let region = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
+        if !region.is_null() {
+            let _ = SetWindowRgn(hwnd, region, 1);
+        }
     }
 }
 
@@ -2999,8 +3094,10 @@ fn apply_window_height(
     webview: Option<&WebView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
+    opaque_panel: bool,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
+    sync_opaque_window_region(window, opaque_panel);
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
     }

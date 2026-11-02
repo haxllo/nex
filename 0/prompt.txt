@@ -1,0 +1,13 @@
+y cant i hae exact clean corners and border like in my settings window?
+
+---
+
+what issues will we face if we do these
+
+---
+
+what if we do it only on the opaqu windows and leave the glass window as it is?
+
+---
+
+ok try implementing it

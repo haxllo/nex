@@ -1,0 +1,5 @@
+looks like the border is 1px inside
+
+---
+
+but looks liek the backround is outside the border its not good dont make it 1px inset

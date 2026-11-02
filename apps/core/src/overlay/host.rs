@@ -528,7 +528,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 webview.as_ref(),
                                 &mut glass_layer,
                                 INITIAL_HEIGHT,
-                                opaque_panel_mode(&state),
+                                &state,
                             );
                             last_applied_height = INITIAL_HEIGHT;
                             pending_resize = None;
@@ -1239,7 +1239,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 webview.as_ref(),
                                 &mut glass_layer,
                                 h,
-                                opaque_panel_mode(&state),
+                                &state,
                             );
                         }
                     } else if first_resize_after_show {
@@ -1255,7 +1255,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 webview.as_ref(),
                                 &mut glass_layer,
                                 h,
-                                opaque_panel_mode(&state),
+                                &state,
                             );
                         }
                     } else if h - last_applied_height >= RESIZE_IMMEDIATE_GROWTH {
@@ -1269,7 +1269,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             webview.as_ref(),
                             &mut glass_layer,
                             h,
-                            opaque_panel_mode(&state),
+                            &state,
                         );
                     } else {
                         // Growth request: debounce to coalesce rapid
@@ -1293,7 +1293,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 webview.as_ref(),
                                 &mut glass_layer,
                                 h,
-                                opaque_panel_mode(&state),
+                                &state,
                             );
                         }
                     }
@@ -1370,15 +1370,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // uncloak + child visible before first frame.
                         set_overlay_cloaked(hwnd, false);
                         set_webview_child_visible(&window, true);
-                        // Uncloaking/frame changes can cause DWM to refresh the
-                        // host geometry; restore the opaque rounded clip just
-                        // before the first visible frame.
-                        sync_opaque_window_region(&window, opaque_panel_mode(&state));
                         // Single activation path (helper owns foreground;
                         // local force only without helper). Request before
                         // first visible frame so DWM doesn't show Acrylic's
                         // inactive fallback.
                         request_foreground(hwnd);
+                        // Uncloaking, activation, and region changes can make
+                        // DWM rebuild the non-client frame. Apply the rounded
+                        // region first, then restore the frame attributes as
+                        // the last operation before the window is shown.
+                        sync_window_frame(&window, &state, false);
                         window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // The window is really on screen now; further hotkey
@@ -2558,18 +2559,6 @@ fn effective_panel_mode(
     mode
 }
 
-fn opaque_panel_mode(
-    state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
-) -> bool {
-    state
-        .lock()
-        .map(|s| {
-            s.panel_background.is_opaque()
-                || !crate::overlay::platform::transparency_enabled()
-        })
-        .unwrap_or(false)
-}
-
 /// Keep the main window's capture affinity in step with the material. Cheap
 /// and idempotent: the flag is only touched when the answer changes, so this
 /// runs on every Show/Apply.
@@ -2926,27 +2915,11 @@ fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_
     }).unwrap_or((true, false, false));
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
-    let immersive_dark = i32::from(dark);
     // Native glass uses the same continuous profile for both HWND regions
     // and CSS. Opaque/acrylic modes use explicit rounded DWM corners so
     // opaque surface clipping matches the visible window silhouette.
-    let rounded_corners = if glass_native && !opaque_panel {
-        windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
-    } else {
-        windows_sys::Win32::Graphics::Dwm::DWMWCP_ROUND
-    };
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
-    let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
-    let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
-    sync_opaque_window_region(window, opaque_panel);
-    // Native glass already shades its own edge. A second system frame
-    // reads as an unrelated hard outline (especially on bright backdrops).
-    let border_color: u32 = if suppress_border || opaque_panel || (glass_native && !opaque_panel) {
-        0xFFFFFFFE
-    } else {
-        0xFFFFFFFF
-    };
-    let _ = set_dwm_attribute(hwnd, windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, &border_color);
+    sync_window_frame_style(window, dark, glass_native, opaque_panel, suppress_border);
 
     // Keep DWM acrylic for the fallback path. With the native refraction
     // layer active, even reapplying acrylic on a later show paints over the
@@ -2996,6 +2969,58 @@ fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
             std::mem::size_of::<T>() as u32,
         ) >= 0
     }
+}
+
+/// Reapply the host shape and DWM frame at the point where the window is
+/// about to be composed. Region changes send window-position messages, so
+/// set the DWM attributes after the region to leave the desired frame state
+/// as the final operation before reveal/resize.
+fn sync_window_frame(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_border: bool) {
+    let (dark, glass_native, opaque_panel) = state
+        .lock()
+        .map(|s| {
+            (
+                s.theme == Theme::Dark,
+                s.glass_native,
+                s.panel_background.is_opaque()
+                    || !crate::overlay::platform::transparency_enabled(),
+            )
+        })
+        .unwrap_or((true, false, false));
+    sync_window_frame_style(window, dark, glass_native, opaque_panel, suppress_border);
+}
+
+fn sync_window_frame_style(
+    window: &Window,
+    dark: bool,
+    glass_native: bool,
+    opaque_panel: bool,
+    suppress_border: bool,
+) {
+    let hwnd = window.hwnd() as HWND;
+    sync_opaque_window_region(window, opaque_panel);
+
+    let immersive_dark = i32::from(dark);
+    let rounded_corners = if glass_native && !opaque_panel {
+        windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
+    } else {
+        windows_sys::Win32::Graphics::Dwm::DWMWCP_ROUND
+    };
+    let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
+    let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+
+    // Native glass supplies its own edge. Opaque modes suppress DWM's
+    // system frame so it cannot be composited over the solid surface.
+    let border_color: u32 = if suppress_border || opaque_panel || (glass_native && !opaque_panel) {
+        0xFFFFFFFE
+    } else {
+        0xFFFFFFFF
+    };
+    let _ = set_dwm_attribute(
+        hwnd,
+        windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR,
+        &border_color,
+    );
 }
 
 /// Clip the opaque WebView surface to the panel silhouette. Opaque WebView
@@ -3094,10 +3119,10 @@ fn apply_window_height(
     webview: Option<&WebView>,
     glass: &mut Option<crate::overlay::refraction::GlassLayer>,
     h: f64,
-    opaque_panel: bool,
+    state: &Arc<Mutex<ShimState>>,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
-    sync_opaque_window_region(window, opaque_panel);
+    sync_window_frame(window, state, false);
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
     }

@@ -1,0 +1,5 @@
+in the whats new page the notes are not fully showing design it better fix it
+
+---
+
+release v 2.34.2

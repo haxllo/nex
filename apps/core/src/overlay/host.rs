@@ -1366,30 +1366,34 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView focus (Windows beeps for those unhandled
                         // characters).
                         focus_input(&webview);
-                        // Wry's WM_SIZE handler snaps the WebView child back
-                        // to the host client size. Restore the oversized
-                        // viewport and clip both HWNDs while the host is
-                        // still cloaked, so its opaque native background
-                        // cannot escape the rounded panel on the first frame.
+                        // The first Tao set_visible(true) does more than show
+                        // the HWND: it reapplies native styles and sends a
+                        // frame change. Wry handles the resulting parent size
+                        // message by snapping its child to the client size.
+                        // Keep the host cloaked while that one-time transition
+                        // and foreground handoff run, then restore the maximum
+                        // viewport and both rounded regions against the final
+                        // geometry before DWM can compose the panel.
+                        let _ = set_overlay_cloaked(hwnd, true);
+                        set_webview_child_visible(&window, false);
+                        window.set_visible(true);
+                        let _ = set_overlay_cloaked(hwnd, true);
+                        // Single activation path (helper owns foreground;
+                        // local force only without helper). Request activation
+                        // before uncloaking so DWM does not show Acrylic's
+                        // inactive fallback on the first visible frame.
+                        request_foreground(hwnd);
                         if let Some(wv) = webview.as_ref() {
                             keep_webview_viewport_max(wv);
                         }
                         sync_window_frame(&window, &state, false);
-                        // Transparent-hide reversal (order mirrors hide):
-                        // uncloak + child visible before first frame.
-                        set_overlay_cloaked(hwnd, false);
                         set_webview_child_visible(&window, true);
-                        // Single activation path (helper owns foreground;
-                        // local force only without helper). Request before
-                        // first visible frame so DWM doesn't show Acrylic's
-                        // inactive fallback.
-                        request_foreground(hwnd);
-                        // Uncloaking, activation, and region changes can make
-                        // DWM rebuild the non-client frame. Apply the rounded
-                        // region first, then restore the frame attributes as
-                        // the last operation before the window is shown.
+                        // Uncloaking can rebuild the non-client frame. Restore
+                        // the DWM attributes after the region is applied, and
+                        // leave this as the last geometry operation before
+                        // composition.
+                        set_overlay_cloaked(hwnd, false);
                         sync_window_frame(&window, &state, false);
-                        window.set_visible(true);
                         OVERLAY_VISIBLE.store(true, Ordering::SeqCst);
                         // The window is really on screen now; further hotkey
                         // presses toggle/refocus through the normal paths.

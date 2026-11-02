@@ -104,6 +104,19 @@ pub(crate) struct IndexPayload {
     pub v: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PaintedPayload {
+    pub v: PaintedState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct PaintedState {
+    pub show_id: u64,
+    pub glass_native: bool,
+}
+
 /// Seek target in whole milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -268,7 +281,7 @@ pub(crate) enum OverlayMessage {
     #[serde(rename = "resize")]
     Resize(ResizePayload),
     #[serde(rename = "painted")]
-    Painted(NoPayload),
+    Painted(PaintedPayload),
     #[serde(rename = "pin")]
     Pin(TextPayload),
     #[serde(rename = "unpin")]

@@ -1024,6 +1024,26 @@
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
   let needsPainted = false;
+  let activeShowId = 0;
+  let glassWaitingForShow = false;
+  let showContentPainted = false;
+  function sendPaintedAck() {
+    if (!showContentPainted || glassWaitingForShow || activeShowId === 0) return;
+    post("painted", {
+      showId: activeShowId,
+      glassNative: document.documentElement.classList.contains("glass-native"),
+    });
+  }
+  function noteContentPainted() {
+    showContentPainted = true;
+    sendPaintedAck();
+  }
+  function schedulePaintedAck() {
+    const showId = activeShowId;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (showId === activeShowId) sendPaintedAck();
+    }));
+  }
   // Holds the post-show reveal until first content paints (or 500ms),
   // so the window never flashes its idle mid-state before results land.
   let showRevealTimer = 0;
@@ -1042,7 +1062,7 @@
       post("resize", { v: h, immediate: true });
       if (needsPainted) {
         needsPainted = false;
-        requestAnimationFrame(() => { scrollToInstant(0); post("painted"); });
+        requestAnimationFrame(() => { scrollToInstant(0); noteContentPainted(); });
       }
       return;
     }
@@ -1058,7 +1078,7 @@
         if (needsPainted) {
           needsPainted = false;
           scrollToInstant(0); // fresh show = fresh scroll, after paint
-          post("painted");
+          noteContentPainted();
         }
       });
     });
@@ -3181,6 +3201,13 @@
         return;
       }
 
+      const wasGlassWaiting = glassWaitingForShow;
+      const wasGlassNative = document.documentElement.classList.contains("glass-native");
+      if (Number.isSafeInteger(state.showId) && state.showId >= 0 && state.showId !== activeShowId) {
+        activeShowId = state.showId;
+        showContentPainted = false;
+      }
+
       // Close the power panel / confirm whenever Rust pushes a fresh state
       // (show, hide, query change, etc.)
       topPower.closeMenu();
@@ -3313,6 +3340,9 @@
       if (typeof state.glassNative === "boolean") {
         document.documentElement.classList.toggle("glass-native", state.glassNative);
       }
+      if (typeof state.glassWaiting === "boolean") {
+        glassWaitingForShow = state.glassWaiting;
+      }
       if (typeof state.glassClip === "string") {
         document.documentElement.style.setProperty("--glass-clip", state.glassClip);
       }
@@ -3439,6 +3469,14 @@
       }
 
       renderCompletion();
+      const glassNativeChanged = wasGlassNative
+        !== document.documentElement.classList.contains("glass-native");
+      if (state.overlayVisible !== false
+        && showContentPainted
+        && !glassWaitingForShow
+        && ((wasGlassWaiting && !glassWaitingForShow) || glassNativeChanged)) {
+        schedulePaintedAck();
+      }
     },
 
     focus() {

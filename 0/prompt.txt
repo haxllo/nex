@@ -1,0 +1,5 @@
+ok there is a small new issue when in glass view when overlay hides and show i see a stale box 1px black border flashing investigate and report what introduced this
+
+---
+
+OK IMPLEMENT THE FIX

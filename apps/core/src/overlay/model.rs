@@ -215,6 +215,13 @@ pub struct ShimState {
     /// layer with nothing in it is a see-through panel, and a renderer
     /// that never comes up would leave the panel invisible.
     pub glass_frame_ready: bool,
+    /// The native glass frame missed this show's reveal deadline. Keep the
+    /// panel on its opaque fallback until the next show rather than flashing
+    /// from the fallback to glass later in the same reveal.
+    pub glass_show_fallback: bool,
+    /// Monotonic show identifier echoed by the page's painted acknowledgement
+    /// so a delayed acknowledgement from an older show cannot reveal this one.
+    pub show_id: u64,
     /// Whether the cursor is inside the panel at show. The page keeps the
     /// pointer position from the previous session to keep the selection
     /// under a stationary mouse; if the pointer is elsewhere, remembering
@@ -267,6 +274,8 @@ impl Default for ShimState {
             glass_native: false,
             pointer_over_panel: false,
             glass_frame_ready: false,
+            glass_show_fallback: false,
+            show_id: 0,
             glass_light: false,
             panel_background: crate::config::PanelBackground::Black,
             content_pending: false,

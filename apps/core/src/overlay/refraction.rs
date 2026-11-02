@@ -518,6 +518,17 @@ impl GlassLayer {
         self.window.last_frame.set(Some((w, h)));
     }
 
+    /// Whether the last renderer frame matches the panel's latest region.
+    /// Used to keep the host cloaked until both native pixels and the page's
+    /// transparent surface are ready for the same size.
+    pub fn has_current_frame(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+            && matches!(
+                self.window.last_region.get(),
+                Some((w, h, _)) if self.window.last_frame.get() == Some((w, h))
+            )
+    }
+
     /// Lift the cloak once a frame for the panel's *current* size has been
     /// presented. A frame for the previous size leaves the rows the page
     /// just grew into holding older pixels, so this waits for the resize
@@ -2851,6 +2862,17 @@ fn worker_main(
                                             "[nex][refract] panel {pw}x{ph} re-presented in {}ms ({source})",
                                             t0.elapsed().as_millis()
                                         ));
+                                    }
+                                    if refresh || rebuilt {
+                                        // A show can use this held-mirror path
+                                        // when the desktop is static. It is a
+                                        // valid present for the current panel
+                                        // size and must complete the host's
+                                        // reveal handshake just like a newly
+                                        // captured frame does below.
+                                        let _ = proxy.send_event(
+                                            UiCommand::GlassPresented { w: pw, h: ph },
+                                        );
                                     }
                                 }
                                 Err(error) => crate::logging::warn(&format!(

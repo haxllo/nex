@@ -155,6 +155,7 @@ const WINDOW_WIDTH: f64 = 760.0;
 const INITIAL_HEIGHT: f64 = 60.0;
 const MAX_HEIGHT: f64 = 680.0;
 const FOCUS_GRACE_MS: u64 = 400;
+const GLASS_SHOW_TIMEOUT_MS: u64 = 350;
 
 /// How long after a Show completes focus-loss is treated as a flap-pair
 /// rather than a genuine dismissal. During this window we always defer
@@ -239,7 +240,12 @@ pub(crate) enum UiCommand {
     /// WebView warm for consistent re-open timing.
     Teardown(u64),
     /// The page painted after a push_state — trigger deferred show.
-    Painted,
+    Painted(crate::overlay::ipc::PaintedState),
+    /// The native glass layer did not produce a current-size frame before
+    /// the per-show deadline. Switch this show to the opaque theme fallback.
+    GlassShowTimeout {
+        show_id: u64,
+    },
     /// The native glass renderer presented a frame at this panel size. The
     /// layer is uncloaked only once such an ack matches the size the page
     /// has, so the first pixels seen belong to the current backdrop.
@@ -423,6 +429,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut focus_reassert_used = false;
     let mut last_show = Instant::now();
     let mut show_pending = false;
+    let mut glass_timeout_armed_for: Option<u64> = None;
     // Show-path latency telemetry: stamped on UiCommand::Show receipt,
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
@@ -529,6 +536,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
+                            begin_pending_show(&state, &mut show_pending);
                             position_window(&window, hwnd);
                             apply_window_height(
                                 &window,
@@ -542,30 +550,77 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             first_resize_after_show = true;
                             refresh_pointer_over_panel(hwnd, &state);
                             prepare_glass_show(&glass_layer, &state);
+                            sync_webview_background(webview.as_ref(), &state);
+                            arm_glass_show_timeout(
+                                &proxy,
+                                &state,
+                                show_pending,
+                                &mut glass_timeout_armed_for,
+                            );
                             push_state(&webview, &state, &icon_cache, true);
-                            show_pending = true;
-
                         }
                     }
                     UiCommand::GlassPresented { w, h } => {
-                        // The renderer has a frame. Re-presenting one for the
-                        // size the page is on lifts the cloak — never the
-                        // last session's held buffer.
                         if let Some(layer) = glass_layer.as_ref() {
                             layer.note_frame(w, h);
                         }
-                        let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
-                            && state.lock().map(|s| s.visible).unwrap_or(false)
-                            && glass_active(&state);
-                        let revealed = live
-                            && glass_layer.as_ref().is_some_and(|layer| layer.reveal());
-                        // The page drops its painted surface exactly when the
-                        // layer shows through, so it is never see-through
-                        // over a cloaked glass.
-                        if revealed {
+                        let current_frame = glass_layer
+                            .as_ref()
+                            .is_some_and(|layer| layer.has_current_frame());
+                        if show_pending && native_glass_expected(&state) {
                             if let Ok(mut s) = state.lock() {
-                                s.glass_frame_ready = true;
+                                s.glass_frame_ready = current_frame;
                             }
+                            // Keep both HWNDs cloaked until JS confirms that
+                            // the transparent glass-native CSS state painted.
+                            if ready {
+                                push_state(&webview, &state, &icon_cache, false);
+                            }
+                        } else {
+                            let live = OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                                && state.lock().map(|s| s.visible).unwrap_or(false)
+                                && glass_active(&state);
+                            let revealed = live
+                                && current_frame
+                                && glass_layer.as_ref().is_some_and(|layer| layer.reveal());
+                            if revealed {
+                                if let Ok(mut s) = state.lock() {
+                                    s.glass_frame_ready = true;
+                                }
+                                if ready {
+                                    push_state(&webview, &state, &icon_cache, false);
+                                }
+                            }
+                        }
+                    }
+                    UiCommand::GlassShowTimeout { show_id } => {
+                        if glass_timeout_armed_for == Some(show_id) {
+                            glass_timeout_armed_for = None;
+                        }
+                        let should_fallback = show_pending
+                            && state
+                                .lock()
+                                .map(|s| {
+                                    s.visible
+                                        && s.show_id == show_id
+                                        && !s.panel_background.is_opaque()
+                                        && s.glass_native
+                                        && !s.glass_frame_ready
+                                        && !s.glass_show_fallback
+                                })
+                                .unwrap_or(false);
+                        if should_fallback {
+                            crate::logging::warn(&format!(
+                                "[nex] glass frame missed show deadline (show_id={show_id}); using opaque fallback for this show"
+                            ));
+                            if let Ok(mut s) = state.lock() {
+                                s.glass_frame_ready = false;
+                                s.glass_show_fallback = true;
+                            }
+                            sync_glass_layer(&glass_layer, &state);
+                            sync_webview_background(webview.as_ref(), &state);
+                            let visible = state.lock().map(|s| s.visible).unwrap_or(false);
+                            sync_window_frame_if_mode_changed(&window, &state, !visible);
                             if ready {
                                 push_state(&webview, &state, &icon_cache, false);
                             }
@@ -618,6 +673,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // glass and opaque modes; this command also runs for
                     // ordinary content updates and keystrokes.
                     sync_window_frame_if_mode_changed(&window, &state, !visible);
+                    arm_glass_show_timeout(
+                        &proxy,
+                        &state,
+                        show_pending,
+                        &mut glass_timeout_armed_for,
+                    );
                     if ready && (visible || show_pending) {
                         push_state(&webview, &state, &icon_cache, false);
                     }
@@ -963,7 +1024,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // (sent by Tao/Windows during WebView creation)
                         // do not trigger Escape and hide the overlay
                         // before WebviewReady can display it.
-                        show_pending = true;
+                        begin_pending_show(&state, &mut show_pending);
 
                         match build_webview(
                             &window,
@@ -991,7 +1052,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // across threads). Do NOT destroy and rebuild —
                         // WebviewReady is already queued and completes the
                         // show via show_pending.
-                        show_pending = true;
+                        begin_pending_show(&state, &mut show_pending);
 
                         return;
                     }
@@ -1015,7 +1076,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // position_window / set_inner_size / push_state cannot
                     // trigger Escape (which would desync OverlayState from
                     // the actual window state).
-                    show_pending = true;
+                    begin_pending_show(&state, &mut show_pending);
 
                     // Cancel any pending deferred-hide from a previous
                     // focus-loss — the user意图 is to show, not hide.
@@ -1079,12 +1140,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // reveal carries this desktop, not the last session's.
                     refresh_pointer_over_panel(hwnd, &state);
                     prepare_glass_show(&glass_layer, &state);
+                    // Apply the native WebView surface before the first
+                    // snapshot can make the page transparent.
+                    sync_webview_background(webview.as_ref(), &state);
+                    arm_glass_show_timeout(
+                        &proxy,
+                        &state,
+                        show_pending,
+                        &mut glass_timeout_armed_for,
+                    );
                     // Push state with show_pending so the JS side sends
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
-                    // Mode may have changed while hidden (Apply skips
-                    // pushes then), so re-sync the surface every show.
-                    sync_webview_background(webview.as_ref(), &state);
                     show_arm_at = Some(Instant::now());
                     if let Some(t0) = show_cmd_at {
                         crate::runtime::log_info(&format!(
@@ -1164,6 +1231,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if ready {
                         push_state(&webview, &state, &icon_cache, false);
                     }
+                    glass_timeout_armed_for = None;
                     if let Ok(mut s) = state.lock() {
                         s.has_focus = false;
                     }
@@ -1201,6 +1269,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if ready {
                         push_state(&webview, &state, &icon_cache, false);
                     }
+                    glass_timeout_armed_for = None;
                     if let Ok(mut s) = state.lock() {
                         s.has_focus = false;
                     }
@@ -1324,7 +1393,47 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         elapsed, fg_now, win_down_now, win_down_raw_now,
                     ));
                 }
-                UiCommand::Painted => {
+                UiCommand::Painted(painted) => {
+                    let snapshot = match state.lock() {
+                        Ok(s) => s.clone(),
+                        Err(_) => return,
+                    };
+                    if !show_pending || painted.show_id != snapshot.show_id {
+                        crate::runtime::log_info(&format!(
+                            "[nex] host Painted: stale acknowledgement show_id={} current={} pending={}",
+                            painted.show_id, snapshot.show_id, show_pending
+                        ));
+                        return;
+                    }
+                    let wants_glass = native_glass_expected(&state);
+                    let current_glass_frame = glass_layer
+                        .as_ref()
+                        .is_some_and(|layer| layer.has_current_frame());
+                    if !snapshot.visible {
+                        show_pending = false;
+                        return;
+                    }
+                    if (wants_glass
+                        && (!snapshot.glass_frame_ready
+                            || !current_glass_frame
+                            || !painted.glass_native))
+                        || (!wants_glass && painted.glass_native)
+                    {
+                        if wants_glass && !current_glass_frame {
+                            if let Ok(mut s) = state.lock() {
+                                s.glass_frame_ready = false;
+                            }
+                            glass_timeout_armed_for = None;
+                            arm_glass_show_timeout(
+                                &proxy,
+                                &state,
+                                show_pending,
+                                &mut glass_timeout_armed_for,
+                            );
+                        }
+                        push_state(&webview, &state, &icon_cache, false);
+                        return;
+                    }
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Painted received show_pending={}", show_pending));
                     if show_pending {
                         if let Some(t0) = show_arm_at.take() {
@@ -2044,11 +2153,11 @@ fn handle_ipc(
             let (h, immediate) = p.v.height_and_immediate();
             try_send_ui(proxy, UiCommand::Resize { h, immediate });
         }
-        OverlayMessage::Painted(_) => {
+        OverlayMessage::Painted(payload) => {
             // First paint after push_state — safe to show the window.
             // Deferred from WebviewReady / Show to avoid a flash of
             // uncomposited content before the WebView2 paints.
-            try_send_ui(proxy, UiCommand::Painted);
+            try_send_ui(proxy, UiCommand::Painted(payload.v));
         }
         OverlayMessage::Pin(p) => {
             let _ = event_tx.send(OverlayEvent::PinApp(p.v));
@@ -2342,7 +2451,84 @@ fn post_json(webview: &WebView, json: impl std::fmt::Display) {
 fn glass_active(state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>) -> bool {
     crate::overlay::platform::transparency_enabled()
         && !crate::overlay::refraction::glass_failed()
-        && state.lock().map(|s| !s.panel_background.is_opaque()).unwrap_or(false)
+        && state
+            .lock()
+            .map(|s| !s.panel_background.is_opaque() && !s.glass_show_fallback)
+            .unwrap_or(false)
+}
+
+fn native_glass_expected(
+    state: &Arc<Mutex<ShimState>>,
+) -> bool {
+    crate::overlay::platform::transparency_enabled()
+        && !crate::overlay::refraction::glass_failed()
+        && state
+            .lock()
+            .map(|s| {
+                s.glass_native
+                    && !s.panel_background.is_opaque()
+                    && !s.glass_show_fallback
+            })
+            .unwrap_or(false)
+}
+
+/// Start one logical show cycle and invalidate any previous frame/fallback
+/// result. The identifier makes delayed page acknowledgements harmless.
+fn begin_pending_show(
+    state: &Arc<Mutex<ShimState>>,
+    show_pending: &mut bool,
+) -> u64 {
+    if !*show_pending {
+        *show_pending = true;
+        if let Ok(mut s) = state.lock() {
+            s.show_id = s.show_id.wrapping_add(1).max(1);
+            s.glass_frame_ready = false;
+            s.glass_show_fallback = false;
+        }
+    }
+    state.lock().map(|s| s.show_id).unwrap_or(0)
+}
+
+/// Arm the bounded reveal fallback once per show when native glass is
+/// expected. A late frame must not switch a panel from opaque to glass after
+/// it has already appeared.
+fn arm_glass_show_timeout(
+    proxy: &EventLoopProxy<UiCommand>,
+    state: &Arc<Mutex<ShimState>>,
+    show_pending: bool,
+    armed_for: &mut Option<u64>,
+) {
+    if !show_pending || !crate::overlay::platform::transparency_enabled()
+        || crate::overlay::refraction::glass_failed()
+    {
+        return;
+    }
+    let Some(show_id) = state.lock().ok().and_then(|s| {
+        (!s.panel_background.is_opaque()
+            && s.glass_native
+            && !s.glass_frame_ready
+            && !s.glass_show_fallback)
+            .then_some(s.show_id)
+    }) else {
+        return;
+    };
+    if *armed_for == Some(show_id) {
+        return;
+    }
+    *armed_for = Some(show_id);
+    let timeout_proxy = proxy.clone();
+    let spawned = std::thread::Builder::new()
+        .name("nex-glass-show-timeout".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(GLASS_SHOW_TIMEOUT_MS));
+            try_send_ui(
+                &timeout_proxy,
+                UiCommand::GlassShowTimeout { show_id },
+            );
+        });
+    if spawned.is_err() {
+        try_send_ui(proxy, UiCommand::GlassShowTimeout { show_id });
+    }
 }
 
 /// What a panel-material change asks of the native layer: `Some(active)`
@@ -2396,6 +2582,9 @@ fn prepare_glass_show(
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) {
     if glass_active(state) {
+        // Keep the transition memo in sync with the show path. In particular,
+        // a previous show's timeout parks glass outside the normal Apply path.
+        sync_glass_layer(glass_layer, state);
         if let Some(layer) = glass_layer.as_ref() {
             layer.prepare_show();
         }
@@ -2568,12 +2757,17 @@ fn capture_exclusion_needed(mode: crate::config::PanelBackground, glass_native: 
 fn effective_panel_mode(
     state: &std::sync::Arc<std::sync::Mutex<crate::overlay::model::ShimState>>,
 ) -> crate::config::PanelBackground {
-    let (mut mode, light) = state
+    let (mut mode, light, show_fallback) = state
         .lock()
-        .map(|s| (s.panel_background, s.theme == Theme::Light))
-        .unwrap_or((crate::config::PanelBackground::Glass, false));
+        .map(|s| (
+            s.panel_background,
+            s.theme == Theme::Light,
+            s.glass_show_fallback,
+        ))
+        .unwrap_or((crate::config::PanelBackground::Glass, false, false));
     if (!crate::overlay::platform::transparency_enabled() && !mode.is_opaque())
         || crate::overlay::refraction::glass_failed()
+        || (show_fallback && !mode.is_opaque())
     {
         mode = if light {
             crate::config::PanelBackground::White
@@ -2724,7 +2918,8 @@ fn snapshot_state_json(s: &ShimState, show_pending: bool) -> String {
         s,
         show_pending,
         crate::overlay::platform::transparency_enabled()
-            && !crate::overlay::refraction::glass_failed(),
+            && !crate::overlay::refraction::glass_failed()
+            && !s.glass_show_fallback,
     )
 }
 
@@ -2845,6 +3040,12 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
         "completion": s.completion,
         "showPending": show_pending,
         "contentPending": s.content_pending,
+        "showId": s.show_id,
+        "glassWaiting": s.visible
+            && transparent
+            && s.glass_native
+            && !s.panel_background.is_opaque()
+            && !s.glass_frame_ready,
         "quickLaunch": quick_launch,
         "quickLaunchVisible": s.quick_launch_visible,
         "updateAvailable": s.update_available,
@@ -3453,6 +3654,7 @@ fn hide_overlay_window(
     // so the next show never paints transparent over a stale layer.
     if let Ok(mut s) = state.lock() {
         s.glass_frame_ready = false;
+        s.glass_show_fallback = false;
     }
     // Transparent-hide first: cloak + click-through + child hidden.
     // WS_EX_TRANSPARENT on the parent does not stop hit-testing on the

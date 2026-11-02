@@ -26,12 +26,12 @@
     "subagent_tokens_complete": true
   },
   "redaction": {
-    "replacements": 593,
+    "replacements": 605,
     "layers": {
       "betterleaks": 0,
       "connection_string": 0,
       "credential_key": 0,
-      "credential_value": 22,
+      "credential_value": 34,
       "credentialed_uri": 0,
       "entropy": 571,
       "key_context": 0,

@@ -1,0 +1,25 @@
+open new issue, in glass view at every show first i see a black flash before glass loads, it was happening for a while i think before or during 2.32 or 2.33.1
+
+---
+
+#
+
+---
+
+investigate issue #38 and investigate the issue in a new branch
+
+---
+
+implement the fix and build
+
+---
+
+always build the release build
+
+---
+
+theres a big issue now only the first show shows glass the rest shows fallback dark theme, after some idle when i open again it shows glass but after that it always show black investigate what was change and fix the fixes
+
+---
+
+issue fixed merge the issue #38 and close issue

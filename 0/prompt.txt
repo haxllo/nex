@@ -1,0 +1,1 @@
+still same as the issue says the first show gives uneven extra backround on some sides and from second show onwards issue is the backround corner isnt rounded properly investigate what that is is it the alcrylic window or glass window or something else? the glass is working properly tho

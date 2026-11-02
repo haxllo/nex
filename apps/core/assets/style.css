@@ -2282,17 +2282,15 @@ html.bg-white #panel {
   box-shadow: none;
 }
 
-/* Keep the opaque hairline inside the hard native rounded region. The
-   one-pixel inset keeps its antialiased curve from being clipped, and the
-   reduced radius shares the outer panel's corner center without affecting
-   its measured size. */
+/* Draw the opaque hairline on the panel silhouette. The pseudo-element
+   keeps the border out of layout while sharing the panel's exact radius. */
 html.bg-black #panel::after,
 html.bg-white #panel::after {
   content: "";
   position: absolute;
-  inset: 1px;
+  inset: 0;
   border: 1px solid;
-  border-radius: calc(var(--radius) - 1px);
+  border-radius: var(--radius);
   pointer-events: none;
 }
 

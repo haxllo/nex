@@ -1366,6 +1366,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // WebView focus (Windows beeps for those unhandled
                         // characters).
                         focus_input(&webview);
+                        // Wry's WM_SIZE handler snaps the WebView child back
+                        // to the host client size. Restore the oversized
+                        // viewport and clip both HWNDs while the host is
+                        // still cloaked, so its opaque native background
+                        // cannot escape the rounded panel on the first frame.
+                        if let Some(wv) = webview.as_ref() {
+                            keep_webview_viewport_max(wv);
+                        }
+                        sync_window_frame(&window, &state, false);
                         // Transparent-hide reversal (order mirrors hide):
                         // uncloak + child visible before first frame.
                         set_overlay_cloaked(hwnd, false);
@@ -3027,20 +3036,33 @@ fn sync_window_frame_style(
 /// backgrounds are required for ClearType, but otherwise fill the rounded
 /// CSS corners with a rectangular black/white surface.
 fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
-    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateRoundRectRgn, SetWindowRgn,
+        ClientToScreen, CreateRoundRectRgn, DeleteObject, SetWindowRgn,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
 
     let hwnd = window.hwnd() as HWND;
+    let webview_hwnd = find_webview_child(window);
     if !opaque_panel {
         unsafe {
             SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+            if !webview_hwnd.is_null() {
+                SetWindowRgn(webview_hwnd, std::ptr::null_mut(), 1);
+            }
         }
         return;
     }
 
+    let mut client_rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetClientRect(hwnd, &mut client_rect) } == 0 {
+        return;
+    }
     let mut window_rect = RECT {
         left: 0,
         top: 0,
@@ -3050,17 +3072,54 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
     if unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0 {
         return;
     }
+    let mut client_origin = POINT {
+        x: client_rect.left,
+        y: client_rect.top,
+    };
+    if unsafe { ClientToScreen(hwnd, &mut client_origin) } == 0 {
+        return;
+    }
     let scale = window.scale_factor() as f32;
     let radius = (8.0 * scale).round() as i32;
-    let width = window_rect.right - window_rect.left;
-    let height = window_rect.bottom - window_rect.top;
+    let width = client_rect.right - client_rect.left;
+    let height = client_rect.bottom - client_rect.top;
     if width <= 0 || height <= 0 {
         return;
     }
+    // SetWindowRgn uses window-relative coordinates, while the WebView child
+    // uses client-relative coordinates. Align the host region to the exact
+    // client rectangle so a non-client inset cannot leave an uneven strip
+    // around the child surface.
+    let left = client_origin.x - window_rect.left;
+    let top = client_origin.y - window_rect.top;
+    let right = left + width;
+    let bottom = top + height;
     unsafe {
-        let region = CreateRoundRectRgn(0, 0, width, height, radius * 2, radius * 2);
+        let region = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
         if !region.is_null() {
-            let _ = SetWindowRgn(hwnd, region, 1);
+            // SetWindowRgn transfers ownership only on success.
+            if SetWindowRgn(hwnd, region, 1) == 0 {
+                DeleteObject(region);
+            }
+        }
+
+        // The host and WRY_WEBVIEW are separate HWNDs. SetWindowRgn on the
+        // host does not give the WebView child the same rounded shape; the
+        // child is intentionally taller than the host so rows are already
+        // rasterized when the panel grows. Clip its own surface to the host's
+        // current client bounds, using the same physical-pixel radius.
+        if !webview_hwnd.is_null() {
+            let child_region = CreateRoundRectRgn(
+                0,
+                0,
+                width,
+                height,
+                radius * 2,
+                radius * 2,
+            );
+            if !child_region.is_null() && SetWindowRgn(webview_hwnd, child_region, 1) == 0 {
+                DeleteObject(child_region);
+            }
         }
     }
 }
@@ -3122,10 +3181,12 @@ fn apply_window_height(
     state: &Arc<Mutex<ShimState>>,
 ) {
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
-    sync_window_frame(window, state, false);
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
     }
+    // Apply the host and child regions after Wry has restored its maximum
+    // viewport; this leaves both native surfaces in their final geometry.
+    sync_window_frame(window, state, false);
     if let Some(layer) = glass {
         let scale = window.scale_factor();
         layer.sync_to_main(

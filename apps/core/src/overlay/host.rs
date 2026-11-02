@@ -42,6 +42,13 @@ const RESIZE_IMMEDIATE_GROWTH: f64 = 80.0;
 /// on Win key-down (only toggle when visible; hook handles first press).
 pub(crate) static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
+/// True when the opaque panel is using DWM for its outer border and corners.
+/// The web page reads this to hide its CSS fallback outline.
+static OPAQUE_DWM_FRAME_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Last opaque/non-opaque frame mode applied to the host (-1 means unknown).
+static APPLIED_OPAQUE_PANEL: std::sync::atomic::AtomicI8 =
+    std::sync::atomic::AtomicI8::new(-1);
+
 /// The overlay window's HWND, cached at startup so other modules (e.g.
 /// live hotkey updates) can re-register the raw-input sink.
 static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -346,8 +353,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // a TRANSIENTWINDOW backdrop — and DWM composed that default frame as a
     // ~2px ring around the never-shown 760x60 window (the boot ghost). With
     // the latch first, glass sessions start border-NONE + DONOTROUND.
-    // Border stays suppressed regardless of panel mode: DWM composes the
-    // frame ring around the hidden window even for opaque panels.
+    // Keep the border suppressed while hidden; the visible show path applies
+    // the selected native or CSS frame after the final window geometry lands.
     let acrylic_available = apply_window_chrome(&window, &state, true);
     // The worker seeds its material from the same theme before the
     // first frame, so page palette and native tint start in step.
@@ -573,6 +580,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // and blocked the re-engage on recovery.
                         sync_glass_layer(&glass_layer, &state);
                         sync_webview_background(webview.as_ref(), &state);
+                        let visible = state.lock().map(|s| s.visible).unwrap_or(false);
+                        sync_window_frame_if_mode_changed(&window, &state, !visible);
                         if ready {
                             push_state(&webview, &state, &icon_cache, false);
                         }
@@ -600,15 +609,18 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // bridge consumes the first non-empty rows and reveals
                     // fast; without a pending show, hidden pushes stay
                     // suppressed as before.
-                    if ready
-                        && (state.lock().map(|s| s.visible).unwrap_or(false) || show_pending)
-                    {
-                        push_state(&webview, &state, &icon_cache, false);
-                    }
+                    let visible = state.lock().map(|s| s.visible).unwrap_or(false);
                     // The panel material can flip at runtime: park the glass
                     // layer for opaque panels, engage it again for glass.
                     sync_glass_layer(&glass_layer, &state);
                     sync_webview_background(webview.as_ref(), &state);
+                    // Frame changes are only needed when crossing between
+                    // glass and opaque modes; this command also runs for
+                    // ordinary content updates and keystrokes.
+                    sync_window_frame_if_mode_changed(&window, &state, !visible);
+                    if ready && (visible || show_pending) {
+                        push_state(&webview, &state, &icon_cache, false);
+                    }
                 }
                 UiCommand::ApplyStatus => {
                     if ready && state.lock().map(|s| s.visible).unwrap_or(false) {
@@ -1372,8 +1384,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // message by snapping its child to the client size.
                         // Keep the host cloaked while that one-time transition
                         // and foreground handoff run, then restore the maximum
-                        // viewport and both rounded regions against the final
-                        // geometry before DWM can compose the panel.
+                        // viewport and the native frame or fallback regions
+                        // against final geometry before DWM composes the panel.
                         let _ = set_overlay_cloaked(hwnd, true);
                         set_webview_child_visible(&window, false);
                         window.set_visible(true);
@@ -2840,6 +2852,8 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
         "overlayVisible": s.visible,
         "pointerOverPanel": s.pointer_over_panel,
         "panelBackground": background,
+        "opaqueDwmFrame": background != "glass"
+            && OPAQUE_DWM_FRAME_ACTIVE.load(Ordering::SeqCst),
         "glassNative": transparent && s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
         "glassLight": transparent && s.glass_native && s.glass_light,
         "glassClip": &*LENS_CLIP,
@@ -2919,18 +2933,15 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
 /// boot ghost), so the border must stay NONE until the first show re-applies
 /// real chrome.
 fn apply_window_chrome(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_border: bool) -> bool {
-    let (dark, glass_native, opaque_panel) = state.lock().map(|s| {
-        (
-            s.theme == Theme::Dark,
-            s.glass_native,
-            s.panel_background.is_opaque() || !crate::overlay::platform::transparency_enabled(),
-        )
-    }).unwrap_or((true, false, false));
+    let (dark, glass_native) = state
+        .lock()
+        .map(|s| (s.theme == Theme::Dark, s.glass_native))
+        .unwrap_or((true, false));
+    let opaque_panel = effective_panel_mode(state).is_opaque();
     let hwnd = window.hwnd() as HWND;
     let transitions_disabled = 1_i32;
-    // Native glass uses the same continuous profile for both HWND regions
-    // and CSS. Opaque/acrylic modes use explicit rounded DWM corners so
-    // opaque surface clipping matches the visible window silhouette.
+    // Native glass keeps its current edge path. Opaque panels prefer DWM's
+    // border and corners, with the existing hard region as a fallback.
     let _ = set_dwm_attribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions_disabled);
     sync_window_frame_style(window, dark, glass_native, opaque_panel, suppress_border);
 
@@ -2986,21 +2997,28 @@ fn set_dwm_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
 
 /// Reapply the host shape and DWM frame at the point where the window is
 /// about to be composed. Region changes send window-position messages, so
-/// set the DWM attributes after the region to leave the desired frame state
-/// as the final operation before reveal/resize.
+/// set the DWM attributes after any region change to leave the desired frame
+/// state as the final operation before reveal/resize.
 fn sync_window_frame(window: &Window, state: &Arc<Mutex<ShimState>>, suppress_border: bool) {
-    let (dark, glass_native, opaque_panel) = state
+    let (dark, glass_native) = state
         .lock()
-        .map(|s| {
-            (
-                s.theme == Theme::Dark,
-                s.glass_native,
-                s.panel_background.is_opaque()
-                    || !crate::overlay::platform::transparency_enabled(),
-            )
-        })
-        .unwrap_or((true, false, false));
+        .map(|s| (s.theme == Theme::Dark, s.glass_native))
+        .unwrap_or((true, false));
+    let opaque_panel = effective_panel_mode(state).is_opaque();
     sync_window_frame_style(window, dark, glass_native, opaque_panel, suppress_border);
+}
+
+fn sync_window_frame_if_mode_changed(
+    window: &Window,
+    state: &Arc<Mutex<ShimState>>,
+    suppress_border: bool,
+) {
+    let opaque_panel = effective_panel_mode(state).is_opaque();
+    let desired = if opaque_panel { 1 } else { 0 };
+    let applied = APPLIED_OPAQUE_PANEL.load(Ordering::SeqCst);
+    if applied != desired {
+        sync_window_frame(window, state, suppress_border);
+    }
 }
 
 fn sync_window_frame_style(
@@ -3011,20 +3029,54 @@ fn sync_window_frame_style(
     suppress_border: bool,
 ) {
     let hwnd = window.hwnd() as HWND;
-    sync_opaque_window_region(window, opaque_panel);
-
     let immersive_dark = i32::from(dark);
     let rounded_corners = if glass_native && !opaque_panel {
         windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
     } else {
         windows_sys::Win32::Graphics::Dwm::DWMWCP_ROUND
     };
+
+    // Opaque panels can use one native owner for both the outline and the
+    // rounded silhouette. Probe both DWM attributes before removing the
+    // hard GDI regions; older Windows builds keep the CSS + region fallback.
+    let opaque_dwm_candidate = if opaque_panel {
+        let no_border = 0xFFFFFFFE_u32;
+        let corners_supported =
+            set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
+        let border_supported = set_dwm_attribute(
+            hwnd,
+            windows_sys::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR,
+            &no_border,
+        );
+        corners_supported && border_supported
+    } else {
+        false
+    };
+    let opaque_dwm_frame = if opaque_dwm_candidate {
+        if sync_opaque_window_region(window, false) {
+            true
+        } else {
+            // A stale region would prevent DWM from rounding the window.
+            // Reapply the known CSS fallback if either HWND refused clearing.
+            sync_opaque_window_region(window, true);
+            false
+        }
+    } else {
+        sync_opaque_window_region(window, opaque_panel);
+        false
+    };
+    OPAQUE_DWM_FRAME_ACTIVE.store(opaque_dwm_frame, Ordering::SeqCst);
+    APPLIED_OPAQUE_PANEL.store(if opaque_panel { 1 } else { 0 }, Ordering::SeqCst);
+
     let _ = set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive_dark);
     let _ = set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &rounded_corners);
 
-    // Native glass supplies its own edge. Opaque modes suppress DWM's
-    // system frame so it cannot be composited over the solid surface.
-    let border_color: u32 = if suppress_border || opaque_panel || (glass_native && !opaque_panel) {
+    // Glass supplies its own edge. Opaque DWM mode uses the system border;
+    // opaque fallback keeps it suppressed so it cannot double the CSS line.
+    let border_color: u32 = if suppress_border
+        || (opaque_panel && !opaque_dwm_frame)
+        || (glass_native && !opaque_panel)
+    {
         0xFFFFFFFE
     } else {
         0xFFFFFFFF
@@ -3036,10 +3088,10 @@ fn sync_window_frame_style(
     );
 }
 
-/// Clip the opaque WebView surface to the panel silhouette. Opaque WebView
-/// backgrounds are required for ClearType, but otherwise fill the rounded
-/// CSS corners with a rectangular black/white surface.
-fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
+/// Install or remove the hard GDI regions used by the opaque CSS fallback.
+/// Opaque WebView backgrounds are needed for ClearType, and the fallback
+/// region keeps their rectangular surface inside the rounded silhouette.
+fn sync_opaque_window_region(window: &Window, use_region: bool) -> bool {
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         ClientToScreen, CreateRoundRectRgn, DeleteObject, SetWindowRgn,
@@ -3048,14 +3100,11 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
 
     let hwnd = window.hwnd() as HWND;
     let webview_hwnd = find_webview_child(window);
-    if !opaque_panel {
-        unsafe {
-            SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
-            if !webview_hwnd.is_null() {
-                SetWindowRgn(webview_hwnd, std::ptr::null_mut(), 1);
-            }
-        }
-        return;
+    if !use_region {
+        let host_cleared = unsafe { SetWindowRgn(hwnd, std::ptr::null_mut(), 1) != 0 };
+        let child_cleared = webview_hwnd.is_null()
+            || unsafe { SetWindowRgn(webview_hwnd, std::ptr::null_mut(), 1) != 0 };
+        return host_cleared && child_cleared;
     }
 
     let mut client_rect = RECT {
@@ -3065,7 +3114,7 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
         bottom: 0,
     };
     if unsafe { GetClientRect(hwnd, &mut client_rect) } == 0 {
-        return;
+        return false;
     }
     let mut window_rect = RECT {
         left: 0,
@@ -3074,21 +3123,21 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
         bottom: 0,
     };
     if unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0 {
-        return;
+        return false;
     }
     let mut client_origin = POINT {
         x: client_rect.left,
         y: client_rect.top,
     };
     if unsafe { ClientToScreen(hwnd, &mut client_origin) } == 0 {
-        return;
+        return false;
     }
     let scale = window.scale_factor() as f32;
     let radius = (8.0 * scale).round() as i32;
     let width = client_rect.right - client_rect.left;
     let height = client_rect.bottom - client_rect.top;
     if width <= 0 || height <= 0 {
-        return;
+        return false;
     }
     // SetWindowRgn uses window-relative coordinates, while the WebView child
     // uses client-relative coordinates. Align the host region to the exact
@@ -3101,13 +3150,17 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
     // antialiased stroke pixel on those two edges.
     let right = left + width + 1;
     let bottom = top + height + 1;
+    let mut regions_applied = true;
     unsafe {
         let region = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
         if !region.is_null() {
             // SetWindowRgn transfers ownership only on success.
             if SetWindowRgn(hwnd, region, 1) == 0 {
                 DeleteObject(region);
+                regions_applied = false;
             }
+        } else {
+            regions_applied = false;
         }
 
         // The host and WRY_WEBVIEW are separate HWNDs. SetWindowRgn on the
@@ -3124,11 +3177,15 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
                 radius * 2,
                 radius * 2,
             );
-            if !child_region.is_null() && SetWindowRgn(webview_hwnd, child_region, 1) == 0 {
+            if child_region.is_null() {
+                regions_applied = false;
+            } else if SetWindowRgn(webview_hwnd, child_region, 1) == 0 {
                 DeleteObject(child_region);
+                regions_applied = false;
             }
         }
     }
+    regions_applied
 }
 
 /// Remove the caption frame tao always adds (window_state.rs forces
@@ -3191,8 +3248,8 @@ fn apply_window_height(
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);
     }
-    // Apply the host and child regions after Wry has restored its maximum
-    // viewport; this leaves both native surfaces in their final geometry.
+    // Apply the native frame or fallback regions after Wry has restored its
+    // maximum viewport; this leaves both native surfaces in final geometry.
     sync_window_frame(window, state, false);
     if let Some(layer) = glass {
         let scale = window.scale_factor();

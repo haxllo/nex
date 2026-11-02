@@ -3227,6 +3227,9 @@
         if (state.panelBackground === "white") root.dataset.theme = "light";
         else if (state.panelBackground === "black") root.dataset.theme = "dark";
       }
+      if (typeof state.opaqueDwmFrame === "boolean") {
+        document.documentElement.classList.toggle("opaque-dwm-frame", state.opaqueDwmFrame);
+      }
 
       // System accent (DWM AccentColor) → CSS var; falls back to theme palette.
       if (state.accent) {

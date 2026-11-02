@@ -2282,8 +2282,7 @@ html.bg-white #panel {
   box-shadow: none;
 }
 
-/* Draw the opaque hairline on the panel silhouette. The pseudo-element
-   keeps the border out of layout while sharing the panel's exact radius. */
+/* CSS outline fallback for systems where DWM cannot own the opaque edge. */
 html.bg-black #panel::after,
 html.bg-white #panel::after {
   content: "";
@@ -2300,6 +2299,12 @@ html.bg-black #panel::after {
 
 html.bg-white #panel::after {
   border-color: rgba(0, 0, 0, 0.16);
+}
+
+/* DWM owns the outline when it also owns the opaque window corners. */
+html.opaque-dwm-frame.bg-black #panel::after,
+html.opaque-dwm-frame.bg-white #panel::after {
+  content: none;
 }
 
 html.glass-native .row .icon.placeholder {

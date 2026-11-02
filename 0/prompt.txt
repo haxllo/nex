@@ -1,0 +1,1 @@
+we are going in circles with each code change, now the top and left edges are correct the right and bottom looks ~1px clipped extra also hiding those 2 side borders

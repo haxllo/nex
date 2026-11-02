@@ -1,0 +1,25 @@
+thats also fixed the current only remaining issue is the corners look 8px rounded but the border doesnt round it stops before the rounded part starts on all 4 corners, look into this and report first
+
+---
+
+im talking about when im in white or black mode the border doesnt continue around the corners is there no fix? what are the new issue that will arise from this or is there a fix without any issues?
+
+---
+
+then previously what was the 2 borders that showed that we removed 1?
+
+---
+
+then previously what was the 2 borders that showed that we removed 1 the original issue?
+
+---
+
+will it be resolved if we had removed the 2. Windows’ native DWM window border instead for opaque windows?
+
+---
+
+we could easily resolve this if we just use only the css border instead right?
+
+---
+
+then implement this fix

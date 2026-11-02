@@ -2269,7 +2269,7 @@ html.glass-native #divider {
   background: color-mix(in srgb, var(--text) 16%, transparent);
 }
 
-/* ── opaque panel backgrounds (settings → Background) ────────── */
+/* ── opaque panel backgrounds (settings → Appearance) ────────── */
 /* Solid paint for light rooms where glass washes out; glass layer
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {

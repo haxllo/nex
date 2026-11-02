@@ -3061,6 +3061,14 @@ fn sync_window_frame_style(
             sync_opaque_window_region(window, true);
             false
         }
+    } else if glass_native && !opaque_panel {
+        // The refraction layer owns the main HWND's rounded region. Clearing
+        // it here after prepare_glass_show would leave GlassLayer's cache
+        // claiming that the region is still installed, so the reveal would
+        // skip restoring it. The WebView child is separate and may still
+        // carry an opaque-mode clip, so clear only that child region.
+        clear_webview_window_region(window);
+        false
     } else {
         sync_opaque_window_region(window, opaque_panel);
         false
@@ -3186,6 +3194,16 @@ fn sync_opaque_window_region(window: &Window, use_region: bool) -> bool {
         }
     }
     regions_applied
+}
+
+/// Clear a stale opaque-mode clip from the WebView child without touching the
+/// host HWND region, which belongs to GlassLayer while native glass is active.
+fn clear_webview_window_region(window: &Window) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::SetWindowRgn;
+
+    let webview_hwnd = find_webview_child(window);
+    webview_hwnd.is_null()
+        || unsafe { SetWindowRgn(webview_hwnd, std::ptr::null_mut(), 1) != 0 }
 }
 
 /// Remove the caption frame tao always adds (window_state.rs forces

@@ -3092,8 +3092,11 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
     // around the child surface.
     let left = client_origin.x - window_rect.left;
     let top = client_origin.y - window_rect.top;
-    let right = left + width;
-    let bottom = top + height;
+    // GDI regions exclude their lower/right boundary. Allow one physical
+    // pixel there so the hard native clip does not trim the WebView's final
+    // antialiased stroke pixel on those two edges.
+    let right = left + width + 1;
+    let bottom = top + height + 1;
     unsafe {
         let region = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
         if !region.is_null() {
@@ -3112,8 +3115,8 @@ fn sync_opaque_window_region(window: &Window, opaque_panel: bool) {
             let child_region = CreateRoundRectRgn(
                 0,
                 0,
-                width,
-                height,
+                width + 1,
+                height + 1,
                 radius * 2,
                 radius * 2,
             );

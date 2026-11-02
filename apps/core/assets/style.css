@@ -2274,19 +2274,34 @@ html.glass-native #divider {
    stays parked (see glass_active) so this costs no capture. */
 html.bg-black #panel {
   background: #000000;
-  /* Single hairline only, drawn as an inset ring: outer edges lose
-     subpixels asymmetrically (right/bottom) to size rounding, but an
-     inset ring always lands fully inside. Region clips outer shadow. */
-  border-color: transparent;
-  box-shadow: inset 0 0 0 1px var(--panel-edge);
+  box-shadow: none;
 }
 
 html.bg-white #panel {
   background: #ffffff;
-  border-color: transparent;
-  /* Match black mode's visible hairline: the shared 10% edge var reads
-     bare on solid white, so pin a stronger inset ring here only. */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.16);
+  box-shadow: none;
+}
+
+/* Keep the opaque hairline inside the hard native rounded region. The
+   one-pixel inset keeps its antialiased curve from being clipped, and the
+   reduced radius shares the outer panel's corner center without affecting
+   its measured size. */
+html.bg-black #panel::after,
+html.bg-white #panel::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border: 1px solid;
+  border-radius: calc(var(--radius) - 1px);
+  pointer-events: none;
+}
+
+html.bg-black #panel::after {
+  border-color: var(--panel-edge);
+}
+
+html.bg-white #panel::after {
+  border-color: rgba(0, 0, 0, 0.16);
 }
 
 html.glass-native .row .icon.placeholder {

@@ -269,13 +269,19 @@
         </div>
       </section>
 
-      <div id="whats-new-view" aria-label="What's new">
-        <div class="whats-new-eyebrow">What's new</div>
-        <div class="whats-new-title" id="whats-new-title">Nex updated</div>
-        <div class="whats-new-items" id="whats-new-items"></div>
-        <div class="whats-new-tips" id="whats-new-tips"></div>
-        <button type="button" id="whats-new-dismiss">Got it</button>
-      </div>
+      <section id="whats-new-view" aria-label="What's new">
+        <header class="whats-new-header">
+          <div class="whats-new-eyebrow">What's new</div>
+          <div class="whats-new-title" id="whats-new-title">Nex updated</div>
+        </header>
+        <div id="whats-new-scroll" class="whats-new-scroll" role="region" aria-label="Release notes" tabindex="0">
+          <div class="whats-new-items" id="whats-new-items"></div>
+          <div class="whats-new-tips" id="whats-new-tips"></div>
+        </div>
+        <footer class="whats-new-footer">
+          <button type="button" id="whats-new-dismiss">Got it</button>
+        </footer>
+      </section>
 
       <div id="power-panel" class="power-panel hidden">
         <div id="power-menu" class="power-row">

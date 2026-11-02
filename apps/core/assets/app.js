@@ -31,6 +31,7 @@
   const whatsNewTitle = $("whats-new-title");
   const whatsNewItems = $("whats-new-items");
   const whatsNewTips = $("whats-new-tips");
+  const whatsNewScroll = $("whats-new-scroll");
   const mediaArt = $("media-art");
   const mediaTitle = $("media-title");
   const mediaArtist = $("media-artist");
@@ -3559,8 +3560,8 @@
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  // Tiny markdown subset for release notes: ### headings, - bullets with
-  // **bold** labels, [links](url), `code`. Raw HTML never passes through.
+  // Small, safe markdown subset for release notes. Raw HTML never passes
+  // through, and all user-facing paragraphs and list items remain visible.
   function renderInlineMd(s) {
     let out = escapeHtml(s);
     out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -3570,28 +3571,61 @@
   }
 
   function renderWhatsNewMarkdown(md) {
-    const items = [];
-    let count = 0;
-    for (const raw of md.split("\n")) {
-      const line = raw.trim();
-      if (!line || count >= 10) continue;
-      if (/^#{2,4}\s/.test(line)) {
-        items.push({ h: line.replace(/^#{2,4}\s*/, "") });
+    const blocks = [];
+    let paragraph = [];
+    let list = [];
+
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      blocks.push(`<p class="whats-new-copy">${renderInlineMd(paragraph.join(" "))}</p>`);
+      paragraph = [];
+    };
+    const flushList = () => {
+      if (!list.length) return;
+      blocks.push(
+        `<div class="whats-new-list">${list
+          .map((item) => `<div class="whats-new-item"><span>${renderInlineMd(item)}</span></div>`)
+          .join("")}</div>`
+      );
+      list = [];
+    };
+
+    for (const raw of md.replace(/\r\n/g, "\n").split("\n")) {
+      const line = raw.trimEnd();
+      const text = line.trim();
+      if (!text) {
+        flushParagraph();
+        flushList();
         continue;
       }
-      if (/^[-*]\s/.test(line)) {
-        items.push({ li: line.replace(/^[-*]\s*/, "") });
-        count++;
+
+      const heading = text.match(/^(#{2,4})\s+(.+)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const tag = heading[1].length === 2 ? "h2" : heading[1].length === 3 ? "h3" : "h4";
+        blocks.push(`<${tag}>${renderInlineMd(heading[2])}</${tag}>`);
+        continue;
       }
+
+      const bullet = text.match(/^[-*]\s+(.+)$/);
+      if (bullet) {
+        flushParagraph();
+        list.push(bullet[1]);
+        continue;
+      }
+
+      if (list.length && /^\s{2,}\S/.test(line)) {
+        list[list.length - 1] += ` ${text}`;
+        continue;
+      }
+
+      flushList();
+      paragraph.push(text);
     }
-    if (!items.length) return "";
-    return items
-      .map((it) =>
-        it.h
-          ? `<h4>${renderInlineMd(it.h)}</h4>`
-          : `<div class="whats-new-item"><span>${renderInlineMd(it.li)}</span></div>`
-      )
-      .join("");
+    flushParagraph();
+    flushList();
+    return blocks.join("");
   }
 
   function postWhatsNewResize() {
@@ -3613,7 +3647,7 @@
       : "";
     whatsNewItems.innerHTML = md
       ? renderWhatsNewMarkdown(md)
-      : `<div class="whats-new-item"><span>This release brings fixes and polish. You're all set.</span></div>`;
+      : `<p class="whats-new-copy">This release brings fixes and polish. You're all set.</p>`;
     whatsNewTips.innerHTML =
       `<div class="tips-heading">Good to know</div>` +
       WHATS_NEW_TIPS.map(([k, v]) => `<div><kbd>${escapeHtml(k)}</kbd> ${escapeHtml(v)}</div>`).join("");
@@ -3629,7 +3663,7 @@
     hideContextMenu();
     whatsNewOpen = true;
     panel.classList.add("whats-new-open");
-    document.getElementById("whats-new-view").scrollTop = 0;
+    whatsNewScroll.scrollTop = 0;
     // Fetch only without cached notes: a close-then-reopen while the
     // first fetch is in flight must not spend a second fetch, and the
     // late arrival renders via nex.apply below.

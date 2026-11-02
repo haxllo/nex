@@ -11,16 +11,16 @@
 //! - `seen == current` → already viewed/dismissed → nothing
 //!
 //! Notes content comes from the GitHub release page for the new version
-//! (same source as the update check), trimmed to the user-facing
-//! "What changed" section. Offline or unpublished notes degrade to an
-//! empty string and the page renders a generic fallback + tips.
+//! (same source as the update check), trimmed to user-facing release notes
+//! with technical commit logs and binary links removed. Offline or unpublished
+//! notes degrade to an empty string and the page renders a generic fallback +
+//! tips.
 
 use std::path::{Path, PathBuf};
 
 const STATE_FILE_NAME: &str = "state.json";
 const SEEN_FIELD: &str = "whats_new_seen";
 const RELEASES_REPO: &str = "haxllo/nex";
-const MAX_NOTES_CHARS: usize = 6000;
 
 fn state_path() -> PathBuf {
     crate::config::stable_app_data_dir().join(STATE_FILE_NAME)
@@ -82,9 +82,9 @@ fn mark_seen_in(dir: &Path, version: &str) {
     }
 }
 
-/// Fetch the release notes for `version` and trim them to the user-facing
-/// section. Returns the markdown (possibly empty when offline or when the
-/// release has no parseable section — the page falls back to tips).
+/// Fetch the release notes for `version` and omit technical commit logs and
+/// binary links. Returns the markdown (possibly empty when offline or when
+/// the release has no parseable section — the page falls back to tips).
 pub fn fetch_notes_markdown(version: &str) -> String {
     let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/tags/v{version}");
     let text = match ureq::get(&url)
@@ -107,32 +107,20 @@ pub fn fetch_notes_markdown(version: &str) -> String {
         .get("body")
         .and_then(|body| body.as_str())
         .unwrap_or_default();
-    truncate_chars(&extract_highlights(markdown), MAX_NOTES_CHARS)
+    extract_highlights(markdown)
 }
 
-/// Keep the "What changed" section (headings + bullets), drop the commit
-/// log and binary links — those are for the release page, not the overlay.
+/// Keep all user-facing release notes, including the title and summary, and
+/// drop the commit log and binary links — those are for the release page, not
+/// the overlay.
 fn extract_highlights(body: &str) -> String {
-    const START: &str = "## What changed";
     const ENDS: &[&str] = &["## Commit Log", "## Binary"];
-    let Some(start) = body.find(START) else {
-        return body.trim().to_string();
-    };
-    let rest = &body[start + START.len()..];
-    let mut end = rest.len();
-    for marker in ENDS {
-        if let Some(pos) = rest.find(marker) {
-            end = end.min(pos);
-        }
-    }
-    rest[..end].trim().to_string()
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    text.chars().take(max_chars).collect()
+    body.lines()
+        .take_while(|line| !ENDS.iter().any(|marker| line.trim() == *marker))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

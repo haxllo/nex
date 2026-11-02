@@ -1723,26 +1723,44 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   display: none;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
-  max-height: 460px;
-  overflow-y: auto;
-  padding: 18px 20px 16px;
+  max-height: min(620px, 90vh);
+  overflow: hidden;
   text-align: left;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) transparent;
-}
-
-#whats-new-view::-webkit-scrollbar { width: 8px; }
-#whats-new-view::-webkit-scrollbar-track { background: transparent; }
-#whats-new-view::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
-  border-radius: 4px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
 }
 
 #panel.whats-new-open #whats-new-view {
   display: flex;
+}
+
+.whats-new-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 5px;
+  padding: 18px 20px 12px;
+}
+
+.whats-new-scroll {
+  display: flex;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(420px, max(120px, calc(90vh - 150px)));
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 20px 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+#whats-new-scroll::-webkit-scrollbar { width: 8px; }
+#whats-new-scroll::-webkit-scrollbar-track { background: transparent; }
+#whats-new-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .whats-new-eyebrow {
@@ -1754,44 +1772,75 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 
 .whats-new-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
+  line-height: 1.3;
+  text-wrap: balance;
 }
 
 .whats-new-items {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 12.5px;
-  line-height: 1.45;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.55;
   color: var(--text);
 }
 
+.whats-new-items h2 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.whats-new-items h3,
 .whats-new-items h4 {
-  margin: 6px 0 0;
+  margin-top: 4px;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-faint);
+  text-wrap: balance;
+}
+
+.whats-new-copy {
+  color: var(--text-dim);
+  text-wrap: pretty;
+}
+
+.whats-new-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .whats-new-item {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
 }
 
 .whats-new-item::before {
-  content: "•";
-  flex: 0 0 auto;
-  color: var(--accent);
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .whats-new-item strong {
   font-weight: 600;
+  color: var(--text);
 }
 
 .whats-new-item .wn-link {
   color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 2px;
 }
 
 .whats-new-item code,
@@ -1806,12 +1855,12 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 .whats-new-tips {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   margin-top: 2px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--hover);
-  font-size: 12px;
+  padding: 12px 13px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--hover));
+  font-size: 11.5px;
   line-height: 1.5;
   color: var(--text-faint);
 }
@@ -1821,17 +1870,27 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   color: var(--text);
 }
 
+.whats-new-footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+
 #whats-new-dismiss {
   align-self: flex-end;
-  margin-top: 2px;
-  padding: 6px 18px;
+  min-width: 88px;
+  min-height: 40px;
+  padding: 0 18px;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--accent);
   color: #fff;
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease;
 }
 
 #whats-new-dismiss:hover {
@@ -1839,11 +1898,12 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 
 #whats-new-dismiss:active {
-  transform: scale(0.98);
+  transform: scale(0.96);
 }
 
-#whats-new-dismiss:focus {
-  outline: none;
+#whats-new-dismiss:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 
 /* ── power panel (circle row) ─────────────────────────────── */

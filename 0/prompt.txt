@@ -1,0 +1,1 @@
+its even on all sides now fixed, but the very first show on startup still has the off by 1px issue, from second show onwards the fix works

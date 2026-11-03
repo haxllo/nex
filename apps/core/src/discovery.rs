@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -9,7 +10,7 @@ use crate::model::SearchItem;
 
 const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
 const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
-const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "3";
+const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "4";
 pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "windows",
     "program files",
@@ -393,6 +394,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                     bridge,
                     &self.roots,
                     &self.excluded_roots,
+                    self.max_depth,
                     self.show_files,
                     self.show_folders,
                     self.max_items_total,
@@ -451,6 +453,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                     bridge,
                     &self.roots,
                     &self.excluded_roots,
+                    self.max_depth,
                     self.show_files,
                     self.show_folders,
                     self.max_items_total,
@@ -522,6 +525,7 @@ fn discover_filesystem_everything(
     bridge: &crate::everything_bridge::EverythingBridge,
     roots: &[PathBuf],
     excluded_roots: &[PathBuf],
+    max_depth: usize,
     show_files: bool,
     show_folders: bool,
     max_items_total: usize,
@@ -534,6 +538,7 @@ fn discover_filesystem_everything(
     bridge.discover(
         roots,
         &exclusion_policy,
+        max_depth,
         show_files,
         show_folders,
         total_budget,
@@ -541,6 +546,33 @@ fn discover_filesystem_everything(
     )
 }
 
+/// Accumulates walk results; callers check the budgets before pushing.
+struct WalkSink<'a> {
+    out: Vec<SearchItem>,
+    total_added: usize,
+    root_added: usize,
+    on_item_discovered: Option<&'a mut dyn FnMut(usize)>,
+}
+
+impl WalkSink<'_> {
+    fn push(&mut self, kind: &str, path: &Path) {
+        let title = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+        let id = format!("{kind}:{}", path.to_string_lossy().to_ascii_lowercase());
+        self.out
+            .push(SearchItem::new(&id, kind, &title, &path.to_string_lossy()));
+        self.total_added += 1;
+        self.root_added += 1;
+        if let Some(callback) = self.on_item_discovered.as_deref_mut() {
+            callback(self.total_added);
+        }
+    }
+}
+
+/// Breadth-first so a budget cap keeps the shallowest entries of every
+/// subtree instead of exhausting itself inside the first deep folder.
 fn discover_filesystem_walk(
     roots: &[PathBuf],
     excluded_roots: &[PathBuf],
@@ -549,18 +581,22 @@ fn discover_filesystem_walk(
     show_folders: bool,
     max_items_total: usize,
     max_items_per_root: usize,
-    mut on_item_discovered: Option<&mut dyn FnMut(usize)>,
+    on_item_discovered: Option<&mut dyn FnMut(usize)>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
-    let mut out = Vec::new();
     let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
     let total_budget = max_items_total.max(1);
     let per_root_budget = max_items_per_root.max(1).min(total_budget);
-    let mut total_added = 0_usize;
     let mut skipped_due_exclusion = 0_usize;
     let walk_depth = effective_walk_depth(max_depth);
+    let mut sink = WalkSink {
+        out: Vec::new(),
+        total_added: 0,
+        root_added: 0,
+        on_item_discovered,
+    };
 
     for root in roots {
-        if total_added >= total_budget {
+        if sink.total_added >= total_budget {
             break;
         }
         if !root.exists() {
@@ -570,78 +606,64 @@ fn discover_filesystem_walk(
             skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
             continue;
         }
+        let Ok(root_meta) = std::fs::metadata(root) else {
+            continue;
+        };
 
-        let mut root_added = 0_usize;
+        sink.root_added = 0;
         let mut root_cap_hit = false;
-        for entry in walkdir::WalkDir::new(root)
-            .max_depth(walk_depth)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|entry| {
-                let excluded = exclusion_policy.should_exclude_path_under_root(entry.path(), root);
-                if excluded && entry.path() != root {
+        if !root_meta.is_dir() {
+            if root_meta.is_file() && show_files {
+                sink.push("file", root);
+            }
+            continue;
+        }
+
+        let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+        queue.push_back((root.clone(), 0));
+        'walk: while let Some((dir, depth)) = queue.pop_front() {
+            // Unreadable directories are skipped silently.
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut entries: Vec<std::fs::DirEntry> = read_dir.filter_map(Result::ok).collect();
+            entries.sort_by_cached_key(|entry| entry.file_name());
+
+            for entry in entries {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                let is_symlink = file_type.is_symlink();
+                // Links are classified through their target but never descended.
+                let (is_dir, is_file) = if is_symlink {
+                    match std::fs::metadata(&path) {
+                        Ok(meta) => (meta.is_dir(), meta.is_file()),
+                        Err(_) => (false, false),
+                    }
+                } else {
+                    (file_type.is_dir(), file_type.is_file())
+                };
+
+                if exclusion_policy.should_exclude_entry_under_root(&path, root, is_dir) {
                     skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
-                }
-                !excluded
-            })
-            .filter_map(Result::ok)
-        {
-            if total_added >= total_budget || root_added >= per_root_budget {
-                root_cap_hit = root_added >= per_root_budget;
-                break;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                if !show_folders {
                     continue;
                 }
-                if path == root {
-                    continue;
+                if sink.total_added >= total_budget || sink.root_added >= per_root_budget {
+                    root_cap_hit = sink.root_added >= per_root_budget;
+                    break 'walk;
                 }
 
-                let folder_name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string());
-
-                let id = format!("folder:{}", path.to_string_lossy().to_ascii_lowercase());
-                out.push(SearchItem::new(
-                    &id,
-                    "folder",
-                    &folder_name,
-                    &path.to_string_lossy(),
-                ));
-                total_added += 1;
-                root_added += 1;
-                if let Some(callback) = on_item_discovered.as_deref_mut() {
-                    callback(total_added);
+                if is_dir {
+                    if show_folders {
+                        sink.push("folder", &path);
+                    }
+                    if !is_symlink && depth + 1 < walk_depth {
+                        queue.push_back((path, depth + 1));
+                    }
+                } else if is_file && show_files {
+                    sink.push("file", &path);
                 }
-                continue;
-            }
-
-            if !path.is_file() {
-                continue;
-            }
-            if !show_files {
-                continue;
-            }
-
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string_lossy().to_string());
-
-            let id = format!("file:{}", path.to_string_lossy().to_ascii_lowercase());
-            out.push(SearchItem::new(
-                &id,
-                "file",
-                &file_name,
-                &path.to_string_lossy(),
-            ));
-            total_added += 1;
-            root_added += 1;
-            if let Some(callback) = on_item_discovered.as_deref_mut() {
-                callback(total_added);
             }
         }
         if root_cap_hit {
@@ -653,7 +675,7 @@ fn discover_filesystem_walk(
         }
     }
 
-    if total_added >= total_budget {
+    if sink.total_added >= total_budget {
         crate::logging::info(&format!(
             "[nex] discovery_cap provider=filesystem total_cap={} reached=true (raise index_max_items_total)",
             total_budget
@@ -666,7 +688,7 @@ fn discover_filesystem_walk(
         ));
     }
 
-    Ok(out)
+    Ok(sink.out)
 }
 
 /// Config depth 0 means unlimited.
@@ -764,6 +786,27 @@ impl DiscoveryExclusionPolicy {
     }
 
     pub(crate) fn should_exclude_path_under_root(&self, path: &Path, root: &Path) -> bool {
+        self.exclude_under_root(path, root, || path.is_dir())
+    }
+
+    /// Same decision as `should_exclude_path_under_root` for callers that
+    /// already know whether `path` is a directory, so no filesystem stat is
+    /// needed per entry.
+    pub(crate) fn should_exclude_entry_under_root(
+        &self,
+        path: &Path,
+        root: &Path,
+        is_dir: bool,
+    ) -> bool {
+        self.exclude_under_root(path, root, || is_dir)
+    }
+
+    fn exclude_under_root(
+        &self,
+        path: &Path,
+        root: &Path,
+        is_dir: impl FnOnce() -> bool,
+    ) -> bool {
         // The explicitly configured root is never excluded.
         if path == root {
             return false;
@@ -796,14 +839,15 @@ impl DiscoveryExclusionPolicy {
             return true;
         }
 
-        let is_dir = path.is_dir();
         for (index, component) in components.iter().enumerate() {
             let is_last = index + 1 == components.len();
             if self.file_names.contains(component.as_str()) {
                 return true;
             }
-            if self.any_depth_dir_names.contains(component.as_str()) && (!is_last || is_dir) {
-                return true;
+            if self.any_depth_dir_names.contains(component.as_str()) {
+                // A trailing match only excludes directories, so files that
+                // merely share the name stay discoverable.
+                return !is_last || is_dir();
             }
         }
 
@@ -1992,4 +2036,44 @@ fn is_excluded_windows_kits_shortcut_reference(value: &str) -> bool {
     lower.contains("sample")
         || lower.contains("documentation")
         || lower.contains("toolsdocumentation")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_exclusion_matches_stat_based_exclusion() {
+        let root = std::env::temp_dir().join(format!("nex-excl-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub").join("build")).unwrap();
+        std::fs::write(root.join("sub").join("target"), b"x").unwrap();
+        std::fs::write(root.join("sub").join("desktop.ini"), b"x").unwrap();
+
+        let policy = DiscoveryExclusionPolicy::new(&[]);
+        for (relative, is_dir, expected) in [
+            ("sub", true, false),
+            ("sub/build", true, true),
+            ("sub/build/inner.txt", false, true),
+            ("sub/target", false, false),
+            ("sub/desktop.ini", false, true),
+            ("windows", true, true),
+        ] {
+            let path = root.join(relative);
+            assert_eq!(
+                policy.should_exclude_entry_under_root(&path, &root, is_dir),
+                expected,
+                "entry {relative}"
+            );
+            if path.exists() {
+                assert_eq!(
+                    policy.should_exclude_path_under_root(&path, &root),
+                    expected,
+                    "path {relative}"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

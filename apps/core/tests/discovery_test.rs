@@ -534,3 +534,89 @@ fn count_filesystem_entries_for_root_counts_and_flags_depth_limit() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+fn unique_temp_root(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nex-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn file_system_walk_cap_keeps_shallow_entries_of_every_top_level_folder() {
+    let root = unique_temp_root("shallow-first");
+
+    // `a/` sorts first and holds a deep subtree: 12 files at each of the
+    // depths 2..=6. `m/` and `z/` each hold one file at depth 2.
+    let mut dir = root.join("a");
+    for depth in 2..=6 {
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..12 {
+            std::fs::write(dir.join(format!("f{n:02}.txt")), b"x").unwrap();
+        }
+        dir = dir.join(format!("d{}", depth + 1));
+    }
+    for name in ["m", "z"] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(root.join(name).join("shallow.txt"), b"x").unwrap();
+    }
+
+    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 0, vec![])
+        .with_index_limits(20, 20);
+    let items = provider.discover().unwrap();
+    let paths: Vec<String> = items.iter().map(|item| item.path.clone()).collect();
+    let root_depth = |path: &str| {
+        std::path::Path::new(path)
+            .strip_prefix(&root)
+            .unwrap()
+            .components()
+            .count()
+    };
+
+    assert_eq!(items.len(), 20);
+    for name in ["m", "z"] {
+        let shallow = root.join(name).join("shallow.txt").to_string_lossy().to_string();
+        assert!(paths.contains(&shallow), "missing {shallow}");
+    }
+    // Everything at depth <= 2 fits the cap; only the remainder comes from deeper.
+    assert_eq!(paths.iter().filter(|p| root_depth(p) <= 2).count(), 18);
+    assert!(paths.iter().all(|p| root_depth(p) <= 3));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn file_system_walk_without_cap_returns_whole_tree_regardless_of_folder_visibility() {
+    let root = unique_temp_root("walk-complete");
+    std::fs::create_dir_all(root.join("b").join("c")).unwrap();
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::write(root.join("top.txt"), b"x").unwrap();
+    std::fs::write(root.join("a").join("one.md"), b"x").unwrap();
+    std::fs::write(root.join("b").join("c").join("two.rs"), b"x").unwrap();
+
+    let all = FileSystemDiscoveryProvider::new(vec![root.clone()], 0, vec![])
+        .discover()
+        .unwrap();
+    let mut titles: Vec<String> = all.iter().map(|item| item.title.clone()).collect();
+    titles.sort();
+    assert_eq!(titles, ["a", "b", "c", "one.md", "top.txt", "two.rs"]);
+    assert!(all
+        .iter()
+        .any(|item| item.kind == "file" && item.title == "one.md"));
+
+    let files_only =
+        FileSystemDiscoveryProvider::with_options(vec![root.clone()], 0, vec![], true, false)
+            .discover()
+            .unwrap();
+    let mut file_titles: Vec<String> = files_only.iter().map(|item| item.title.clone()).collect();
+    file_titles.sort();
+    assert_eq!(file_titles, ["one.md", "top.txt", "two.rs"]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}

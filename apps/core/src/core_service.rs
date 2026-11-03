@@ -122,7 +122,14 @@ pub struct CoreService {
     providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
-    tantivy_index: Mutex<Option<TantivyIndex>>,
+    /// RwLock so searches, commits and syncs (all `&TantivyIndex`; the
+    /// writer has its own mutex) run concurrently; only replacing or
+    /// closing the index takes the write side.
+    tantivy_index: RwLock<Option<TantivyIndex>>,
+    /// Throttles watcher-driven commits (see `commit_search_index_if_due`).
+    last_index_commit: Mutex<Option<Instant>>,
+    index_warmer: Arc<crate::tantivy_search::IndexWarmer>,
+    title_fts_backfill_started: AtomicBool,
     /// Set when a Tantivy search/commit fails (e.g. missing segment files);
     /// the background maintenance loop rebuilds the index from SQLite.
     tantivy_needs_heal: AtomicBool,
@@ -203,17 +210,22 @@ impl CoreService {
     }
 
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
-        let cached = index_store::list_items(&db)?;
-        let cached_apps = collect_app_items(&cached);
+        let all_items = index_store::list_items(&db)?;
+        let cached_apps = collect_app_items(&all_items);
 
         let index_dir = config.index_db_path.parent().unwrap_or(Path::new("."));
         let tantivy_path = index_dir.join("index.tantivy");
 
         let tantivy_index = if enable_tantivy {
-            open_or_reset_tantivy_index(&tantivy_path, &cached)
+            open_or_reset_tantivy_index(&tantivy_path, &all_items)
         } else {
             None
         };
+        // Compact now rather than on the first refresh: an uncompacted cache
+        // makes every cache-scan search walk the whole store.
+        let cache_complete = cache_compaction_summary(&all_items, &config).dropped_total == 0;
+        let cached = compact_cached_items(&all_items, &config);
+        drop(all_items);
 
         Ok(Self {
             config: RwLock::new(config),
@@ -221,10 +233,13 @@ impl CoreService {
             providers: RwLock::new(Vec::new()),
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
-            tantivy_index: Mutex::new(tantivy_index),
+            tantivy_index: RwLock::new(tantivy_index),
+            last_index_commit: Mutex::new(None),
+            index_warmer: Arc::new(crate::tantivy_search::IndexWarmer::default()),
+            title_fts_backfill_started: AtomicBool::new(false),
             tantivy_needs_heal: AtomicBool::new(false),
             last_drift_store_count: Mutex::new(None),
-            cache_complete: AtomicBool::new(true),
+            cache_complete: AtomicBool::new(cache_complete),
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
@@ -521,7 +536,11 @@ impl CoreService {
         filter: &SearchFilter,
         query_boosts: &HashMap<String, i64>,
     ) {
-        if self.cache_complete.load(Ordering::SeqCst) || query.trim().is_empty() {
+        // Substring recall below three characters matches most of the store
+        // and cannot use the trigram index; prefix search already covers it.
+        if self.cache_complete.load(Ordering::SeqCst)
+            || !query.split_whitespace().any(|term| term.chars().count() >= 3)
+        {
             return;
         }
         let (include_files, include_folders) = match filter.mode {
@@ -989,7 +1008,7 @@ impl CoreService {
     /// Commit buffered Tantivy writes so watcher-driven upserts/deletes are
     /// visible to search now and survive process exit.
     pub fn flush_search_index(&self) {
-        let guard = match self.tantivy_index.lock() {
+        let guard = match self.tantivy_index.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1003,6 +1022,38 @@ impl CoreService {
         self.bump_search_generation();
     }
 
+    /// Commit buffered Tantivy writes if any are pending and the last
+    /// commit is at least `min_interval` old. Commits are fsync-heavy, so
+    /// watcher churn is throttled instead of committing every batch; no GC
+    /// here (the periodic `maybe_compact_backends` flush handles it).
+    pub(crate) fn commit_search_index_if_due(&self, min_interval: Duration) -> bool {
+        let mut last = match self.last_index_commit.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if last.is_some_and(|at| at.elapsed() < min_interval) {
+            return false;
+        }
+        let committed = match self.tantivy_index.read() {
+            Ok(guard) => guard.as_ref().map(|idx| idx.commit_pending()),
+            Err(poisoned) => poisoned.into_inner().as_ref().map(|idx| idx.commit_pending()),
+        };
+        match committed {
+            Some(Ok(true)) => {
+                *last = Some(Instant::now());
+                drop(last);
+                self.bump_search_generation();
+                true
+            }
+            Some(Err(e)) => {
+                crate::logging::warn(&format!("[nex] Tantivy commit failed: {e}"));
+                self.tantivy_needs_heal.store(true, Ordering::SeqCst);
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Background Tantivy upkeep: rebuild after a failed search/commit, and
     /// repair drift when the document count disagrees with the SQLite store.
     pub fn maintain_search_index(&self) {
@@ -1010,13 +1061,16 @@ impl CoreService {
             self.rebuild_search_index_from_store();
             return;
         }
+        // Buffered deletes/upserts (e.g. from the stale pruner) are not
+        // drift; publish them before comparing counts.
+        self.commit_search_index_if_due(Duration::ZERO);
 
         let store_count = match index_store::count_items(&*self.db()) {
             Ok(n) => n,
             Err(_) => return,
         };
         let docs = {
-            let guard = match self.tantivy_index.lock() {
+            let guard = match self.tantivy_index.read() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -1054,10 +1108,33 @@ impl CoreService {
         *last = None;
         drop(last);
         crate::logging::info(&format!(
-            "[nex] Tantivy drift detected docs={docs} store_items={store_count}; resyncing"
+            "[nex] Tantivy drift detected docs={docs} store_items={store_count}; reconciling"
         ));
-        if let Err(e) = self.sync_indexes_from_cache_with_force(true) {
-            crate::logging::warn(&format!("[nex] Tantivy drift resync failed: {e}"));
+        let items = match index_store::list_items(&*self.db()) {
+            Ok(items) => items,
+            Err(e) => {
+                crate::logging::warn(&format!("[nex] Tantivy drift repair skipped: {e}"));
+                return;
+            }
+        };
+        // Only missing/extra documents are written, unlike a forced sync
+        // that re-adds every document.
+        let result = match self.tantivy_index.read() {
+            Ok(guard) => guard.as_ref().map(|idx| idx.reconcile_items(&items)),
+            Err(poisoned) => poisoned.into_inner().as_ref().map(|idx| idx.reconcile_items(&items)),
+        };
+        match result {
+            Some(Ok((added, removed))) => {
+                crate::logging::info(&format!(
+                    "[nex] Tantivy drift repaired added={added} removed={removed}"
+                ));
+                self.bump_search_generation();
+            }
+            Some(Err(e)) => {
+                crate::logging::warn(&format!("[nex] Tantivy drift repair failed: {e}"));
+                self.tantivy_needs_heal.store(true, Ordering::SeqCst);
+            }
+            None => {}
         }
     }
 
@@ -1075,7 +1152,7 @@ impl CoreService {
                 return;
             }
         };
-        let mut guard = match self.tantivy_index.lock() {
+        let mut guard = match self.tantivy_index.write() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1091,7 +1168,7 @@ impl CoreService {
 
     /// Live Tantivy document count, or `None` when running without an index.
     pub fn search_index_doc_count(&self) -> Option<u64> {
-        let guard = match self.tantivy_index.lock() {
+        let guard = match self.tantivy_index.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1100,7 +1177,7 @@ impl CoreService {
 
     /// Commit and close the index (waiting for merges) before exit.
     pub(crate) fn shutdown_search_index(&self) {
-        let taken = match self.tantivy_index.lock() {
+        let taken = match self.tantivy_index.write() {
             Ok(mut guard) => guard.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         };
@@ -1131,8 +1208,22 @@ impl CoreService {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    if let Ok(guard) = svc.try_write() {
-                        let _ = guard.prune_stale_items_if_due();
+                    // Short read locks only: the existence checks below can
+                    // stall for seconds on a spun-down drive and must never
+                    // hold the service lock that searches and shows need.
+                    let candidates = match svc.try_read() {
+                        Ok(guard) => guard.stale_prune_candidates_if_due(),
+                        Err(_) => continue,
+                    };
+                    let stale_ids: Vec<String> = candidates
+                        .iter()
+                        .filter(|item| is_stale_index_entry(item))
+                        .map(|item| item.id.clone())
+                        .collect();
+                    if let Ok(guard) = svc.try_read() {
+                        if let Err(error) = guard.remove_stale_items(&stale_ids, candidates.len()) {
+                            crate::logging::warn(&format!("[nex] stale prune failed: {error}"));
+                        }
                         guard.maintain_search_index();
                     }
                 }
@@ -1140,6 +1231,50 @@ impl CoreService {
         {
             self.stale_pruner_started.store(false, Ordering::Release);
             crate::logging::warn(&format!("[nex] stale pruner start failed: {error}"));
+        }
+        self.start_title_fts_backfill(service_arc);
+    }
+
+    /// Index pre-existing rows into the title trigram table in small
+    /// batches after a store upgrade; recall uses the slower LIKE scan
+    /// until this finishes.
+    fn start_title_fts_backfill(&self, service_arc: &Arc<RwLock<CoreService>>) {
+        if !index_store::title_fts_backfill_pending(&*self.db()).unwrap_or(false)
+            || self.title_fts_backfill_started.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let stop = Arc::clone(&self.stale_pruner_stop);
+        let svc = Arc::clone(service_arc);
+        let spawned = std::thread::Builder::new()
+            .name("nex-title-fts-backfill".into())
+            .spawn(move || {
+                let mut warned = false;
+                while !stop.load(Ordering::Relaxed) {
+                    let step = match svc.try_read() {
+                        Ok(guard) => index_store::backfill_title_fts_batch(&*guard.db(), 2_000),
+                        Err(_) => Ok(false),
+                    };
+                    match step {
+                        Ok(true) => {
+                            crate::logging::info("[nex] title index backfill complete");
+                            break;
+                        }
+                        Ok(false) => std::thread::sleep(Duration::from_millis(15)),
+                        Err(error) => {
+                            if !warned {
+                                warned = true;
+                                crate::logging::warn(&format!(
+                                    "[nex] title index backfill retrying: {error}"
+                                ));
+                            }
+                            std::thread::sleep(Duration::from_secs(2));
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.title_fts_backfill_started.store(false, Ordering::Release);
         }
     }
 
@@ -1408,10 +1543,12 @@ impl CoreService {
             return Ok(Vec::new());
         }
 
-        // Try Tantivy
-        let tantivy_guard = match self.tantivy_index.lock() {
+        // try_read: while the index is being replaced (rare rebuild),
+        // fall back to cache + store recall instead of blocking the keystroke.
+        let tantivy_guard = match self.tantivy_index.try_read() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(Vec::new()),
         };
         if let Some(ref idx) = *tantivy_guard {
             match idx.search(query, limit) {
@@ -1437,15 +1574,16 @@ impl CoreService {
     /// cold-page-fault latency.  Must be called with the outer service
     /// lock held (read or write).
     pub fn warm_search_cache(&self) {
-        // Warm Tantivy reader
-        if let Ok(guard) = self.tantivy_index.lock() {
-            if let Some(ref idx) = *guard {
-                idx.warmup();
-            }
-        }
-        // Touch the cached items inner lock to warm the cache line.
-        drop(self.cached_items.read());
-        drop(self.cached_app_items.read());
+        // Called on the show path: never read index files synchronously
+        // here; the warmer only re-reads new or changed segment files.
+        let index_dir = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            cfg.index_db_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("index.tantivy")
+        };
+        self.index_warmer.warm_in_background(index_dir);
     }
 
     /// Invalidate the hot-prefix cache. Called on every mutation of the item
@@ -1560,7 +1698,7 @@ impl CoreService {
         // in-memory cache, which is exactly the cost we are trying to hide.
         let index_ready = self
             .tantivy_index
-            .lock()
+            .read()
             .ok()
             .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
             .map(|docs| docs > 0)
@@ -1672,7 +1810,13 @@ impl CoreService {
             }
 
             let path_text = path.to_string_lossy().to_string();
-            let item = match existing.get(&id) {
+            // Compaction evicts most file rows from the cache; read those
+            // from the store so their usage counts are not reset.
+            let stored = match existing.get(&id) {
+                Some(_) => None,
+                None => index_store::get_item(&*self.db(), &id)?,
+            };
+            let item = match existing.get(&id).or(stored.as_ref()) {
                 Some(current) => {
                     if current.last_accessed_epoch_secs >= modified {
                         continue;
@@ -1882,7 +2026,7 @@ impl CoreService {
 
         let tantivy_docs = self
             .tantivy_index
-            .lock()
+            .read()
             .ok()
             .and_then(|g| g.as_ref().and_then(|idx| idx.num_docs().ok()));
 
@@ -1910,33 +2054,25 @@ impl CoreService {
             index_dir.join("index.tantivy")
         };
 
-        let tantivy_guard = match self.tantivy_index.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
         // Mid-run self-heal: if the index is None (schema bump or
-        // corruption), reset and reopen while we hold the lock.
-        let mut tantivy_guard = if tantivy_guard.is_none() {
+        // corruption), reset and reopen under the write lock.
+        let missing = self
+            .tantivy_index
+            .read()
+            .map(|guard| guard.is_none())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().is_none());
+        if missing {
             crate::logging::info("[nex] Tantivy index missing or schema changed mid-run, resetting");
-            drop(tantivy_guard);
-            // No seed: the index is re-filled from `items` just below.
-            let healed = open_or_reset_tantivy_index(&tantivy_path, &[]);
-            match self.tantivy_index.lock() {
-                Ok(mut guard) => {
-                    *guard = healed;
-                    guard
-                }
-                Err(poisoned) => {
-                    let mut guard = poisoned.into_inner();
-                    *guard = healed;
-                    guard
-                }
+            let mut guard = self.tantivy_index.write().unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                // No seed: the index is re-filled from `items` just below.
+                *guard = open_or_reset_tantivy_index(&tantivy_path, &[]);
             }
-        } else {
-            tantivy_guard
-        };
+        }
 
+        // Read side: searches keep running against the last commit while
+        // the sync writes (the writer has its own mutex).
+        let tantivy_guard = self.tantivy_index.read().unwrap_or_else(|e| e.into_inner());
         let mut drop_index = false;
         if let Some(ref idx) = *tantivy_guard {
             let result = if tantivy_is_first {
@@ -1969,12 +2105,13 @@ impl CoreService {
                 }
             }
         }
+        drop(tantivy_guard);
         if drop_index {
-            if let Some(old) = tantivy_guard.take() {
+            let taken = self.tantivy_index.write().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(old) = taken {
                 close_tantivy_index(old);
             }
         }
-        drop(tantivy_guard);
 
         self.maybe_compact_backends();
         self.bump_search_generation();
@@ -1982,7 +2119,7 @@ impl CoreService {
     }
 
     fn index_item_on_backends(&self, item: &SearchItem) {
-        let tantivy_guard = match self.tantivy_index.lock() {
+        let tantivy_guard = match self.tantivy_index.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1999,7 +2136,7 @@ impl CoreService {
     }
 
     fn remove_item_from_backends(&self, id: &str) {
-        let tantivy_guard = match self.tantivy_index.lock() {
+        let tantivy_guard = match self.tantivy_index.read() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -2042,7 +2179,7 @@ impl CoreService {
         };
 
         if should_compact {
-            let tantivy_guard = match self.tantivy_index.lock() {
+            let tantivy_guard = match self.tantivy_index.read() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -2073,7 +2210,7 @@ impl CoreService {
             let working_set_mb = pmc.WorkingSetSize / (1024 * 1024);
             let pagefile_mb = pmc.PagefileUsage / (1024 * 1024);
 
-            let tantivy_mb = match self.tantivy_index.lock() {
+            let tantivy_mb = match self.tantivy_index.read() {
                 Ok(g) => g
                     .as_ref()
                     .map_or(0, |idx| idx.mem_usage_bytes()),
@@ -2115,7 +2252,10 @@ impl CoreService {
         Ok(())
     }
 
-    fn prune_stale_items_if_due(&self) -> Result<(), ServiceError> {
+    /// Next batch of cached items to existence-check, or empty when a prune
+    /// pass is not due yet. The caller checks the filesystem without holding
+    /// the service lock, then calls `remove_stale_items`.
+    pub(crate) fn stale_prune_candidates_if_due(&self) -> Vec<SearchItem> {
         let should_prune = {
             let mut last = match self.last_stale_prune.lock() {
                 Ok(guard) => guard,
@@ -2133,56 +2273,47 @@ impl CoreService {
 
         if !should_prune {
             self.maybe_compact_backends();
-            return Ok(());
+            return Vec::new();
         }
+        self.stale_prune_candidates(STALE_PRUNE_BATCH_SIZE)
+    }
 
-        let candidates = self.stale_prune_candidates(STALE_PRUNE_BATCH_SIZE);
-        let stale_ids: Vec<String> = candidates
-            .iter()
-            .filter(|item| is_stale_index_entry(item))
-            .map(|item| item.id.clone())
-            .collect();
-
+    pub(crate) fn remove_stale_items(
+        &self,
+        stale_ids: &[String],
+        scanned: usize,
+    ) -> Result<(), ServiceError> {
         if stale_ids.is_empty() {
             return Ok(());
         }
 
-        for stale_id in &stale_ids {
+        for stale_id in stale_ids {
             index_store::delete_item(&*self.db(), stale_id)?;
         }
 
+        let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
         match self.cached_items.write() {
-            Ok(mut guard) => {
-                let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
-                guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
-                guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
-            }
+            Ok(mut guard) => guard.retain(|entry| !stale_lookup.contains(entry.id.as_str())),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .retain(|entry| !stale_lookup.contains(entry.id.as_str())),
         }
         match self.cached_app_items.write() {
-            Ok(mut guard) => {
-                let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
-                guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
-                guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
-            }
+            Ok(mut guard) => guard.retain(|entry| !stale_lookup.contains(entry.id.as_str())),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .retain(|entry| !stale_lookup.contains(entry.id.as_str())),
         }
 
         // Remove stale entries from Tantivy backend so
         // deleted-on-disk files stop appearing in search results.
-        for stale_id in &stale_ids {
+        for stale_id in stale_ids {
             self.remove_item_from_backends(stale_id);
         }
 
         crate::logging::info(&format!(
             "[nex] stale_prune scanned={} removed={} cached_items_remaining={}",
-            candidates.len(),
+            scanned,
             stale_ids.len(),
             self.cached_len()
         ));
@@ -2698,7 +2829,7 @@ mod tests {
     fn tantivy_docs(service: &CoreService) -> u64 {
         service
             .tantivy_index
-            .lock()
+            .read()
             .ok()
             .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
             .unwrap_or(0)

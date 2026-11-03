@@ -44,6 +44,11 @@ const CONSUMER_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 /// pathological FS storm cannot grow RSS.
 const CONSUMER_BATCH_CAP: usize = 4096;
 
+/// Minimum spacing between watcher-driven Tantivy commits. New files are
+/// searchable from the in-memory cache immediately; the commit only
+/// publishes them (and deletions) to the persistent index.
+const WATCHER_COMMIT_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Per-root watcher + consumer pair.
 struct WatcherEntry {
     _watcher: DirectoryWatcher,
@@ -215,7 +220,10 @@ fn run_consumer(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                // No new events; fall through to flush.
+                // Quiet period: publish writes the throttle held back.
+                if let Ok(guard) = service.try_read() {
+                    guard.commit_search_index_if_due(WATCHER_COMMIT_INTERVAL);
+                }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 crate::runtime::log_info(&format!(
@@ -541,8 +549,12 @@ fn flush_pending(
                 upserted += 1;
             }
         }
-        if upserted > 0 || deleted > 0 {
-            guard.flush_search_index();
+    }
+    // Commit outside the write lock (searches and shows only need a read
+    // lock); throttled so churn does not commit on every batch.
+    if upserted > 0 || deleted > 0 {
+        if let Ok(guard) = service.try_read() {
+            guard.commit_search_index_if_due(WATCHER_COMMIT_INTERVAL);
         }
     }
 

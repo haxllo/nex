@@ -152,6 +152,7 @@ impl EverythingBridge {
         &self,
         roots: &[PathBuf],
         exclusion: &DiscoveryExclusionPolicy,
+        max_depth: usize,
         show_files: bool,
         show_folders: bool,
         max_items_total: usize,
@@ -191,6 +192,7 @@ impl EverythingBridge {
         let mut out = Vec::with_capacity(total_budget.min(count));
         let mut total_added = 0_usize;
         let mut skipped_excluded = 0_usize;
+        let mut buf: Vec<u16> = vec![0u16; 512];
 
         for root in roots {
             if total_added >= total_budget {
@@ -204,89 +206,99 @@ impl EverythingBridge {
                 continue;
             }
 
-            let mut root_added = 0_usize;
-            let root_lower = root.to_string_lossy().to_ascii_lowercase();
-            let root_lower = root_lower.trim_end_matches('\\');
+            let root_prefix = normalized_root_prefix(root);
+            let root_budget = per_root_budget.min(total_budget - total_added);
 
-            let mut buf: Vec<u16> = vec![0u16; 512];
-
+            // Pass 1: record only (result index, depth) for every eligible
+            // entry so a root with millions of matches stays cheap in memory.
+            let mut eligible: Vec<EligibleResult> = Vec::new();
+            let mut histogram: Vec<usize> = Vec::new();
             for i in 0..count as u32 {
-                if total_added >= total_budget || root_added >= per_root_budget {
-                    break;
-                }
-
-                let mut written = unsafe {
-                    (self.fns.get_result_full_path_name_w)(i, buf.as_mut_ptr(), buf.len() as u32)
+                let Some(path) = self.result_path(i, &mut buf) else {
+                    continue;
                 };
-                if written == 0 {
+                let Some(relative) = relative_under_root(&path, &root_prefix) else {
                     continue;
-                }
-                if (written as usize) >= buf.len() {
-                    // The voidtools SDK reports the required buffer size in TCHARs
-                    // (not including the null terminator) and does NOT modify the
-                    // buffer when it is too small. Resize and retry.
-                    let needed = (written as usize).saturating_add(1);
-                    buf = vec![0u16; needed];
-                    written = unsafe {
-                        (self.fns.get_result_full_path_name_w)(
-                            i,
-                            buf.as_mut_ptr(),
-                            buf.len() as u32,
-                        )
-                    };
-                    if written == 0 || (written as usize) >= buf.len() {
-                        continue;
-                    }
-                }
-                let path = String::from_utf16_lossy(&buf[..written as usize]);
-                let path_lower = path.to_ascii_lowercase();
-
-                if !path_lower.starts_with(&root_lower) {
-                    continue;
-                }
-                let path = Path::new(&path);
-
-                if exclusion.should_exclude_path_under_root(path, root) {
-                    skipped_excluded = skipped_excluded.saturating_add(1);
+                };
+                let depth = relative_depth(relative);
+                if max_depth != 0 && depth > max_depth {
                     continue;
                 }
 
                 let is_folder = unsafe { (self.fns.is_folder_result)(i) } != 0;
-
                 if is_folder {
-                    if !show_folders {
+                    if !show_folders || depth == 0 {
                         continue;
                     }
-                    if path == root {
-                        continue;
-                    }
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        // Lowercase id: matches walk (`discover_filesystem_walk`)
-                        // and watcher (`path_to_search_item`) so an
-                        // Everything scan upserts the same row instead
-                        // of leaving a ghost duplicate.
-                        let id = format!("folder:{}", path.to_string_lossy().to_ascii_lowercase());
-                        out.push(SearchItem::new(&id, "folder", name, &path.to_string_lossy()));
-                        total_added += 1;
-                        root_added += 1;
-                    }
-                } else {
-                    if !show_files {
-                        continue;
-                    }
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .or_else(|| path.file_name().and_then(|n| n.to_str()))
-                        .unwrap_or("");
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let id = format!("file:{}", path.to_string_lossy().to_ascii_lowercase());
-                    out.push(SearchItem::new(&id, "file", name, &path.to_string_lossy()));
-                    total_added += 1;
-                    root_added += 1;
+                } else if !show_files {
+                    continue;
                 }
+
+                // Rebuild the path from the configured root so component
+                // exclusions apply even when its casing differs from the
+                // index's.
+                let exclusion_path = if relative.is_empty() {
+                    root.clone()
+                } else {
+                    root.join(relative)
+                };
+                if exclusion.should_exclude_entry_under_root(&exclusion_path, root, is_folder) {
+                    skipped_excluded = skipped_excluded.saturating_add(1);
+                    continue;
+                }
+
+                if histogram.len() <= depth {
+                    histogram.resize(depth + 1, 0);
+                }
+                histogram[depth] += 1;
+                eligible.push(EligibleResult {
+                    index: i,
+                    depth: depth.min(u16::MAX as usize) as u16,
+                    is_folder,
+                });
+            }
+
+            // Pass 2: when the root exceeds its budget keep the shallowest
+            // entries (ties at the cutoff depth in Everything's order)
+            // rather than an arbitrary name-ordered sample.
+            let (cutoff_depth, mut cutoff_slots) = shallow_first_cutoff(&histogram, root_budget);
+            for result in &eligible {
+                let depth = result.depth as usize;
+                if depth > cutoff_depth {
+                    continue;
+                }
+                if depth == cutoff_depth {
+                    if cutoff_slots == 0 {
+                        continue;
+                    }
+                    cutoff_slots -= 1;
+                }
+                let Some(path) = self.result_path(result.index, &mut buf) else {
+                    continue;
+                };
+                let path = Path::new(&path);
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                // Lowercase id: matches walk (`discover_filesystem_walk`)
+                // and watcher (`path_to_search_item`) so an Everything
+                // scan upserts the same row instead of leaving a ghost
+                // duplicate. Title is the full file name, like the walk.
+                let kind = if result.is_folder { "folder" } else { "file" };
+                let id = format!("{kind}:{}", path.to_string_lossy().to_ascii_lowercase());
+                out.push(SearchItem::new(&id, kind, name, &path.to_string_lossy()));
+                total_added += 1;
+            }
+
+            if eligible.len() > per_root_budget {
+                crate::runtime::log_warn(&format!(
+                    "[nex] discovery_cap provider=filesystem backend=everything root={} per_root_cap={per_root_budget} eligible={} reached=true; deepest entries were not indexed (raise index_max_items_per_root)",
+                    root.display(),
+                    eligible.len()
+                ));
             }
         }
 
@@ -303,6 +315,85 @@ impl EverythingBridge {
 
         Ok(out)
     }
+
+    /// Full path of result `index`, growing `buf` when the SDK reports a
+    /// longer path. Callers must hold `SDK_LOCK`.
+    fn result_path(&self, index: u32, buf: &mut Vec<u16>) -> Option<String> {
+        let mut written = unsafe {
+            (self.fns.get_result_full_path_name_w)(index, buf.as_mut_ptr(), buf.len() as u32)
+        };
+        if written == 0 {
+            return None;
+        }
+        if (written as usize) >= buf.len() {
+            // The voidtools SDK reports the required buffer size in TCHARs
+            // (not including the null terminator) and does NOT modify the
+            // buffer when it is too small. Resize and retry.
+            let needed = (written as usize).saturating_add(1);
+            *buf = vec![0u16; needed];
+            written = unsafe {
+                (self.fns.get_result_full_path_name_w)(index, buf.as_mut_ptr(), buf.len() as u32)
+            };
+            if written == 0 || (written as usize) >= buf.len() {
+                return None;
+            }
+        }
+        Some(String::from_utf16_lossy(&buf[..written as usize]))
+    }
+}
+
+struct EligibleResult {
+    index: u32,
+    depth: u16,
+    is_folder: bool,
+}
+
+/// Root as a backslash path without trailing separators (`G:\` -> `G:`),
+/// the form `relative_under_root` expects.
+fn normalized_root_prefix(root: &Path) -> String {
+    root.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// The part of `path` below `root_prefix`, or `None` when `path` is outside
+/// it. Matches only on a path-separator boundary (`g:\games` does not own
+/// `g:\games2\x`); the root itself yields an empty string.
+fn relative_under_root<'a>(path: &'a str, root_prefix: &str) -> Option<&'a str> {
+    let path = path.trim_end_matches(['\\', '/']);
+    let head = path.get(..root_prefix.len())?;
+    if !head.eq_ignore_ascii_case(root_prefix) {
+        return None;
+    }
+    let rest = &path[root_prefix.len()..];
+    if rest.is_empty() {
+        return Some(rest);
+    }
+    rest.strip_prefix(['\\', '/'])
+}
+
+/// Number of path components in a `relative_under_root` result.
+fn relative_depth(relative: &str) -> usize {
+    relative
+        .split(['\\', '/'])
+        .filter(|component| !component.is_empty())
+        .count()
+}
+
+/// Splits `budget` over a per-depth entry histogram, shallowest first.
+/// Returns `(depth, slots)`: keep every entry shallower than `depth`, plus
+/// the first `slots` entries at `depth`; deeper entries are dropped. When
+/// everything fits, `depth` is `histogram.len()`.
+fn shallow_first_cutoff(histogram: &[usize], budget: usize) -> (usize, usize) {
+    let mut remaining = budget;
+    for (depth, &count) in histogram.iter().enumerate() {
+        if count > remaining {
+            return (depth, remaining);
+        }
+        remaining -= count;
+    }
+    (histogram.len(), remaining)
 }
 
 unsafe fn load_functions(lib: HMODULE) -> Option<EverythingFns> {
@@ -529,6 +620,58 @@ mod tests {
         for dir in &dirs {
             assert!(!dir.as_os_str().is_empty());
         }
+    }
+
+    #[test]
+    fn shallow_first_cutoff_keeps_everything_when_budget_fits() {
+        assert_eq!(shallow_first_cutoff(&[0, 3, 5], 10), (3, 2));
+        assert_eq!(shallow_first_cutoff(&[], 4), (0, 4));
+    }
+
+    #[test]
+    fn shallow_first_cutoff_splits_at_first_depth_that_overflows() {
+        assert_eq!(shallow_first_cutoff(&[0, 3, 5, 9], 10), (3, 2));
+        assert_eq!(shallow_first_cutoff(&[0, 3, 50, 9], 10), (2, 7));
+        assert_eq!(shallow_first_cutoff(&[0, 50, 3], 10), (1, 10));
+    }
+
+    #[test]
+    fn shallow_first_cutoff_exact_fit_leaves_no_slots_below() {
+        assert_eq!(shallow_first_cutoff(&[0, 4, 6, 1], 10), (3, 0));
+        assert_eq!(shallow_first_cutoff(&[0, 4, 6], 10), (3, 0));
+        assert_eq!(shallow_first_cutoff(&[5, 5], 0), (0, 0));
+    }
+
+    #[test]
+    fn relative_under_root_requires_separator_boundary() {
+        let root = normalized_root_prefix(Path::new(r"g:\games"));
+        assert_eq!(relative_under_root(r"G:\Games\a\b.txt", &root), Some(r"a\b.txt"));
+        assert_eq!(relative_under_root(r"G:\Games", &root), Some(""));
+        assert_eq!(relative_under_root(r"G:\Games2\x", &root), None);
+        assert_eq!(relative_under_root(r"G:\Gam", &root), None);
+        assert_eq!(relative_under_root(r"D:\Games\x", &root), None);
+    }
+
+    #[test]
+    fn relative_under_root_handles_drive_roots_and_trailing_separators() {
+        for root in [r"G:\", "G:", "g:/"] {
+            let root = normalized_root_prefix(Path::new(root));
+            assert!(root.eq_ignore_ascii_case("G:"));
+            assert_eq!(relative_under_root(r"G:\", &root), Some(""));
+            assert_eq!(relative_under_root(r"G:\top", &root), Some("top"));
+            assert_eq!(relative_under_root(r"G:\top\sub\", &root), Some(r"top\sub"));
+            assert_eq!(relative_under_root(r"H:\top", &root), None);
+        }
+        let slashed = normalized_root_prefix(Path::new("G:/Data/Docs/"));
+        assert_eq!(relative_under_root(r"G:\Data\Docs\a.txt", &slashed), Some("a.txt"));
+    }
+
+    #[test]
+    fn relative_depth_counts_components_below_root() {
+        assert_eq!(relative_depth(""), 0);
+        assert_eq!(relative_depth("a"), 1);
+        assert_eq!(relative_depth(r"a\b\c.txt"), 3);
+        assert_eq!(relative_depth("a/b"), 2);
     }
 
     #[test]

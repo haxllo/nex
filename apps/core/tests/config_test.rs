@@ -351,3 +351,30 @@ search_backend = "tantivy"
     std::fs::remove_file(&config_path).unwrap();
     std::fs::remove_dir_all(&config_dir).unwrap();
 }
+
+#[test]
+fn discovery_max_depth_default_is_unlimited_and_validated() {
+    let mut cfg = nex_core::config::Config::default();
+    assert_eq!(cfg.discovery_max_depth, 0);
+    assert!(nex_core::config::validate(&cfg).is_ok());
+    cfg.discovery_max_depth = 256;
+    assert!(nex_core::config::validate(&cfg).is_ok());
+    cfg.discovery_max_depth = 257;
+    assert!(nex_core::config::validate(&cfg).is_err());
+}
+
+#[test]
+fn migration_from_v25_adds_discovery_max_depth() {
+    let dir = std::env::temp_dir().join(format!("nex-cfg-depth-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, "version = 25\nmax_results = 21\n").unwrap();
+
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
+    assert_eq!(loaded.version, nex_core::config::CURRENT_CONFIG_VERSION);
+    assert_eq!(loaded.max_results, 21);
+    assert_eq!(loaded.discovery_max_depth, 0);
+    let raw = std::fs::read_to_string(&config_path).unwrap();
+    assert!(raw.contains("discovery_max_depth = 0"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -634,16 +634,93 @@ fn probe_index_health(cfg: &config::Config) -> serde_json::Value {
     let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
     let tantivy_path = index_dir.join("index.tantivy");
 
-    let tantivy = match TantivyIndex::open(&tantivy_path) {
-        Ok(idx) => match idx.num_docs() {
-            Ok(n) => serde_json::json!({"status": "ok", "num_docs": n}),
-            Err(e) => serde_json::json!({"status": "error", "detail": e}),
-        },
+    // Read-only: opening a writer here would contend with (or, on older
+    // builds, reset) the running instance's index.
+    let tantivy = match TantivyIndex::read_only_doc_count(&tantivy_path) {
+        Ok(n) => serde_json::json!({"status": "ok", "num_docs": n}),
         Err(e) => serde_json::json!({"status": "error", "detail": e}),
     };
 
+    let include_paths = std::env::var("NEX_INCLUDE_RAW_DIAGNOSTICS").as_deref() == Ok("1");
     serde_json::json!({
         "tantivy": tantivy,
+        "completeness": index_completeness_report(cfg, include_paths),
+    })
+}
+
+/// Compares what is indexed (SQLite, Tantivy) with what is on disk for each
+/// configured root, and flags the limits that explain any gap. Walks every
+/// root uncapped, so it can take a while on drive-sized roots.
+pub(crate) fn index_completeness_report(cfg: &config::Config, include_paths: bool) -> serde_json::Value {
+    use std::path::Path;
+
+    let db = match crate::index_store::open_read_only(&cfg.index_db_path) {
+        Ok(db) => db,
+        Err(e) => return serde_json::json!({"status": "error", "detail": e.to_string()}),
+    };
+    let store_items = crate::index_store::count_items(&db).ok();
+    let index_dir = cfg.index_db_path.parent().unwrap_or(Path::new("."));
+    let tantivy_docs =
+        crate::tantivy_search::TantivyIndex::read_only_doc_count(&index_dir.join("index.tantivy")).ok();
+
+    let per_root_cap = cfg.index_max_items_per_root as u64;
+    let mut indexed_total = 0_u64;
+    let roots: Vec<serde_json::Value> = cfg
+        .discovery_roots
+        .iter()
+        .enumerate()
+        .map(|(i, root)| {
+            let label = if include_paths {
+                root.display().to_string()
+            } else {
+                format!("root_{i}")
+            };
+            let (db_files, db_folders) =
+                crate::index_store::count_file_folder_items_under_root(&db, &root.to_string_lossy())
+                    .unwrap_or((0, 0));
+            indexed_total += db_files + db_folders;
+            let fs = crate::discovery::count_filesystem_entries_for_root(root, cfg);
+            let expected_files = if cfg.show_files { fs.files } else { 0 };
+            let expected_folders = if cfg.show_folders { fs.folders } else { 0 };
+            let expected = expected_files + expected_folders;
+            let indexed = db_files + db_folders;
+            serde_json::json!({
+                "root": label,
+                "exists": root.exists(),
+                "db_files": db_files,
+                "db_folders": db_folders,
+                "fs_files": fs.files,
+                "fs_folders": fs.folders,
+                "fs_excluded_entries": fs.excluded,
+                "fs_walk_errors": fs.errors,
+                "missing_files": expected_files.saturating_sub(db_files),
+                "missing_folders": expected_folders.saturating_sub(db_folders),
+                "coverage_pct": if expected == 0 { 100.0 } else {
+                    ((indexed.min(expected) as f64 / expected as f64) * 1000.0).round() / 10.0
+                },
+                "per_root_cap_hit": indexed >= per_root_cap,
+                "depth_limited": fs.depth_limited,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "status": "ok",
+        "store_items": store_items,
+        "tantivy_docs": tantivy_docs,
+        "tantivy_matches_store": match (store_items, tantivy_docs) {
+            (Some(s), Some(t)) => serde_json::Value::Bool(s == t),
+            _ => serde_json::Value::Null,
+        },
+        "limits": {
+            "discovery_max_depth": cfg.discovery_max_depth,
+            "index_max_items_per_root": cfg.index_max_items_per_root,
+            "index_max_items_total": cfg.index_max_items_total,
+            "total_cap_hit": indexed_total >= cfg.index_max_items_total as u64,
+            "show_files": cfg.show_files,
+            "show_folders": cfg.show_folders,
+        },
+        "roots": roots,
     })
 }
 
@@ -778,13 +855,18 @@ pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
     println!("  config_path: {}", cfg.config_path.display());
     println!("  index_db_path: {}", cfg.index_db_path.display());
 
-    match TantivyIndex::open(&tantivy_path) {
-        Ok(idx) => match idx.num_docs() {
-            Ok(n) => println!("  tantivy: OK ({} documents)", n),
-            Err(e) => println!("  tantivy: opened but num_docs failed: {e}"),
-        },
+    match TantivyIndex::read_only_doc_count(&tantivy_path) {
+        Ok(n) => println!("  tantivy: OK ({} documents)", n),
         Err(e) => println!("  tantivy: FAILED ({e})"),
     }
+
+    // Local terminal output: paths are the user's own, so show them.
+    let report = index_completeness_report(&cfg, true);
+    println!("  completeness (filesystem walk may take a while):");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("encode error: {e}"))
+    );
 
     Ok(())
 }
@@ -808,5 +890,51 @@ fn runtime_state_summary() -> String {
     #[cfg(not(target_os = "windows"))]
     {
         "unsupported_platform".to_string()
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+    use crate::model::SearchItem;
+
+    #[test]
+    fn completeness_report_flags_unindexed_files_per_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for name in ["a.txt", "b.txt", "sub/c.txt"] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+
+        let mut cfg = config::Config::default();
+        cfg.index_db_path = dir.path().join("index.sqlite3");
+        cfg.discovery_roots = vec![root.clone()];
+        cfg.discovery_exclude_roots = Vec::new();
+        cfg.show_files = true;
+        cfg.show_folders = true;
+        {
+            let db = crate::index_store::open_file(&cfg.index_db_path).unwrap();
+            for name in ["a.txt", "b.txt"] {
+                let path = root.join(name).to_string_lossy().to_string();
+                crate::index_store::upsert_item(
+                    &db,
+                    &SearchItem::new(&format!("file:{}", path.to_ascii_lowercase()), "file", name, &path),
+                )
+                .unwrap();
+            }
+        }
+
+        let report = index_completeness_report(&cfg, false);
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["store_items"], 2);
+        let r = &report["roots"][0];
+        assert_eq!(r["root"], "root_0");
+        assert_eq!(r["fs_files"], 3);
+        assert_eq!(r["fs_folders"], 1);
+        assert_eq!(r["db_files"], 2);
+        assert_eq!(r["missing_files"], 1);
+        assert_eq!(r["missing_folders"], 1);
+        assert_eq!(r["per_root_cap_hit"], false);
     }
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
-    ERROR_INSUFFICIENT_BUFFER,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_NOTIFY_ENUM_DIR, ERROR_OPERATION_ABORTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
@@ -21,7 +21,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_SIZE,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, WaitForSingleObject,
 };
@@ -30,6 +30,10 @@ use windows_sys::Win32::System::Threading::{
 /// builds; the extra 48 KiB costs one page per watched root.
 const BUFFER_BYTES: usize = 64 * 1024;
 const DEBOUNCE_WINDOW_MS: u64 = 200;
+/// Upper bound on how long a continuous event stream can delay a flush.
+const MAX_BATCH_LATENCY_MS: u64 = 1000;
+const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MAX_EVENTS_PER_BATCH: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +107,7 @@ impl Drop for WatcherHandles {
 struct PendingBatch {
     events: Vec<WatcherEvent>,
     timer_start: Option<Instant>,
+    first_event: Option<Instant>,
 }
 
 pub struct DirectoryWatcher {
@@ -228,12 +233,125 @@ unsafe fn create_watcher_handles(
     ))
 }
 
+enum SessionEnd {
+    Stopped,
+    Failed,
+}
+
 fn run_watch_loop(
     config: WatcherConfig,
-    mut handles: WatcherHandles,
+    initial: WatcherHandles,
     stop: Arc<AtomicBool>,
     tx: Sender<Vec<WatcherEvent>>,
 ) {
+    let mut batch = PendingBatch {
+        events: Vec::new(),
+        timer_start: None,
+        first_event: None,
+    };
+    // Boxed so the buffer address stays stable while an I/O is pending.
+    let mut handles: Option<Box<WatcherHandles>> = Some(Box::new(initial));
+    let mut backoff = RESTART_BACKOFF_MIN;
+
+    while !stop.load(Ordering::SeqCst) {
+        let mut current = match handles.take() {
+            Some(h) => h,
+            None => {
+                if !sleep_unless_stopped(&stop, backoff) {
+                    break;
+                }
+                match unsafe { create_watcher_handles(&config.root) } {
+                    Ok((mut h, _)) => {
+                        h.overlapped.hEvent = h.event;
+                        crate::runtime::log_warn(&format!(
+                            "[nex-dir-watcher] reopened watcher for {}; requesting resync",
+                            config.root.display()
+                        ));
+                        // Events were missed while the watcher was down.
+                        flush_batch(&mut batch, &tx);
+                        let _ = tx.send(vec![WatcherEvent {
+                            kind: WatcherEventKind::OverflowResync,
+                            path: PathBuf::new(),
+                        }]);
+                        Box::new(h)
+                    }
+                    Err(e) => {
+                        log_watcher_error("reopen", &e.to_string());
+                        backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let mut progressed = false;
+        let end = watch_session(&config, &mut current, &stop, &tx, &mut batch, &mut progressed);
+        drop(current);
+        match end {
+            SessionEnd::Stopped => break,
+            SessionEnd::Failed => {
+                if progressed {
+                    backoff = RESTART_BACKOFF_MIN;
+                }
+                crate::runtime::log_warn(&format!(
+                    "[nex-dir-watcher] watcher for {} failed; restarting in {}s",
+                    config.root.display(),
+                    backoff.as_secs()
+                ));
+                if !sleep_unless_stopped(&stop, backoff) {
+                    break;
+                }
+                backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+        }
+    }
+
+    flush_batch(&mut batch, &tx);
+}
+
+/// Sleeps in short slices; returns false if `stop` was set.
+fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) -> bool {
+    let deadline = Instant::now() + total;
+    while Instant::now() < deadline {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
+/// Cancels the outstanding read and waits for it to complete so the
+/// kernel no longer references the buffer.
+fn cancel_pending(handles: &mut WatcherHandles) {
+    unsafe {
+        CancelIoEx(handles.directory, &handles.overlapped);
+        let mut n: u32 = 0;
+        GetOverlappedResult(handles.directory, &handles.overlapped, &mut n, 1);
+    }
+}
+
+fn flush_due(since_last: Duration, since_first: Duration) -> bool {
+    since_last >= Duration::from_millis(DEBOUNCE_WINDOW_MS)
+        || since_first >= Duration::from_millis(MAX_BATCH_LATENCY_MS)
+}
+
+fn push_overflow(batch: &mut PendingBatch) {
+    batch.events.clear();
+    batch.events.push(WatcherEvent {
+        kind: WatcherEventKind::OverflowResync,
+        path: PathBuf::new(),
+    });
+}
+
+fn watch_session(
+    config: &WatcherConfig,
+    handles: &mut WatcherHandles,
+    stop: &AtomicBool,
+    tx: &Sender<Vec<WatcherEvent>>,
+    batch: &mut PendingBatch,
+    progressed: &mut bool,
+) -> SessionEnd {
     // Watching directory names too: a renamed/created folder changes
     // which files a scan would return beneath it.
     let notify_filter = FILE_NOTIFY_CHANGE_FILE_NAME
@@ -247,19 +365,14 @@ fn run_watch_loop(
         .iter()
         .map(|p| normalize_path(p))
         .collect();
-
     let root_lower = normalize_path(&config.root);
 
-    let mut batch = PendingBatch {
-        events: Vec::new(),
-        timer_start: None,
-    };
-
-    'outer: loop {
+    loop {
         if stop.load(Ordering::SeqCst) {
-            break;
+            return SessionEnd::Stopped;
         }
 
+        // Each completion consumes the request, so re-arm every pass.
         let buffer_ptr = handles.buffer.as_mut_ptr() as *mut core::ffi::c_void;
         let buffer_len = handles.buffer.len();
         let queued = unsafe {
@@ -275,8 +388,8 @@ fn run_watch_loop(
             )
         };
         if queued == 0 {
-            log_watcher_error("ReadDirectoryChangesW", last_error() as i32);
-            break;
+            log_watcher_error("ReadDirectoryChangesW", &last_error().to_string());
+            return SessionEnd::Failed;
         }
 
         loop {
@@ -288,7 +401,8 @@ fn run_watch_loop(
             let wait_result = unsafe { WaitForSingleObject(handles.event, wait_ms) };
 
             if stop.load(Ordering::SeqCst) {
-                break 'outer;
+                cancel_pending(handles);
+                return SessionEnd::Stopped;
             }
 
             if wait_result == WAIT_OBJECT_0 {
@@ -296,60 +410,68 @@ fn run_watch_loop(
                 let ok = unsafe {
                     GetOverlappedResult(
                         handles.directory,
-                        &mut handles.overlapped,
+                        &handles.overlapped,
                         &mut bytes_returned,
                         1,
                     )
                 };
                 if ok == 0 {
-                    log_watcher_error("GetOverlappedResult", last_error() as i32);
-                    break 'outer;
+                    let code = last_error();
+                    if code == ERROR_NOTIFY_ENUM_DIR {
+                        push_overflow(batch);
+                        flush_batch(batch, tx);
+                        break;
+                    }
+                    if code != ERROR_OPERATION_ABORTED {
+                        log_watcher_error("GetOverlappedResult", &code.to_string());
+                    }
+                    return SessionEnd::Failed;
                 }
+                *progressed = true;
                 if bytes_returned == 0 {
-                    // Windows reports directory-change buffer overflow with
-                    // zero bytes. The journal is no longer trustworthy;
-                    // force a full consumer resync before accepting events.
-                    batch.events.clear();
-                    batch.events.push(WatcherEvent {
-                        kind: WatcherEventKind::OverflowResync,
-                        path: PathBuf::new(),
-                    });
-                    flush_batch(&mut batch, &tx);
+                    // Zero bytes means the journal overflowed; force a
+                    // full consumer resync.
+                    push_overflow(batch);
+                    flush_batch(batch, tx);
                     break;
                 }
-                // Buffer overflow: the journal wrapped and events were
-                // lost. Keep watching (re-arm below) and emit a drain
-                // marker so the consumer forces a full resync. Exiting
-                // here used to kill the watcher until process restart.
                 if bytes_returned as usize > buffer_len {
-                    log_watcher_error("GetOverlappedResult", ERROR_INSUFFICIENT_BUFFER as i32);
-                    batch.events.clear();
-                    batch.events.push(WatcherEvent {
-                        kind: WatcherEventKind::OverflowResync,
-                        path: PathBuf::new(),
-                    });
-                    flush_batch(&mut batch, &tx);
+                    log_watcher_error(
+                        "GetOverlappedResult",
+                        &ERROR_INSUFFICIENT_BUFFER.to_string(),
+                    );
+                    push_overflow(batch);
+                    flush_batch(batch, tx);
                     break;
                 }
                 let slice = unsafe {
                     std::slice::from_raw_parts(buffer_ptr as *const u8, bytes_returned as usize)
                 };
-                append_notifications(slice, &root_lower, &excluded, &mut batch);
-                batch.timer_start = Some(Instant::now());
+                append_notifications(slice, &root_lower, &excluded, batch);
+                if !batch.events.is_empty() {
+                    let now = Instant::now();
+                    batch.timer_start = Some(now);
+                    batch.first_event.get_or_insert(now);
+                }
+                if let Some(first) = batch.first_event {
+                    if flush_due(Duration::ZERO, first.elapsed()) {
+                        flush_batch(batch, tx);
+                    }
+                }
+                break;
             } else if wait_result == WAIT_TIMEOUT {
-                if let Some(start) = batch.timer_start {
-                    if start.elapsed() >= Duration::from_millis(DEBOUNCE_WINDOW_MS) {
-                        flush_batch(&mut batch, &tx);
+                if let (Some(last), Some(first)) = (batch.timer_start, batch.first_event) {
+                    if flush_due(last.elapsed(), first.elapsed()) {
+                        flush_batch(batch, tx);
                     }
                 }
             } else {
-                log_watcher_error("WaitForSingleObject", last_error() as i32);
-                break 'outer;
+                log_watcher_error("WaitForSingleObject", &last_error().to_string());
+                cancel_pending(handles);
+                return SessionEnd::Failed;
             }
         }
     }
-
-    flush_batch(&mut batch, &tx);
 }
 
 fn append_notifications(
@@ -468,6 +590,7 @@ fn is_under_excluded(path: &Path, excluded: &[String]) -> bool {
 fn flush_batch(batch: &mut PendingBatch, tx: &Sender<Vec<WatcherEvent>>) {
     if batch.events.is_empty() {
         batch.timer_start = None;
+        batch.first_event = None;
         return;
     }
     // Last-wins: a rapid create+delete must end deleted (not ghost),
@@ -484,14 +607,15 @@ fn flush_batch(batch: &mut PendingBatch, tx: &Sender<Vec<WatcherEvent>>) {
     let deduped = reversed;
     let _ = tx.send(deduped);
     batch.timer_start = None;
+    batch.first_event = None;
 }
 
 fn last_error() -> u32 {
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
-fn log_watcher_error(op: &str, code: i32) {
-    eprintln!("[nex-dir-watcher] {} failed (code={})", op, code);
+fn log_watcher_error(op: &str, detail: &str) {
+    crate::runtime::log_warn(&format!("[nex-dir-watcher] {} failed ({})", op, detail));
 }
 
 #[cfg(test)]
@@ -517,6 +641,15 @@ mod tests {
             Some(WatcherEventKind::RenameOld)
         );
         assert_eq!(WatcherEventKind::from_action(99), None);
+    }
+
+    #[test]
+    fn flush_due_on_quiet_or_max_latency() {
+        let ms = Duration::from_millis;
+        assert!(!flush_due(ms(50), ms(100)));
+        assert!(flush_due(ms(200), ms(200)));
+        assert!(flush_due(ms(0), ms(1000)));
+        assert!(!flush_due(ms(0), ms(999)));
     }
 
     #[test]

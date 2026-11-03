@@ -9,8 +9,9 @@
 //!    index never gains items that a full scan would have skipped.
 //! 3. Coalesce bursts last-wins per path (delete+recreate inside the
 //!    window ends present, matching disk state).
-//! 4. Apply a bounded queue between producer and consumer so a flood of
-//!    events cannot grow unbounded memory.
+//! 4. Cap the number of pending paths (the watcher channel itself is
+//!    unbounded) so a flood of events cannot grow memory without limit;
+//!    overflow triggers a full resync.
 //!
 //! All public entry points are no-ops on non-Windows targets. The watcher
 //! thread is `#[cfg(target_os = "windows")]` in `file_watcher.rs`; the
@@ -159,6 +160,8 @@ fn run_consumer(
     let mut dropped_since_last_flush: usize = 0;
     let mut flush_count_since_last_resync: usize = 0;
     let mut resync_handle: Option<JoinHandle<()>> = None;
+    let mut rerun_requested = false;
+    let mut moved_dir_seen = false;
     const OVERFLOW_RESYNC_THRESHOLD: usize = 3;
 
     loop {
@@ -166,11 +169,18 @@ fn run_consumer(
         if resync_handle.as_ref().is_some_and(|handle| handle.is_finished()) {
             let _ = resync_handle.take().and_then(|handle| handle.join().ok());
         }
+        if rerun_requested {
+            rerun_requested = false;
+            resync_or_defer(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+                &mut rerun_requested,
+            );
+        }
         match recv {
             Ok(batch) => {
-                if resync_in_flight.load(Ordering::SeqCst) {
-                    continue;
-                }
                 for event in batch {
                     if event.kind == WatcherEventKind::OverflowResync {
                         // Journal overflow upstream: net state is
@@ -182,12 +192,13 @@ fn run_consumer(
                             &mut pending_added,
                             &mut pending_removed,
                         );
-                        trigger_full_resync(
-                            &service,
-                            &root,
-                            &resync_in_flight,
-                            &mut resync_handle,
-                        );
+                        resync_or_defer(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+                &mut rerun_requested,
+            );
                         flush_count_since_last_resync = 0;
                         break;
                     }
@@ -197,6 +208,9 @@ fn run_consumer(
                             dropped_since_last_flush.saturating_add(1);
                         continue;
                     }
+                    if event.kind == WatcherEventKind::RenameNew && event.path.is_dir() {
+                        moved_dir_seen = true;
+                    }
                     apply_event_to_pending(event, &mut pending_added, &mut pending_removed);
                 }
             }
@@ -204,7 +218,11 @@ fn run_consumer(
                 // No new events; fall through to flush.
             }
             Err(RecvTimeoutError::Disconnected) => {
-                // Watcher thread has exited. Flush whatever is pending, then stop.
+                crate::runtime::log_info(&format!(
+                    "[nex] directory_watcher root=\"{}\" watcher stopped",
+                    root.display()
+                ));
+                // Flush whatever is pending, then stop.
                 flush_pending(
                     &root,
                     &service,
@@ -217,12 +235,13 @@ fn run_consumer(
                         "[nex] directory_watcher root=\"{}\" dropped {total_dropped} events due to batch cap",
                         root.display()
                     ));
-                    trigger_full_resync(
-                        &service,
-                        &root,
-                        &resync_in_flight,
-                        &mut resync_handle,
-                    );
+                    resync_or_defer(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+                &mut rerun_requested,
+            );
                 }
                 if let Some(handle) = resync_handle.take() {
                     let _ = handle.join();
@@ -242,6 +261,19 @@ fn run_consumer(
             flush_count_since_last_resync += 1;
         }
 
+        // A moved-in folder's descendants are never reported by Windows.
+        if moved_dir_seen {
+            moved_dir_seen = false;
+            resync_or_defer(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+                &mut rerun_requested,
+            );
+            flush_count_since_last_resync = 0;
+        }
+
         // If we dropped events during this flush window, the index is
         // likely stale (a path we never saw could be missing, or an
         // event we never received could leave a stale row in place).
@@ -257,11 +289,12 @@ fn run_consumer(
                 dropped_since_last_flush
             ));
             dropped_since_last_flush = 0;
-            trigger_full_resync(
+            resync_or_defer(
                 &service,
                 &root,
                 &resync_in_flight,
                 &mut resync_handle,
+                &mut rerun_requested,
             );
             flush_count_since_last_resync = 0;
         } else if flush_count_since_last_resync >= OVERFLOW_RESYNC_THRESHOLD {
@@ -276,18 +309,33 @@ fn run_consumer(
                     accumulated,
                     flush_count_since_last_resync
                 ));
-                trigger_full_resync(
-                    &service,
-                    &root,
-                    &resync_in_flight,
-                    &mut resync_handle,
-                );
+                resync_or_defer(
+                &service,
+                &root,
+                &resync_in_flight,
+                &mut resync_handle,
+                &mut rerun_requested,
+            );
                 overflow_count.store(0, Ordering::SeqCst);
                 flush_count_since_last_resync = 0;
             }
         }
     }
 
+}
+
+/// Starts a full resync, or remembers to rerun one once the running
+/// resync finishes (its scan may have missed what triggered this call).
+fn resync_or_defer(
+    service: &Arc<RwLock<CoreService>>,
+    root: &Path,
+    in_flight: &Arc<AtomicBool>,
+    handle_slot: &mut Option<JoinHandle<()>>,
+    rerun_requested: &mut bool,
+) {
+    if !trigger_full_resync(service, root, in_flight, handle_slot) {
+        *rerun_requested = true;
+    }
 }
 
 /// Kick a full (non-incremental) resync against the core service to
@@ -302,18 +350,18 @@ fn trigger_full_resync(
     root: &Path,
     in_flight: &Arc<AtomicBool>,
     handle_slot: &mut Option<JoinHandle<()>>,
-) {
+) -> bool {
     if handle_slot
         .as_ref()
         .is_some_and(|handle| !handle.is_finished())
     {
-        return;
+        return false;
     }
     if let Some(handle) = handle_slot.take() {
         let _ = handle.join();
     }
     if in_flight.swap(true, Ordering::SeqCst) {
-        return;
+        return false;
     }
     let service = Arc::clone(service);
     let root = root.to_path_buf();
@@ -342,13 +390,17 @@ fn trigger_full_resync(
             worker_in_flight.store(false, Ordering::SeqCst);
         });
     match result {
-        Ok(thread) => *handle_slot = Some(thread),
+        Ok(thread) => {
+            *handle_slot = Some(thread);
+            true
+        }
         Err(error) => {
             in_flight.store(false, Ordering::SeqCst);
             crate::runtime::log_warn(&format!(
                 "[nex] directory_watcher root=\"{}\" resync thread failed to start: {error}",
                 root_label
             ));
+            false
         }
     }
 }
@@ -422,6 +474,10 @@ fn flush_pending(
             if exclusion.should_exclude_path_under_root(path, root) {
                 continue;
             }
+            // Same depth limit as the scan, or the next scan would prune it.
+            if exceeds_max_depth(path, root, cfg.discovery_max_depth) {
+                continue;
+            }
             if let Some(item) =
                 path_to_search_item(path, root, &cfg, show_files, show_folders)
             {
@@ -432,15 +488,16 @@ fn flush_pending(
 
     // Deletions first: removing an item frees its id, which is required
     // before we can re-upsert under the same id.
-    let removed_ids: Vec<String> = removed
+    let removed_paths: Vec<(String, [String; 2])> = removed
         .iter()
         .filter(|path| is_under_root(path, root))
-        .flat_map(|path| {
-            let normalized = path.to_string_lossy().to_ascii_lowercase();
-            [
-                format!("file:{normalized}"),
-                format!("folder:{normalized}"),
-            ]
+        .map(|path| {
+            let text = path.to_string_lossy().to_string();
+            let normalized = text.to_ascii_lowercase();
+            (
+                text,
+                [format!("file:{normalized}"), format!("folder:{normalized}")],
+            )
         })
         .collect();
 
@@ -455,15 +512,37 @@ fn flush_pending(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        for id in &removed_ids {
-            if guard.delete_item_by_id(id).is_ok() {
-                deleted += 1;
+        // Without folder rows we cannot tell a folder delete from a file
+        // delete, so every removal must check for descendants.
+        let folders_indexed = guard.config_snapshot().show_folders;
+        for (text, ids) in &removed_paths {
+            let was_indexed_folder = ids.iter().any(|id| {
+                id.starts_with("folder:")
+                    && crate::index_store::get_item(&guard.db_ref(), id)
+                        .ok()
+                        .flatten()
+                        .is_some()
+            });
+            for id in ids {
+                if guard.delete_item_by_id(id).is_ok() {
+                    deleted += 1;
+                }
+            }
+            // A removed/renamed folder leaves descendants Windows never
+            // reports. Skipped for plain files: the lookup is a table scan.
+            if was_indexed_folder || !folders_indexed {
+                if let Ok(count) = guard.delete_items_under_path(text) {
+                    deleted += count;
+                }
             }
         }
         for item in &upsert_items {
             if guard.upsert_item(item).is_ok() {
                 upserted += 1;
             }
+        }
+        if upserted > 0 || deleted > 0 {
+            guard.flush_search_index();
         }
     }
 
@@ -475,6 +554,25 @@ fn flush_pending(
             deleted
         ));
     }
+}
+
+/// Walkdir depth of `path` below `root` (direct child = 1) exceeds
+/// `max_depth`; 0 means unlimited.
+fn exceeds_max_depth(path: &Path, root: &Path, max_depth: u32) -> bool {
+    if max_depth == 0 {
+        return false;
+    }
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    let root = root
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .trim_end_matches(['\\', '/'])
+        .to_string();
+    let Some(rest) = path.strip_prefix(&root) else {
+        return false;
+    };
+    let depth = rest.split(['\\', '/']).filter(|c| !c.is_empty()).count();
+    depth > max_depth as usize
 }
 
 fn is_under_root(path: &Path, root: &Path) -> bool {
@@ -555,6 +653,17 @@ fn panic_message_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_filter_matches_walkdir_depth() {
+        let root = Path::new("C:\\Users\\me");
+        let child = Path::new("C:\\Users\\me\\a.txt");
+        let deep = Path::new("C:\\Users\\me\\a\\b\\c.txt");
+        assert!(!exceeds_max_depth(deep, root, 0));
+        assert!(!exceeds_max_depth(child, root, 1));
+        assert!(!exceeds_max_depth(deep, root, 3));
+        assert!(exceeds_max_depth(deep, root, 2));
+    }
     use crate::file_watcher::{WatcherEvent, WatcherEventKind};
 
     fn evt(kind: WatcherEventKind, p: &str) -> WatcherEvent {

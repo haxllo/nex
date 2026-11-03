@@ -517,6 +517,11 @@ pub(crate) fn run_windows_runtime(
     drop(hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()).take());
     log_info("[nex] shutdown: joining worker thread");
     let _ = worker_join.join();
+    // Commit watcher writes and wait for merges so the next launch does
+    // not find a half-merged index.
+    if let Ok(guard) = service.read() {
+        guard.shutdown_search_index();
+    }
     log_info("[nex] shutdown: complete, process exiting");
 
     host_result.map_err(RuntimeError::Overlay)

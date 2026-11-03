@@ -26,6 +26,24 @@ pub(crate) struct TantivyFields {
     pub last_accessed_epoch_secs: Field,
 }
 
+/// Why `TantivyIndex::open` failed. `LockBusy` means another process (a
+/// running Nex instance) owns the writer: the index is healthy and must not
+/// be reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TantivyOpenError {
+    LockBusy(String),
+    Other(String),
+}
+
+impl std::fmt::Display for TantivyOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LockBusy(msg) => write!(f, "tantivy index locked by another writer: {msg}"),
+            Self::Other(msg) => f.write_str(msg),
+        }
+    }
+}
+
 pub(crate) struct TantivyIndex {
     index_path: PathBuf,
     reader: IndexReader,
@@ -37,9 +55,10 @@ pub(crate) struct TantivyIndex {
 }
 
 impl TantivyIndex {
-    pub fn open(index_path: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(index_path)
-            .map_err(|e| format!("failed to create tantivy directory: {e}"))?;
+    pub fn open(index_path: &Path) -> Result<Self, TantivyOpenError> {
+        std::fs::create_dir_all(index_path).map_err(|e| {
+            TantivyOpenError::Other(format!("failed to create tantivy directory: {e}"))
+        })?;
 
         let mut schema_builder = Schema::builder();
 
@@ -56,18 +75,20 @@ impl TantivyIndex {
 
         let schema = schema_builder.build();
 
+        let other = TantivyOpenError::Other;
         let directory = MmapDirectory::open(index_path)
-            .map_err(|e| format!("failed to open tantivy directory: {e}"))?;
+            .map_err(|e| other(format!("failed to open tantivy directory: {e}")))?;
         let index = Index::open_or_create(directory, schema.clone())
-            .map_err(|e| format!("failed to open/create tantivy index: {e}"))?;
+            .map_err(|e| other(format!("failed to open/create tantivy index: {e}")))?;
 
         let reader = index
             .reader()
-            .map_err(|e| format!("failed to create tantivy reader: {e}"))?;
+            .map_err(|e| other(format!("failed to create tantivy reader: {e}")))?;
 
-        let writer = index
-            .writer(16_000_000)
-            .map_err(|e| format!("failed to create tantivy writer: {e}"))?;
+        let writer = index.writer(16_000_000).map_err(|e| match e {
+            tantivy::TantivyError::LockFailure(..) => TantivyOpenError::LockBusy(e.to_string()),
+            other_err => other(format!("failed to create tantivy writer: {other_err}")),
+        })?;
 
         let mut merge_policy = LogMergePolicy::default();
         merge_policy.set_min_num_segments(3);
@@ -258,7 +279,7 @@ impl TantivyIndex {
         // `delete_all_documents` logically removed but the file
         // handles stay resident until GC runs. Without this the
         // index directory grows unboundedly on every reindex.
-        let _ = writer.garbage_collect_files().wait();
+        collect_garbage(&writer);
 
         Ok(())
     }
@@ -287,7 +308,7 @@ impl TantivyIndex {
             .write_count
             .lock()
             .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
-        let _ = writer.garbage_collect_files().wait();
+        collect_garbage(&writer);
 
         Ok(())
     }
@@ -418,7 +439,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
-        let _ = writer.garbage_collect_files().wait();
+        collect_garbage(&writer);
 
         Ok(())
     }
@@ -431,7 +452,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
-        let _ = writer.garbage_collect_files().wait();
+        collect_garbage(&writer);
         let mut count = self
             .write_count
             .lock()
@@ -454,6 +475,35 @@ impl TantivyIndex {
         }
     }
 
+    /// Commit pending writes and wait for background merges so no segment
+    /// is left half-written when the index is dropped or the process exits.
+    pub fn close(self) -> Result<(), String> {
+        let mut writer = self
+            .writer
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        collect_garbage(&writer);
+        writer
+            .wait_merging_threads()
+            .map_err(|e| format!("tantivy merge wait error: {e}"))
+    }
+
+    /// Document count without creating a writer, so diagnostics can probe
+    /// the live index while Nex holds the writer lock.
+    pub fn read_only_doc_count(index_path: &Path) -> Result<u64, String> {
+        let directory = MmapDirectory::open(index_path)
+            .map_err(|e| format!("failed to open tantivy directory: {e}"))?;
+        let index =
+            Index::open(directory).map_err(|e| format!("failed to open tantivy index: {e}"))?;
+        let reader = index
+            .reader()
+            .map_err(|e| format!("failed to create tantivy reader: {e}"))?;
+        Ok(reader.searcher().num_docs())
+    }
+
     pub fn num_docs(&self) -> Result<u64, String> {
         self.reader
             .reload()
@@ -467,6 +517,22 @@ impl TantivyIndex {
         let reader = self.reader.searcher();
         let segment_mem = reader.segment_readers().len() * 2_000_000;
         arena + segment_mem
+    }
+}
+
+fn collect_garbage(writer: &IndexWriter) {
+    match writer.garbage_collect_files().wait() {
+        Ok(result) => {
+            if !result.failed_to_delete_files.is_empty() {
+                // Normal on Windows while a reader still maps the file;
+                // retried on the next GC.
+                crate::logging::info(&format!(
+                    "[nex] Tantivy GC deferred {} file(s) still in use",
+                    result.failed_to_delete_files.len()
+                ));
+            }
+        }
+        Err(e) => crate::logging::warn(&format!("[nex] Tantivy GC failed: {e}")),
     }
 }
 
@@ -548,6 +614,32 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = TantivyIndex::open(dir.path()).expect("open tantivy index");
         (index, dir)
+    }
+
+    #[test]
+    fn second_open_reports_lock_busy_not_corruption() {
+        let (index, dir) = open_temp_index();
+        index
+            .index_items(&[SearchItem::new("1", "file", "alpha.txt", "C:\\a\\alpha.txt")])
+            .unwrap();
+        match TantivyIndex::open(dir.path()) {
+            Err(TantivyOpenError::LockBusy(_)) => {}
+            Err(other) => panic!("expected LockBusy, got {other}"),
+            Ok(_) => panic!("second writer must not open"),
+        }
+        // Read-only probing works while the writer is held.
+        assert_eq!(TantivyIndex::read_only_doc_count(dir.path()).unwrap(), 1);
+    }
+
+    #[test]
+    fn close_commits_pending_writes_and_releases_lock() {
+        let (index, dir) = open_temp_index();
+        index
+            .upsert_item(&SearchItem::new("1", "file", "beta.txt", "C:\\b\\beta.txt"))
+            .unwrap();
+        index.close().unwrap();
+        let reopened = TantivyIndex::open(dir.path()).expect("lock released after close");
+        assert_eq!(reopened.num_docs().unwrap(), 1);
     }
 
     #[test]

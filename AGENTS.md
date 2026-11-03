@@ -83,18 +83,23 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 
 **IMPORTANT**: Release workflows must be run directly by the main agent (me), NOT delegated to subagents. Use subagents only for review/verification of release output if needed.
 
+**Trigger**: When the user asks to run, create, or publish a Nex release, execute this release procedure. It is a manual agent workflow, not a GitHub Actions dispatch.
+
 ```bash
-# 1. bump version in Cargo.toml, commit, tag
+# 1. bump version and commit the release changes; do not tag yet
 cargo build --release --bin Nex --bin NexHelper
 
 # 2. build artifacts (zip, setup, manifest)
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
 
-# 3. write release notes to docs/releases/v<ver>-notes.md (copy from docs\releases\RELEASE-TEMPLATE.md)
+# 3. write release notes to docs/releases/v<ver>-notes.md (copy from docs\releases\RELEASE-TEMPLATE.md) and commit them
 
-# 4. push + create GitHub release
+# 4. tag only after the release-notes commit, then push
+git tag v<ver>
 git push origin master --tags
+
+# 5. create GitHub release
 gh release create v<ver> --title "v<ver>" --notes-file docs/releases/v<ver>-notes.md artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe,manifest.json}
 ```
 
@@ -125,7 +130,8 @@ Commit message bodies MUST contain NO AI agent embedded names. This means absolu
 
 The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9949214).
 
-- For every user-reported Nex bug, feature request, or coding task, search the Nex project for a matching issue before implementation. Reuse the matching issue when one exists; otherwise create an issue in the Nex project before editing code. Do not create issues for questions that do not request project work.
+- For Nex bug reports, feature requests, and coding tasks that require implementation, search the Nex project for a matching issue before editing code. Reuse the matching issue when one exists; otherwise create an issue in the Nex project. Do not create issues for questions, planning, or status requests that do not ask for implementation.
+- Track a release-only request with a Linear Release record, following the configured Nex release pipeline. Do not create a regular issue solely to build, package, tag, or publish a release. Link related implementation issues to the release when available. If no release pipeline is configured or accessible, tell the user and do not create a regular issue as a substitute.
 - Keep the issue current as work progresses. Before finishing, record the implemented behavior and the build/test checks that were or were not run.
 - Set the issue state to reflect the actual work. Do not say checks passed unless they were run.
 - When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.

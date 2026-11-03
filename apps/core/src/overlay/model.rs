@@ -92,6 +92,8 @@ pub enum OverlayEvent {
     PinApp(String),
     /// Unpin an app from Quick Launch by title.
     UnpinApp(String),
+    /// Launch a Quick Launch item clicked in the compact search bar.
+    LaunchQuickLaunch(String),
     Bookmark(String, String, bool),
     BookmarkIconReady(String, String),
     /// Add an app to Quick Launch by path.
@@ -195,8 +197,10 @@ pub struct ShimState {
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
     pub ui_warm_release_ms: u32,
-    /// Quick Launch items for idle state (empty query).
+    /// Quick Launch items for the idle state and compact search bar.
     pub quick_launch_items: Vec<QuickLaunchItem>,
+    /// Compact search-bar presentation is active.
+    pub compact_view: bool,
     /// Whether Quick Launch is visible (query is empty).
     pub quick_launch_visible: bool,
     /// Whether the bento grid view is active (clipboard history).
@@ -266,6 +270,7 @@ impl Default for ShimState {
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
             quick_launch_items: Vec::new(),
+            compact_view: false,
             quick_launch_visible: false,
             bento_view: false,
             completion: None,

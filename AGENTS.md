@@ -120,3 +120,14 @@ git commit --author="Habeeb <mshabeeburrahman786@gmail.com>" -m "message"
 ## Commit Message Content
 
 Commit message bodies MUST contain NO AI agent embedded names. This means absolutely NO `Co-authored-by:` trailers referencing any bot or AI, NO bot signatures, NO mentions of AI assistants, and NO references to agent systems. This applies to commit messages, tag messages, branch descriptions, and any other git-related text.
+
+## Linear Project Tracking
+
+The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9949214).
+
+- For every user-reported Nex bug, feature request, or coding task, search the Nex project for a matching issue before implementation. Reuse the matching issue when one exists; otherwise create an issue in the Nex project before editing code. Do not create issues for questions that do not request project work.
+- Keep the issue current as work progresses. Before finishing, record the implemented behavior and the build/test checks that were or were not run.
+- Set the issue state to reflect the actual work. Do not say checks passed unless they were run.
+- When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.
+- Use project status updates for periodic progress, health, and risks; use milestones for major deliverables with clear outcomes. Do not create a milestone for every issue or a health update without evidence.
+- If Linear is unavailable, ask the user to connect it for the current agent before starting implementation.

@@ -235,6 +235,49 @@ body {
   color: var(--text);
 }
 
+#quick-launch-pins {
+  display: none;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 40%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+#quick-launch-pins::-webkit-scrollbar {
+  display: none;
+}
+html.compact-view #quick-launch-pins:not([hidden]) {
+  display: flex;
+}
+#quick-launch-pins button {
+  display: grid;
+  flex: 0 0 36px;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 120ms ease, scale 120ms ease;
+}
+#quick-launch-pins button:hover,
+#quick-launch-pins button:focus-visible {
+  background: var(--kbd-bg);
+}
+#quick-launch-pins button:active {
+  scale: 0.96;
+}
+#quick-launch-pins img.icon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
 #help {
   flex: 0 0 auto;
   display: grid;
@@ -951,6 +994,11 @@ html.bg-white .footer-icon-btn:active {
 #power-wrap-top {
   position: relative;
   flex: 0 0 auto;
+}
+
+html.compact-view #power-wrap-top,
+html.compact-view #power-panel-top {
+  display: none;
 }
 
 #power-btn-top {

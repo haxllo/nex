@@ -2171,6 +2171,9 @@ fn handle_ipc(
         OverlayMessage::AddToQuickLaunch(p) => {
             let _ = event_tx.send(OverlayEvent::AddToQuickLaunch(p.v));
         }
+        OverlayMessage::LaunchQuickLaunch(p) => {
+            let _ = event_tx.send(OverlayEvent::LaunchQuickLaunch(p.v));
+        }
         OverlayMessage::PowerAction(p) => {
             let event = match p.v.as_str() {
                 "lock" => OverlayEvent::TrayLock,
@@ -2865,7 +2868,7 @@ fn push_state(
     // Phase 3: Encode icons outside lock (~2-5ms for 20 rows).
     // Note: png_bytes() may block on first decode per icon (cold cache),
     // but the state lock is not held during this work.
-    let icons_json = snapshot_icons_json(&snapshot, icons);
+    let icons_json = snapshot_icons_json(&snapshot, icons, show_pending);
 
     // Phase 4: Send both messages back-to-back (same frame).
     post_json(&wv, &state_json);
@@ -3058,6 +3061,7 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
         "glassNative": transparent && s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
         "glassLight": transparent && s.glass_native && s.glass_light,
         "glassClip": &*LENS_CLIP,
+        "compactView": s.compact_view,
     })
     .to_string()
 }
@@ -3070,20 +3074,25 @@ fn snapshot_icon_subset_json(
     let wanted: std::collections::HashSet<&str> =
         decoded_paths.iter().map(String::as_str).collect();
     let mut seen = std::collections::HashSet::new();
-    let icon_map: serde_json::Map<String, serde_json::Value> = s
+    let mut icon_map = serde_json::Map::new();
+    for path in s
         .rows
         .iter()
-        .filter(|r| !r.icon_path.is_empty())
-        .filter(|r| wanted.contains(r.icon_path.as_str()))
-        .filter(|r| seen.insert(r.icon_path.clone()))
-        .filter_map(|r| {
-            let uri = icons.data_uri_cached(&r.icon_path)?;
-            Some((
-                r.icon_path.clone(),
-                serde_json::Value::String(uri.as_ref().to_owned()),
-            ))
-        })
-        .collect();
+        .map(|row| row.icon_path.as_str())
+        .chain(
+            s.quick_launch_items
+                .iter()
+                .filter(|item| item.is_pinned)
+                .map(|item| item.icon_path.as_str()),
+        )
+    {
+        if path.is_empty() || !wanted.contains(path) || !seen.insert(path.to_owned()) {
+            continue;
+        }
+        if let Some(uri) = icons.data_uri_cached(path) {
+            icon_map.insert(path.to_owned(), serde_json::Value::String(uri.as_ref().to_owned()));
+        }
+    }
 
     if icon_map.is_empty() {
         return String::new();
@@ -3092,28 +3101,35 @@ fn snapshot_icon_subset_json(
     serde_json::json!({ "icons": icon_map }).to_string()
 }
 
-/// Serialize icon data as `{"icons": {path: dataUri, ...}}`.
-/// Deduplicates by path to avoid encoding the same icon twice when
-/// multiple rows share a path (e.g. two shortcuts to the same .exe).
-/// Returns an empty string if no icons.
+/// Serialize warm result-row icons as `{"icons": {path: dataUri, ...}}`,
+/// deduplicated by path. Compact pinned icons are included on show so the
+/// warm WebView can restore them without resending them on query updates.
 ///
 /// Non-blocking: only already-decoded (warm) icons are included. The
 /// background prefetch thread fills the cache and posts `ApplyIcons`
 /// to re-invoke this on the host thread, delivering newly-decoded
 /// icons as a separate `{"icons": ...}` message the page patches in.
-fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>) -> String {
+fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>, show_pending: bool) -> String {
     let mut seen = std::collections::HashSet::new();
-    let icon_map: serde_json::Map<String, serde_json::Value> = s
+    let mut paths: Vec<&str> = s
         .rows
         .iter()
-        .filter(|r| !r.icon_path.is_empty())
-        .filter(|r| seen.insert(r.icon_path.clone()))
-        .filter_map(|r| {
-            let uri = icons.data_uri_cached(&r.icon_path)?;
-            Some((
-                r.icon_path.clone(),
-                serde_json::Value::String(uri.as_ref().to_owned()),
-            ))
+        .map(|row| row.icon_path.as_str())
+        .collect();
+    if show_pending && s.compact_view {
+        paths.extend(
+            s.quick_launch_items
+                .iter()
+                .filter(|item| item.is_pinned)
+                .map(|item| item.icon_path.as_str()),
+        );
+    }
+    let icon_map: serde_json::Map<String, serde_json::Value> = paths
+        .into_iter()
+        .filter(|path| !path.is_empty() && seen.insert((*path).to_owned()))
+        .filter_map(|path| {
+            let uri = icons.data_uri_cached(path)?;
+            Some((path.to_owned(), serde_json::Value::String(uri.as_ref().to_owned())))
         })
         .collect();
 

@@ -242,7 +242,8 @@ impl WebSearchProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickLaunchConfig {
-    /// Maximum number of items shown in Quick Launch.
+    /// Target maximum for Quick Launch auto-filled items. User-pinned items
+    /// are always included, even when they exceed this count.
     pub max_items: u8,
     /// Apps pinned by the user — always appear first, in this order.
     /// Stored as app paths (stable identifiers).
@@ -1026,7 +1027,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
 
     text.push_str("# Quick Launch: the idle app list. Compact view mode hides it.\n");
     text.push_str("[quick_launch]\n");
-    text.push_str("# Maximum number of Quick Launch items (valid range: 3..12)\n");
+    text.push_str("# Auto-fill Quick Launch up to this many items (valid range: 3..12); all pinned items are shown\n");
     text.push_str("max_items = ");
     text.push_str(&cfg.quick_launch.max_items.to_string());
     text.push('\n');

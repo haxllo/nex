@@ -190,11 +190,10 @@ pub fn get_quick_launch_items(
     let mut result = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    // First: add pinned apps (in the order specified by the user)
+    // First: add every pinned app (in the order specified by the user).
+    // `max_items` only limits auto-filled suggestions; explicit pins are
+    // always shown, even when their count exceeds that limit.
     for pinned_path in pinned_paths {
-        if result.len() >= max_items {
-            break;
-        }
         let trimmed = pinned_path.trim();
         if trimmed.is_empty() {
             continue;

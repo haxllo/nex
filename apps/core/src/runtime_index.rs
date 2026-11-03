@@ -302,6 +302,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             );
             overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
             overlay.set_grid_view(runtime_config.grid_view);
+            overlay.set_compact_view(!runtime_config.view_mode.shows_idle_feed());
             overlay.set_panel_background(runtime_config.panel_background);
             *plugin_registry = PluginRegistry::load_from_config(runtime_config);
             for warning in &plugin_registry.load_warnings {

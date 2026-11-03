@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use lru::LruCache;
 
+#[cfg(test)]
 use crate::overlay::model::OverlayRow;
 
 const DEFAULT_MAX_ENTRIES: usize = 128;
@@ -1455,19 +1456,19 @@ fn ensure_worker_com_initialized() {
     // entire thread, requiring re-initialization on the next call.
 }
 
-fn unique_cold_icon_paths(rows: &[OverlayRow], cache: &IconCache) -> Vec<(usize, String)> {
+fn unique_cold_icon_paths(paths: &[String], cache: &IconCache) -> Vec<(usize, String)> {
     // Dedup by path: repeated exes (two shortcuts to the same target)
     // decode once. Skip warm entries so a superseding keystroke's
     // inline pass isn't repeated by the tail loop.
     use std::collections::HashSet;
     let mut seen = HashSet::new();
     let mut cold = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        if !row.icon_path.is_empty()
-            && seen.insert(row.icon_path.clone())
-            && cache.png_bytes_cached(&row.icon_path).is_none()
+    for (index, path) in paths.iter().enumerate() {
+        if !path.is_empty()
+            && seen.insert(path.clone())
+            && cache.png_bytes_cached(path).is_none()
         {
-            cold.push((index, row.icon_path.clone()));
+            cold.push((index, path.clone()));
         }
     }
     cold
@@ -1528,9 +1529,9 @@ fn warm_package_locations(paths: &[(usize, String)]) {
     }
 }
 
-pub(crate) fn prefetch_rows(cache: &IconCache, rows: &[OverlayRow]) -> Vec<String> {
+pub(crate) fn prefetch_icon_paths(cache: &IconCache, paths: &[String]) -> Vec<String> {
     ensure_worker_com_initialized();
-    let cold = unique_cold_icon_paths(rows, cache);
+    let cold = unique_cold_icon_paths(paths, cache);
     #[cfg(target_os = "windows")]
     warm_package_locations(&cold);
     decode_icon_paths(cache, &cold)

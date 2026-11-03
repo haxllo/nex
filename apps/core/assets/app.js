@@ -16,6 +16,14 @@
   const bodyEl = $("body");
   const footerEl = $("footer");
   const tabsEl = $("tabs");
+  const quickLaunchPins = $("quick-launch-pins");
+  quickLaunchPins.addEventListener("wheel", (e) => {
+    if (quickLaunchPins.scrollWidth <= quickLaunchPins.clientWidth) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      quickLaunchPins.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -167,6 +175,7 @@
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
+  let quickLaunchPinsKey = null;
   // Active category tab. Filtering is client-side: hidden rows keep their
   // Rust-side index, so submit/pin/context-menu still address the right row.
   let activeTab = "all";
@@ -756,6 +765,42 @@
     measure();
   }
 
+  function renderQuickLaunchPins() {
+    const pinnedItems = quickLaunchItems.filter((item) => item.pinned && item.path);
+    const key = JSON.stringify(pinnedItems.map((item) => [item.title, item.path, item.icon]));
+    if (key === quickLaunchPinsKey) return;
+    quickLaunchPinsKey = key;
+
+    const frag = document.createDocumentFragment();
+    pinnedItems.forEach((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.title = item.title;
+      button.setAttribute("aria-label", `Launch ${item.title}`);
+
+      const img = document.createElement("img");
+      img.className = "icon";
+      img.alt = "";
+      if (item.icon) {
+        img.dataset.iconPath = item.icon;
+        img.src = iconCache.get(item.icon) || BLANK_ICON;
+      } else {
+        img.src = placeholderIcon();
+      }
+      img.onerror = () => { img.src = placeholderIcon(); };
+      button.appendChild(img);
+      button.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        post("launchQuickLaunch", item.path);
+        input.focus();
+      });
+      frag.appendChild(button);
+    });
+    quickLaunchPins.replaceChildren(frag);
+    quickLaunchPins.hidden = quickLaunchPins.childElementCount === 0;
+  }
+
   function syncTabButtons() {
     for (const btn of tabsEl.children) {
       const on = btn.dataset.tab === activeTab;
@@ -911,9 +956,8 @@
   // blink — twice when head + tail arrived as separate pushes.
   function patchIcons() {
     const pending = [];
-    for (const li of list.children) {
-      const img = li.querySelector("img.icon");
-      if (!img) continue;
+    const iconImages = document.querySelectorAll("#list img.icon, #quick-launch-pins img.icon");
+    for (const img of iconImages) {
       if (img.src === folderIcon()) continue;
       const path = img.dataset.iconPath;
       if (path && iconCache.has(path)) {
@@ -3321,6 +3365,13 @@
       if (typeof state.overlayVisible === "boolean") {
         overlayVisible = state.overlayVisible;
       }
+      if (typeof state.compactView === "boolean") {
+        document.documentElement.classList.toggle("compact-view", state.compactView);
+        if (state.compactView) {
+          topPower.closeMenu();
+          topPower.closeConfirm();
+        }
+      }
       // Every show starts on All: the tab is a within-session filter, not
       // a remembered preference.
       if (showPush && activeTab !== "all") {
@@ -3384,6 +3435,7 @@
       // Store Quick Launch items if provided
       if (Array.isArray(state.quickLaunch)) {
         quickLaunchItems = state.quickLaunch;
+        renderQuickLaunchPins();
       }
 
       // Placeholder is applied by renderCompletion() (single source of

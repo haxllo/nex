@@ -48,13 +48,13 @@ struct Inner {
     stop_tx: Sender<()>,
     stop_rx: Receiver<()>,
     /// Shared work slot for the single persistent icon-prefetch thread.
-    /// `set_results()` replaces the contents; the background thread
-    /// always processes the latest batch — old work is discarded.
+    /// `set_results()` and `set_quick_launch_items()` replace the contents;
+    /// the worker always processes the latest batch — old work is discarded.
     /// `prefetch_notify_tx` wakes the thread immediately so first
     /// paint does not wait out the 50 ms poll sleep. Only the worker
     /// thread holds the `Receiver` — a second stored receiver would
     /// steal wake tokens (MPMC fan-out) and reintroduce the delay.
-    prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>>,
+    prefetch_work: Arc<Mutex<Option<Vec<String>>>>,
     prefetch_notify_tx: Sender<()>,
     /// Wake-up for the single persistent media-refresh thread. Refresh
     /// requests only set this flag — the worker always snapshots the
@@ -73,7 +73,7 @@ impl NativeOverlayShell {
     /// the runtime callback.
     pub fn create() -> Result<Self, String> {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
-        let prefetch_work: Arc<Mutex<Option<Vec<OverlayRow>>>> = Arc::new(Mutex::new(None));
+        let prefetch_work: Arc<Mutex<Option<Vec<String>>>> = Arc::new(Mutex::new(None));
         // Rendezvous wake-up: `set_results` offers a token; the thread
         // blocks on `recv_timeout(50ms)` so a lost token only costs the
         // old poll delay, never a stall.
@@ -154,15 +154,15 @@ impl NativeOverlayShell {
 
         // Spawn a single persistent icon-prefetch thread. It loops,
         // draining the shared work slot and processing the latest batch.
-        // When set_results() replaces the slot, the old batch is discarded
-        // — no thread accumulation under rapid typing.
+        // Replacing the slot discards stale work, so rapid typing does not
+        // accumulate icon extraction jobs.
         std::thread::Builder::new()
             .name("nex-icon-prefetch".into())
             .spawn(move || loop {
-                // Block until `set_results` wakes us; 50 ms timeout is
-                // only a fallback so a lost token still gets picked up.
+                // Block until a result or Quick Launch update wakes us;
+                // 50 ms is only a fallback for a lost token.
                 let _ = prefetch_notify_for_thread.recv_timeout(Duration::from_millis(50));
-                let rows: Vec<OverlayRow> = {
+                let paths: Vec<String> = {
                     let mut slot = match prefetch_work_for_thread.lock() {
                         Ok(g) => g,
                         Err(_) => break,
@@ -177,10 +177,10 @@ impl NativeOverlayShell {
                 // Re-check the work slot between phases so a superseding
                 // keystroke can cancel stale, expensive shell extraction.
                 const VIEWPORT_ROWS: usize = 8;
-                let head_end = VIEWPORT_ROWS.min(rows.len());
-                let decoded_head = crate::overlay::icons::prefetch_rows(
+                let head_end = VIEWPORT_ROWS.min(paths.len());
+                let decoded_head = crate::overlay::icons::prefetch_icon_paths(
                     &icon_cache_for_thread,
-                    &rows[..head_end],
+                    &paths[..head_end],
                 );
                 if !decoded_head.is_empty() {
                     if let Ok(slot) = proxy_for_thread.lock() {
@@ -190,15 +190,15 @@ impl NativeOverlayShell {
                     }
                 }
 
-                if rows.len() > head_end {
+                if paths.len() > head_end {
                     let stale_tail = matches!(
                         prefetch_work_for_thread.lock().as_deref(),
                         Ok(Some(_))
                     );
                     if !stale_tail {
-                        let decoded_tail = crate::overlay::icons::prefetch_rows(
+                        let decoded_tail = crate::overlay::icons::prefetch_icon_paths(
                             &icon_cache_for_thread,
-                            &rows[head_end..],
+                            &paths[head_end..],
                         );
                         // Notify the host event loop that icons are now cached
                         // so it sends only the newly decoded icon data; the
@@ -480,6 +480,11 @@ impl NativeOverlayShell {
         self.post(UiCommand::Apply);
     }
 
+    pub fn set_compact_view(&self, enabled: bool) {
+        self.with_state(|s| s.compact_view = enabled);
+        self.post(UiCommand::Apply);
+    }
+
     /// Show clipboard history in bento grid view.
     pub fn show_clipboard_history(&self, rows: Vec<OverlayRow>) {
         self.with_state(|s| {
@@ -615,6 +620,19 @@ impl NativeOverlayShell {
     }
 
     pub fn set_results(&self, rows: &[OverlayRow], selected_index: usize) {
+        let quick_launch_icons = {
+            let mut paths = Vec::new();
+            if let Ok(state) = self.inner.state.lock() {
+                paths.extend(
+                    state
+                        .quick_launch_items
+                        .iter()
+                        .filter(|item| item.is_pinned)
+                        .map(|item| item.icon_path.clone()),
+                );
+            }
+            paths
+        };
         self.with_state(|s| {
             s.rows = rows.to_vec();
             s.selected = selected_index.min(s.rows.len().saturating_sub(1));
@@ -626,28 +644,51 @@ impl NativeOverlayShell {
             // Update quick_launch_visible based on whether we're showing Quick Launch rows
             s.quick_launch_visible = rows.iter().any(|r| r.role == crate::overlay::model::OverlayRowRole::QuickLaunch);
         });
-        // Queue the full batch on the prefetch thread. It prioritizes the
-        // visible head, so result rendering and hotkey handling never wait
-        // for cold shell icon extraction.
-        if !rows.is_empty() {
-            if let Ok(mut slot) = self.inner.prefetch_work.lock() {
-                *slot = Some(rows.to_vec());
-            }
-        }
+        // Queue result icons first, then pinned icons for the compact bar.
+        // Extraction stays on the prefetch thread, away from input handling.
+        let mut icon_paths: Vec<String> = rows
+            .iter()
+            .map(|row| row.icon_path.clone())
+            .filter(|path| !path.is_empty())
+            .collect();
+        icon_paths.extend(quick_launch_icons);
+        self.queue_icon_prefetch(icon_paths);
         self.post(UiCommand::Apply);
-
-        // Wake the worker after the row state is visible. The worker decodes
-        // the first viewport batch before the rest, then posts icon data.
-        if !rows.is_empty() {
-            let _ = self.inner.prefetch_notify_tx.try_send(());
-        }
     }
 
     /// Set Quick Launch items for idle state display.
     pub fn set_quick_launch_items(&self, items: Vec<QuickLaunchItem>) {
+        let pinned_icon_paths: Vec<String> = items
+            .iter()
+            .filter(|item| item.is_pinned)
+            .map(|item| item.icon_path.clone())
+            .filter(|path| !path.is_empty())
+            .collect();
+        let mut icon_paths = pinned_icon_paths.clone();
         self.with_state(|s| {
+            icon_paths.extend(
+                s.rows
+                    .iter()
+                    .map(|row| row.icon_path.clone())
+                    .filter(|path| !path.is_empty()),
+            );
             s.quick_launch_items = items;
         });
+        self.queue_icon_prefetch(icon_paths);
+        let warm_pinned_icons: Vec<String> = pinned_icon_paths
+            .into_iter()
+            .filter(|path| self.inner.icon_cache.png_bytes_cached(path).is_some())
+            .collect();
+        if !warm_pinned_icons.is_empty() {
+            self.post(UiCommand::ApplyIcons(warm_pinned_icons));
+        }
+    }
+
+    fn queue_icon_prefetch(&self, paths: Vec<String>) {
+        if let Ok(mut slot) = self.inner.prefetch_work.lock() {
+            *slot = Some(paths);
+        }
+        let _ = self.inner.prefetch_notify_tx.try_send(());
     }
 
     /// Mark first-show content as still incoming (deferred Quick Launch).

@@ -229,6 +229,7 @@ pub(crate) fn run_windows_runtime(
     );
     overlay.set_game_mode_enabled(runtime_config.game_mode_enabled);
     overlay.set_grid_view(runtime_config.grid_view);
+    overlay.set_compact_view(!runtime_config.view_mode.shows_idle_feed());
     overlay.set_panel_background(runtime_config.panel_background);
     log_info("[nex] native overlay shell initialized (hidden)");
     log_info(&format!(
@@ -1037,6 +1038,46 @@ impl RuntimeWorker {
         }
         if let Some(issue) = self.hotkey_issue_status.as_deref() {
             self.overlay.set_status_text(issue);
+        }
+    }
+
+    fn launch_quick_launch_item(&mut self, path: &str) {
+        let Some(item) = self.quick_launch_items.iter().find(|item| item.path == path) else {
+            return;
+        };
+        let title = item.title.clone();
+        let path = item.path.clone();
+        self.overlay.hide_sync();
+        self.overlay_state.on_escape();
+        match crate::action_executor::launch_open_target(&path) {
+            Ok(()) => {
+                log_info(&format!("[nex] quick_launch launched '{title}'"));
+                let id = {
+                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                    let db = guard.db_ref();
+                    crate::index_store::find_item_by_path_or_title(&db, &path)
+                        .ok()
+                        .flatten()
+                        .map(|(id, _, _, _, _)| id)
+                };
+                if let Some(id) = id {
+                    let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
+                    if let Err(error) = guard.record_successful_launch_by_id(&id) {
+                        log_warn(&format!("[nex] record_launch failed: {error}"));
+                    }
+                }
+                reset_overlay_session(
+                    &self.overlay,
+                    &mut self.current_results,
+                    &mut self.selected_index,
+                );
+                self.last_query.clear();
+                self.search_session.clear();
+                self.search_worker.clear_session();
+            }
+            Err(error) => {
+                self.overlay.set_status_text(&format!("Launch error: {error}"));
+            }
         }
     }
 
@@ -2053,6 +2094,9 @@ impl RuntimeWorker {
                                 self.config_generation += 1;
                                 self.search_worker.clear_session();
                                 self.overlay.set_grid_view(self.runtime_config.grid_view);
+                                self.overlay.set_compact_view(
+                                    !self.runtime_config.view_mode.shows_idle_feed(),
+                                );
                                 self.overlay.set_panel_background(
                                     self.runtime_config.panel_background,
                                 );
@@ -2340,41 +2384,8 @@ impl RuntimeWorker {
                 if self.overlay.query_text().trim().is_empty() && !self.quick_launch_items.is_empty() {
                     if let Some(list_selection) = self.overlay.selected_index() {
                         if list_selection < self.quick_launch_items.len() {
-                            let item = &self.quick_launch_items[list_selection];
-                            let path = item.path.clone();
-                            self.overlay.hide_sync();
-                            self.overlay_state.on_escape();
-                            // Launch the Quick Launch item
-                            match crate::action_executor::launch_open_target(&path) {
-                                Ok(()) => {
-                                    log_info(&format!("[nex] quick_launch launched '{}'", item.title));
-                                    let id = {
-                                        let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
-                                        let db = guard.db_ref();
-                                        crate::index_store::find_item_by_path_or_title(&db, &path)
-                                            .ok()
-                                            .flatten()
-                                            .map(|(id, _, _, _, _)| id)
-                                    };
-                                    if let Some(id) = id {
-                                        let guard = self.service.read().unwrap_or_else(|e| e.into_inner());
-                                        if let Err(error) = guard.record_successful_launch_by_id(&id) {
-                                            log_warn(&format!("[nex] record_launch failed: {error}"));
-                                        }
-                                    }
-                                    reset_overlay_session(
-                                        &self.overlay,
-                                        &mut self.current_results,
-                                        &mut self.selected_index,
-                                    );
-                                    self.last_query.clear();
-                                    self.search_session.clear();
-                                    self.search_worker.clear_session();
-                                }
-                                Err(error) => {
-                                    self.overlay.set_status_text(&format!("Launch error: {error}"));
-                                }
-                            }
+                            let path = self.quick_launch_items[list_selection].path.clone();
+                            self.launch_quick_launch_item(&path);
                             return;
                         }
                     }
@@ -2790,6 +2801,9 @@ impl RuntimeWorker {
                             .set_status_text(&format!("Launch error: {error}"));
                     }
                 }
+            }
+            OverlayEvent::LaunchQuickLaunch(path) => {
+                self.launch_quick_launch_item(&path);
             }
             OverlayEvent::PinApp(title) => {
                 self.pin_app_to_quick_launch(&title);

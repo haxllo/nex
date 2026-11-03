@@ -290,6 +290,8 @@ pub(crate) enum OverlayMessage {
     Bookmark(BookmarkPayload),
     #[serde(rename = "addToQuickLaunch")]
     AddToQuickLaunch(TextPayload),
+    #[serde(rename = "launchQuickLaunch")]
+    LaunchQuickLaunch(TextPayload),
     #[serde(rename = "powerAction")]
     PowerAction(TextPayload),
     #[serde(rename = "contextAction")]
@@ -390,6 +392,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "unpin",
         "bookmark",
         "addToQuickLaunch",
+        "launchQuickLaunch",
         "powerAction",
         "contextAction",
         "settings",
@@ -544,6 +547,9 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             check_len(&p.v, MAX_TITLE_CHARS, "pin target").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::AddToQuickLaunch(p) => {
+            check_len(&p.v, MAX_PATH_CHARS, "quick-launch path").map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::LaunchQuickLaunch(p) => {
             check_len(&p.v, MAX_PATH_CHARS, "quick-launch path").map_err(IpcReject::BadPayload)?;
         }
         OverlayMessage::Bookmark(p) => {

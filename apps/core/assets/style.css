@@ -250,6 +250,10 @@ body {
 html.compact-view #quick-launch-wrap:not([hidden]) {
   display: flex;
 }
+/* Tighten the junction the pills hand off to the pins row by 4px. */
+#update-notice:not(.hidden) + #quick-launch-wrap {
+  margin-left: -4px;
+}
 #quick-launch-pins {
   flex: 1 1 auto;
   display: flex;

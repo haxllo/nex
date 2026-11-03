@@ -782,7 +782,7 @@
     pinnedItems.forEach((item) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.title = item.title;
+      button.dataset.tip = item.title;
       button.setAttribute("aria-label", `Launch ${item.title}`);
 
       const img = document.createElement("img");
@@ -1238,6 +1238,9 @@
     ));
     let y = targetRect.top - tipRect.height - 6;
     if (y < 4) y = targetRect.bottom + 6;
+    // Short panels (compact view) can't fit the tip on either side: clamp
+    // inside the viewport so the hint never gets clipped by the window edge.
+    y = Math.min(Math.max(y, 4), window.innerHeight - tipRect.height - 4);
     tipEl.style.left = `${x}px`;
     tipEl.style.top = `${y}px`;
   }
@@ -3667,11 +3670,9 @@
     updateNotice.classList.toggle("hidden", !show);
     whatsNewBtn.hidden = whatsNewPending === null;
     if (whatsNewPending !== null) {
-      whatsNewBtn.title = "See what's new";
       whatsNewBtn.setAttribute("aria-label", "See what's new in version " + whatsNewPending);
     }
     if (!updateBtn.disabled) {
-      updateBtn.title = "Update available";
       updateBtn.setAttribute("aria-label", "Update available");
       updateBtnLabel.textContent = updateAvailable ? "Update" : "";
     }

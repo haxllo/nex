@@ -465,3 +465,72 @@ fn from_config_auto_backend_never_panics() {
     let label = provider.backend_label();
     assert!(label == "everything" || label == "walkdir");
 }
+
+fn make_deep_tree(label: &str) -> (PathBuf, PathBuf) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "nex-depth-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    let mut dir = root.clone();
+    for level in 1..=8 {
+        dir = dir.join(format!("d{level}"));
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    let deepest = dir.join("deepest.txt");
+    std::fs::write(&deepest, "x").unwrap();
+    std::fs::write(root.join("top.txt"), "x").unwrap();
+    (root, deepest)
+}
+
+fn discovered_paths(config: &Config) -> Vec<String> {
+    FileSystemDiscoveryProvider::from_config(config, config.discovery_max_depth as usize)
+        .discover()
+        .unwrap()
+        .into_iter()
+        .map(|item| item.path)
+        .collect()
+}
+
+#[test]
+fn discovery_depth_unlimited_by_default_and_limited_when_configured() {
+    let (root, deepest) = make_deep_tree("cfg");
+    let mut config = Config::default();
+    config.discovery_roots = vec![root.clone()];
+    config.discovery_exclude_roots = vec![];
+    config.file_discovery_backend = nex_core::config::DiscoveryBackend::Walkdir;
+
+    let deepest_str = deepest.to_string_lossy().to_string();
+    assert!(discovered_paths(&config).contains(&deepest_str));
+
+    config.discovery_max_depth = 3;
+    let limited = discovered_paths(&config);
+    assert!(!limited.contains(&deepest_str));
+    assert!(limited.contains(&root.join("top.txt").to_string_lossy().to_string()));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn count_filesystem_entries_for_root_counts_and_flags_depth_limit() {
+    let (root, _) = make_deep_tree("count");
+    let mut config = Config::default();
+    config.discovery_exclude_roots = vec![];
+
+    let full = nex_core::discovery::count_filesystem_entries_for_root(&root, &config);
+    assert_eq!(full.files, 2);
+    assert_eq!(full.folders, 8);
+    assert_eq!(full.errors, 0);
+    assert!(!full.depth_limited);
+
+    config.discovery_max_depth = 3;
+    let limited = nex_core::discovery::count_filesystem_entries_for_root(&root, &config);
+    assert_eq!(limited.files, 1);
+    assert_eq!(limited.folders, 3);
+    assert!(limited.depth_limited);
+
+    let _ = std::fs::remove_dir_all(&root);
+}

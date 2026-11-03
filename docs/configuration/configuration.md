@@ -46,6 +46,7 @@ All settings, their defaults, valid ranges, and descriptions:
 | `ui_warm_release_ms` | `u32` | `5000` | `500..600000` | How long (ms) the WebView stays resident after hide before teardown. |
 | `index_max_items_total` | `u32` | `120000` | `10000..2000000` | Maximum indexed items across all roots. |
 | `index_max_items_per_root` | `u32` | `40000` | `1000..1000000` | Maximum indexed items per discovery root. Must be ≤ `index_max_items_total`. |
+| `discovery_max_depth` | `u32` | `0` | `0..256` | Maximum folder depth walked below each discovery root. `0` = unlimited (bounded by the item caps). |
 | `index_max_items_per_query_seed` | `u32` | `5000` | `250..200000` | Runtime candidate budget for per-query file/folder retrieval. |
 | `discovery_roots` | `string[]` | `["C:\\Users\\<user>"]` | — | Folders scanned for local file/folder discovery. |
 | `discovery_exclude_roots` | `string[]` | `["%USERPROFILE%\\AppData\\Local\\Temp", "%USERPROFILE%\\AppData\\Local\\Microsoft\\Windows\\INetCache"]` | — | Folders excluded from file discovery. |
@@ -138,6 +139,7 @@ Config is validated on load and save. Violations produce a startup error:
 - `ui_warm_release_ms`: `500..600000`.
 - `index_max_items_total`: `10000..2000000`.
 - `index_max_items_per_root`: `1000..1000000`; must be ≤ `index_max_items_total`.
+- `discovery_max_depth`: `0..256`; `0` means unlimited.
 - `index_max_items_per_query_seed`: `250..200000`.
 - `discovery_roots`, `discovery_exclude_roots`, `plugin_paths`: no empty entries.
 - `clipboard_exclude_sensitive_patterns`: no empty patterns.
@@ -192,6 +194,7 @@ ui_warm_release_ms = 5000
 
 index_max_items_total = 120000
 index_max_items_per_root = 40000
+discovery_max_depth = 0
 index_max_items_per_query_seed = 5000
 ```
 

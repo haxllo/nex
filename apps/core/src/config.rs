@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 25;
+pub const CURRENT_CONFIG_VERSION: u32 = 26;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
@@ -56,6 +56,7 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "index_max_items_total",
     "index_max_items_per_root",
     "index_max_items_per_query_seed",
+    "discovery_max_depth",
     "search_backend",
     "file_discovery_backend",
 ];
@@ -505,6 +506,8 @@ pub struct Config {
     pub index_max_items_total: u32,
     pub index_max_items_per_root: u32,
     pub index_max_items_per_query_seed: u32,
+    /// Maximum directory depth walked below each discovery root; 0 = unlimited.
+    pub discovery_max_depth: u32,
     /// Quick Launch settings for idle-state app launcher.
     pub quick_launch: QuickLaunchConfig,
     pub web_bookmarks: Vec<WebBookmark>,
@@ -587,6 +590,7 @@ impl Default for Config {
             index_max_items_total: 120_000,
             index_max_items_per_root: 40_000,
             index_max_items_per_query_seed: 5_000,
+            discovery_max_depth: 0,
             quick_launch: QuickLaunchConfig::default(),
             web_bookmarks: Vec::new(),
         }
@@ -1078,6 +1082,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("index_max_items_per_query_seed = ");
     text.push_str(&cfg.index_max_items_per_query_seed.to_string());
     text.push('\n');
+    text.push_str("# Maximum folder depth indexed below each discovery root (0 = unlimited, max 256)\n");
+    text.push_str("discovery_max_depth = ");
+    text.push_str(&cfg.discovery_max_depth.to_string());
+    text.push('\n');
 
     std::fs::write(path, text)?;
     Ok(())
@@ -1138,6 +1146,12 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         ));
     }
 
+    if cfg.discovery_max_depth > 256 {
+        return Err(format!(
+            "discovery_max_depth must be between 0 and 256, got {}",
+            cfg.discovery_max_depth
+        ));
+    }
     if cfg.index_max_items_per_root < 1_000 || cfg.index_max_items_per_root > 1_000_000 {
         return Err(format!(
             "index_max_items_per_root must be between 1000 and 1000000, got {}",
@@ -1532,6 +1546,12 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         if was_enabled == Some(false) {
             cfg.view_mode = ViewMode::Compact;
         }
+        changed = true;
+    }
+
+    if source_version < 26 && !raw_has_key(raw, "discovery_max_depth") {
+        // Previously depth was a hardcoded 5; adopt the new default (unlimited).
+        cfg.discovery_max_depth = Config::default().discovery_max_depth;
         changed = true;
     }
 

@@ -58,6 +58,17 @@ pub fn open_file(path: &Path) -> Result<Connection, StoreError> {
     Ok(conn)
 }
 
+/// Read-only connection for diagnostics: no schema migration and no write
+/// lock, so probing never contends with a running instance.
+pub fn open_read_only(path: &Path) -> Result<Connection, StoreError> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.pragma_update(None, "busy_timeout", 1000)?;
+    Ok(conn)
+}
+
 pub fn open_from_config(cfg: &Config) -> Result<Connection, StoreError> {
     open_file(&cfg.index_db_path)
 }
@@ -139,6 +150,134 @@ pub fn clear_items(db: &Connection) -> Result<(), StoreError> {
 pub fn delete_item(db: &Connection, id: &str) -> Result<(), StoreError> {
     db.execute("DELETE FROM item WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+/// Escape `%`, `_` and the escape char itself for a `LIKE ... ESCAPE '!'`.
+pub(crate) fn escape_like(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '!') {
+            out.push('!');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Ids of file/folder rows strictly beneath `folder_path` (case-insensitive,
+/// either separator).
+pub fn list_item_ids_under_path(db: &Connection, folder_path: &str) -> Result<Vec<String>, StoreError> {
+    let base = folder_path
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    if base.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = format!("{}\\%", escape_like(&base));
+    let mut stmt = db.prepare(
+        "SELECT id FROM item
+         WHERE kind IN ('file', 'folder') AND path LIKE ?1 ESCAPE '!'",
+    )?;
+    let mut rows = stmt.query(params![pattern])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get(0)?);
+    }
+    Ok(out)
+}
+
+/// Substring recall over file/folder rows: every whitespace-separated term
+/// must appear in the title or path. Used when Tantivy and the compacted
+/// in-memory cache cannot produce enough candidates, so any indexed row
+/// stays reachable.
+pub fn search_file_folder_items(
+    db: &Connection,
+    query: &str,
+    include_files: bool,
+    include_folders: bool,
+    limit: usize,
+) -> Result<Vec<SearchItem>, StoreError> {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.replace('/', "\\").to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .take(8)
+        .collect();
+    if terms.is_empty() || limit == 0 || !(include_files || include_folders) {
+        return Ok(Vec::new());
+    }
+    let mut kinds = Vec::new();
+    if include_files {
+        kinds.push("'file'");
+    }
+    if include_folders {
+        kinds.push("'folder'");
+    }
+    let mut sql = format!(
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at
+         FROM item WHERE kind IN ({})",
+        kinds.join(", ")
+    );
+    let mut values: Vec<String> = Vec::with_capacity(terms.len());
+    for (i, term) in terms.iter().enumerate() {
+        sql.push_str(&format!(
+            " AND (title LIKE ?{n} ESCAPE '!' OR path LIKE ?{n} ESCAPE '!')",
+            n = i + 1
+        ));
+        values.push(format!("%{}%", escape_like(term)));
+    }
+    // LIKE is ASCII case-insensitive, matching `to_ascii_lowercase` above.
+    // Title matches first, then shorter (shallower) paths.
+    sql.push_str(&format!(
+        " ORDER BY (title LIKE ?1 ESCAPE '!') DESC, LENGTH(path) ASC LIMIT {}",
+        limit
+    ));
+    let mut stmt = db.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(values.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(SearchItem::from_owned_with_usage(
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+        ));
+    }
+    Ok(out)
+}
+
+/// Count of file/folder rows at or beneath `root` (case-insensitive).
+pub fn count_file_folder_items_under_root(
+    db: &Connection,
+    root: &str,
+) -> Result<(u64, u64), StoreError> {
+    let base = root.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    if base.is_empty() {
+        return Ok((0, 0));
+    }
+    let pattern = format!("{}\\%", escape_like(&base));
+    let (files, folders): (i64, i64) = db.query_row(
+        "SELECT
+            COALESCE(SUM(kind = 'file'), 0),
+            COALESCE(SUM(kind = 'folder'), 0)
+         FROM item
+         WHERE kind IN ('file', 'folder')
+           AND LOWER(REPLACE(path, '/', '\\')) LIKE ?1 ESCAPE '!'",
+        params![pattern],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((files.max(0) as u64, folders.max(0) as u64))
+}
+
+pub fn count_items(db: &Connection) -> Result<u64, StoreError> {
+    let n: i64 = db.query_row("SELECT COUNT(*) FROM item", [], |row| row.get(0))?;
+    Ok(n.max(0) as u64)
 }
 
 pub fn get_meta(db: &Connection, key: &str) -> Result<Option<String>, StoreError> {

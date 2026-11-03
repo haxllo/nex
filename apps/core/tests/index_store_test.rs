@@ -83,3 +83,34 @@ fn stores_and_reads_query_selection_memory() {
     assert_eq!(rows[0].1, 2);
     assert_eq!(rows[0].2, 200);
 }
+
+#[test]
+fn prefix_helpers_respect_folder_boundaries_and_like_escapes() {
+    let db = nex_core::index_store::open_memory().unwrap();
+    let rows = [
+        ("folder:c:\\a\\foo", "folder", "foo", "C:\\a\\foo"),
+        ("file:c:\\a\\foo\\x.txt", "file", "x.txt", "C:\\a\\foo\\x.txt"),
+        ("file:c:\\a\\foo\\sub\\y.txt", "file", "y.txt", "C:\\a\\foo\\sub\\y.txt"),
+        ("file:c:\\a\\foobar\\z.txt", "file", "z.txt", "C:\\a\\foobar\\z.txt"),
+        ("file:c:\\a\\f_o\\w.txt", "file", "w.txt", "C:\\a\\f_o\\w.txt"),
+    ];
+    for (id, kind, title, path) in rows {
+        nex_core::index_store::upsert_item(&db, &nex_core::model::SearchItem::new(id, kind, title, path))
+            .unwrap();
+    }
+
+    let mut under = nex_core::index_store::list_item_ids_under_path(&db, "C:\\A\\Foo\\").unwrap();
+    under.sort();
+    assert_eq!(under, vec!["file:c:\\a\\foo\\sub\\y.txt", "file:c:\\a\\foo\\x.txt"]);
+    // `_` is literal, not a LIKE wildcard.
+    assert!(nex_core::index_store::list_item_ids_under_path(&db, "C:\\a\\fxo").unwrap().is_empty());
+    assert_eq!(
+        nex_core::index_store::count_file_folder_items_under_root(&db, "C:\\a").unwrap(),
+        (4, 1)
+    );
+
+    let hits = nex_core::index_store::search_file_folder_items(&db, "Y.TXT", true, true, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    let folders_only = nex_core::index_store::search_file_folder_items(&db, "foo", false, true, 10).unwrap();
+    assert!(folders_only.iter().all(|r| r.kind == "folder") && !folders_only.is_empty());
+}

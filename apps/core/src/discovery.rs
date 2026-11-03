@@ -557,6 +557,7 @@ fn discover_filesystem_walk(
     let per_root_budget = max_items_per_root.max(1).min(total_budget);
     let mut total_added = 0_usize;
     let mut skipped_due_exclusion = 0_usize;
+    let walk_depth = effective_walk_depth(max_depth);
 
     for root in roots {
         if total_added >= total_budget {
@@ -571,8 +572,10 @@ fn discover_filesystem_walk(
         }
 
         let mut root_added = 0_usize;
+        let mut root_cap_hit = false;
         for entry in walkdir::WalkDir::new(root)
-            .max_depth(max_depth)
+            .max_depth(walk_depth)
+            .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
                 let excluded = exclusion_policy.should_exclude_path_under_root(entry.path(), root);
@@ -584,6 +587,7 @@ fn discover_filesystem_walk(
             .filter_map(Result::ok)
         {
             if total_added >= total_budget || root_added >= per_root_budget {
+                root_cap_hit = root_added >= per_root_budget;
                 break;
             }
             let path = entry.path();
@@ -640,11 +644,18 @@ fn discover_filesystem_walk(
                 callback(total_added);
             }
         }
+        if root_cap_hit {
+            crate::runtime::log_warn(&format!(
+                "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
+                root.display(),
+                per_root_budget
+            ));
+        }
     }
 
     if total_added >= total_budget {
         crate::logging::info(&format!(
-            "[nex] discovery_cap provider=filesystem total_cap={} reached=true",
+            "[nex] discovery_cap provider=filesystem total_cap={} reached=true (raise index_max_items_total)",
             total_budget
         ));
     }
@@ -656,6 +667,80 @@ fn discover_filesystem_walk(
     }
 
     Ok(out)
+}
+
+/// Config depth 0 means unlimited.
+fn effective_walk_depth(max_depth: usize) -> usize {
+    if max_depth == 0 {
+        usize::MAX
+    } else {
+        max_depth
+    }
+}
+
+/// Uncapped raw entry counts for one discovery root, using discovery's
+/// exclusion policy and depth limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RootFsCount {
+    pub files: u64,
+    pub folders: u64,
+    pub excluded: u64,
+    pub errors: u64,
+    /// Some directory at the depth limit has contents that were not walked.
+    pub depth_limited: bool,
+}
+
+pub fn count_filesystem_entries_for_root(
+    root: &Path,
+    cfg: &crate::config::Config,
+) -> RootFsCount {
+    let mut count = RootFsCount::default();
+    if !root.exists() {
+        return count;
+    }
+    let policy = DiscoveryExclusionPolicy::new(&cfg.discovery_exclude_roots);
+    if policy.should_exclude_path_under_root(root, root) {
+        count.excluded += 1;
+        return count;
+    }
+    let max_depth = effective_walk_depth(cfg.discovery_max_depth as usize);
+    let mut excluded = 0_u64;
+    let walker = walkdir::WalkDir::new(root)
+        .max_depth(max_depth)
+        .into_iter()
+        .filter_entry(|entry| {
+            let skip = policy.should_exclude_path_under_root(entry.path(), root);
+            if skip && entry.path() != root {
+                excluded += 1;
+            }
+            !skip
+        });
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                count.errors += 1;
+                continue;
+            }
+        };
+        let ft = entry.file_type();
+        if ft.is_dir() {
+            if entry.depth() > 0 {
+                count.folders += 1;
+            }
+            if entry.depth() >= max_depth
+                && std::fs::read_dir(entry.path())
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false)
+            {
+                count.depth_limited = true;
+            }
+        } else if ft.is_file() {
+            count.files += 1;
+        }
+    }
+    count.excluded += excluded;
+    count
 }
 
 #[derive(Debug, Clone)]

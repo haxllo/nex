@@ -235,22 +235,30 @@ body {
   color: var(--text);
 }
 
-#quick-launch-pins {
+/* Wrapper keeps the arrow buttons in static slots beside the scrolling
+   pins, so no pin ever renders under an arrow. */
+#quick-launch-wrap {
   display: none;
   flex: 0 1 auto;
   align-items: center;
-  gap: 2px;
   min-width: 0;
   max-width: 40%;
+}
+html.compact-view #quick-launch-wrap:not([hidden]) {
+  display: flex;
+}
+#quick-launch-pins {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
 }
 #quick-launch-pins::-webkit-scrollbar {
   display: none;
-}
-html.compact-view #quick-launch-pins:not([hidden]) {
-  display: flex;
 }
 #quick-launch-pins button {
   display: grid;
@@ -276,6 +284,34 @@ html.compact-view #quick-launch-pins:not([hidden]) {
   width: 24px;
   height: 24px;
   object-fit: contain;
+}
+#quick-launch-wrap .pin-nav {
+  display: grid;
+  place-items: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 36px;
+  border: 0;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  /* Slots stay reserved while the row overflows: no pin ever reflows into
+     them, only the arrow that has content left on its side becomes usable. */
+  visibility: hidden;
+  pointer-events: none;
+}
+#quick-launch-wrap .pin-nav.active {
+  visibility: visible;
+  pointer-events: auto;
+}
+#quick-launch-wrap .pin-nav:hover,
+#quick-launch-wrap .pin-nav:focus-visible {
+  color: var(--text);
+}
+#quick-launch-wrap .pin-nav[hidden] {
+  display: none;
 }
 
 #help {

@@ -17,6 +17,7 @@
   const footerEl = $("footer");
   const tabsEl = $("tabs");
   const quickLaunchPins = $("quick-launch-pins");
+  const quickLaunchWrap = $("quick-launch-wrap");
   quickLaunchPins.addEventListener("wheel", (e) => {
     if (quickLaunchPins.scrollWidth <= quickLaunchPins.clientWidth) return;
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
@@ -24,6 +25,8 @@
       e.preventDefault();
     }
   }, { passive: false });
+  quickLaunchPins.addEventListener("scroll", () => updatePinNav(), { passive: true });
+  window.addEventListener("resize", () => { sizePinViewport(); updatePinNav(); });
   const powerBtnTop = $("power-btn-top");
   const powerMenuTop = $("power-menu-top");
   const powerConfirmTop = $("power-confirm-top");
@@ -175,6 +178,7 @@
   let lastRowSig = ""; // content signature — gates entrance stagger re-animation
   let hasAnimatedFirstShow = false; // stagger only fires for the first rows ever shown
   let quickLaunchItems = []; // Quick Launch items for idle state
+  let compactView = false;
   let quickLaunchPinsKey = null;
   // Active category tab. Filtering is client-side: hidden rows keep their
   // Rust-side index, so submit/pin/context-menu still address the right row.
@@ -772,6 +776,9 @@
     quickLaunchPinsKey = key;
 
     const frag = document.createDocumentFragment();
+    // Typing pushes state that can rebuild the pins row; keep the scroll
+    // position from the previous build instead of resetting to pin #1.
+    const prevScroll = quickLaunchPins.scrollLeft;
     pinnedItems.forEach((item) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -798,8 +805,58 @@
       frag.appendChild(button);
     });
     quickLaunchPins.replaceChildren(frag);
-    quickLaunchPins.hidden = quickLaunchPins.childElementCount === 0;
+    quickLaunchPins.scrollLeft = prevScroll;
+    quickLaunchPins.hidden = pinnedItems.length === 0;
+    quickLaunchWrap.hidden = pinnedItems.length === 0;
+    requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
   }
+
+  // Arrows live beside the scroll row (static slots), so pins never render
+  // under them. Affordance for wheel-scroll; no cap on pin count.
+  const PIN_NAV_STEP = 3 * 38; // three 36px pin slots plus gap
+
+  const pinNavLeft = $("pin-nav-left");
+  const pinNavRight = $("pin-nav-right");
+  for (const [btn, dir] of [[pinNavLeft, -1], [pinNavRight, 1]]) {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      quickLaunchPins.scrollBy({ left: dir * PIN_NAV_STEP, behavior: "smooth" });
+      input.focus();
+    });
+  }
+  function updatePinNav() {
+    const overflow = quickLaunchPins.scrollWidth > quickLaunchPins.clientWidth + 1;
+    const max = quickLaunchPins.scrollWidth - quickLaunchPins.clientWidth;
+    pinNavLeft.hidden = pinNavRight.hidden = !overflow;
+    // Arrow stays in its reserved slot; only the side with content left is active.
+    pinNavLeft.classList.toggle("active", overflow && quickLaunchPins.scrollLeft > 1);
+    pinNavRight.classList.toggle("active", overflow && quickLaunchPins.scrollLeft < max - 1);
+  }
+
+  // Size the pins viewport to whole 38px pin pitches (36px icon + 2px gap),
+  // so no pin is ever partially clipped at the viewport edge beside the
+  // reserved arrow slots. The wrapper keeps the 40% cap of the top row.
+  function sizePinViewport() {
+    quickLaunchPins.style.width = "";
+    // Hidden or compact-view off: nothing to size; pin state resets.
+    if (quickLaunchWrap.hidden || quickLaunchWrap.offsetParent === null) return;
+    const n = quickLaunchPins.childElementCount;
+    if (!n) return;
+    const natural = 38 * n - 2;
+    if (quickLaunchWrap.clientWidth >= natural + 36) return; // fits, no overflow
+    const row = quickLaunchWrap.parentElement;
+    const rowStyle = getComputedStyle(row);
+    const rowInner = row.clientWidth
+      - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight);
+    const viewportMax = rowInner * 0.4 - 36; // minus the two reserved arrow slots
+    const wholePins = Math.max(1, Math.floor((viewportMax + 2) / 38));
+    quickLaunchPins.style.width = (Math.min(38 * wholePins - 2, natural)) + "px";
+    requestAnimationFrame(updatePinNav);
+  }
+
+
+
 
   function syncTabButtons() {
     for (const btn of tabsEl.children) {
@@ -3365,11 +3422,28 @@
       if (typeof state.overlayVisible === "boolean") {
         overlayVisible = state.overlayVisible;
       }
+      if (showPush) {
+        // WebView stays warm across hides, so stale pin scroll survives —
+        // rules reset for every show.
+        quickLaunchPins.scrollLeft = 0;
+        requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
+      }
       if (typeof state.compactView === "boolean") {
+        // The compact flag rides on every state push; reset pin scroll only
+        // on an actual view switch, not per keystroke (state pushes while
+        // typing carry the same true value).
+        const switched = compactView !== state.compactView;
+        compactView = state.compactView;
         document.documentElement.classList.toggle("compact-view", state.compactView);
         if (state.compactView) {
           topPower.closeMenu();
           topPower.closeConfirm();
+        }
+        if (switched) {
+          // Re-measure after the view switch re-flows the bar; scrolling in
+          // expanded view clamps/reset scrollLeft, so also clear stale scroll.
+          quickLaunchPins.scrollLeft = 0;
+          requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
         }
       }
       // Every show starts on All: the tab is a within-session filter, not

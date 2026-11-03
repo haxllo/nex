@@ -964,7 +964,7 @@ html.glass-native .footer-mark {
   overflow: hidden;
   transition: max-width 0.18s ease, opacity 0.14s ease;
 }
-#footer-actions:hover .footer-action-list,
+#footer-actions.open .footer-action-list,
 #footer-actions:focus-within .footer-action-list {
   max-width: 96px;
   opacity: 1;

@@ -3435,6 +3435,7 @@
         // WebView stays warm across hides, so stale pin scroll survives —
         // rules reset for every show.
         quickLaunchPins.scrollLeft = 0;
+        footerActions.classList.remove("open");
         requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
       }
       if (typeof state.compactView === "boolean") {
@@ -3637,6 +3638,14 @@
     github: "https://github.com/haxllo/nex",
     website: "https://nexapp.live",
   };
+
+  // Hover expansion is JS-managed: the WebView stays warm across hides and
+  // Chromium keeps the :hover of the hide moment (hover only re-computes on
+  // mousemove, which a hidden window never receives), so a CSS :hover rule
+  // re-shows the list expanded on every reopen without any pointer on it.
+  // Shows clear the class with the other warm-state resets.
+  footerActions.addEventListener("mouseenter", () => footerActions.classList.add("open"));
+  footerActions.addEventListener("mouseleave", () => footerActions.classList.remove("open"));
 
   footerActions.addEventListener("click", (event) => {
     const button = event.target.closest("[data-footer-action]");

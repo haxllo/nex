@@ -837,7 +837,11 @@
   // Size the pins viewport to whole 38px pin pitches (36px icon + 2px gap),
   // so no pin is ever partially clipped at the viewport edge beside the
   // reserved arrow slots. The wrapper keeps the 40% cap of the top row.
+  // Re-measure runs whenever the bar reflows (idle vs typing width), so
+  // re-anchor to the same first visible pin instead of letting the browser
+  // clamp scrollLeft against the new max.
   function sizePinViewport() {
+    const prevFirst = Math.round(quickLaunchPins.scrollLeft / 38);
     quickLaunchPins.style.width = "";
     // Hidden or compact-view off: nothing to size; pin state resets.
     if (quickLaunchWrap.hidden || quickLaunchWrap.offsetParent === null) return;
@@ -852,6 +856,11 @@
     const viewportMax = rowInner * 0.4 - 36; // minus the two reserved arrow slots
     const wholePins = Math.max(1, Math.floor((viewportMax + 2) / 38));
     quickLaunchPins.style.width = (Math.min(38 * wholePins - 2, natural)) + "px";
+    const maxScroll = quickLaunchPins.scrollWidth - quickLaunchPins.clientWidth;
+    const reanchored = Math.min(Math.max(prevFirst * 38, 0), maxScroll);
+    if (quickLaunchPins.scrollLeft !== reanchored) {
+      quickLaunchPins.scrollLeft = reanchored;
+    }
     requestAnimationFrame(updatePinNav);
   }
 

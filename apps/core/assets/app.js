@@ -3653,6 +3653,8 @@
   // release stays reachable without viewing notes first.
   function syncUpdateNotice() {
     const show = updateAvailable || whatsNewPending !== null;
+    const pillsChanged = show !== !updateNotice.classList.contains("hidden")
+      || whatsNewBtn.hidden !== (whatsNewPending === null);
     updateNotice.classList.toggle("hidden", !show);
     whatsNewBtn.hidden = whatsNewPending === null;
     if (whatsNewPending !== null) {
@@ -3665,6 +3667,9 @@
       updateBtnLabel.textContent = updateAvailable ? "Update" : "";
     }
     updateBtn.hidden = !updateAvailable;
+    // Pills appearing/disappearing reflow the row without a window resize,
+    // so the pins viewport must re-measure (and re-anchor) explicitly.
+    if (pillsChanged) requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
   }
 
   updateBtn.addEventListener("click", () => {

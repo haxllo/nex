@@ -1434,6 +1434,23 @@
         const sel = selectableIndices();
         if (sel.length) setSelected(sel[sel.length - 1], true);
       }
+
+      // The native show handoff can deliver the first key to the page before
+      // the search input regains DOM focus. Preserve that character instead
+      // of waiting for the next key to arrive in the input.
+      const focusIsOnDocument = document.activeElement === document.body
+        || document.activeElement === document.documentElement;
+      if (overlayVisible
+        && focusIsOnDocument
+        && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing
+        && e.key.length === 1) {
+        e.preventDefault();
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        input.focus({ preventScroll: true });
+        input.setRangeText(e.key, start, end, "end");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
     },
     true
   );

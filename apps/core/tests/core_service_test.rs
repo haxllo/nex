@@ -20,6 +20,25 @@ fn kill_notepad() {
     }
 }
 
+fn cleanup_launched_file(path: &std::path::Path) {
+    kill_notepad();
+
+    for attempt in 0..40 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            // ShellExecute can return before Notepad releases the file handle.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 39 => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => panic!(
+                "failed to remove launched test file {}: {error}",
+                path.display()
+            ),
+        }
+    }
+}
+
 #[test]
 fn service_search_returns_ranked_results() {
     let config = test_config();
@@ -84,8 +103,7 @@ fn service_launch_by_id_uses_indexed_path() {
         .unwrap();
 
     let launched = service.launch(LaunchTarget::Id("launch-id"));
-    kill_notepad();
-    std::fs::remove_file(&launch_path).unwrap();
+    cleanup_launched_file(&launch_path);
 
     assert!(launched.is_ok());
 }
@@ -121,8 +139,7 @@ fn service_launch_by_id_records_usage_signals() {
     assert_eq!(updated.use_count, 1);
     assert!(updated.last_accessed_epoch_secs > 0);
 
-    kill_notepad();
-    std::fs::remove_file(&launch_path).unwrap();
+    cleanup_launched_file(&launch_path);
 }
 
 #[test]
@@ -402,8 +419,7 @@ fn incremental_rebuild_preserves_usage_metrics() {
     assert!(updated.use_count >= 1);
     assert!(updated.last_accessed_epoch_secs > 0);
 
-    kill_notepad();
-    std::fs::remove_file(path).unwrap();
+    cleanup_launched_file(&path);
 }
 
 #[test]

@@ -1469,7 +1469,9 @@
     lastQuerySent = query;
 
     const now = performance.now();
-    const delay = (now - lastInputTime > 300) ? 0 : 40;
+    // Clearing the input is never coalesced: the panel collapses back to
+    // the bare bar as soon as the empty query reaches the host.
+    const delay = (query === "" || now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
     clearTimeout(debounce);
     debounce = setTimeout(() => post("query", query), delay);

@@ -117,33 +117,6 @@ impl TantivyIndex {
         })
     }
 
-    /// Pre-warm ALL Tantivy segment files into the OS page cache so the
-    /// user's first keystroke for ANY letter pays zero page-fault latency
-    /// for term dictionaries, posting lists, document store, or index
-    /// metadata.  Tantivy's `MmapDirectory` maps these files — the OS
-    /// Cache Manager shares pages between `ReadFile` and `CreateFileMapping`
-    /// on Windows, so a sequential pre-read populates the same pages the
-    /// mmap accesses later.
-    ///
-    /// Typical index size: 10–30 MB for 50k documents.  Sequential SSD
-    /// read completes in 50–100 ms and runs synchronously during the show
-    /// animation (~160 ms), so the user perceives no delay.
-    pub fn warmup(&self) {
-        let _ = self.reader.reload();
-        let dir = self.index_path.as_path();
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().is_some_and(|e| e != "tmp") {
-                    // Allocate falls out of scope immediately — the OS
-                    // page cache retains the data for subsequent mmap
-                    // accesses.
-                    let _ = std::fs::read(&path);
-                }
-            }
-        }
-    }
-
     pub fn search(&self, query_text: &str, limit: usize) -> Result<Vec<SearchItem>, String> {
         if query_text.trim().is_empty() {
             return Ok(Vec::new());
@@ -368,39 +341,8 @@ impl TantivyIndex {
             .map_err(|e| format!("tantivy write_count lock error: {e}"))? = 0;
         drop(writer);
 
-        // Phase 1: Collect existing document IDs using the reader only.
-        // The reader is independent from the writer — no writer lock needed.
-        // This is the expensive part (iterates all live docs) and runs
-        // outside the writer lock so concurrent searches are not blocked.
-        // A failed reload leaves a stale searcher whose view is missing live
-        // docs, which would silently skip their deletions — fail instead.
-        self.reader
-            .reload()
-            .map_err(|e| format!("tantivy reload error: {e}"))?;
-        let reader = self.reader.searcher();
-        let mut existing_ids: HashSet<String> = HashSet::new();
-        for (segment_ord, segment_reader) in reader.segment_readers().iter().enumerate() {
-            let max_doc = segment_reader.max_doc();
-            let alive_bitset = segment_reader.alive_bitset();
-            for doc_id in 0u32..max_doc {
-                // After deletions, live doc IDs can exist at positions
-                // >= num_docs(). Iterate max_doc() and skip deleted docs
-                // via the alive bitset to avoid missing live entries.
-                if let Some(ref bitset) = alive_bitset {
-                    if !bitset.is_alive(doc_id) {
-                        continue;
-                    }
-                }
-                let doc_address = tantivy::DocAddress::new(segment_ord as u32, doc_id);
-                let doc: TantivyDocument = reader
-                    .doc::<TantivyDocument>(doc_address)
-                    .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
-                if let Some(id_val) = doc.get_first(self.fields.id).and_then(|v| v.as_str()) {
-                    existing_ids.insert(id_val.to_string());
-                }
-            }
-        }
-        drop(reader);
+        // Phase 1: collect existing document IDs (reader only, no writer lock).
+        let existing_ids = self.live_ids()?;
 
         // Phase 2: Compute diff (no lock needed)
         let incoming_ids: HashSet<String> = items.iter().map(|i| i.id.clone()).collect();
@@ -442,6 +384,109 @@ impl TantivyIndex {
         collect_garbage(&writer);
 
         Ok(())
+    }
+
+    /// IDs of all committed live documents. Iterates every document, so
+    /// keep it off interactive paths. A failed reload leaves a stale
+    /// searcher whose view is missing live docs, which would silently skip
+    /// their deletions — fail instead.
+    fn live_ids(&self) -> Result<HashSet<String>, String> {
+        self.reader
+            .reload()
+            .map_err(|e| format!("tantivy reload error: {e}"))?;
+        let reader = self.reader.searcher();
+        let mut existing_ids: HashSet<String> = HashSet::new();
+        for (segment_ord, segment_reader) in reader.segment_readers().iter().enumerate() {
+            let max_doc = segment_reader.max_doc();
+            let alive_bitset = segment_reader.alive_bitset();
+            for doc_id in 0u32..max_doc {
+                // After deletions, live doc IDs can exist at positions
+                // >= num_docs(). Iterate max_doc() and skip deleted docs
+                // via the alive bitset to avoid missing live entries.
+                if let Some(ref bitset) = alive_bitset {
+                    if !bitset.is_alive(doc_id) {
+                        continue;
+                    }
+                }
+                let doc_address = tantivy::DocAddress::new(segment_ord as u32, doc_id);
+                let doc: TantivyDocument = reader
+                    .doc::<TantivyDocument>(doc_address)
+                    .map_err(|e| format!("tantivy doc retrieval error: {e}"))?;
+                if let Some(id_val) = doc.get_first(self.fields.id).and_then(|v| v.as_str()) {
+                    existing_ids.insert(id_val.to_string());
+                }
+            }
+        }
+        Ok(existing_ids)
+    }
+
+    /// Bring the index in line with `items` by adding only missing documents
+    /// and deleting extra ones; unlike `incremental_sync_items`, existing
+    /// documents are not rewritten. Returns (added, removed).
+    pub fn reconcile_items(&self, items: &[SearchItem]) -> Result<(usize, usize), String> {
+        self.commit_pending()?;
+        let existing_ids = self.live_ids()?;
+        let incoming_ids: HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
+
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+        let mut removed = 0usize;
+        for existing_id in &existing_ids {
+            if !incoming_ids.contains(existing_id.as_str()) {
+                writer.delete_term(tantivy::Term::from_field_text(self.fields.id, existing_id));
+                removed += 1;
+            }
+        }
+        let mut added = 0usize;
+        for item in items {
+            if existing_ids.contains(&item.id) {
+                continue;
+            }
+            writer
+                .add_document(doc!(
+                    self.fields.id => item.id.as_str(),
+                    self.fields.title => item.title.as_str(),
+                    self.fields.title_norm => crate::model::normalize_for_search(item.title.as_str()),
+                    self.fields.path => item.path.as_str(),
+                    self.fields.subtitle => item.subtitle.as_str(),
+                    self.fields.kind => item.kind.as_str(),
+                    self.fields.extension => extract_extension(&item.path),
+                    self.fields.use_count => item.use_count as i64,
+                    self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
+                ))
+                .map_err(|e| format!("tantivy add document error: {e}"))?;
+            added += 1;
+        }
+        if added > 0 || removed > 0 {
+            writer
+                .commit()
+                .map_err(|e| format!("tantivy commit error: {e}"))?;
+            collect_garbage(&writer);
+        }
+        Ok((added, removed))
+    }
+
+    /// Commit buffered upserts/deletes without GC. Returns false when
+    /// nothing was pending.
+    pub fn commit_pending(&self) -> Result<bool, String> {
+        let mut count = self
+            .write_count
+            .lock()
+            .map_err(|e| format!("tantivy write_count lock error: {e}"))?;
+        if *count == 0 {
+            return Ok(false);
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+        writer
+            .commit()
+            .map_err(|e| format!("tantivy commit error: {e}"))?;
+        *count = 0;
+        Ok(true)
     }
 
     pub fn flush(&self) -> Result<(), String> {
@@ -517,6 +562,76 @@ impl TantivyIndex {
         let reader = self.reader.searcher();
         let segment_mem = reader.segment_readers().len() * 2_000_000;
         arena + segment_mem
+    }
+}
+
+/// Keeps index files in the OS page cache without touching the show path:
+/// warming runs on a background thread and only re-reads files that are
+/// new or changed (segments are immutable), plus a full pass every few
+/// minutes in case the cache was trimmed while idle.
+#[derive(Default)]
+pub(crate) struct IndexWarmer {
+    in_flight: std::sync::atomic::AtomicBool,
+    state: Mutex<WarmState>,
+}
+
+#[derive(Default)]
+struct WarmState {
+    files: std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
+    last_full: Option<std::time::Instant>,
+}
+
+const FULL_REWARM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+impl IndexWarmer {
+    pub(crate) fn warm_in_background(self: &std::sync::Arc<Self>, index_dir: PathBuf) {
+        use std::sync::atomic::Ordering;
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let this = std::sync::Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("nex-index-warm".into())
+            .spawn(move || {
+                this.warm(&index_dir);
+                this.in_flight.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            self.in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    fn warm(&self, index_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(index_dir) else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .last_full
+            .is_none_or(|at| at.elapsed() >= FULL_REWARM_INTERVAL)
+        {
+            state.files.clear();
+            state.last_full = Some(std::time::Instant::now());
+        }
+        let mut seen = HashSet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() || path.extension().is_some_and(|e| e == "tmp" || e == "lock") {
+                continue;
+            }
+            let stamp = (meta.len(), meta.modified().ok());
+            seen.insert(path.clone());
+            if state.files.get(&path) == Some(&stamp) {
+                continue;
+            }
+            // The data is dropped at once; the OS page cache keeps the pages
+            // that tantivy's mmap reads later.
+            if std::fs::read(&path).is_ok() {
+                state.files.insert(path, stamp);
+            }
+        }
+        state.files.retain(|path, _| seen.contains(path));
     }
 }
 

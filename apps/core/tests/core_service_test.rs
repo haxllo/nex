@@ -782,3 +782,24 @@ fn maintenance_repairs_index_drift_from_store() {
     service.maintain_search_index();
     assert_eq!(service.search_index_doc_count(), Some(6));
 }
+
+#[test]
+fn maintenance_publishes_buffered_deletes_without_treating_them_as_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = isolated_config(dir.path());
+    let db = nex_core::index_store::open_file(&config.index_db_path).unwrap();
+    let service = CoreService::with_connection(config, db).unwrap();
+    for i in 0..3 {
+        service
+            .upsert_item(&file_item("docs", &format!("keep-{i}.txt")))
+            .unwrap();
+    }
+    service.flush_search_index();
+    service
+        .delete_item_by_id(&file_item("docs", "keep-0.txt").id)
+        .unwrap();
+    // The delete is buffered in Tantivy until a commit.
+    assert_eq!(service.search_index_doc_count(), Some(3));
+    service.maintain_search_index();
+    assert_eq!(service.search_index_doc_count(), Some(2));
+}

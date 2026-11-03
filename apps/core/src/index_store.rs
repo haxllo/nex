@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::config::Config;
 use crate::model::SearchItem;
@@ -191,6 +191,10 @@ pub fn list_item_ids_under_path(db: &Connection, folder_path: &str) -> Result<Ve
 /// must appear in the title or path. Used when Tantivy and the compacted
 /// in-memory cache cannot produce enough candidates, so any indexed row
 /// stays reachable.
+///
+/// Terms of 3+ characters go through the title trigram index (~1 ms); the
+/// unindexed `LIKE` scan (~40 ms at 120k rows) is only used while the
+/// index backfill is still running or when every term is shorter.
 pub fn search_file_folder_items(
     db: &Connection,
     query: &str,
@@ -214,24 +218,44 @@ pub fn search_file_folder_items(
     if include_folders {
         kinds.push("'folder'");
     }
-    let mut sql = format!(
-        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at
-         FROM item WHERE kind IN ({})",
-        kinds.join(", ")
-    );
-    let mut values: Vec<String> = Vec::with_capacity(terms.len());
-    for (i, term) in terms.iter().enumerate() {
-        sql.push_str(&format!(
-            " AND (title LIKE ?{n} ESCAPE '!' OR path LIKE ?{n} ESCAPE '!')",
-            n = i + 1
-        ));
+    let trigram_terms: Vec<&String> = terms.iter().filter(|t| t.chars().count() >= 3).collect();
+    let use_fts = !trigram_terms.is_empty() && !title_fts_backfill_pending(db)?;
+
+    let mut values: Vec<String> = Vec::with_capacity(terms.len() + 1);
+    let mut sql = if use_fts {
+        // Candidate if the title contains any long term; the LIKE filters
+        // below then require every term in the title or path.
+        let match_expr = trigram_terms
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        values.push(match_expr);
+        format!(
+            "SELECT i.id, i.kind, i.title, i.path, i.subtitle, i.use_count, i.last_accessed_epoch_secs, i.launch_count, i.last_launched_at
+             FROM item_title_fts f JOIN item i ON i.rowid = f.rowid
+             WHERE item_title_fts MATCH ?1 AND i.kind IN ({})",
+            kinds.join(", ")
+        )
+    } else {
+        format!(
+            "SELECT i.id, i.kind, i.title, i.path, i.subtitle, i.use_count, i.last_accessed_epoch_secs, i.launch_count, i.last_launched_at
+             FROM item i WHERE i.kind IN ({})",
+            kinds.join(", ")
+        )
+    };
+    let first_term_param = values.len() + 1;
+    for term in &terms {
         values.push(format!("%{}%", escape_like(term)));
+        // LIKE is ASCII case-insensitive, matching `to_ascii_lowercase` above.
+        sql.push_str(&format!(
+            " AND (i.title LIKE ?{n} ESCAPE '!' OR i.path LIKE ?{n} ESCAPE '!')",
+            n = values.len()
+        ));
     }
-    // LIKE is ASCII case-insensitive, matching `to_ascii_lowercase` above.
     // Title matches first, then shorter (shallower) paths.
     sql.push_str(&format!(
-        " ORDER BY (title LIKE ?1 ESCAPE '!') DESC, LENGTH(path) ASC LIMIT {}",
-        limit
+        " ORDER BY (i.title LIKE ?{first_term_param} ESCAPE '!') DESC, LENGTH(i.path) ASC LIMIT {limit}"
     ));
     let mut stmt = db.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(values.iter()))?;
@@ -369,20 +393,14 @@ pub fn get_quick_launch_items(
     // items instead of repeating the frequent ones.
     let mut seen_ids = seen_ids;
     let passes = [
-        ("launch_count DESC, last_launched_at DESC", usize::div_ceil(max_items - result.len(), 2)),
-        ("last_launched_at DESC", max_items - result.len()),
+        (QUICK_LAUNCH_FREQUENT_SQL, usize::div_ceil(max_items - result.len(), 2)),
+        (QUICK_LAUNCH_RECENT_SQL, max_items - result.len()),
     ];
-    for (order_by, limit) in passes {
+    for (sql, limit) in passes {
         if result.len() >= max_items {
             break;
         }
-        let sql = format!(
-            "SELECT id, kind, title, path, subtitle FROM item
-             WHERE kind = 'app' AND launch_count > 0
-             ORDER BY {order_by}
-             LIMIT ?1"
-        );
-        let mut stmt = db.prepare(&sql)?;
+        let mut stmt = db.prepare_cached(sql)?;
         let mut rows = stmt.query(params![limit as i64])?;
         while let Some(row) = rows.next()? {
             if result.len() >= max_items {
@@ -449,59 +467,58 @@ pub fn get_all_apps(
     Ok(result)
 }
 
-/// Find an item by path or title (case-insensitive).
+/// Find an item by path or title (case-insensitive). Runs on every overlay
+/// show (pinned Quick Launch items), so every step must hit an index
+/// (`idx_item_path_nocase`, `idx_item_title_nocase`, `idx_item_app_launch`);
+/// unindexed scans cost ~25 ms per pin at 120k rows.
 pub fn find_item_by_path_or_title(
     db: &Connection,
     query: &str,
 ) -> Result<Option<(String, String, String, String, String)>, StoreError> {
-    // Try exact path match first
-    let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, subtitle FROM item WHERE path = ?1 LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![query])?;
-    if let Some(row) = rows.next()? {
-        return Ok(Some((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        )));
+    let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String, String, String, String)> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+    };
+
+    // Path match, ASCII case-insensitive like the previous LOWER() lookup;
+    // an exact-case row wins when several differ only by case.
+    let mut stmt = db.prepare_cached(FIND_BY_PATH_SQL)?;
+    if let Some(found) = stmt.query_row(params![query], read).optional()? {
+        return Ok(Some(found));
+    }
+    let backslashed = query.replace('/', "\\");
+    if backslashed != query {
+        if let Some(found) = stmt.query_row(params![backslashed], read).optional()? {
+            return Ok(Some(found));
+        }
+    }
+    // Stored paths with forward slashes: only app rows (the partial index
+    // keeps this to a few hundred rows).
+    let mut stmt = db.prepare_cached(FIND_APP_BY_NORMALIZED_PATH_SQL)?;
+    if let Some(found) = stmt
+        .query_row(params![backslashed.to_ascii_lowercase()], read)
+        .optional()?
+    {
+        return Ok(Some(found));
     }
 
-    // Try case-insensitive path match
-    let normalized_query = query.replace('/', "\\").to_ascii_lowercase();
-    let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(REPLACE(path, '/', '\\')) = ?1 LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![normalized_query])?;
-    if let Some(row) = rows.next()? {
-        return Ok(Some((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        )));
-    }
-
-    // Try case-insensitive title match
-    let mut stmt = db.prepare(
-        "SELECT id, kind, title, path, subtitle FROM item WHERE LOWER(title) = LOWER(?1) LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![query])?;
-    if let Some(row) = rows.next()? {
-        return Ok(Some((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        )));
-    }
-
-    Ok(None)
+    let mut stmt = db.prepare_cached(FIND_BY_TITLE_SQL)?;
+    Ok(stmt.query_row(params![query], read).optional()?)
 }
+
+const FIND_BY_PATH_SQL: &str = "SELECT id, kind, title, path, subtitle FROM item
+     WHERE path = ?1 COLLATE NOCASE ORDER BY path = ?1 DESC LIMIT 1";
+const FIND_APP_BY_NORMALIZED_PATH_SQL: &str = "SELECT id, kind, title, path, subtitle FROM item
+     WHERE kind = 'app' AND LOWER(REPLACE(path, '/', '\\')) = ?1 LIMIT 1";
+const FIND_BY_TITLE_SQL: &str = "SELECT id, kind, title, path, subtitle FROM item
+     WHERE title = ?1 COLLATE NOCASE LIMIT 1";
+const QUICK_LAUNCH_FREQUENT_SQL: &str = "SELECT id, kind, title, path, subtitle FROM item
+     WHERE kind = 'app' AND launch_count > 0
+     ORDER BY launch_count DESC, last_launched_at DESC
+     LIMIT ?1";
+const QUICK_LAUNCH_RECENT_SQL: &str = "SELECT id, kind, title, path, subtitle FROM item
+     WHERE kind = 'app' AND launch_count > 0
+     ORDER BY last_launched_at DESC
+     LIMIT ?1";
 
 pub fn list_query_selections(
     db: &Connection,
@@ -549,9 +566,12 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
         if current_version < 5 {
             migration_v5(conn)?;
         }
+        if current_version < 6 {
+            migration_v6(conn)?;
+        }
 
-        if current_version < 5 {
-            conn.pragma_update(None, "user_version", 5_i64)?;
+        if current_version < 6 {
+            conn.pragma_update(None, "user_version", 6_i64)?;
         }
 
         Ok::<(), StoreError>(())
@@ -638,6 +658,81 @@ fn migration_v4(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// Add launch_count and last_launched_at columns for Quick Launch feature.
+/// Indexes for the per-show Quick Launch lookups (see
+/// `find_item_by_path_or_title`). The app index is partial so it never
+/// competes with file/folder scans.
+///
+/// Also adds a trigram index over titles for substring recall
+/// (`search_file_folder_items`). It is keyed by `item.rowid` and kept in
+/// sync by triggers; rows that predate the migration are filled in by
+/// `backfill_title_fts_batch` in the background so opening a large store
+/// never blocks on it.
+fn migration_v6(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_item_path_nocase ON item(path COLLATE NOCASE);
+         CREATE INDEX IF NOT EXISTS idx_item_title_nocase ON item(title COLLATE NOCASE);
+         CREATE INDEX IF NOT EXISTS idx_item_app_launch
+             ON item(launch_count, last_launched_at) WHERE kind = 'app';
+         CREATE VIRTUAL TABLE IF NOT EXISTS item_title_fts USING fts5(
+             title, content='', contentless_delete=1, tokenize='trigram');
+         CREATE TRIGGER IF NOT EXISTS item_title_fts_ai AFTER INSERT ON item BEGIN
+             INSERT OR REPLACE INTO item_title_fts(rowid, title) VALUES (new.rowid, new.title);
+         END;
+         CREATE TRIGGER IF NOT EXISTS item_title_fts_ad AFTER DELETE ON item BEGIN
+             DELETE FROM item_title_fts WHERE rowid = old.rowid;
+         END;
+         CREATE TRIGGER IF NOT EXISTS item_title_fts_au AFTER UPDATE OF title ON item
+             WHEN old.title IS NOT new.title BEGIN
+             INSERT OR REPLACE INTO item_title_fts(rowid, title) VALUES (new.rowid, new.title);
+         END;
+         INSERT INTO index_meta (key, value)
+             SELECT 'title_fts_backfill_upto', CAST(COALESCE(MAX(rowid), 0) AS TEXT) FROM item
+             WHERE true
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+    )?;
+    Ok(())
+}
+
+const TITLE_FTS_BACKFILL_KEY: &str = "title_fts_backfill_upto";
+
+/// True while rows that predate the title index are still being indexed.
+pub fn title_fts_backfill_pending(db: &Connection) -> Result<bool, StoreError> {
+    Ok(get_meta(db, TITLE_FTS_BACKFILL_KEY)?
+        .and_then(|v| v.parse::<i64>().ok())
+        .is_some_and(|upto| upto > 0))
+}
+
+/// Index up to `batch` pre-migration rows (highest rowids first). Returns
+/// true once the backfill is complete. Small batches keep each call short
+/// so the shared connection is never held for long.
+pub fn backfill_title_fts_batch(db: &Connection, batch: usize) -> Result<bool, StoreError> {
+    let upto = match get_meta(db, TITLE_FTS_BACKFILL_KEY)?.and_then(|v| v.parse::<i64>().ok()) {
+        Some(upto) if upto > 0 => upto,
+        _ => return Ok(true),
+    };
+    let low = upto.saturating_sub(batch.max(1) as i64).max(0);
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        db.execute(
+            "INSERT OR REPLACE INTO item_title_fts(rowid, title)
+             SELECT rowid, title FROM item WHERE rowid > ?1 AND rowid <= ?2",
+            params![low, upto],
+        )?;
+        set_meta(db, TITLE_FTS_BACKFILL_KEY, &low.to_string())?;
+        Ok::<(), StoreError>(())
+    })();
+    match result {
+        Ok(()) => {
+            db.execute_batch("COMMIT")?;
+            Ok(low == 0)
+        }
+        Err(error) => {
+            let _ = db.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 fn migration_v5(conn: &Connection) -> Result<(), StoreError> {
     let mut has_launch_count = false;
     let mut has_last_launched_at = false;
@@ -672,6 +767,98 @@ fn migration_v5(conn: &Connection) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use crate::model::SearchItem;
+
+    fn plan(db: &Connection, sql: &str) -> String {
+        let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = stmt
+            .query_map(params!["x"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.join(" | ")
+    }
+
+    #[test]
+    fn quick_launch_lookups_use_indexes() {
+        let db = open_memory().unwrap();
+        for sql in [
+            FIND_BY_PATH_SQL,
+            FIND_APP_BY_NORMALIZED_PATH_SQL,
+            FIND_BY_TITLE_SQL,
+            QUICK_LAUNCH_FREQUENT_SQL,
+            QUICK_LAUNCH_RECENT_SQL,
+        ] {
+            let plan = plan(&db, sql);
+            assert!(plan.contains("USING INDEX"), "full scan for {sql}: {plan}");
+        }
+    }
+
+    #[test]
+    fn find_item_by_path_or_title_matches_case_and_separators() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &app("a", "Alpha", 0, 0)).unwrap();
+        let exact = "C:\\Program Files\\Alpha\\Alpha.exe";
+        assert_eq!(find_item_by_path_or_title(&db, exact).unwrap().unwrap().0, "a");
+        assert_eq!(
+            find_item_by_path_or_title(&db, "c:/program files/alpha/ALPHA.EXE").unwrap().unwrap().0,
+            "a"
+        );
+        assert_eq!(find_item_by_path_or_title(&db, "alpha").unwrap().unwrap().0, "a");
+        assert!(find_item_by_path_or_title(&db, "C:\\missing.exe").unwrap().is_none());
+    }
+
+    fn file(name: &str, dir: &str) -> SearchItem {
+        let path = format!("C:\\data\\{dir}\\{name}");
+        SearchItem::new(&format!("file:{}", path.to_ascii_lowercase()), "file", name, &path)
+    }
+
+    #[test]
+    fn title_index_recall_matches_substrings_and_tracks_changes() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &file("annual-Report-2024.pdf", "finance")).unwrap();
+        upsert_item(&db, &file("notes.txt", "reports")).unwrap();
+        assert!(!title_fts_backfill_pending(&db).unwrap());
+
+        let hits = search_file_folder_items(&db, "report", true, true, 10).unwrap();
+        assert_eq!(hits.len(), 1, "title match only: {hits:?}");
+        // Extra terms may match the path.
+        let hits = search_file_folder_items(&db, "finance report", true, true, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let hits = search_file_folder_items(&db, "notes reports", true, true, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+
+        delete_item(&db, &file("annual-Report-2024.pdf", "finance").id).unwrap();
+        assert!(search_file_folder_items(&db, "report", true, true, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn title_index_backfills_rows_from_before_the_upgrade() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for migrate in [migration_v1, migration_v2, migration_v3, migration_v4, migration_v5] {
+            migrate(&db).unwrap();
+        }
+        db.pragma_update(None, "user_version", 5_i64).unwrap();
+        db.execute_batch("COMMIT").unwrap();
+        for i in 0..2_500 {
+            upsert_item(&db, &file(&format!("legacy-{i:04}.log"), "old")).unwrap();
+        }
+        upsert_item(&db, &file("quarterly-message.txt", "old")).unwrap();
+
+        init_schema(&db).unwrap();
+        assert!(title_fts_backfill_pending(&db).unwrap());
+        // Recall still works through the LIKE fallback meanwhile.
+        assert_eq!(search_file_folder_items(&db, "message", true, true, 5).unwrap().len(), 1);
+
+        let mut steps = 0;
+        while !backfill_title_fts_batch(&db, 1_000).unwrap() {
+            steps += 1;
+            assert!(steps < 10);
+        }
+        assert!(!title_fts_backfill_pending(&db).unwrap());
+        assert_eq!(search_file_folder_items(&db, "message", true, true, 5).unwrap().len(), 1);
+        assert_eq!(search_file_folder_items(&db, "legacy-0042", true, true, 5).unwrap().len(), 1);
+    }
 
     fn app(id: &str, title: &str, launches: u32, last: i64) -> SearchItem {
         SearchItem::from_owned_with_usage(

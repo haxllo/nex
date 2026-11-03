@@ -959,11 +959,22 @@ impl RuntimeWorker {
     }
 
     fn save_ql_snapshot_to(path: &std::path::Path, items: &[crate::overlay::model::QuickLaunchItem]) {
+        // Runs on every show and every cleared query: skip the disk write
+        // when nothing changed since the last save to this path.
+        static LAST_SAVED: std::sync::Mutex<Option<(std::path::PathBuf, String)>> =
+            std::sync::Mutex::new(None);
+        let Ok(json) = serde_json::to_string(items) else {
+            return;
+        };
+        let mut last = LAST_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_ref().is_some_and(|(p, j)| p == path && *j == json) {
+            return;
+        }
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(json) = serde_json::to_string(items) {
-            let _ = std::fs::write(path, json);
+        if std::fs::write(path, &json).is_ok() {
+            *last = Some((path.to_path_buf(), json));
         }
     }
 
@@ -1814,14 +1825,9 @@ impl RuntimeWorker {
                 ));
                 match action {
                     HotkeyAction::ShowAndFocus => {
-                        // Warm search indexes synchronously before showing the
-                        // overlay.  The user can't type until the window appears
-                        // (~160ms animation) and the IPC channel is live, so
-                        // the ~50ms warmup finishes well before the first char.
-                        // Uses try_read() — if the background indexer holds the
-                        // write lock (e.g. first-run rebuild), skip the warmup
-                        // and show immediately; the query path re-warms on the
-                        // first keystroke.
+                        // Kick off index warming on a background thread; never
+                        // block the show on it. try_read(): if a writer holds
+                        // the service, skip and show immediately.
                         match self.service.try_read() {
                             Ok(guard) => guard.warm_search_cache(),
                             Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
@@ -1892,9 +1898,9 @@ impl RuntimeWorker {
                 crate::overlay::hotkey::finish_bare_win_press();
             }
             OverlayEvent::ExternalShow => {
-                // Same sync warmup as ShowAndFocus — user can't type until
-                // window appears + IPC handler is live.
-                if let Ok(guard) = self.service.read() {
+                // Same background warmup as ShowAndFocus; try_read so a
+                // writer never delays the show.
+                if let Ok(guard) = self.service.try_read() {
                     guard.warm_search_cache();
                 }
                 spawn_hot_prefix_prefetch(&self.service);

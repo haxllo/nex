@@ -3625,9 +3625,12 @@
       // Called by Rust via evaluate_script after every Show + painted.
       // Reset scroll here too — covers any case where the state-push
       // reset was dropped (race, coalesced render, etc).
+      // A focus handoff can run after the user starts typing; don't select
+      // text when the search input already owns focus.
+      const selectExistingQuery = document.activeElement !== input && input.value.length > 0;
       scrollToInstant(0);
       input.focus();
-      input.select();
+      if (selectExistingQuery) input.select();
     },
   };
 

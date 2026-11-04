@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::config::SearchMode;
 use crate::core_service::CoreService;
 use crate::model::SearchItem;
 
@@ -292,6 +293,65 @@ fn dispatch(
             *published = Some((generation, items));
             IpcResponse::ok(response)
         }
+        // Writes the UI must not perform itself: the indexer owns the store.
+        "record_launch" => {
+            let id = request.params.get("id").and_then(Value::as_str).unwrap_or("");
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            match service.record_successful_launch_by_id(id) {
+                Ok(()) => IpcResponse::ok(json!({})),
+                Err(error) => IpcResponse::error(error.to_string()),
+            }
+        }
+        "record_selection" => {
+            let query = request
+                .params
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let id = request.params.get("id").and_then(Value::as_str).unwrap_or("");
+            let mode = match request
+                .params
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("all")
+            {
+                "apps" => SearchMode::Apps,
+                "files" => SearchMode::Files,
+                "folders" => SearchMode::Folders,
+                "actions" => SearchMode::Actions,
+                "clipboard" => SearchMode::Clipboard,
+                _ => SearchMode::All,
+            };
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            match service.record_query_selection_hint(query, mode, id) {
+                Ok(()) => IpcResponse::ok(json!({})),
+                Err(error) => IpcResponse::error(error.to_string()),
+            }
+        }
+        "recent_documents" => {
+            const REFRESH_SECS: i64 = 600;
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            if service.recent_documents_scan_due(REFRESH_SECS) {
+                match service.apply_recent_documents() {
+                    Ok(applied) if applied > 0 => crate::logging::info(&format!(
+                        "[nex-indexer] recent_documents applied={applied}"
+                    )),
+                    Ok(_) => {}
+                    Err(error) => crate::logging::warn(&format!(
+                        "[nex-indexer] recent_documents failed: {error}"
+                    )),
+                }
+            }
+            IpcResponse::ok(json!({}))
+        }
+        "delete_item" => {
+            let id = request.params.get("id").and_then(Value::as_str).unwrap_or("");
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            match service.delete_item_by_id(id) {
+                Ok(()) => IpcResponse::ok(json!({})),
+                Err(error) => IpcResponse::error(error.to_string()),
+            }
+        }
         "search" => {
             let query = request
                 .params
@@ -383,6 +443,22 @@ pub fn shutdown_indexer(addr: &str) -> bool {
         Ok(response) => response.ok,
         Err(_) => !indexer_is_alive(addr),
     }
+}
+
+/// Fire-and-forget command to the indexer.
+///
+/// The UI process must not write the store: launch history, query selections,
+/// MRU scans, and prune deletions are forwarded here. Failures are dropped —
+/// the next snapshot/delta reconciles any missed write.
+pub fn send_indexer_command(method: &'static str, params: Value) {
+    if std::env::var("NEX_UI_PROCESS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("nex-indexer-cmd".into())
+        .spawn(move || {
+            let _ = ipc_call(INDEXER_ADDR, &IpcRequest::new(method, params));
+        });
 }
 
 /// Path to the indexer binary that ships beside the current executable.

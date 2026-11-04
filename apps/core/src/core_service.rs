@@ -142,6 +142,9 @@ pub struct CoreService {
     /// True when this service keeps every store row in `cached_items` (the
     /// indexer's publishing mode) and must not compact on refresh.
     keep_all_items: bool,
+    /// True for the UI-process service: it reads the store but must never
+    /// write it. Mutations are forwarded to the indexer, which owns writes.
+    ui_client: bool,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
@@ -280,6 +283,7 @@ impl CoreService {
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
             keep_all_items: !compact,
+            ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
@@ -637,6 +641,10 @@ impl CoreService {
         self.cached_len()
     }
 
+    pub fn is_ui_client(&self) -> bool {
+        self.ui_client
+    }
+
     pub fn reload_cache_from_store(&self) -> Result<usize, ServiceError> {
         self.refresh_cache_from_store()?;
         Ok(self.cached_len())
@@ -750,8 +758,16 @@ impl CoreService {
                             error
                         ));
                         if should_prune_after_launch_error(&item, &error) {
-                            if let Err(e) = index_store::delete_item(&*self.db(), &item.id) {
-                                crate::logging::warn(&format!("[nex] delete_item after launch error failed: {e}"));
+                            if self.ui_client {
+                                crate::ipc::send_indexer_command(
+                                    "delete_item",
+                                    serde_json::json!({ "id": item.id }),
+                                );
+                            } else if let Err(e) = index_store::delete_item(&*self.db(), &item.id)
+                            {
+                                crate::logging::warn(&format!(
+                                    "[nex] delete_item after launch error failed: {e}"
+                                ));
                             }
                             self.remove_cached_item_by_id(&item.id);
                         }
@@ -773,6 +789,26 @@ impl CoreService {
             return Ok(());
         }
         if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
+            return Ok(());
+        }
+        if self.ui_client {
+            // The indexer owns the store; it records the selection. Drop the
+            // local personalization cache so the next read picks it up.
+            {
+                let mut cache = match self.personalization_cache.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                cache.invalidate();
+            }
+            crate::ipc::send_indexer_command(
+                "record_selection",
+                serde_json::json!({
+                    "query": query_norm,
+                    "mode": search_mode_key(mode),
+                    "id": item_id,
+                }),
+            );
             return Ok(());
         }
         index_store::record_query_selection(
@@ -2362,6 +2398,15 @@ impl CoreService {
         updated.last_accessed_epoch_secs = now.max(updated.last_accessed_epoch_secs);
         updated.last_launched_at = now.max(updated.last_launched_at);
 
+        let id = updated.id.clone();
+        if self.ui_client {
+            // The indexer owns the store. Bump the local cache now so ranking
+            // and Quick Launch reflect the launch immediately; the next delta
+            // carries the authoritative row.
+            self.upsert_cached_item(updated);
+            crate::ipc::send_indexer_command("record_launch", serde_json::json!({ "id": id }));
+            return Ok(());
+        }
         index_store::upsert_item(&self.db(), &updated)?;
         self.upsert_cached_item(updated);
         Ok(())

@@ -544,46 +544,18 @@ fn media_control(action: crate::media::MediaAction, overlay: &NativeOverlayShell
         .ok();
 }
 
-/// How often the recent-documents recency overlay is allowed to re-scan the
-/// shell MRU. Launching an app or opening a document is what moves the MRU,
-/// and the overlay only *advances* recency, so a coarse interval loses
-/// nothing while keeping the service write lock idle.
-const RECENT_DOCUMENTS_REFRESH_SECS: i64 = 600;
-
 /// The "Show all apps" result row is parked: the expanded view browses
 /// usage-ranked apps instead, and a full-index row inside every app query
 /// is noise. Flip back to `true` to restore it.
 const SHOW_ALL_APPS_ENTRY: bool = false;
 
-/// Apply the recent-documents recency overlay on a background thread.
+/// Ask the indexer to apply the recent-documents recency overlay.
 ///
-/// Takes the service write lock, so it must never run on the event-loop
-/// thread: the search worker holds a read guard while ranking, and blocking
-/// that would stall the first keystroke.
-fn spawn_recent_documents_refresh(service: &Arc<RwLock<CoreService>>) {
-    let due = match service.try_read() {
-        Ok(guard) => guard.recent_documents_scan_due(RECENT_DOCUMENTS_REFRESH_SECS),
-        Err(_) => false,
-    };
-    if !due {
-        return;
-    }
-
-    let service = Arc::clone(service);
-    let _ = std::thread::Builder::new()
-        .name("nex-recent-documents".into())
-        .spawn(move || match service.write() {
-            Ok(guard) => match guard.apply_recent_documents() {
-                Ok(applied) if applied > 0 => {
-                    log_info(&format!("[nex] recent_documents applied={applied}"))
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    log_info(&format!("[nex] recent_documents failed: {error}"))
-                }
-            },
-            Err(_) => log_info("[nex] recent_documents skipped (service busy)"),
-        });
+/// The indexer owns the store and the shell-MRU scan; it enforces its own
+/// interval, so a per-show request is cheap. Sending it off-thread keeps the
+/// event loop free.
+fn spawn_recent_documents_refresh(_service: &Arc<RwLock<CoreService>>) {
+    crate::ipc::send_indexer_command("recent_documents", serde_json::Value::Null);
 }
 
 /// All mutable state owned by the runtime worker thread. The

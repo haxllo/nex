@@ -733,6 +733,52 @@ const OUTSIDE_CLICK_DEDUPE_MS: u64 = 150;
 static OUTSIDE_CLICK_CLOCK: OnceLock<Instant> = OnceLock::new();
 static LAST_OUTSIDE_CLICK_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Click-away fallback for the window before the elevated helper connects.
+///
+/// At startup the helper takes ~3 s to launch, connect, and install its
+/// `WH_MOUSE_LL` hook. During that gap the Medium-IL hook is UIPI-blocked for
+/// elevated windows and the helper has nothing to forward, so a click on
+/// Task Manager was lost. Polling the async button state is hook-free and
+/// therefore not UIPI-gated; it runs only while the overlay is visible and the
+/// helper is not yet active, so steady-state behaviour is unchanged.
+fn start_click_away_fallback(should_exit: Arc<AtomicBool>) {
+    let spawned = thread::Builder::new()
+        .name("nex-click-away-poll".into())
+        .spawn(move || {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+            };
+
+            let mut was_down = false;
+            loop {
+                if should_exit.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(40));
+
+                // The helper's hook covers elevated input once it is live.
+                if !OVERLAY_VISIBLE.load(Ordering::SeqCst) || HELPER_ACTIVE.load(Ordering::SeqCst) {
+                    was_down = false;
+                    continue;
+                }
+
+                let down = unsafe {
+                    (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0
+                        || (GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000) != 0
+                };
+                if down && !was_down {
+                    emit_outside_click_if_outside("poll");
+                }
+                was_down = down;
+            }
+        });
+    if let Err(error) = spawned {
+        logging::warn(&format!(
+            "[nex] failed to spawn click-away fallback: {error}"
+        ));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HotkeyListener
 // ---------------------------------------------------------------------------
@@ -787,6 +833,8 @@ impl HotkeyListener {
 
         let should_exit = Arc::new(AtomicBool::new(false));
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
+
+        start_click_away_fallback(Arc::clone(&should_exit));
 
         *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
 

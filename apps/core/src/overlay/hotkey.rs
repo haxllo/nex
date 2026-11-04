@@ -726,7 +726,7 @@ fn emit_outside_click_if_outside(source: &str) {
     let clock = OUTSIDE_CLICK_CLOCK.get_or_init(Instant::now);
     let now_ms = clock.elapsed().as_millis() as u64;
     let last_ms = LAST_OUTSIDE_CLICK_MS.swap(now_ms, Ordering::SeqCst);
-    if now_ms.saturating_sub(last_ms) < OUTSIDE_CLICK_DEDUPE_MS {
+    if last_ms != u64::MAX && now_ms.saturating_sub(last_ms) < OUTSIDE_CLICK_DEDUPE_MS {
         return;
     }
 
@@ -744,8 +744,14 @@ fn emit_outside_click_if_outside(source: &str) {
 /// Both the UI hook and the helper report a normal-window click; collapse the
 /// pair into one dismissal.
 const OUTSIDE_CLICK_DEDUPE_MS: u64 = 150;
+/// Zero point for the dedupe clock. Created lazily, so the *first* evaluation
+/// always measures ~0 ms — the sentinel below makes it pass anyway.
 static OUTSIDE_CLICK_CLOCK: OnceLock<Instant> = OnceLock::new();
-static LAST_OUTSIDE_CLICK_MS: AtomicU64 = AtomicU64::new(0);
+/// Timestamp of the last emitted dismissal; `u64::MAX` means "none yet".
+/// Without the sentinel the first click of the process always looked 0 ms
+/// after a previous one and was silently deduped (the "click Task Manager
+/// twice on the first show" report).
+static LAST_OUTSIDE_CLICK_MS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Hook-free click-away poll.
 ///

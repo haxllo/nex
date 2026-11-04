@@ -740,15 +740,14 @@ pub(crate) struct HotkeyListener {
     inner: Option<HotkeyListenerInner>,
 }
 
-/// State shared between the listener and the late helper-setup thread.
+/// State shared between the listener and the helper supervisor thread.
 /// The helper connects asynchronously after the in-process hook is live,
 /// so startup never blocks on PowerShell/schtasks/pipe retries.
 struct HelperState {
-    /// True once the helper pipe reader is running.
+    /// True while the supervisor has a live helper pipe (detection owner).
     active: bool,
     /// Non-zero for direct-spawn mode, 0 for scheduled-task mode.
     helper_process_handle: Option<isize>,
-    pipe_reader_thread: Option<thread::JoinHandle<()>>,
 }
 
 struct HotkeyListenerInner {
@@ -756,7 +755,7 @@ struct HotkeyListenerInner {
     hook_thread: Option<thread::JoinHandle<()>>,
     thread_id: Arc<OnceLock<u32>>,
     helper: Arc<Mutex<HelperState>>,
-    /// Late helper-setup thread (detached on drop; self-exits on shutdown).
+    /// Late helper supervisor thread (detached on drop; self-exits on shutdown).
     helper_thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -1072,159 +1071,35 @@ impl HotkeyListener {
             }
         }
 
-        // --- Late helper setup (async) ---
-        // The in-process hook is live. Spawn the elevated-helper dance on a
-        // side thread: task check, schtasks /run, pipe connect. When the
-        // helper connects, it takes over detection (HELPER_ACTIVE) and the
-        // hook thread is asked to exit. Failing that, the hook keeps working.
+        // --- Late helper supervision (async) ---
+        // The in-process hook is live. A supervisor thread runs the
+        // elevated-helper dance (task check, schtasks /run, pipe connect),
+        // owns the pipe while it lasts, and reconnects with backoff when the
+        // helper dies. Failing that, the hook keeps working.
         let helper = Arc::new(Mutex::new(HelperState {
             active: false,
             helper_process_handle: None,
-            pipe_reader_thread: None,
         }));
         let helper_thread = if try_helper {
             let should_exit_h = should_exit.clone();
-            let _thread_id_h = thread_id.clone();
             let helper_h = helper.clone();
             let event_tx_h = event_tx.clone();
             let required_mods_h = required_mods.clone();
             let hotkey_str_h = hotkey_str.to_string();
             thread::Builder::new()
-                .name("nex-helper-setup".into())
+                .name("nex-helper-supervisor".into())
                 .spawn(move || {
-                    if should_exit_h.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    match spawn_and_connect_helper(
-                        target_key, target_is_win, &required_mods_h, &hotkey_str_h,
-                    ) {
-                        Ok((helper_handle, pipe_file)) => {
-                            if should_exit_h.load(Ordering::SeqCst) {
-                                // Shutdown raced us — don't install, kill the helper.
-                                kill_helper_process(helper_handle);
-                                return;
-                            }
-                            logging::info("[nex] hotkey: using elevated helper for detection");
-                            let pipe_event_tx = event_tx_h;
-                            match thread::Builder::new()
-                                .name("NexHelper-pipe-reader".into())
-                                .spawn(move || {
-                                    use std::io::BufRead;
-                                    let reader = std::io::BufReader::new(pipe_file);
-                                    for line in reader.lines() {
-                                        match line {
-                                            Ok(l) if l == "HOTKEY" => {
-                                                logging::info("[nex] pipe: HOTKEY received from helper");
-                                                // Stamped on arrival: the helper's copy of a
-                                                // press that raw input also saw lands here
-                                                // within the same 50 ms gate window.
-                                                let _ = send_hotkey_event(&pipe_event_tx, 1);
-                                            }
-                                            Ok(l) if l == "SUPPRESS_ON" => {
-                                                crate::overlay::hotkey::set_suppress_focus_escape(true);
-                                            }
-                                            Ok(l) if l == "SUPPRESS_OFF" => {
-                                                crate::overlay::hotkey::set_suppress_focus_escape(false);
-                                            }
-                                            Ok(_) => {} // ignore other lines
-                                            Err(_) => break, // pipe disconnected
-                                        }
-                                    }
-                                    // Pipe EOF/error: the helper is gone. Clear the
-                                    // flag so the next hotkey change falls back to
-                                    // full re-registration instead of signalling a
-                                    // dead process. Also drop focus-escape
-                                    // suppression: a SUPPRESS_ON without its OFF
-                                    // would stick otherwise.
-                                    HELPER_ACTIVE.store(false, Ordering::SeqCst);
-                                    crate::overlay::hotkey::set_suppress_focus_escape(false);
-                                    logging::warn(
-                                        "[nex] helper pipe closed — live-update path disabled until a new helper connects",
-                                    );
-                                })
-                            {
-                                Ok(pipe_reader_thread) => {
-                                    HELPER_ACTIVE.store(true, Ordering::SeqCst);
-                                    // KEEP the hook thread alive: its LL hook
-                                    // passes everything through while
-                                    // HELPER_ACTIVE is set (no double-fire),
-                                    // but its message loop still owns the
-                                    // RegisterHotKeyW fallback registration —
-                                    // live hotkey updates swap that via
-                                    // WM_NEX_REREGISTER. Killing this thread
-                                    // left non-Win combos undetectable until
-                                    // restart.
-                                    if let Ok(mut st) = helper_h.lock() {
-                                        st.active = true;
-                                        st.helper_process_handle = Some(helper_handle);
-                                        st.pipe_reader_thread = Some(pipe_reader_thread);
-                                    }
-                                }
-                                Err(e) => {
-                                    logging::warn(&format!(
-                                        "[nex] failed to spawn pipe reader: {e}"
-                                    ));
-                                    kill_helper_process(helper_handle);
-                                }
-                            }
-                            // Auxiliary pipes connect AFTER detection flows:
-                            // best-effort plumbing must never gate the pipe
-                            // reader or HELPER_ACTIVE. Small budgets so a
-                            // missing server costs ~1s, not ~8s.
-                            // Helper command pipe (simulation transport for
-                            // send_helper_key). Server end is inbound, so the
-                            // client opens write-only.
-                            let cmd_pipe_name = format!(
-                                r"\\.\pipe\NexHelperCmd\{}",
-                                std::process::id()
-                            );
-                            match connect_pipe(&cmd_pipe_name, 0x40000000, 3) {
-                                Ok(cmd_file) => {
-                                    if let Ok(mut slot) = HELPER_CMD.lock() {
-                                        *slot = Some(cmd_file);
-                                    }
-                                }
-                                Err(e) => logging::warn(&format!(
-                                    "[nex] helper cmd pipe unavailable: {e}"
-                                )),
-                            }
-                            // Helper log pipe: forward helper
-                            // diagnostics into nex's log.
-                            let log_pipe_name = format!(
-                                r"\\.\pipe\NexHelperLog\{}",
-                                std::process::id()
-                            );
-                            match connect_pipe(&log_pipe_name, 0x80000000, 3) {
-                                Ok(log_file) => {
-                                    match thread::Builder::new()
-                                        .name("NexHelper-log-reader".into())
-                                        .spawn(move || {
-                                            use std::io::BufRead;
-                                            let reader = std::io::BufReader::new(log_file);
-                                            for line in reader.lines().flatten() {
-                                                logging::info(&format!("[helper] {line}"));
-                                            }
-                                        }) {
-                                        Ok(_) => {}
-                                        Err(e) => logging::warn(&format!(
-                                            "[nex] helper log reader spawn failed: {e}"
-                                        )),
-                                    }
-                                }
-                                Err(e) => logging::warn(&format!(
-                                    "[nex] helper log pipe unavailable: {e}"
-                                )),
-                            }
-                        }
-                        Err(e) => {
-                            if !should_exit_h.load(Ordering::SeqCst) {
-                                logging::warn(&format!("[nex] helper elevation failed: {e}"));
-                                logging::info("[nex] falling back to in-process hook thread");
-                            }
-                        }
-                    }
+                    run_helper_supervisor(
+                        target_key,
+                        target_is_win,
+                        required_mods_h,
+                        hotkey_str_h,
+                        event_tx_h,
+                        helper_h,
+                        should_exit_h,
+                    );
                 })
-                .map_err(|e| format!("failed to spawn helper setup thread: {e}"))?
+                .map_err(|e| format!("failed to spawn helper supervisor: {e}"))?
                 .into()
         } else {
             None
@@ -1253,13 +1128,11 @@ impl HotkeyListener {
             Some(inner) => {
                 if let Ok(st) = inner.helper.lock() {
                     if st.active {
-                        // Helper mode: the pipe reader is the live
-                        // detection path. The hook thread intentionally
-                        // exits after handover — its state is irrelevant.
+                        // Helper mode: the supervisor thread reads the pipe
+                        // and reconnects on its own; HELPER_ACTIVE is the
+                        // liveness signal for the detection path.
                         return !inner.should_exit.load(Ordering::SeqCst)
-                            && st.pipe_reader_thread
-                                .as_ref()
-                                .is_some_and(|t| !t.is_finished());
+                            && HELPER_ACTIVE.load(Ordering::SeqCst);
                     }
                 }
                 // Hook mode (helper pending or skipped): thread_id is set
@@ -1314,11 +1187,9 @@ impl Drop for HotkeyListener {
             if let Some(handle) = handle {
                 kill_helper_process(handle);
             }
-            // The late setup thread may still be mid-spawn; it checks
+            // The late supervisor thread may still be mid-spawn; it checks
             // should_exit and kills the helper itself if it connects late.
             drop(inner.helper_thread.take());
-            // Drop JoinHandle without joining (detaches the thread).
-            drop(inner.helper.lock().ok().and_then(|mut st| st.pipe_reader_thread.take()));
 
             // Hook mode: post WM_QUIT and detach — must not join here
             // because Drop runs on the runtime worker thread and joining
@@ -1352,6 +1223,148 @@ fn kill_helper_process(handle: isize) {
             .creation_flags(0x08000000)
             .output();
     }
+}
+
+/// Keep the elevated helper alive for the lifetime of the listener.
+///
+/// The in-process hook is always live, so the helper is a supplement: when it
+/// is unavailable the hotkey still works for normal windows. On pipe EOF the
+/// helper is gone, so this retries with capped exponential backoff instead of
+/// leaving elevated-window detection degraded until the next UI restart.
+fn run_helper_supervisor(
+    target_key: u32,
+    target_is_win: bool,
+    required_mods: Vec<u32>,
+    hotkey: String,
+    event_tx: Sender<OverlayEvent>,
+    helper: Arc<Mutex<HelperState>>,
+    should_exit: Arc<AtomicBool>,
+) {
+    const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+    let mut backoff = INITIAL_BACKOFF;
+    let mut reconnect = false;
+
+    loop {
+        if should_exit.load(Ordering::SeqCst) {
+            return;
+        }
+        if reconnect {
+            // The previous helper is gone or wedged; make sure the scheduled
+            // task cannot leave a second detector running.
+            kill_stale_helper();
+        }
+        reconnect = true;
+
+        match spawn_and_connect_helper(target_key, target_is_win, &required_mods, &hotkey) {
+            Ok((helper_handle, pipe_file)) => {
+                if should_exit.load(Ordering::SeqCst) {
+                    kill_helper_process(helper_handle);
+                    return;
+                }
+                backoff = INITIAL_BACKOFF;
+                HELPER_ACTIVE.store(true, Ordering::SeqCst);
+                if let Ok(mut st) = helper.lock() {
+                    st.active = true;
+                    st.helper_process_handle = Some(helper_handle);
+                }
+                logging::info("[nex] hotkey: using elevated helper for detection");
+                connect_helper_aux_pipes();
+
+                read_helper_pipe(pipe_file, &event_tx);
+
+                HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                set_suppress_focus_escape(false);
+                if let Ok(mut st) = helper.lock() {
+                    st.active = false;
+                }
+                if should_exit.load(Ordering::SeqCst) {
+                    return;
+                }
+                logging::warn("[nex] helper pipe closed; reconnecting elevated helper");
+            }
+            Err(error) => {
+                if should_exit.load(Ordering::SeqCst) {
+                    return;
+                }
+                logging::warn(&format!(
+                    "[nex] elevated helper unavailable ({error}); in-process hook stays active"
+                ));
+            }
+        }
+
+        // Slice the backoff so quit is never held up by the retry timer.
+        let mut waited = Duration::ZERO;
+        while waited < backoff {
+            if should_exit.load(Ordering::SeqCst) {
+                return;
+            }
+            let slice = Duration::from_millis(200).min(backoff - waited);
+            thread::sleep(slice);
+            waited += slice;
+        }
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+/// Consume the detection pipe until the helper goes away.
+fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(pipe_file);
+    for line in reader.lines() {
+        match line {
+            Ok(l) if l == "HOTKEY" => {
+                logging::info("[nex] pipe: HOTKEY received from helper");
+                // Stamped on arrival: the helper's copy of a press that raw
+                // input also saw lands here within the same 50 ms gate.
+                let _ = send_hotkey_event(event_tx, 1);
+            }
+            Ok(l) if l == "SUPPRESS_ON" => set_suppress_focus_escape(true),
+            Ok(l) if l == "SUPPRESS_OFF" => set_suppress_focus_escape(false),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// Best-effort auxiliary pipes. Never gates detection.
+fn connect_helper_aux_pipes() {
+    let cmd_pipe_name = format!(r"\\.\pipe\NexHelperCmd\{}", std::process::id());
+    match connect_pipe(&cmd_pipe_name, 0x40000000, 3) {
+        Ok(cmd_file) => {
+            if let Ok(mut slot) = HELPER_CMD.lock() {
+                *slot = Some(cmd_file);
+            }
+        }
+        Err(e) => logging::warn(&format!("[nex] helper cmd pipe unavailable: {e}")),
+    }
+
+    let log_pipe_name = format!(r"\\.\pipe\NexHelperLog\{}", std::process::id());
+    match connect_pipe(&log_pipe_name, 0x80000000, 3) {
+        Ok(log_file) => {
+            match thread::Builder::new()
+                .name("NexHelper-log-reader".into())
+                .spawn(move || {
+                    use std::io::BufRead;
+                    let reader = std::io::BufReader::new(log_file);
+                    for line in reader.lines().flatten() {
+                        logging::info(&format!("[helper] {line}"));
+                    }
+                }) {
+                Ok(_) => {}
+                Err(e) => logging::warn(&format!("[nex] helper log reader spawn failed: {e}")),
+            }
+        }
+        Err(e) => logging::warn(&format!("[nex] helper log pipe unavailable: {e}")),
+    }
+}
+
+/// Clear a helper left over from a previous connection before reconnecting.
+fn kill_stale_helper() {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/IM", "NexHelper.exe"])
+        .creation_flags(0x08000000)
+        .output();
 }
 
 fn post_quit_to_thread(thread_id: u32) {

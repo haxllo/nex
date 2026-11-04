@@ -49,61 +49,12 @@ pub(crate) struct BackgroundIndexRefresh {
 #[cfg(target_os = "windows")]
 pub(crate) fn start_background_index_refresh(
     service: &Arc<RwLock<CoreService>>,
-    config: &Config,
+    _config: &Config,
     initial_cache_empty: bool,
     startup_started_at: Instant,
 ) -> BackgroundIndexRefresh {
-    if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
-        return start_ui_snapshot_sync(service, initial_cache_empty, startup_started_at);
-    }
-    let completed = Arc::new(AtomicBool::new(false));
-    let result = Arc::new(Mutex::new(None));
-    let completed_worker = completed.clone();
-    let result_worker = result.clone();
-    let worker_config = config.clone();
-    std::thread::spawn(move || {
-        // Catch panics so a buggy provider can never silently leave the main
-        // thread waiting on a completion flag that will never flip.
-        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let service = CoreService::new_background(worker_config)
-                .map_err(|e| format!("background service init failed: {e}"))?;
-            service
-                .with_runtime_providers()
-                .rebuild_index_incremental_with_report()
-                .map_err(|error| format!("background indexing failed: {error}"))
-        })) {
-            Ok(result) => result,
-            Err(payload) => {
-                let message = panic_message_to_string(&payload);
-                log_warn(&format!(
-                    "[nex] background indexing thread panicked: {message}"
-                ));
-                Err(format!("background indexing panicked: {message}"))
-            }
-        };
-        let mut slot = match result_worker.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *slot = Some(outcome);
-        completed_worker.store(true, Ordering::Release);
-    });
-
-    BackgroundIndexRefresh {
-        completed,
-        result,
-        cache_applied: false,
-        indexes_synced: false,
-        initial_cache_empty,
-        pending_discovery_reindex: false,
-        pending_discovery_reindex_due_at: None,
-        pending_discovery_reindex_requests: 0,
-        started_at: Instant::now(),
-        startup_started_at,
-        apply_started: Arc::new(AtomicBool::new(false)),
-        apply_done: Arc::new(AtomicBool::new(false)),
-        ui_snapshot_applied: None,
-    }
+    // The UI process never indexes: discovery and Tantivy live in the indexer.
+    start_ui_snapshot_sync(service, initial_cache_empty, startup_started_at)
 }
 
 /// `NexUIProcess` never discovers or indexes locally: it mirrors the indexer's
@@ -395,16 +346,6 @@ pub(crate) fn maybe_start_queued_discovery_reindex(
 #[cfg(target_os = "windows")]
 pub(crate) fn config_file_modified_time(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
-}
-
-fn panic_message_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
 }
 
 #[cfg(target_os = "windows")]

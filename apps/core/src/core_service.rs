@@ -221,17 +221,6 @@ impl CoreService {
         Self::with_loaded_cache_mode(config, db, false, false)
     }
 
-    /// Background rebuild service: SQLite + cache only, NO Tantivy index.
-    /// The background thread must never open its own IndexWriter on the
-    /// same directory as the main service — concurrent writers race and
-    /// corrupt meta.json (empty index). The main service syncs Tantivy
-    /// from cache after background completion instead.
-    pub(crate) fn new_background(config: Config) -> Result<Self, ServiceError> {
-        validate(&config).map_err(ServiceError::Config)?;
-        let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache(config, db, false)
-    }
-
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
         Self::with_loaded_cache_mode(config, db, enable_tantivy, true)
     }

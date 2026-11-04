@@ -16,7 +16,6 @@ const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let once = args.iter().any(|arg| arg == "--once");
     let flag_value = |flag: &str| -> Option<String> {
         args.iter()
             .position(|arg| arg == flag)
@@ -80,10 +79,6 @@ fn main() {
     }
 
     run_index_cycle(&service, &indexing, stdio_enabled);
-
-    if once {
-        std::process::exit(0);
-    }
 
     start_watchers(&service);
 

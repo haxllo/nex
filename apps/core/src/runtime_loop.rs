@@ -15,11 +15,7 @@ use crate::clipboard_history;
 #[cfg(target_os = "windows")]
 use crate::config::Config;
 #[cfg(target_os = "windows")]
-use crate::config::DiscoveryBackend;
-#[cfg(target_os = "windows")]
 use crate::core_service::CoreService;
-#[cfg(target_os = "windows")]
-use crate::everything_bridge::EverythingBridge;
 #[cfg(target_os = "windows")]
 use crate::overlay_state::{HotkeyAction, OverlayState};
 #[cfg(target_os = "windows")]
@@ -71,8 +67,6 @@ use crate::overlay::host::Host;
 #[cfg(target_os = "windows")]
 use crate::overlay::hotkey::HotkeyListener;
 #[cfg(target_os = "windows")]
-use crate::overlay::indexing_progress::run_with_progress_window;
-#[cfg(target_os = "windows")]
 use crate::overlay::{
     signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
 };
@@ -98,99 +92,22 @@ pub(crate) fn run_windows_runtime(
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(RwLock::new(service));
 
-    let initial_cache_empty = {
+    // The UI never indexes. The indexer owns discovery and Tantivy, and the
+    // snapshot sync below mirrors its published set. First-run indexing and
+    // the progress window are indexer concerns now.
+    let cached_items = {
         let guard = service.read().unwrap_or_else(|e| e.into_inner());
-        guard.cached_items_len() == 0
+        guard.cached_items_len()
     };
-
-    let ui_process = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
-    let background_index_refresh = if initial_cache_empty && !ui_process {
-        let use_progress_window = match runtime_config.file_discovery_backend {
-            DiscoveryBackend::Everything => false,
-            DiscoveryBackend::Walkdir => true,
-            DiscoveryBackend::Auto => match EverythingBridge::detect() {
-                Some(bridge) if bridge.is_service_running() => false,
-                _ => true,
-            },
-        };
-        if use_progress_window {
-            log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
-            let service_arc = service.clone();
-            let result = run_with_progress_window(move |pct| {
-                let svc = service_arc.write().unwrap_or_else(|e| e.into_inner());
-                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(pct);
-                let report = svc.rebuild_index_incremental_with_report();
-                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                report
-            });
-            match result {
-                Ok(report) => {
-                    log_info(&format!(
-                        "[nex] startup indexed_items={} discovered={} upserted={} removed={}",
-                        report.indexed_total,
-                        report.discovered_total,
-                        report.upserted_total,
-                        report.removed_total,
-                    ));
-                    for provider in &report.providers {
-                        log_info(&format!(
-                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
-                            provider.provider,
-                            provider.discovered,
-                            provider.upserted,
-                            provider.removed,
-                            provider.skipped,
-                            provider.elapsed_ms
-                        ));
-                    }
-                    // Sync Tantivy immediately so the first
-                    // keystroke never hits the CPU-bound cached_items
-                    // scan.  The progress window just closed and the
-                    // overlay + hotkey haven't been created yet, so
-                    // the user perceives no delay.
-                    if let Ok(svc) = service.write() {
-                        let _ = svc.sync_indexes_from_cache();
-                    }
-                    BackgroundIndexRefresh {
-                        completed: Arc::new(AtomicBool::new(true)),
-                        result: Arc::new(Mutex::new(Some(Ok(report)))),
-                        cache_applied: true,
-                        indexes_synced: true,
-                        initial_cache_empty: true,
-                        pending_discovery_reindex: false,
-                        pending_discovery_reindex_due_at: None,
-                        pending_discovery_reindex_requests: 0,
-                        started_at: Instant::now(),
-                        startup_started_at,
-                        apply_started: Arc::new(AtomicBool::new(true)),
-                        apply_done: Arc::new(AtomicBool::new(true)),
-                        ui_snapshot_applied: None,
-                    }
-                }
-                Err(e) => {
-                    log_warn(&format!("[nex] first-time indexing failed: {e}"));
-                    start_background_index_refresh(&service, &runtime_config, true, startup_started_at)
-                }
-            }
-        } else {
-            log_info("[nex] startup cached_items=0 (first-time indexing, Everything backend — async, no progress window)");
-            log_info(&format!(
-                "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=true cached_items=0",
-                startup_started_at.elapsed().as_millis()
-            ));
-            start_background_index_refresh(&service, &runtime_config, true, startup_started_at)
-        }
-    } else {
-        log_info(&format!(
-            "[nex] startup cached_items={} (async index sync scheduled{})",
-            {
-                let guard = service.read().unwrap_or_else(|e| e.into_inner());
-                guard.cached_items_len()
-            },
-            if ui_process { ", ui process" } else { "" }
-        ));
-        start_background_index_refresh(&service, &runtime_config, initial_cache_empty, startup_started_at)
-    };
+    log_info(&format!(
+        "[nex] startup cached_items={cached_items} (async index sync scheduled, ui process)"
+    ));
+    let background_index_refresh = start_background_index_refresh(
+        &service,
+        &runtime_config,
+        cached_items == 0,
+        startup_started_at,
+    );
 
     let plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {

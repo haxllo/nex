@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,6 +39,8 @@ pub(crate) struct BackgroundIndexRefresh {
     pub(crate) pending_discovery_reindex_requests: usize,
     pub(crate) started_at: Instant,
     pub(crate) startup_started_at: Instant,
+    pub(crate) apply_started: Arc<AtomicBool>,
+    pub(crate) apply_done: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "windows")]
@@ -51,13 +54,20 @@ pub(crate) fn start_background_index_refresh(
     let completed_worker = completed.clone();
     let result_worker = result.clone();
     let worker_config = config.clone();
+    let use_runtime_providers = std::env::var("NEX_UI_PROCESS").ok().as_deref() != Some("1");
     std::thread::spawn(move || {
         // Catch panics so a buggy provider can never silently leave the main
         // thread waiting on a completion flag that will never flip.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            CoreService::new_background(worker_config)
-                .map(|service| service.with_runtime_providers())
-                .and_then(|service| service.rebuild_index_incremental_with_report())
+            let service = CoreService::new_background(worker_config)
+                .map_err(|e| format!("background service init failed: {e}"))?;
+            let service = if use_runtime_providers {
+                service.with_runtime_providers()
+            } else {
+                service
+            };
+            service
+                .rebuild_index_incremental_with_report()
                 .map_err(|error| format!("background indexing failed: {error}"))
         })) {
             Ok(result) => result,
@@ -88,18 +98,21 @@ pub(crate) fn start_background_index_refresh(
         pending_discovery_reindex_requests: 0,
         started_at: Instant::now(),
         startup_started_at,
+        apply_started: Arc::new(AtomicBool::new(false)),
+        apply_done: Arc::new(AtomicBool::new(false)),
     }
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_apply_background_index_refresh(
-    service: &CoreService,
+    service: &Arc<RwLock<CoreService>>,
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
     if state.cache_applied {
         if !state.indexes_synced {
-            match service.sync_indexes_from_cache() {
+            let svc = service.read().unwrap_or_else(|e| e.into_inner());
+            match svc.sync_indexes_from_cache() {
                 Ok(()) => {
                     state.indexes_synced = true;
                     log_info("[nex] Tantivy/FTS5 search indexes synced from cache");
@@ -111,7 +124,7 @@ pub(crate) fn maybe_apply_background_index_refresh(
                 }
             }
         }
-        maybe_start_queued_discovery_reindex(service, state, runtime_config);
+        maybe_start_queued_discovery_reindex(&*service.read().unwrap_or_else(|e| e.into_inner()), state, runtime_config);
         return;
     }
     if !state.completed.load(Ordering::Acquire) {
@@ -139,56 +152,70 @@ pub(crate) fn maybe_apply_background_index_refresh(
                 report.upserted_total,
                 report.removed_total
             ));
-            match service.reload_cache_from_store() {
-                Ok(cached_items) => {
-                    log_info(&format!(
-                        "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
-                        startup_elapsed_ms,
-                        cached_items,
-                        state.initial_cache_empty
-                    ));
-                    for provider in &report.providers {
-                        log_info(&format!(
-                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
-                            provider.provider,
-                            provider.discovered,
-                            provider.upserted,
-                            provider.removed,
-                            provider.skipped,
-                            provider.elapsed_ms
-                        ));
+            for provider in &report.providers {
+                log_info(&format!(
+                    "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                    provider.provider,
+                    provider.discovered,
+                    provider.upserted,
+                    provider.removed,
+                    provider.skipped,
+                    provider.elapsed_ms
+                ));
+            }
+
+            // Heavy cache/index apply runs off the UI thread.
+            if !state.apply_started.swap(true, Ordering::AcqRel) {
+                let service = Arc::clone(service);
+                let apply_done = state.apply_done.clone();
+                std::thread::spawn(move || {
+                    let svc = service.read().unwrap_or_else(|e| e.into_inner());
+                    match svc.reload_cache_from_store() {
+                        Ok(cached_items) => {
+                            let startup_elapsed_ms = 0usize;
+                            let _ = startup_elapsed_ms;
+                            log_info(&format!(
+                                "[nex] startup_phase phase=cache_applied cached_items={}",
+                                cached_items
+                            ));
+                            if let Err(e) = svc.sync_indexes_from_cache() {
+                                log_warn(&format!(
+                                    "[nex] background indexing Tantivy sync failed: {e}"
+                                ));
+                            } else {
+                                log_info("[nex] Tantivy search index synced from cache");
+                            }
+                        }
+                        Err(error) => {
+                            log_warn(&format!(
+                                "[nex] background indexing cache refresh failed: {error}"
+                            ));
+                        }
                     }
-                    if let Err(e) = service.sync_indexes_from_cache() {
-                        log_warn(&format!(
-                        "[nex] background indexing Tantivy sync failed: {e}"
-                        ));
-                    } else {
-                        state.indexes_synced = true;
-                    log_info("[nex] Tantivy search index synced from cache");
-                    }
-                }
-                Err(error) => {
-                    log_warn(&format!(
-                        "[nex] background indexing cache refresh failed: {error}"
-                    ));
-                }
+                    apply_done.store(true, Ordering::Release);
+                });
             }
         }
         Some(Err(error)) => {
             log_warn(&format!("[nex] {error}"));
+            state.apply_done.store(true, Ordering::Release);
         }
         None => {
             log_warn("[nex] background indexing completed without result");
+            state.apply_done.store(true, Ordering::Release);
         }
     }
 
-    state.cache_applied = true;
+    if state.apply_done.load(Ordering::Acquire) {
+        state.cache_applied = true;
+        state.indexes_synced = true;
 
-    if state.pending_discovery_reindex {
-        log_info(
-            "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
-        );
-        maybe_start_queued_discovery_reindex(service, state, runtime_config);
+        if state.pending_discovery_reindex {
+            log_info(
+                "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
+            );
+            maybe_start_queued_discovery_reindex(&*service.read().unwrap_or_else(|e| e.into_inner()), state, runtime_config);
+        }
     }
 }
 

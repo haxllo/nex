@@ -75,6 +75,9 @@ pub(crate) fn search_overlay_results_with_session(
     if result_limit == 0 {
         return Ok(Vec::new());
     }
+    if let Ok(value) = std::env::var("NEX_UI_PROCESS") {
+        crate::runtime::log_info(&format!("[nex] NEX_UI_PROCESS={value:?}"));
+    }
 
     let filter = build_search_filter(cfg, parsed_query);
     let text_query = parsed_query.free_text.trim();
@@ -120,7 +123,34 @@ pub(crate) fn search_overlay_results_with_session(
     let indexed_started = Instant::now();
     let mut indexed_cache_hit = false;
     let prefix_cache_eligible = is_prefix_cache_eligible_query(parsed_query, short_query_app_bias);
-    let indexed_seed_items = if let Some(cache) =
+    let indexed_seed_items = if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
+        crate::ipc::ensure_indexer_running();
+        crate::runtime::log_info("[nex] using NexIndexerProcess for indexed search");
+        let req = crate::ipc::IpcRequest {
+            method: "search".to_string(),
+            params: serde_json::json!({ "query": text_query, "limit": indexed_seed_limit }),
+        };
+        match crate::ipc::ipc_call("127.0.0.1:45821", &req) {
+            Ok(resp) if resp.ok => {
+                let items = resp.result.unwrap_or(serde_json::Value::Array(vec![]));
+                let mut out = Vec::new();
+                if let Some(arr) = items.as_array() {
+                    for v in arr {
+                        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let subtitle = v.get("subtitle").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        out.push(crate::model::SearchItem::new(&id, &kind, &title, &path).with_subtitle(&subtitle));
+                    }
+                }
+                out
+            }
+            _ => service
+                .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
+                .map_err(|error| format!("indexed search failed: {error}"))?,
+        }
+    } else if let Some(cache) =
         session.indexed_prefix_cache.as_ref().filter(|cache| {
             can_use_indexed_prefix_cache(
                 cache,

@@ -161,6 +161,8 @@ pub(crate) fn run_windows_runtime(
                         pending_discovery_reindex_requests: 0,
                         started_at: Instant::now(),
                         startup_started_at,
+                        apply_started: Arc::new(AtomicBool::new(true)),
+                        apply_done: Arc::new(AtomicBool::new(true)),
                     }
                 }
                 Err(e) => {
@@ -1684,27 +1686,31 @@ impl RuntimeWorker {
                 self.search_worker.clear_session();
                 self.last_sent_generation = 0;
             }
-            maybe_apply_background_index_refresh(
-                &*svc,
-                &mut self.background_index_refresh,
-                &self.runtime_config,
-            );
-
-            // Start per-root file watchers the first time the index
-            // cache becomes usable. The handle is idempotent: it is a
-            // no-op if a watcher is already running.
-            if self.background_index_refresh.cache_applied {
-                svc.start_stale_pruner(&self.service);
-                if let Err(error) = svc.start_file_watchers(&self.service) {
-                    log_warn(&format!("[nex] directory_watcher start failed: {error}"));
-                }
-                svc.start_application_watchers(&self.service);
-            }
+            // Heavy index apply is deferred to a background thread by
+            // maybe_apply_background_index_refresh; do not run it while
+            // holding the service write lock here.
         } else {
             // Service lock is held by a worker. The config reloader,
             // index-refresh applicator, and watcher starter will
             // retry on the next event; the cost of skipping a tick
             // is bounded by the worker's per-item critical section.
+        }
+
+        maybe_apply_background_index_refresh(
+            &self.service,
+            &mut self.background_index_refresh,
+            &self.runtime_config,
+        );
+        if self.background_index_refresh.cache_applied {
+            if let Ok(svc) = self.service.try_write() {
+                svc.start_stale_pruner(&self.service);
+                if std::env::var("NEX_UI_PROCESS").ok().as_deref() != Some("1") {
+                    if let Err(error) = svc.start_file_watchers(&self.service) {
+                        log_warn(&format!("[nex] directory_watcher start failed: {error}"));
+                    }
+                }
+                svc.start_application_watchers(&self.service);
+            }
         }
 
         // Deferred full re-registration (svc borrow dropped above).
@@ -1889,7 +1895,7 @@ impl RuntimeWorker {
                         // the next show.
                         while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
-                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                            &self.service,
                             &mut self.background_index_refresh,
                             &self.runtime_config,
                         );

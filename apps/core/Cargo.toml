@@ -18,6 +18,14 @@ path = "src/lib.rs"
 name = "Nex"
 path = "src/main.rs"
 
+[[bin]]
+name = "NexUIProcess"
+path = "src/bin/nex_ui_process.rs"
+
+[[bin]]
+name = "NexIndexerProcess"
+path = "src/bin/nex_indexer_process.rs"
+
 [dependencies]
 rusqlite = { version = "0.37.0", features = ["bundled", "vtab"] }
 tantivy = { version = "0.26.1", default-features = false, features = ["mmap"] }

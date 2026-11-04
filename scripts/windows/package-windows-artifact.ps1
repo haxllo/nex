@@ -127,6 +127,10 @@ else {
 }
 
 Copy-Item $coreExe (Join-Path $stageDir "bin/Nex.exe") -Force
+$uiExe = Join-Path $targetRoot "release/NexUIProcess.exe"
+if (Test-Path $uiExe) { Copy-Item $uiExe (Join-Path $stageDir "bin/NexUIProcess.exe") -Force }
+$indexerExe = Join-Path $targetRoot "release/NexIndexerProcess.exe"
+if (Test-Path $indexerExe) { Copy-Item $indexerExe (Join-Path $stageDir "bin/NexIndexerProcess.exe") -Force }
 
 $helperExe = Join-Path $targetRoot "release/NexHelper.exe"
 if (-not (Test-Path $helperExe)) {

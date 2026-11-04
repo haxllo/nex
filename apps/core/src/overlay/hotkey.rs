@@ -714,6 +714,12 @@ fn emit_outside_click_if_outside(source: &str) {
         return;
     }
     if !cursor_outside_rect(cursor.x, cursor.y, rect.left, rect.top, rect.right, rect.bottom) {
+        if OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+            logging::info(&format!(
+                "[nex::debug] outside click ({source}) ignored: cursor inside panel cursor=({}, {}) rect=({},{})-({},{})",
+                cursor.x, cursor.y, rect.left, rect.top, rect.right, rect.bottom
+            ));
+        }
         return;
     }
 
@@ -730,6 +736,8 @@ fn emit_outside_click_if_outside(source: &str) {
     let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
     if let Some(sender) = ctx {
         let _ = sender.send(OverlayEvent::OutsideClick);
+    } else {
+        logging::warn("[nex] outside click ignored: no event channel");
     }
 }
 
@@ -739,14 +747,15 @@ const OUTSIDE_CLICK_DEDUPE_MS: u64 = 150;
 static OUTSIDE_CLICK_CLOCK: OnceLock<Instant> = OnceLock::new();
 static LAST_OUTSIDE_CLICK_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Click-away fallback for the window before the elevated helper connects.
+/// Hook-free click-away poll.
 ///
-/// At startup the helper takes ~3 s to launch, connect, and install its
-/// `WH_MOUSE_LL` hook. During that gap the Medium-IL hook is UIPI-blocked for
-/// elevated windows and the helper has nothing to forward, so a click on
-/// Task Manager was lost. Polling the async button state is hook-free and
-/// therefore not UIPI-gated; it runs only while the overlay is visible and the
-/// helper is not yet active, so steady-state behaviour is unchanged.
+/// The helper's `WH_MOUSE_LL` covers elevated windows once it connects, but
+/// that path has startup and edge-case gaps: before the helper is live, and on
+/// the first show over an elevated window, a click on Task Manager could go
+/// unseen. Polling the async button state is not UIPI-gated, costs two cheap
+/// calls every 40 ms only while the panel is visible, and feeds the same
+/// outside-click helper. The 150 ms dedupe collapses overlap with the hook and
+/// helper paths.
 fn start_click_away_fallback(should_exit: Arc<AtomicBool>) {
     let spawned = thread::Builder::new()
         .name("nex-click-away-poll".into())
@@ -756,14 +765,14 @@ fn start_click_away_fallback(should_exit: Arc<AtomicBool>) {
             };
 
             let mut was_down = false;
+            logging::info("[nex] click-away poll active (40ms, visible only)");
             loop {
                 if should_exit.load(Ordering::SeqCst) {
                     return;
                 }
                 thread::sleep(Duration::from_millis(40));
 
-                // The helper's hook covers elevated input once it is live.
-                if !OVERLAY_VISIBLE.load(Ordering::SeqCst) || HELPER_ACTIVE.load(Ordering::SeqCst) {
+                if !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
                     was_down = false;
                     continue;
                 }
@@ -1378,7 +1387,12 @@ fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
             Ok(l) if l == "SUPPRESS_OFF" => set_suppress_focus_escape(false),
             // Elevated-window click forwarded by the helper; the local hook
             // cannot see these (UIPI).
-            Ok(l) if l == "MOUSEDOWN" => emit_outside_click_if_outside("helper"),
+            Ok(l) if l == "MOUSEDOWN" => {
+                if OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+                    logging::info("[nex::debug] helper mouse-down received");
+                }
+                emit_outside_click_if_outside("helper")
+            }
             Ok(_) => {}
             Err(_) => break,
         }

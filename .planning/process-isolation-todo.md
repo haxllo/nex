@@ -53,6 +53,9 @@
   modules (`settings_catalog`, `control_panel`, `uninstall_registry`,
   `recent_files`, `bookmarks`, `action_executor`) promoted to `pub` and the
   UI modules' `crate::` paths rewritten to `nex_core::`.
-- Helper supervision gap: if `NexHelper.exe` dies, the UI clears
-  `HELPER_ACTIVE` and falls back to the in-process hook, but it does not
-  reconnect. Elevated-window detection stays degraded until the UI restarts.
+- Helper supervision: the UI keeps `NexHelper.exe` connected and reconnects
+  with 2 s→30 s backoff when the pipe closes; the in-process hook stays active
+  while it is unavailable.
+- Helper command pipe is created by the UI (`NexHelperCmd`), not the helper:
+  UIPI blocks Medium→High pipe writes, so the previous helper-owned pipe always
+  failed with "access denied" and `send_helper_key` had no transport.

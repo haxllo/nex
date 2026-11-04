@@ -488,10 +488,18 @@ pub fn ensure_indexer_running(addr: &str) -> bool {
     crate::logging::info("[nex-ipc] indexer not reachable, starting NexIndexerProcess");
     // The parent pid lets the indexer exit on its own when the UI process
     // disappears, even if the UI crashed instead of quitting cleanly.
-    let _ = std::process::Command::new(indexer)
+    // CREATE_NO_WINDOW: the indexer is a console-subsystem binary, and
+    // without it Windows allocates a visible console titled with the exe path.
+    let mut command = std::process::Command::new(indexer);
+    command
         .arg("--parent-pid")
-        .arg(std::process::id().to_string())
-        .spawn();
+        .arg(std::process::id().to_string());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let _ = command.spawn();
 
     // The process needs a moment to bind its listener; a bounded wait keeps
     // the first keystroke from falling back to a cold local cache.

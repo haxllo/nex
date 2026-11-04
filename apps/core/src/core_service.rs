@@ -375,7 +375,7 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
 
     // Register filesystem provider for roots-based file/folder discovery.
     let filesystem_provider = FileSystemDiscoveryProvider::from_config(config, config.discovery_max_depth as usize);
-    crate::runtime::log_info(&format!(
+    crate::logging::info(&format!(
         "[nex] file_discovery_backend = {} (requested={})",
         filesystem_provider.backend_label(),
         config.file_discovery_backend.as_str(),
@@ -1353,7 +1353,7 @@ impl CoreService {
         let excluded_roots = config.discovery_exclude_roots.clone();
 
         if roots.is_empty() {
-            crate::runtime::log_info(
+            crate::logging::info(
                 "[nex] directory_watcher: no discovery_roots configured; skipping start",
             );
             return Ok(());
@@ -1361,7 +1361,7 @@ impl CoreService {
 
         let handle =
             crate::file_watcher_consumer::FileWatcherHandle::start(roots, excluded_roots, Arc::clone(service_arc));
-        crate::runtime::log_info(&format!(
+        crate::logging::info(&format!(
             "[nex] directory_watcher: started on {} root(s)",
             handle.active_roots()
         ));
@@ -1384,7 +1384,7 @@ impl CoreService {
         }
 
         let handle = crate::application_watcher::ApplicationWatcherHandle::start(Arc::clone(service_arc));
-        crate::runtime::log_info(&format!(
+        crate::logging::info(&format!(
             "[nex] app discovery watcher: started on {} directories and {} registry keys",
             handle.active_directories(),
             handle.active_registry_keys()
@@ -1397,7 +1397,7 @@ impl CoreService {
     pub fn stop_application_watchers(&self) {
         if let Some(handle) = self.take_application_watchers() {
             drop(handle);
-            crate::runtime::log_info("[nex] app discovery watcher: stopped");
+            crate::logging::info("[nex] app discovery watcher: stopped");
         }
     }
 
@@ -1417,7 +1417,7 @@ impl CoreService {
     pub fn stop_file_watchers(&self) {
         if let Some(handle) = self.take_file_watchers() {
             drop(handle); // RAII joins threads
-            crate::runtime::log_info("[nex] directory_watcher: stopped");
+            crate::logging::info("[nex] directory_watcher: stopped");
         }
     }
 

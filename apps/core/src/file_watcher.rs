@@ -263,7 +263,7 @@ fn run_watch_loop(
                 match unsafe { create_watcher_handles(&config.root) } {
                     Ok((mut h, _)) => {
                         h.overlapped.hEvent = h.event;
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex-dir-watcher] reopened watcher for {}; requesting resync",
                             config.root.display()
                         ));
@@ -293,7 +293,7 @@ fn run_watch_loop(
                 if progressed {
                     backoff = RESTART_BACKOFF_MIN;
                 }
-                crate::runtime::log_warn(&format!(
+                crate::logging::warn(&format!(
                     "[nex-dir-watcher] watcher for {} failed; restarting in {}s",
                     config.root.display(),
                     backoff.as_secs()
@@ -615,7 +615,7 @@ fn last_error() -> u32 {
 }
 
 fn log_watcher_error(op: &str, detail: &str) {
-    crate::runtime::log_warn(&format!("[nex-dir-watcher] {} failed ({})", op, detail));
+    crate::logging::warn(&format!("[nex-dir-watcher] {} failed ({})", op, detail));
 }
 
 #[cfg(test)]

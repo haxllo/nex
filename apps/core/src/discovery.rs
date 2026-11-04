@@ -337,13 +337,13 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
                         FileBackend::Everything(bridge)
                     }
                     Some(_) => {
-                        crate::runtime::log_warn(
+                        crate::logging::warn(
                             "[nex] file_discovery_backend=everything requested but Everything service is not running; falling back to walkdir (start Everything.exe to use the SDK backend)",
                         );
                         FileBackend::Walkdir
                     }
                     None => {
-                        crate::runtime::log_warn(
+                        crate::logging::warn(
                             "[nex] file_discovery_backend=everything requested but Everything SDK was not detected; falling back to walkdir",
                         );
                         FileBackend::Walkdir
@@ -356,7 +356,7 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
                         FileBackend::Everything(bridge)
                     }
                     Some(_) => {
-                        crate::runtime::log_info(
+                        crate::logging::info(
                             "[nex] Everything SDK present but service not running; using walkdir (start Everything.exe to use the SDK backend)",
                         );
                         FileBackend::Walkdir
@@ -366,7 +366,7 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
             }
         };
         if matches!(backend, FileBackend::Everything(_)) {
-            crate::runtime::log_info("[nex] Everything SDK loaded; using Everything as filesystem backend");
+            crate::logging::info("[nex] Everything SDK loaded; using Everything as filesystem backend");
         }
         backend
     }
@@ -408,7 +408,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                         // populated index instead of a silent failure that
                         // leaves the launcher searching 80K items per
                         // keystroke.
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex] Everything discover failed ({e}); falling back to walkdir"
                         ));
                         discover_filesystem_walk(
@@ -468,7 +468,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                         Ok(items)
                     }
                     Err(e) => {
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex] Everything discover failed ({e}); falling back to walkdir"
                         ));
                         discover_filesystem_walk(
@@ -667,7 +667,7 @@ fn discover_filesystem_walk(
             }
         }
         if root_cap_hit {
-            crate::runtime::log_warn(&format!(
+            crate::logging::warn(&format!(
                 "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
                 root.display(),
                 per_root_budget

@@ -118,6 +118,16 @@ unsafe extern "system" {
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
 
+    fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: *mut core::ffi::c_void,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: PipeHandle,
+    ) -> PipeHandle;
+
     fn CloseHandle(hObject: PipeHandle) -> i32;
 }
 
@@ -138,10 +148,14 @@ unsafe extern "system" {
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
-const PIPE_ACCESS_INBOUND: u32 = 0x00000001;
 const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
 const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+
+const GENERIC_READ: u32 = 0x80000000;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const OPEN_EXISTING: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Config source: CLI args or JSON config file
@@ -496,32 +510,42 @@ fn exec_sim(action: SimTap) {
     };
 }
 
-/// Parked thread: serve the command pipe, execute allowlisted lines.
-fn spawn_cmd_pipe_server(cmd_path: String) {
+/// Connect to the UI-owned command pipe and execute allowlisted lines.
+///
+/// The UI creates this pipe at Medium IL and owns the write end. UIPI blocks a
+/// Medium-IL process from writing into a High-IL pipe, so the elevated helper
+/// must be the client here; reading down is permitted.
+fn spawn_cmd_pipe_client(cmd_path: String) {
     std::thread::Builder::new()
         .name("NexHelper-cmd-pipe".into())
         .spawn(move || {
             let wide = to_wide(&cmd_path);
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    wide.as_ptr(),
-                    PIPE_ACCESS_INBOUND,
-                    PIPE_TYPE_MESSAGE | PIPE_WAIT,
-                    PIPE_UNLIMITED_INSTANCES,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null_mut(),
-                )
+            let mut pipe = None;
+            // The UI opens its server end right after the detection pipe
+            // handshake; retry briefly so a slow supervisor is not fatal.
+            for _ in 0..40 {
+                let handle = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        std::ptr::null_mut(),
+                        OPEN_EXISTING,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if !handle.is_null() && handle as isize != -1 {
+                    pipe = Some(unsafe { std::fs::File::from_raw_handle(handle as *mut _) });
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+
+            let Some(file) = pipe else {
+                debug_log("cmd pipe connect failed");
+                return;
             };
-            if handle.is_null() || handle as isize == -1 {
-                debug_log("cmd pipe create failed");
-                return;
-            }
-            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
-            if wait_for_client(&file).is_err() {
-                return;
-            }
             debug_log("cmd pipe client connected");
             // Single buffered reader for the session: recreating it per
             // line would drop buffered bytes with it.
@@ -1251,7 +1275,7 @@ fn main() {
 
     debug_log(&startup_privilege_report());
     spawn_log_pipe_server(log_pipe_for(&pipe_path));
-    spawn_cmd_pipe_server(cmd_pipe_for(&pipe_path));
+    spawn_cmd_pipe_client(cmd_pipe_for(&pipe_path));
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 

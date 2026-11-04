@@ -1329,15 +1329,9 @@ fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
 
 /// Best-effort auxiliary pipes. Never gates detection.
 fn connect_helper_aux_pipes() {
-    let cmd_pipe_name = format!(r"\\.\pipe\NexHelperCmd\{}", std::process::id());
-    match connect_pipe(&cmd_pipe_name, 0x40000000, 3) {
-        Ok(cmd_file) => {
-            if let Ok(mut slot) = HELPER_CMD.lock() {
-                *slot = Some(cmd_file);
-            }
-        }
-        Err(e) => logging::warn(&format!("[nex] helper cmd pipe unavailable: {e}")),
-    }
+    // Command channel: the UI owns the server so the elevated helper can read
+    // down into it (write-up from Medium IL to a High-IL pipe is denied).
+    start_helper_cmd_server();
 
     let log_pipe_name = format!(r"\\.\pipe\NexHelperLog\{}", std::process::id());
     match connect_pipe(&log_pipe_name, 0x80000000, 3) {
@@ -1356,6 +1350,83 @@ fn connect_helper_aux_pipes() {
             }
         }
         Err(e) => logging::warn(&format!("[nex] helper log pipe unavailable: {e}")),
+    }
+}
+
+/// Serve the helper's command channel.
+///
+/// The pipe object must be created by this Medium-IL process. The helper runs
+/// at High IL and UIPI blocks write-up into a High-IL pipe, which is why the
+/// old helper-created command pipe always failed with "access denied". Here
+/// the UI owns the write end and the elevated helper connects as a client that
+/// only reads; reading down is permitted.
+fn start_helper_cmd_server() {
+    let pipe_name = format!(r"\\.\pipe\NexHelperCmd\{}", std::process::id());
+    let spawned = thread::Builder::new()
+        .name("NexHelper-cmd-pipe".into())
+        .spawn(move || {
+            use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+
+            const PIPE_ACCESS_OUTBOUND: u32 = 0x0000_0002;
+            const PIPE_TYPE_MESSAGE: u32 = 0x0000_0004;
+            const PIPE_WAIT: u32 = 0x0000_0000;
+            const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+            const ERROR_PIPE_CONNECTED: u32 = 535;
+
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn CreateNamedPipeW(
+                    lpName: *const u16,
+                    dwOpenMode: u32,
+                    dwPipeMode: u32,
+                    nMaxInstances: u32,
+                    nOutBufferSize: u32,
+                    nInBufferSize: u32,
+                    nDefaultTimeOut: u32,
+                    lpSecurityAttributes: *mut core::ffi::c_void,
+                ) -> *mut core::ffi::c_void;
+                fn ConnectNamedPipe(
+                    hNamedPipe: *mut core::ffi::c_void,
+                    lpOverlapped: *mut core::ffi::c_void,
+                ) -> i32;
+            }
+
+            let wide = to_wide(&pipe_name);
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide.as_ptr(),
+                    PIPE_ACCESS_OUTBOUND,
+                    PIPE_TYPE_MESSAGE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    4096,
+                    4096,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                logging::warn("[nex] helper cmd pipe server create failed");
+                return;
+            }
+
+            let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+            if connected == 0 {
+                let error = unsafe { GetLastError() };
+                if error != ERROR_PIPE_CONNECTED {
+                    logging::warn(&format!("[nex] helper cmd pipe accept failed err={error}"));
+                    unsafe { CloseHandle(handle) };
+                    return;
+                }
+            }
+
+            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
+            if let Ok(mut slot) = HELPER_CMD.lock() {
+                *slot = Some(file);
+            }
+            logging::info("[nex] helper cmd pipe connected");
+        });
+    if let Err(error) = spawned {
+        logging::warn(&format!("[nex] failed to spawn helper cmd pipe: {error}"));
     }
 }
 

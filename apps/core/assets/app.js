@@ -1476,6 +1476,23 @@
     clearTimeout(debounce);
     debounce = setTimeout(() => post("query", query), delay);
   });
+  // Focus-race safety net. The panel can be revealed a frame before the
+  // query input owns keyboard focus, which silently dropped the first typed
+  // character (compact view: "first key does nothing"). If a printable key
+  // arrives while no control owns focus, route it into the input instead of
+  // losing it. Only the empty-activeElement case is claimed, so chat input,
+  // completion, and other controls keep their own handling.
+  window.addEventListener("keydown", (event) => {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+    if (event.key.length !== 1) return;
+    event.preventDefault();
+    input.focus({ preventScroll: true });
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
+    input.value += event.key;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, true);
   // The dim completion suffix must track the input's horizontal scroll
   // (selection drag / arrow keys scroll long queries).
   input.addEventListener("scroll", renderCompletion, { passive: true });
@@ -3542,6 +3559,11 @@
       if (isShow) {
         pendingShow = true;
         lastH = 0; // fresh show cycle: trigger resize on first content paint
+        // Take focus before the reveal. Rust focuses again after the first
+        // paint, but a key typed in that gap used to land on <body> and be
+        // dropped — that is the "first keystroke does nothing" compact-view
+        // bug.
+        input.focus({ preventScroll: true });
         scrollToInstant(0);
         // Reveal waits for content (or the cap below) - never the idle
         // mid-state. needsPainted is consumed by measure's paint path.

@@ -10,5 +10,5 @@
 - [x] Make indexer the sole Tantivy/SQLite owner
 - [x] Add UI cache reload from indexer updates
 - [x] Update release/packaging scripts for new binaries
-- [x] Add end-to-end recovery tests
-- [x] Verify parity (local vs indexer search)
+- [ ] Add end-to-end recovery tests
+- [ ] Verify parity (local vs indexer search)

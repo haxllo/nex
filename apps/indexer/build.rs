@@ -15,7 +15,7 @@ fn main() {
     if std::path::Path::new("../assets/nex.ico").exists() {
         res.set_icon("../assets/nex.ico");
     }
-    res.set("FileDescription", "NexIndexerProcess");
+    res.set("FileDescription", "NexIndexer");
     res.set("InternalName", "NexIndexerProcess");
     res.set("OriginalFilename", "NexIndexerProcess.exe");
     res.set("ProductName", "Nex");

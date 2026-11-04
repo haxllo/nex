@@ -1,6 +1,6 @@
 [package]
 name = "nex-shim"
-version = "2.38.0"
+version = "2.38.1"
 edition = "2024"
 authors = ["haxllo"]
 description = "One-release migration launcher: forwards bin\\Nex.exe to NexUIProcess.exe"

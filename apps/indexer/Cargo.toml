@@ -1,6 +1,6 @@
 [package]
 name = "nex-indexer"
-version = "2.38.0"
+version = "2.38.1"
 edition = "2024"
 authors = ["haxllo"]
 description = "Background indexing process for Nex"

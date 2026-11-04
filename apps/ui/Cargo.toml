@@ -1,6 +1,6 @@
 [package]
 name = "nex-ui"
-version = "2.38.0"
+version = "2.38.1"
 edition = "2024"
 authors = ["haxllo"]
 description = "Nex UI process: overlay, hotkeys, tray, and snapshot search"

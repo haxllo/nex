@@ -207,7 +207,16 @@ impl CoreService {
     pub fn new_indexer(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache_mode(config, db, true, false)
+        Self::with_loaded_cache_mode(config, db, true, false, true)
+    }
+
+    /// UI-process service that starts empty: the runtime loads the store on a
+    /// background thread so the overlay and hotkey come up without waiting for
+    /// a full item scan. Search falls back to SQLite until that load lands.
+    pub fn new_ui_client_lazy(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        Self::with_loaded_cache_mode(config, db, false, false, false)
     }
 
     /// UI-process service: reads the store for launch/personalization state,
@@ -218,11 +227,11 @@ impl CoreService {
         let db = index_store::open_from_config(&config)?;
         // Keep every store row: the UI must be able to find files that cache
         // compaction would otherwise evict.
-        Self::with_loaded_cache_mode(config, db, false, false)
+        Self::with_loaded_cache_mode(config, db, false, false, true)
     }
 
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
-        Self::with_loaded_cache_mode(config, db, enable_tantivy, true)
+        Self::with_loaded_cache_mode(config, db, enable_tantivy, true, true)
     }
 
     fn with_loaded_cache_mode(
@@ -230,8 +239,13 @@ impl CoreService {
         db: Connection,
         enable_tantivy: bool,
         compact: bool,
+        load_items: bool,
     ) -> Result<Self, ServiceError> {
-        let all_items = index_store::list_items(&db)?;
+        let all_items = if load_items {
+            index_store::list_items(&db)?
+        } else {
+            Vec::new()
+        };
         let cached_apps = collect_app_items(&all_items);
 
         let index_dir = config.index_db_path.parent().unwrap_or(Path::new("."));
@@ -244,8 +258,8 @@ impl CoreService {
         };
         // Compact now rather than on the first refresh: an uncompacted cache
         // makes every cache-scan search walk the whole store.
-        let cache_complete = !compact
-            || cache_compaction_summary(&all_items, &config).dropped_total == 0;
+        let cache_complete = load_items
+            && (!compact || cache_compaction_summary(&all_items, &config).dropped_total == 0);
         let cached = if compact {
             compact_cached_items(&all_items, &config)
         } else {

@@ -92,10 +92,27 @@ pub(crate) fn run_windows_runtime(
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(RwLock::new(service));
 
-    // Warm the single-character prefix cache before the first show: a cold
-    // one-character query is the most expensive search, and paying it on the
-    // user's first keystroke is what made the first result feel late.
-    spawn_hot_prefix_prefetch(&service);
+    // The service starts empty so the hotkey is ready immediately. Fill the
+    // search cache off-thread, then warm the single-character prefix cache —
+    // paying either cost on the user's first keystroke is what made startup
+    // feel slow. Quick Launch reads SQLite directly and is unaffected.
+    {
+        let service = Arc::clone(&service);
+        let _ = std::thread::Builder::new()
+            .name("nex-store-load".into())
+            .spawn(move || match service.read() {
+                Ok(guard) => match guard.reload_cache_from_store() {
+                    Ok(count) => {
+                        log_info(&format!("[nex] startup cache loaded items={count}"));
+                        spawn_hot_prefix_prefetch(&service);
+                    }
+                    Err(error) => {
+                        log_warn(&format!("[nex] startup cache load failed: {error}"));
+                    }
+                },
+                Err(_) => log_warn("[nex] startup cache load skipped (service lock poisoned)"),
+            });
+    }
 
     // The UI never indexes. The indexer owns discovery and Tantivy, and the
     // snapshot sync below mirrors its published set. First-run indexing and

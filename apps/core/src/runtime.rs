@@ -283,7 +283,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
     }
 
-    let service = CoreService::new_ui_client(runtime_config.clone())?;
+    let service = CoreService::new_ui_client_lazy(runtime_config.clone())?;
     #[cfg(target_os = "windows")]
     {
         run_windows_runtime(startup_started_at, runtime_config, service)

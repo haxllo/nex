@@ -85,8 +85,8 @@ if (-not (Test-Path $stageDir)) {
   }
 }
 
-if (-not (Test-Path (Join-Path $stageDir "bin/Nex.exe"))) {
-  throw "Missing staged executable at '$stageDir/bin/Nex.exe'."
+if (-not (Test-Path (Join-Path $stageDir "bin/NexUIProcess.exe"))) {
+  throw "Missing staged executable at '$stageDir/bin/NexUIProcess.exe'."
 }
 
 New-Item -ItemType Directory -Force -Path $outputRootAbs | Out-Null

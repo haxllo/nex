@@ -17,6 +17,7 @@ function Resolve-InstalledRuntimePath {
   param([string]$Root)
 
   foreach ($candidate in @(
+    (Join-Path $Root "bin\NexUIProcess.exe"),
     (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
     (Join-Path $Root "bin\swiftfind-core.exe")
@@ -26,7 +27,7 @@ function Resolve-InstalledRuntimePath {
     }
   }
 
-  return (Join-Path $Root "bin\Nex.exe")
+  return (Join-Path $Root "bin\NexUIProcess.exe")
 }
 
 if (-not $InstallRoot -or $InstallRoot.Trim().Length -eq 0) {

@@ -57,12 +57,13 @@ jobs:
 
       - name: Run release build gate
         timeout-minutes: 60
-        run: cargo build --locked --release --bin Nex --bin NexHelper
+        run: cargo build --locked --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
 
       - name: Verify release binaries
         run: |
-          test -f target/release/Nex.exe
+          test -f target/release/NexUIProcess.exe
           test -f target/release/NexHelper.exe
+          test -f target/release/NexIndexerProcess.exe
 
       - name: Run Rust test gate
         timeout-minutes: 60

@@ -1,0 +1,23 @@
+[package]
+name = "nex-ui"
+version = "2.37.0"
+edition = "2024"
+authors = ["haxllo"]
+description = "Nex UI process: overlay, hotkeys, tray, and snapshot search"
+license = "MIT"
+repository = "https://github.com/haxllo/nex"
+
+[[bin]]
+name = "NexUIProcess"
+path = "src/main.rs"
+
+[dependencies]
+nex = { path = "../core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_System_Console",
+] }
+
+[build-dependencies]
+winres = "0.1"

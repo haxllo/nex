@@ -7,9 +7,10 @@ use crate::overlay::{is_instance_window_present, signal_existing_instance_quit};
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "Nex.exe";
+pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "NexUIProcess.exe";
 #[cfg(target_os = "windows")]
-pub(crate) const LEGACY_RUNTIME_EXE_NAMES: &[&str] = &["nex-core.exe", "swiftfind-core.exe"];
+pub(crate) const LEGACY_RUNTIME_EXE_NAMES: &[&str] =
+    &["Nex.exe", "nex-core.exe", "swiftfind-core.exe"];
 
 #[cfg(target_os = "windows")]
 pub(crate) fn runtime_executable_names() -> impl Iterator<Item = &'static str> {

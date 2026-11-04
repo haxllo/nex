@@ -181,6 +181,7 @@ function Get-RuntimeExecutableCandidates {
   param([string]$Root)
 
   return @(
+    (Join-Path $Root "bin\NexUIProcess.exe"),
     (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\NexHelper.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
@@ -197,7 +198,7 @@ function Resolve-InstalledRuntimePath {
     }
   }
 
-  return (Join-Path $Root "bin\Nex.exe")
+  return (Join-Path $Root "bin\NexUIProcess.exe")
 }
 
 function Test-IsUnderProgramFiles([string]$Path) {
@@ -228,7 +229,8 @@ function Get-RunningInstallRoot {
     return $null
   }
   $parent = Split-Path -Parent $dir
-  if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe"))) {
+  if ($parent -and ((Test-Path -LiteralPath (Join-Path $parent "bin\NexUIProcess.exe")) -or
+                    (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe")))) {
     return $parent
   }
   return $null
@@ -252,7 +254,8 @@ function Get-RegistryInstallLocation {
   if ($candidate.Length -eq 0) {
     return $null
   }
-  if (-not (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe"))) {
+  if (-not ((Test-Path -LiteralPath (Join-Path $candidate "bin\NexUIProcess.exe")) -or
+            (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe")))) {
     return $null
   }
   return $candidate
@@ -667,7 +670,8 @@ $needsElevation = $installInfo.NeedsElevation
 # unavoidable exactly once for this cleanup.
 $legacyOrphan = $false
 foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe'))) {
+  if ($programFiles -and ((Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\NexUIProcess.exe')) -or
+                          (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe')))) {
     $legacyOrphan = $true
     break
   }

@@ -59,16 +59,20 @@ if ($SkipBuild) {
 if (-not $SourceExe -or $SourceExe.Trim().Length -eq 0) {
   $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   $candidates = @(
-    (Join-Path $scriptDir "..\bin\Nex.exe"),              # packaged zip layout
-    (Join-Path $scriptDir "..\..\target\release\Nex.exe"), # repo layout
+    (Join-Path $scriptDir "..\bin\NexUIProcess.exe"),      # packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\NexUIProcess.exe"), # repo layout
     (Join-Path $scriptDir "..\bin\NexHelper.exe"),         # packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\NexHelper.exe"), # repo layout
+    (Join-Path $scriptDir "..\bin\Nex.exe"),               # legacy packaged zip layout
+    (Join-Path $scriptDir "..\..\target\release\Nex.exe"), # legacy repo layout
     (Join-Path $scriptDir "..\bin\nex-core.exe"),          # legacy packaged zip layout
     (Join-Path $scriptDir "..\..\target\release\nex-core.exe"), # legacy repo layout
-    (Join-Path (Get-Location) "bin\Nex.exe"),
-    (Join-Path (Get-Location) "target\release\Nex.exe"),
+    (Join-Path (Get-Location) "bin\NexUIProcess.exe"),
+    (Join-Path (Get-Location) "target\release\NexUIProcess.exe"),
     (Join-Path (Get-Location) "bin\NexHelper.exe"),
     (Join-Path (Get-Location) "target\release\NexHelper.exe"),
+    (Join-Path (Get-Location) "bin\Nex.exe"),
+    (Join-Path (Get-Location) "target\release\Nex.exe"),
     (Join-Path (Get-Location) "bin\nex-core.exe"),
     (Join-Path (Get-Location) "target\release\nex-core.exe")
   )
@@ -87,9 +91,10 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   Write-Host "[1/5] Building release binary from source..." -ForegroundColor Yellow
   Push-Location $repoRoot
   try {
-    cargo build -p nex --release --quiet --bin Nex --bin NexUIProcess --bin NexIndexerProcess
+    cargo build --release --quiet --bin NexUIProcess --bin NexIndexerProcess
     cargo build -p nex-helper --release --quiet --bin NexHelper
     $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
+      "target\release\NexUIProcess.exe",
       "target\release\Nex.exe",
       "target\release\NexHelper.exe",
       "target\release\nex-core.exe"
@@ -109,7 +114,7 @@ Could not find the Nex runtime executable to install.
 
 For end users:
 - Extract the release zip and run this script from that extracted folder.
-- The zip should contain bin\Nex.exe.
+- The zip should contain bin\NexUIProcess.exe.
 
 For developers:
 - Re-run with -BuildFromSource, or pass -SourceExe "<full path to Nex.exe>".
@@ -126,7 +131,7 @@ New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
 Write-Host "[3/5] Copying runtime files..."
-Copy-Item $SourceExe (Join-Path $binDir "Nex.exe") -Force
+Copy-Item $SourceExe (Join-Path $binDir "NexUIProcess.exe") -Force
 
 $helperSourceDir = Split-Path -Parent $SourceExe
 $helperExe = Join-Path $helperSourceDir "NexHelper.exe"
@@ -135,19 +140,22 @@ if (Test-Path $helperExe) {
   Write-Host "  Bundled NexHelper.exe"
 }
 
-# Process isolation: Nex.exe delegates discovery/indexing to these when present.
-foreach ($companion in @("NexUIProcess.exe", "NexIndexerProcess.exe")) {
-  $companionPath = Join-Path $helperSourceDir $companion
-  if (Test-Path $companionPath) {
-    Copy-Item $companionPath (Join-Path $binDir $companion) -Force
-    Write-Host "  Bundled $companion"
-  }
+# Process isolation: the UI process delegates discovery/indexing to the indexer.
+$indexerCompanion = Join-Path $helperSourceDir "NexIndexerProcess.exe"
+if (Test-Path $indexerCompanion) {
+  Copy-Item $indexerCompanion (Join-Path $binDir "NexIndexerProcess.exe") -Force
+  Write-Host "  Bundled NexIndexerProcess.exe"
+}
+else {
+  Write-Host "  WARNING: NexIndexerProcess.exe not found; the UI will run without indexing." -ForegroundColor Yellow
 }
 
-foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {
+# Nex.exe was the pre-isolation entry point; the UI is NexUIProcess.exe now.
+foreach ($legacyName in @("Nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
   $legacyPath = Join-Path $binDir $legacyName
   if (Test-Path -LiteralPath $legacyPath) {
     Remove-Item -LiteralPath $legacyPath -Force
+    Write-Host "  Removed legacy $legacyName"
   }
 }
 
@@ -183,7 +191,7 @@ foreach ($runbook in $runbookCandidates) {
   }
 }
 
-$installedExe = Join-Path $binDir "Nex.exe"
+$installedExe = Join-Path $binDir "NexUIProcess.exe"
 
 Write-Host "[4/5] Preparing startup registration..."
 $startupPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"

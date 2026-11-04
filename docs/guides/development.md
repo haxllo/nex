@@ -50,11 +50,13 @@ Press `Ctrl+Space` to summon the overlay (configurable in config.toml).
 
 | Command | Description |
 |---|---|
-| `cargo build --bin nex` | Debug build (nex only) |
-| `cargo build --release --bin nex --bin NexHelper` | Release build (both binaries) |
+| `cargo build --bin NexUIProcess` | Debug build (UI only) |
+| `cargo build --release --bin NexUIProcess --bin NexIndexerProcess --bin NexHelper` | Release build (all binaries) |
 | `cargo build --release -p nex-helper` | Release build (helper only) |
-| `cargo build -p nex` | Debug build (package-scoped, equivalent) |
+| `cargo build -p nex` | Debug build of the shared library |
 | `cargo check -p nex` | Type-check without producing a binary |
+
+`NexUIProcess.exe` is the UI process (overlay, hotkeys, tray, snapshot search) and `NexIndexerProcess.exe` owns discovery, SQLite writes, watchers, and Tantivy. There is no in-process indexing fallback.
 
 **`NexHelper.exe`** is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task, handles hotkey detection when elevated/UWP windows (Task Manager, Settings, etc.) are foreground, and sets the overlay foreground from High IL to bypass UIPI.
 

@@ -1,4 +1,4 @@
-// GUI subsystem: Windows never allocates a console for `nex.exe`, so
+// GUI subsystem: Windows never allocates a console for `NexUIProcess.exe`, so
 // double-click / startup launches don't flash a black cmd window. CLI
 // commands that print to the terminal reattach to the parent console in
 // `attach_parent_console_if_present()` below, so `--status`, `--quit`,

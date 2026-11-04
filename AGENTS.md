@@ -4,14 +4,17 @@
 
 1. **Linear first.** For any user-reported bug, feature request, or implementation
    task, search the Nex project (P-CIQ-2) for a matching issue *before touching
-   code*. Reuse it, or create one if none matches. Keep it current and set its
-   state from what actually happened. Questions, planning, and status requests do
-   not need an issue. Details: "Linear Project Tracking" below.
-2. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
+   code*. Reuse it, or create one if none matches. Keep it current. Questions,
+   planning, and status requests do not need an issue. Details: "Linear Project
+   Tracking" below.
+2. **Never close an issue yourself.** Finished work moves to **In Review**; only
+   a merged PR moves it to **Done**. Setting Done before the PR merges is not
+   allowed, no matter how complete the implementation looks.
+3. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
    relevant gate, and never claim a check passed unless it was run.
-3. **Commit identity.** Author is the repo owner; commit bodies contain no
+4. **Commit identity.** Author is the repo owner; commit bodies contain no
    AI/bot names or co-author trailers. Do not commit unless asked.
-4. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
+5. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker, not a supervisor. See
    "Process Model & Privilege Boundaries" below.
 
@@ -193,7 +196,9 @@ The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9
 - For Nex bug reports, feature requests, and coding tasks that require implementation, search the Nex project for a matching issue before editing code. Reuse the matching issue when one exists; otherwise create an issue in the Nex project. Do not create issues for questions, planning, or status requests that do not ask for implementation.
 - Track a release-only request with a Linear Release record, following the configured Nex release pipeline. Do not create a regular issue solely to build, package, tag, or publish a release. Link related implementation issues to the release when available. If no release pipeline is configured or accessible, tell the user and do not create a regular issue as a substitute.
 - Keep the issue current as work progresses. Before finishing, record the implemented behavior and the build/test checks that were or were not run.
-- Set the issue state to reflect the actual work. Do not say checks passed unless they were run.
+- **State policy:** agents may move issues to In Progress or In Review. Only a
+  merged PR closes an issue (moves it to Done). Do not set Done directly, even
+  for retroactive or verification-only work.
 - When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.
 - Use project status updates for periodic progress, health, and risks; use milestones for major deliverables with clear outcomes. Do not create a milestone for every issue or a health update without evidence.
 - If Linear is unavailable, ask the user to connect it for the current agent before starting implementation.

@@ -72,8 +72,13 @@ fn start_ui_snapshot_sync(
         let mut last_generation = 0_u64;
         let mut first_apply = true;
         loop {
-            match sync_indexer_snapshot(last_generation) {
-                SnapshotSync::Applied(generation, items) => {
+            let applied_generation = match sync_indexer_snapshot(last_generation) {
+                SnapshotSync::Unchanged => None,
+                SnapshotSync::Unreachable => {
+                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+                    None
+                }
+                SnapshotSync::Full(generation, items) => {
                     let count = items.len();
                     let mut applied = false;
                     // The main loop only takes short read locks; retry a
@@ -82,7 +87,6 @@ fn start_ui_snapshot_sync(
                         match service.try_write() {
                             Ok(svc) => {
                                 svc.apply_external_snapshot(items);
-                                last_generation = generation;
                                 applied_worker.store(true, Ordering::Release);
                                 log_info(&format!(
                                     "[nex] ui_snapshot_applied items={count} generation={generation}"
@@ -93,21 +97,41 @@ fn start_ui_snapshot_sync(
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
                         }
                     }
-                    if applied {
-                        // Applying a snapshot invalidates the prefix cache.
-                        // Re-warm it off-thread: the first apply covers
-                        // startup, later ones only while the overlay is
-                        // visible so hidden idle churn costs no CPU.
-                        if first_apply || crate::overlay::hotkey::is_overlay_visible() {
-                            crate::runtime_loop::spawn_hot_prefix_prefetch(&service);
+                    applied.then_some((generation, true))
+                }
+                SnapshotSync::Delta(generation, upserts, deleted) => {
+                    let upserts_n = upserts.len();
+                    let deleted_n = deleted.len();
+                    let mut outcome = None;
+                    for _ in 0..40 {
+                        match service.try_write() {
+                            Ok(svc) => {
+                                let changed = svc.apply_external_delta(upserts, deleted);
+                                applied_worker.store(true, Ordering::Release);
+                                log_info(&format!(
+                                    "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation}"
+                                ));
+                                outcome = Some((generation, changed));
+                                break;
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(50)),
                         }
-                        first_apply = false;
                     }
+                    outcome
                 }
-                SnapshotSync::Unchanged => {}
-                SnapshotSync::Unreachable => {
-                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+            };
+
+            if let Some((generation, changed)) = applied_generation {
+                last_generation = generation;
+                // A changed item set invalidates the prefix cache. Re-warm it
+                // off-thread: the first apply covers startup, later ones only
+                // while the overlay is visible, so hidden idle churn is free.
+                if changed
+                    && (first_apply || crate::overlay::hotkey::is_overlay_visible())
+                {
+                    crate::runtime_loop::spawn_hot_prefix_prefetch(&service);
                 }
+                first_apply = false;
             }
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -134,7 +158,8 @@ fn start_ui_snapshot_sync(
 enum SnapshotSync {
     /// Nothing changed (or a rebuild is in flight); keep the last generation.
     Unchanged,
-    Applied(u64, Vec<crate::model::SearchItem>),
+    Full(u64, Vec<crate::model::SearchItem>),
+    Delta(u64, Vec<crate::model::SearchItem>, Vec<String>),
     Unreachable,
 }
 
@@ -170,10 +195,28 @@ fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
     let Some(generation) = result.get("generation").and_then(Value::as_u64) else {
         return SnapshotSync::Unchanged;
     };
+    if let Some(delta) = result.get("delta") {
+        let upserts = delta
+            .get("upserts")
+            .and_then(Value::as_array)
+            .map(|values| items_from_values(values))
+            .unwrap_or_default();
+        let deleted = delta
+            .get("deleted")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return SnapshotSync::Delta(generation, upserts, deleted);
+    }
     let Some(items) = result.get("items").and_then(Value::as_array) else {
         return SnapshotSync::Unchanged;
     };
-    SnapshotSync::Applied(generation, items_from_values(items))
+    SnapshotSync::Full(generation, items_from_values(items))
 }
 
 #[cfg(target_os = "windows")]

@@ -5,6 +5,7 @@
 //! ever transports an item snapshot; it never reads the Tantivy index and never
 //! runs discovery, so the two processes cannot race on index files.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -144,12 +145,15 @@ pub fn serve_indexer(
     indexing: Arc<AtomicBool>,
 ) {
     crate::logging::info(&format!("[nex-ipc] listening on {INDEXER_ADDR}"));
+    // Last item set handed to a poll, so a later sync can send a delta.
+    let published: Arc<Mutex<Option<(u64, Vec<SearchItem>)>>> = Arc::new(Mutex::new(None));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let service = Arc::clone(&service);
                 let indexing = Arc::clone(&indexing);
-                std::thread::spawn(move || handle_connection(stream, service, indexing));
+                let published = Arc::clone(&published);
+                std::thread::spawn(move || handle_connection(stream, service, indexing, published));
             }
             Err(error) => crate::logging::warn(&format!("[nex-ipc] accept failed: {error}")),
         }
@@ -160,6 +164,7 @@ fn handle_connection(
     mut stream: TcpStream,
     service: Arc<RwLock<CoreService>>,
     indexing: Arc<AtomicBool>,
+    published: Arc<Mutex<Option<(u64, Vec<SearchItem>)>>>,
 ) {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(clone) => clone,
@@ -184,7 +189,7 @@ fn handle_connection(
             request.version
         ))
     } else {
-        dispatch(&request, &service, &indexing)
+        dispatch(&request, &service, &indexing, &published)
     };
     let _ = write_response(&mut stream, &response);
 }
@@ -193,6 +198,7 @@ fn dispatch(
     request: &IpcRequest,
     service: &Arc<RwLock<CoreService>>,
     indexing: &AtomicBool,
+    published: &Mutex<Option<(u64, Vec<SearchItem>)>>,
 ) -> IpcResponse {
     match request.method.as_str() {
         "ping" => IpcResponse::ok(json!({ "version": PROTOCOL_VERSION })),
@@ -251,12 +257,40 @@ fn dispatch(
                 Ok(items) => items,
                 Err(error) => return IpcResponse::error(format!("snapshot failed: {error}")),
             };
-            IpcResponse::ok(json!({
-                "generation": generation,
-                "changed": true,
-                "indexing": false,
-                "items": items_to_values(&items),
-            }))
+            drop(service); // diffing/serializing does not need the service lock
+
+            let mut published = published.lock().unwrap_or_else(|e| e.into_inner());
+            let response = match published.as_ref() {
+                // Delta only when the caller's set is exactly the one we
+                // published last; a missed generation needs a full snapshot.
+                Some((published_generation, previous)) if *published_generation == known => {
+                    match build_item_delta(previous, &items) {
+                        Some((upserts, deleted)) => json!({
+                            "generation": generation,
+                            "changed": true,
+                            "indexing": false,
+                            "delta": {
+                                "upserts": items_to_values(&upserts),
+                                "deleted": deleted,
+                            },
+                        }),
+                        None => json!({
+                            "generation": generation,
+                            "changed": true,
+                            "indexing": false,
+                            "items": items_to_values(&items),
+                        }),
+                    }
+                }
+                _ => json!({
+                    "generation": generation,
+                    "changed": true,
+                    "indexing": false,
+                    "items": items_to_values(&items),
+                }),
+            };
+            *published = Some((generation, items));
+            IpcResponse::ok(response)
         }
         "search" => {
             let query = request
@@ -277,6 +311,42 @@ fn dispatch(
         }
         other => IpcResponse::error(format!("unknown method: {other}")),
     }
+}
+
+/// Compute small upserts/deletes between the previously published set and the
+/// current one. Returns None when the change is large enough that a full
+/// snapshot is cheaper than a delta.
+fn build_item_delta(
+    previous: &[SearchItem],
+    current: &[SearchItem],
+) -> Option<(Vec<SearchItem>, Vec<String>)> {
+    const MAX_DELTA_ENTRIES: usize = 512;
+
+    let previous_by_id: HashMap<&str, &SearchItem> =
+        previous.iter().map(|item| (item.id.as_str(), item)).collect();
+    let current_ids: HashSet<&str> = current.iter().map(|item| item.id.as_str()).collect();
+
+    let mut upserts = Vec::new();
+    for item in current {
+        match previous_by_id.get(item.id.as_str()) {
+            Some(old) if *old == item => {}
+            _ => upserts.push(item.clone()),
+        }
+    }
+    let deleted: Vec<String> = previous
+        .iter()
+        .filter(|item| !current_ids.contains(item.id.as_str()))
+        .map(|item| item.id.clone())
+        .collect();
+
+    if upserts.len() > MAX_DELTA_ENTRIES || deleted.len() > MAX_DELTA_ENTRIES {
+        return None;
+    }
+    // Replacing most of the set costs more than a full snapshot.
+    if (upserts.len() + deleted.len()) * 4 > current.len() {
+        return None;
+    }
+    Some((upserts, deleted))
 }
 
 fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Result<()> {
@@ -419,5 +489,32 @@ mod tests {
         let decoded: IpcRequest =
             serde_json::from_str(r#"{"version":999,"method":"ping"}"#).unwrap();
         assert_ne!(decoded.version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn delta_lists_upserts_and_deletes() {
+        let a = SearchItem::new("a", "app", "Alpha", r"C:\a.exe");
+        let b = SearchItem::new("b", "app", "Beta", r"C:\b.exe");
+        let a2 = SearchItem::new("a", "app", "Alpha 2", r"C:\a.exe");
+        let c = SearchItem::new("c", "app", "Gamma", r"C:\c.exe");
+
+        let (upserts, deleted) =
+            build_item_delta(&[a, b], &[a2, c]).expect("small change should be a delta");
+        let ids: Vec<&str> = upserts.iter().map(|item| item.id.as_str()).collect();
+        assert!(ids.contains(&"a"), "changed item is an upsert");
+        assert!(ids.contains(&"c"), "new item is an upsert");
+        assert!(!ids.contains(&"b"), "unchanged item is not resent");
+        assert_eq!(deleted, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn delta_falls_back_to_full_for_large_changes() {
+        let previous: Vec<SearchItem> = (0..100)
+            .map(|i| SearchItem::new(&format!("old{i}"), "app", "Old", "C:\\old.exe"))
+            .collect();
+        let current: Vec<SearchItem> = (0..100)
+            .map(|i| SearchItem::new(&format!("new{i}"), "app", "New", "C:\\new.exe"))
+            .collect();
+        assert!(build_item_delta(&previous, &current).is_none());
     }
 }

@@ -654,6 +654,40 @@ impl CoreService {
         count
     }
 
+    /// Apply an incremental change published by the indexer.
+    ///
+    /// Returns false when the delta was empty. Upserts replace by id (or are
+    /// appended); deleted ids are removed. Item order is not significant for
+    /// search, so this is a single rebuild pass rather than an index shuffle.
+    pub fn apply_external_delta(&self, upserts: Vec<SearchItem>, deleted: Vec<String>) -> bool {
+        if upserts.is_empty() && deleted.is_empty() {
+            return false;
+        }
+        let mut replacements: std::collections::HashMap<String, SearchItem> =
+            upserts.into_iter().map(|item| (item.id.clone(), item)).collect();
+        let deleted: std::collections::HashSet<String> = deleted.into_iter().collect();
+
+        let mut guard = self.cached_items.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = Vec::with_capacity(guard.len() + replacements.len());
+        for item in guard.drain(..) {
+            if deleted.contains(&item.id) {
+                continue;
+            }
+            match replacements.remove(&item.id) {
+                Some(replacement) => next.push(replacement),
+                None => next.push(item),
+            }
+        }
+        next.extend(replacements.into_values());
+        let apps = collect_app_items(&next);
+        *guard = next;
+        drop(guard);
+        *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
+        self.cache_complete.store(true, Ordering::SeqCst);
+        self.bump_search_generation();
+        true
+    }
+
     pub fn launch(&self, target: LaunchTarget<'_>) -> Result<(), ServiceError> {
         self.launch_with_query_context(target, None, None)
     }

@@ -163,6 +163,7 @@ pub(crate) fn run_windows_runtime(
                         startup_started_at,
                         apply_started: Arc::new(AtomicBool::new(true)),
                         apply_done: Arc::new(AtomicBool::new(true)),
+                        last_db_reload: Instant::now(),
                     }
                 }
                 Err(e) => {

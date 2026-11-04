@@ -41,6 +41,7 @@ pub(crate) struct BackgroundIndexRefresh {
     pub(crate) startup_started_at: Instant,
     pub(crate) apply_started: Arc<AtomicBool>,
     pub(crate) apply_done: Arc<AtomicBool>,
+    pub(crate) last_db_reload: Instant,
 }
 
 #[cfg(target_os = "windows")]
@@ -100,6 +101,7 @@ pub(crate) fn start_background_index_refresh(
         startup_started_at,
         apply_started: Arc::new(AtomicBool::new(false)),
         apply_done: Arc::new(AtomicBool::new(false)),
+        last_db_reload: Instant::now(),
     }
 }
 
@@ -110,6 +112,13 @@ pub(crate) fn maybe_apply_background_index_refresh(
     runtime_config: &Config,
 ) {
     if state.cache_applied {
+        if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1")
+            && state.last_db_reload.elapsed() >= std::time::Duration::from_secs(30) {
+            let svc = service.read().unwrap_or_else(|e| e.into_inner());
+            let _ = svc.reload_cache_from_store();
+            let _ = svc.sync_indexes_from_cache();
+            state.last_db_reload = std::time::Instant::now();
+        }
         if !state.indexes_synced {
             let svc = service.read().unwrap_or_else(|e| e.into_inner());
             match svc.sync_indexes_from_cache() {

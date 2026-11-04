@@ -8,7 +8,7 @@
 - [x] Indexer health-check/auto-restart
 - [ ] Remove local CoreService discovery from UI entirely
 - [ ] Make indexer the sole Tantivy/SQLite owner
-- [ ] Add UI cache reload from indexer updates
+- [x] Add UI cache reload from indexer updates
 - [x] Update release/packaging scripts for new binaries
 - [ ] Add end-to-end recovery tests
 - [ ] Verify parity (local vs indexer search)

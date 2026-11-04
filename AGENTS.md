@@ -1,5 +1,20 @@
 # Nex — Agent Reference
 
+## Non-negotiables (read before editing)
+
+1. **Linear first.** For any user-reported bug, feature request, or implementation
+   task, search the Nex project (P-CIQ-2) for a matching issue *before touching
+   code*. Reuse it, or create one if none matches. Keep it current and set its
+   state from what actually happened. Questions, planning, and status requests do
+   not need an issue. Details: "Linear Project Tracking" below.
+2. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
+   relevant gate, and never claim a check passed unless it was run.
+3. **Commit identity.** Author is the repo owner; commit bodies contain no
+   AI/bot names or co-author trailers. Do not commit unless asked.
+4. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
+   never renders; helper (High IL) is a broker, not a supervisor. See
+   "Process Model & Privilege Boundaries" below.
+
 ## Build & Test
 
 **Cargo target location**: Use `G:\nex-target` for Cargo commands when available. Set `$env:CARGO_TARGET_DIR='G:\nex-target'` before `cargo build`, `cargo check`, or `cargo test` to avoid C: drive pressure.
@@ -68,6 +83,18 @@ Do not invert that ownership.
 **Supervision:** the UI's hotkey supervisor keeps the helper connected and
 reconnects with 2s→30s backoff when the pipe closes; the in-process hook stays
 active meanwhile. The snapshot-sync loop respawns a dead indexer.
+
+## Agent Tooling
+
+- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it strips AI
+  co-author trailers and rejects a commit that changes `apps/`, `scripts/`, or
+  `manifests/` without a `CIQ-<n>` id. Enable it per clone with
+  `git config core.hooksPath scripts/git-hooks`. Exceptional commits can bypass
+  once via `NEX_ALLOW_NO_LINEAR=1`.
+- `CLAUDE.md`, `.github/copilot-instructions.md`, and `.cursor/rules/nex.mdc`
+  repeat the non-negotiables for agents that do not load this file.
+- CI rejects pull requests that change code paths without a Linear id in the
+  title or body.
 
 ## Toolchain
 

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Nex commit policy.
+#
+# 1. Strip AI co-author trailers.
+# 2. Require a Linear issue id (CIQ-<n>) when the commit changes code paths.
+#
+# Exceptional commits can bypass the Linear check once with:
+#   NEX_ALLOW_NO_LINEAR=1 git commit ...
+
+msg_file="$1"
+
+# --- 1. No AI/bot trailers in commit messages -------------------------------
+# The repo owner requires commit bodies to contain no agent names at all.
+sed -i.bak '/^Co-authored-by: Command Code /d' "$msg_file"
+sed -i.bak '/^Co-authored-by: .*noreply@commandcode\.ai/d' "$msg_file"
+rm -f "$msg_file.bak"
+
+# Merge/revert/fixup commits carry their own context; no issue needed.
+subject=$(sed -n '1p' "$msg_file")
+case "$subject" in
+  Merge*|Revert*|fixup!*|squash!*) exit 0 ;;
+esac
+
+if grep -Eq 'CIQ-[0-9]+' "$msg_file"; then
+  exit 0
+fi
+
+# Only code and agent-tooling changes require tracking.
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if printf '%s\n' "$staged" | grep -Eq '^(apps|scripts|manifests)/'; then
+  if [ "$NEX_ALLOW_NO_LINEAR" = "1" ]; then
+    echo "commit-msg: Linear check bypassed (NEX_ALLOW_NO_LINEAR=1)" >&2
+    exit 0
+  fi
+  cat >&2 <<'EOF'
+commit-msg: this commit changes apps/, scripts/, or manifests/ but names no
+            Linear issue. Add the issue id to the message, for example:
+
+              Fix overlay focus race (CIQ-42)
+
+            If Linear genuinely does not apply, bypass once with:
+              NEX_ALLOW_NO_LINEAR=1 git commit ...
+EOF
+  exit 1
+fi
+
+exit 0

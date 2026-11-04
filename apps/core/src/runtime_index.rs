@@ -70,10 +70,12 @@ fn start_ui_snapshot_sync(
     let service = Arc::clone(service);
     std::thread::spawn(move || {
         let mut last_generation = 0_u64;
+        let mut first_apply = true;
         loop {
             match sync_indexer_snapshot(last_generation) {
                 SnapshotSync::Applied(generation, items) => {
                     let count = items.len();
+                    let mut applied = false;
                     // The main loop only takes short read locks; retry a
                     // write instead of stalling it behind a writer request.
                     for _ in 0..40 {
@@ -85,10 +87,21 @@ fn start_ui_snapshot_sync(
                                 log_info(&format!(
                                     "[nex] ui_snapshot_applied items={count} generation={generation}"
                                 ));
+                                applied = true;
                                 break;
                             }
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
                         }
+                    }
+                    if applied {
+                        // Applying a snapshot invalidates the prefix cache.
+                        // Re-warm it off-thread: the first apply covers
+                        // startup, later ones only while the overlay is
+                        // visible so hidden idle churn costs no CPU.
+                        if first_apply || crate::overlay::hotkey::is_overlay_visible() {
+                            crate::runtime_loop::spawn_hot_prefix_prefetch(&service);
+                        }
+                        first_apply = false;
                     }
                 }
                 SnapshotSync::Unchanged => {}

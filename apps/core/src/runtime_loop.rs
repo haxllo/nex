@@ -92,6 +92,11 @@ pub(crate) fn run_windows_runtime(
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(RwLock::new(service));
 
+    // Warm the single-character prefix cache before the first show: a cold
+    // one-character query is the most expensive search, and paying it on the
+    // user's first keystroke is what made the first result feel late.
+    spawn_hot_prefix_prefetch(&service);
+
     // The UI never indexes. The indexer owns discovery and Tantivy, and the
     // snapshot sync below mirrors its published set. First-run indexing and
     // the progress window are indexer concerns now.
@@ -465,7 +470,7 @@ pub(crate) fn run_windows_runtime(
 /// long-lived session pays the cost once per item-set generation. Keeping it
 /// off the event-loop thread means showing and typing in the overlay never
 /// waits on it.
-fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
+pub(crate) fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
     let needed = match service.try_read() {
         Ok(guard) => guard.hot_prefix_prefetch_needed(),
         Err(_) => false,

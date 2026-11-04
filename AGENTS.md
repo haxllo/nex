@@ -16,21 +16,23 @@ cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
-**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification.
+**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification. `cargo test -p nex-helper` cannot run either: the helper embeds a `requireAdministrator` manifest, so the test harness exits with "The requested operation requires elevation" (os error 740).
 
 **CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess` → `cargo test -p nex` → perf gate → smoke gate.
 
-**Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `nex.exe` and is found automatically.
+**Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `NexUIProcess.exe` and is found automatically.
 
 ## Running
 
+`Nex.exe` no longer exists; the UI entry point is `NexUIProcess.exe`.
+
 ```bash
-nex --foreground              # dev mode, keeps terminal attached
-nex --quit                    # stop running instance
-nex --status                  # check if running
-nex --restart                 # restart
-nex --diagnostics-bundle      # dump diagnostics to a zip
-nex                           # normal: background hotkey runtime (Ctrl+Space)
+.\target\release\NexUIProcess.exe --foreground   # dev mode, keeps terminal attached
+.\target\release\NexUIProcess.exe --quit         # stop running instance
+.\target\release\NexUIProcess.exe --status       # check if running
+.\target\release\NexUIProcess.exe --restart      # restart
+.\target\release\NexUIProcess.exe --diagnostics-bundle
+.\target\release\NexUIProcess.exe                # normal: background hotkey runtime
 ```
 
 Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDATA%\Nex\index.sqlite3`.
@@ -46,6 +48,26 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 - **One binary per package on purpose**: a build script's Windows resource is linked into all of its package's binaries and inherited by dependent packages, so sharing a package would give every process the same `FileDescription` (Task Manager name).
 - **Windows-only modules**: `runtime_loop`, `everything`, `runtime_overlay_rows`
 - Tests in `apps/core/src/runtime.rs:tests` and `apps/core/tests/`, `tests/perf/`, plus process-isolation e2e in `apps/indexer/tests/`
+
+## Process Model & Privilege Boundaries
+
+| Process | Integrity | Owns |
+|---|---|---|
+| `NexUIProcess.exe` | Medium | Overlay/WebView2, hotkeys, tray, settings, search over the published snapshot. Session owner: spawns, supervises, and stops the indexer and helper. |
+| `NexIndexerProcess.exe` | Medium | Discovery, SQLite writes, file/app watchers, Tantivy. Parent-PID watchdog; exits when the UI disappears. |
+| `NexHelper.exe` | High (elevated) | Narrow privileged broker: elevated hotkey detection, foreground grant, input simulation. **Never owns process lifecycle.** |
+
+**Pipe integrity rule (UIPI):** a Medium-IL process cannot write into a
+High-IL pipe (`Access is denied`). Therefore:
+- pipes the UI only *reads* may be created by the helper (`nex-hotkey`,
+  `NexHelperLog`);
+- the command pipe the UI *writes* must be created by the UI (`NexHelperCmd`),
+  with the helper as the read-only client.
+Do not invert that ownership.
+
+**Supervision:** the UI's hotkey supervisor keeps the helper connected and
+reconnects with 2s→30s backoff when the pipe closes; the in-process hook stays
+active meanwhile. The snapshot-sync loop respawns a dead indexer.
 
 ## Toolchain
 

@@ -87,7 +87,7 @@ if ((-not $SourceExe -or -not (Test-Path $SourceExe)) -and $BuildFromSource) {
   Write-Host "[1/5] Building release binary from source..." -ForegroundColor Yellow
   Push-Location $repoRoot
   try {
-    cargo build -p nex --release --quiet --bin Nex
+    cargo build -p nex --release --quiet --bin Nex --bin NexUIProcess --bin NexIndexerProcess
     cargo build -p nex-helper --release --quiet --bin NexHelper
     $built = Resolve-RuntimePath -BaseDir $repoRoot -RelativeCandidates @(
       "target\release\Nex.exe",
@@ -133,6 +133,15 @@ $helperExe = Join-Path $helperSourceDir "NexHelper.exe"
 if (Test-Path $helperExe) {
   Copy-Item $helperExe (Join-Path $binDir "NexHelper.exe") -Force
   Write-Host "  Bundled NexHelper.exe"
+}
+
+# Process isolation: Nex.exe delegates discovery/indexing to these when present.
+foreach ($companion in @("NexUIProcess.exe", "NexIndexerProcess.exe")) {
+  $companionPath = Join-Path $helperSourceDir $companion
+  if (Test-Path $companionPath) {
+    Copy-Item $companionPath (Join-Path $binDir $companion) -Force
+    Write-Host "  Bundled $companion"
+  }
 }
 
 foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {

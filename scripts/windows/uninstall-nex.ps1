@@ -58,7 +58,7 @@ else {
 }
 
 Write-Host "[2/5] Hard-stopping any leftover Nex process..."
-foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+foreach ($imageName in @("Nex.exe", "NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
   taskkill /IM $imageName /F /T | Out-Null
 }
 Start-Sleep -Milliseconds 200

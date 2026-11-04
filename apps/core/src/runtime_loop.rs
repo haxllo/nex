@@ -103,7 +103,8 @@ pub(crate) fn run_windows_runtime(
         guard.cached_items_len() == 0
     };
 
-    let background_index_refresh = if initial_cache_empty {
+    let ui_process = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
+    let background_index_refresh = if initial_cache_empty && !ui_process {
         let use_progress_window = match runtime_config.file_discovery_backend {
             DiscoveryBackend::Everything => false,
             DiscoveryBackend::Walkdir => true,
@@ -163,12 +164,12 @@ pub(crate) fn run_windows_runtime(
                         startup_started_at,
                         apply_started: Arc::new(AtomicBool::new(true)),
                         apply_done: Arc::new(AtomicBool::new(true)),
-                        last_db_reload: Instant::now(),
+                        ui_snapshot_applied: None,
                     }
                 }
                 Err(e) => {
                     log_warn(&format!("[nex] first-time indexing failed: {e}"));
-                    start_background_index_refresh(&runtime_config, true, startup_started_at)
+                    start_background_index_refresh(&service, &runtime_config, true, startup_started_at)
                 }
             }
         } else {
@@ -177,17 +178,18 @@ pub(crate) fn run_windows_runtime(
                 "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=true cached_items=0",
                 startup_started_at.elapsed().as_millis()
             ));
-            start_background_index_refresh(&runtime_config, true, startup_started_at)
+            start_background_index_refresh(&service, &runtime_config, true, startup_started_at)
         }
     } else {
         log_info(&format!(
-            "[nex] startup cached_items={} (async indexing scheduled)",
+            "[nex] startup cached_items={} (async index sync scheduled{})",
             {
                 let guard = service.read().unwrap_or_else(|e| e.into_inner());
                 guard.cached_items_len()
-            }
+            },
+            if ui_process { ", ui process" } else { "" }
         ));
-        start_background_index_refresh(&runtime_config, false, startup_started_at)
+        start_background_index_refresh(&service, &runtime_config, initial_cache_empty, startup_started_at)
     };
 
     let plugin_registry = PluginRegistry::load_from_config(&runtime_config);
@@ -524,6 +526,16 @@ pub(crate) fn run_windows_runtime(
     // not find a half-merged index.
     if let Ok(guard) = service.read() {
         guard.shutdown_search_index();
+    }
+    // The indexer is a child of this UI process only by convention (spawned
+    // detached). Ask it to exit now so `quit` never leaves it running; its
+    // parent-PID watchdog is only a backstop for crashes.
+    #[cfg(target_os = "windows")]
+    if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
+        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+            log_info("[nex] shutdown: stopping NexIndexerProcess");
+            crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR);
+        }
     }
     log_info("[nex] shutdown: complete, process exiting");
 
@@ -1644,6 +1656,7 @@ impl RuntimeWorker {
             let hotkey_changed = maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
+                &self.service,
                 &mut self.runtime_config,
                 &mut self.plugin_registry,
                 &mut self.search_session,
@@ -1704,13 +1717,14 @@ impl RuntimeWorker {
         );
         if self.background_index_refresh.cache_applied {
             if let Ok(svc) = self.service.try_write() {
-                svc.start_stale_pruner(&self.service);
-                if std::env::var("NEX_UI_PROCESS").ok().as_deref() != Some("1") {
+                let ui_process = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
+                if !ui_process {
+                    svc.start_stale_pruner(&self.service);
                     if let Err(error) = svc.start_file_watchers(&self.service) {
                         log_warn(&format!("[nex] directory_watcher start failed: {error}"));
                     }
+                    svc.start_application_watchers(&self.service);
                 }
-                svc.start_application_watchers(&self.service);
             }
         }
 

@@ -222,6 +222,30 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         RuntimeCommand::Run => {}
     }
 
+    // Process isolation: the shipping launcher runs as the UI process and
+    // delegates discovery/indexing to NexIndexerProcess. Falls back to the
+    // legacy in-process indexer when the companion binary is missing, so an
+    // unpacked `Nex.exe` alone still works.
+    #[cfg(target_os = "windows")]
+    let ui_process = {
+        let forced = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
+        let available = crate::ipc::indexer_exe_path().is_some_and(|path| path.exists());
+        if forced || available {
+            unsafe {
+                std::env::set_var("NEX_UI_PROCESS", "1");
+            }
+            if !crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR) {
+                log_warn("[nex] NexIndexerProcess did not start; searching the last snapshot");
+            }
+            true
+        } else {
+            log_warn("[nex] NexIndexerProcess.exe missing; using legacy in-process indexing");
+            false
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let ui_process = false;
+
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let startup_started_at = Instant::now();
     let runtime_config = config::load(None)?;
@@ -268,7 +292,13 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
     }
 
-    let service = CoreService::new(runtime_config.clone())?.with_runtime_providers();
+    let service = if ui_process {
+        // Discovery, SQLite writes, and Tantivy ownership live in the indexer
+        // process; the UI only searches the snapshot it publishes.
+        CoreService::new_ui_client(runtime_config.clone())?
+    } else {
+        CoreService::new(runtime_config.clone())?.with_runtime_providers()
+    };
     #[cfg(target_os = "windows")]
     {
         run_windows_runtime(startup_started_at, runtime_config, service)

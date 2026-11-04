@@ -198,6 +198,17 @@ impl CoreService {
         Self::with_loaded_cache(config, db, true)
     }
 
+    /// UI-process service: reads the store for launch/personalization state,
+    /// but owns no Tantivy index. Discovery and backends belong to the indexer
+    /// process; search runs over the snapshot it publishes.
+    pub fn new_ui_client(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        // Keep every store row: the UI must be able to find files that cache
+        // compaction would otherwise evict.
+        Self::with_loaded_cache_mode(config, db, false, false)
+    }
+
     /// Background rebuild service: SQLite + cache only, NO Tantivy index.
     /// The background thread must never open its own IndexWriter on the
     /// same directory as the main service — concurrent writers race and
@@ -210,6 +221,15 @@ impl CoreService {
     }
 
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
+        Self::with_loaded_cache_mode(config, db, enable_tantivy, true)
+    }
+
+    fn with_loaded_cache_mode(
+        config: Config,
+        db: Connection,
+        enable_tantivy: bool,
+        compact: bool,
+    ) -> Result<Self, ServiceError> {
         let all_items = index_store::list_items(&db)?;
         let cached_apps = collect_app_items(&all_items);
 
@@ -223,9 +243,13 @@ impl CoreService {
         };
         // Compact now rather than on the first refresh: an uncompacted cache
         // makes every cache-scan search walk the whole store.
-        let cache_complete = cache_compaction_summary(&all_items, &config).dropped_total == 0;
-        let cached = compact_cached_items(&all_items, &config);
-        drop(all_items);
+        let cache_complete = !compact
+            || cache_compaction_summary(&all_items, &config).dropped_total == 0;
+        let cached = if compact {
+            compact_cached_items(&all_items, &config)
+        } else {
+            all_items
+        };
 
         Ok(Self {
             config: RwLock::new(config),
@@ -600,6 +624,25 @@ impl CoreService {
     pub fn reload_cache_from_store(&self) -> Result<usize, ServiceError> {
         self.refresh_cache_from_store()?;
         Ok(self.cached_len())
+    }
+
+    /// Full store contents, uncompacted. The indexer serves this to the UI so
+    /// search can reach rows that cache compaction evicted.
+    pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
+        Ok(index_store::list_items(&*self.db())?)
+    }
+
+    /// Replace the searchable item set with one published by the indexer.
+    /// The snapshot is the whole store, so the cache counts as complete and
+    /// search never needs a direct SQLite pass.
+    pub fn apply_external_snapshot(&self, items: Vec<SearchItem>) -> usize {
+        let apps = collect_app_items(&items);
+        let count = items.len();
+        *self.cached_items.write().unwrap_or_else(|e| e.into_inner()) = items;
+        *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
+        self.cache_complete.store(true, Ordering::SeqCst);
+        self.bump_search_generation();
+        count
     }
 
     pub fn launch(&self, target: LaunchTarget<'_>) -> Result<(), ServiceError> {

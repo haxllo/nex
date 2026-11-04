@@ -41,33 +41,34 @@ pub(crate) struct BackgroundIndexRefresh {
     pub(crate) startup_started_at: Instant,
     pub(crate) apply_started: Arc<AtomicBool>,
     pub(crate) apply_done: Arc<AtomicBool>,
-    pub(crate) last_db_reload: Instant,
+    /// Set in `NexUIProcess`: the indexer publishes snapshots and a monitor
+    /// thread reports when one has been applied.
+    pub(crate) ui_snapshot_applied: Option<Arc<AtomicBool>>,
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn start_background_index_refresh(
+    service: &Arc<RwLock<CoreService>>,
     config: &Config,
     initial_cache_empty: bool,
     startup_started_at: Instant,
 ) -> BackgroundIndexRefresh {
+    if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
+        return start_ui_snapshot_sync(service, initial_cache_empty, startup_started_at);
+    }
     let completed = Arc::new(AtomicBool::new(false));
     let result = Arc::new(Mutex::new(None));
     let completed_worker = completed.clone();
     let result_worker = result.clone();
     let worker_config = config.clone();
-    let use_runtime_providers = std::env::var("NEX_UI_PROCESS").ok().as_deref() != Some("1");
     std::thread::spawn(move || {
         // Catch panics so a buggy provider can never silently leave the main
         // thread waiting on a completion flag that will never flip.
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let service = CoreService::new_background(worker_config)
                 .map_err(|e| format!("background service init failed: {e}"))?;
-            let service = if use_runtime_providers {
-                service.with_runtime_providers()
-            } else {
-                service
-            };
             service
+                .with_runtime_providers()
                 .rebuild_index_incremental_with_report()
                 .map_err(|error| format!("background indexing failed: {error}"))
         })) {
@@ -101,8 +102,92 @@ pub(crate) fn start_background_index_refresh(
         startup_started_at,
         apply_started: Arc::new(AtomicBool::new(false)),
         apply_done: Arc::new(AtomicBool::new(false)),
-        last_db_reload: Instant::now(),
+        ui_snapshot_applied: None,
     }
+}
+
+/// `NexUIProcess` never discovers or indexes locally: it mirrors the indexer's
+/// published snapshot into its in-memory search set.
+#[cfg(target_os = "windows")]
+fn start_ui_snapshot_sync(
+    service: &Arc<RwLock<CoreService>>,
+    initial_cache_empty: bool,
+    startup_started_at: Instant,
+) -> BackgroundIndexRefresh {
+    let applied = Arc::new(AtomicBool::new(false));
+    let applied_worker = applied.clone();
+    let service = Arc::clone(service);
+    std::thread::spawn(move || {
+        let mut last_generation = 0_u64;
+        loop {
+            // shortcut: every change ships the whole store, which costs CPU on
+            // large churn; switch to per-change deltas if watcher churn hurts.
+            if let Some((generation, items)) = fetch_indexer_snapshot() {
+                if generation != last_generation {
+                    let count = items.len();
+                    // The main loop only takes short read locks; retry a
+                    // write instead of stalling it behind a writer request.
+                    for _ in 0..40 {
+                        match service.try_write() {
+                            Ok(svc) => {
+                                svc.apply_external_snapshot(items);
+                                last_generation = generation;
+                                applied_worker.store(true, Ordering::Release);
+                                log_info(&format!(
+                                    "[nex] ui_snapshot_applied items={count} generation={generation}"
+                                ));
+                                break;
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                        }
+                    }
+                }
+            } else {
+                crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    BackgroundIndexRefresh {
+        completed: Arc::new(AtomicBool::new(true)),
+        result: Arc::new(Mutex::new(None)),
+        cache_applied: false,
+        indexes_synced: false,
+        initial_cache_empty,
+        pending_discovery_reindex: false,
+        pending_discovery_reindex_due_at: None,
+        pending_discovery_reindex_requests: 0,
+        started_at: Instant::now(),
+        startup_started_at,
+        apply_started: Arc::new(AtomicBool::new(true)),
+        apply_done: Arc::new(AtomicBool::new(true)),
+        ui_snapshot_applied: Some(applied),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn fetch_indexer_snapshot() -> Option<(u64, Vec<crate::model::SearchItem>)> {
+    use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
+    use serde_json::Value;
+
+    let status = ipc_call(INDEXER_ADDR, &IpcRequest::new("status", Value::Null)).ok()?;
+    if !status.ok {
+        return None;
+    }
+    let status = status.result?;
+    // A snapshot taken mid-rebuild would only be replaced moments later.
+    if status.get("indexing").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    let snapshot = ipc_call(INDEXER_ADDR, &IpcRequest::new("snapshot", Value::Null)).ok()?;
+    if !snapshot.ok {
+        return None;
+    }
+    let snapshot = snapshot.result?;
+    let generation = snapshot.get("generation").and_then(Value::as_u64)?;
+    let items = snapshot.get("items").and_then(Value::as_array)?;
+    Some((generation, items_from_values(items)))
 }
 
 #[cfg(target_os = "windows")]
@@ -111,14 +196,18 @@ pub(crate) fn maybe_apply_background_index_refresh(
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
-    if state.cache_applied {
-        if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1")
-            && state.last_db_reload.elapsed() >= std::time::Duration::from_secs(30) {
-            let svc = service.read().unwrap_or_else(|e| e.into_inner());
-            let _ = svc.reload_cache_from_store();
-            let _ = svc.sync_indexes_from_cache();
-            state.last_db_reload = std::time::Instant::now();
+    if let Some(applied) = state.ui_snapshot_applied.clone() {
+        if applied.load(Ordering::Acquire) && !state.cache_applied {
+            state.cache_applied = true;
+            state.indexes_synced = true;
+            log_info(&format!(
+                "[nex] startup_phase phase=indexing_completed elapsed_ms={} source=nex-indexer",
+                state.startup_started_at.elapsed().as_millis()
+            ));
         }
+        return;
+    }
+    if state.cache_applied {
         if !state.indexes_synced {
             let svc = service.read().unwrap_or_else(|e| e.into_inner());
             match svc.sync_indexes_from_cache() {
@@ -133,7 +222,7 @@ pub(crate) fn maybe_apply_background_index_refresh(
                 }
             }
         }
-        maybe_start_queued_discovery_reindex(&*service.read().unwrap_or_else(|e| e.into_inner()), state, runtime_config);
+        maybe_start_queued_discovery_reindex(service, state, runtime_config);
         return;
     }
     if !state.completed.load(Ordering::Acquire) {
@@ -223,13 +312,17 @@ pub(crate) fn maybe_apply_background_index_refresh(
             log_info(
                 "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
             );
-            maybe_start_queued_discovery_reindex(&*service.read().unwrap_or_else(|e| e.into_inner()), state, runtime_config);
+            maybe_start_queued_discovery_reindex(service, state, runtime_config);
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn queue_discovery_reindex_after_active_index(state: &mut BackgroundIndexRefresh) {
+    if state.ui_snapshot_applied.is_some() {
+        // The UI process does not discover; the indexer picks up root changes.
+        return;
+    }
     state.pending_discovery_reindex = true;
     state.pending_discovery_reindex_requests =
         state.pending_discovery_reindex_requests.saturating_add(1);
@@ -249,7 +342,7 @@ pub(crate) fn queued_discovery_reindex_is_due(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_start_queued_discovery_reindex(
-    service: &CoreService,
+    service: &Arc<RwLock<CoreService>>,
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
@@ -272,9 +365,9 @@ pub(crate) fn maybe_start_queued_discovery_reindex(
     log_info(&format!(
         "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
         startup_started_at.elapsed().as_millis(),
-        service.cached_items_len()
+        service.read().unwrap_or_else(|e| e.into_inner()).cached_items_len()
     ));
-    *state = start_background_index_refresh(runtime_config, false, startup_started_at);
+    *state = start_background_index_refresh(service, runtime_config, false, startup_started_at);
 }
 
 #[cfg(target_os = "windows")]
@@ -296,6 +389,7 @@ fn panic_message_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
 pub(crate) fn maybe_apply_runtime_config_reload(
     overlay: &NativeOverlayShell,
     service: &CoreService,
+    service_arc: &Arc<RwLock<CoreService>>,
     runtime_config: &mut Config,
     plugin_registry: &mut PluginRegistry,
     search_session: &mut OverlaySearchSession,
@@ -361,23 +455,26 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                     log_warn(&format!(
                         "[nex] provider reconfigure failed after config reload: {error}"
                     ));
+                } else if background_index_refresh.ui_snapshot_applied.is_some() {
+                    log_info(
+                        "[nex] discovery settings changed; NexIndexerProcess reloads them",
+                    );
+                } else if background_index_refresh.cache_applied {
+                    *background_index_refresh = start_background_index_refresh(
+                        service_arc,
+                        runtime_config,
+                        false,
+                        background_index_refresh.startup_started_at,
+                    );
+                    log_info("[nex] discovery settings changed; background reindex started");
                 } else {
-                    if background_index_refresh.cache_applied {
-                        *background_index_refresh = start_background_index_refresh(
-                            runtime_config,
-                            false,
-                            background_index_refresh.startup_started_at,
-                        );
-                        log_info("[nex] discovery settings changed; background reindex started");
-                    } else {
-                        queue_discovery_reindex_after_active_index(background_index_refresh);
-                        discovery_reindex_queued = true;
-                        log_info(&format!(
-                            "[nex] discovery settings changed while indexing is active; reindex queued debounce_ms={} requests={}",
-                            QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS,
-                            background_index_refresh.pending_discovery_reindex_requests
-                        ));
-                    }
+                    queue_discovery_reindex_after_active_index(background_index_refresh);
+                    discovery_reindex_queued = true;
+                    log_info(&format!(
+                        "[nex] discovery settings changed while indexing is active; reindex queued debounce_ms={} requests={}",
+                        QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS,
+                        background_index_refresh.pending_discovery_reindex_requests
+                    ));
                 }
             }
 

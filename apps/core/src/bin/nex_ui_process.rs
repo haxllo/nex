@@ -10,12 +10,12 @@ fn main() {
         .unwrap_or(true);
 
     unsafe { std::env::set_var("NEX_UI_PROCESS", "1"); }
-    let indexer = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("NexIndexerProcess.exe")))
-        .unwrap_or_else(|| std::path::PathBuf::from("NexIndexerProcess.exe"));
-    // Best-effort spawn; ignore if already running.
-    let _ = std::process::Command::new(indexer).spawn();
+    // Start (or reuse) the indexer before the UI builds its service, so the
+    // first keystroke has a snapshot to search. Failure is non-fatal: the UI
+    // keeps its last store snapshot and retries on the next monitor tick.
+    if !nex_core::ipc::ensure_indexer_running(nex_core::ipc::INDEXER_ADDR) && stdio_enabled {
+        eprintln!("[nex] indexer not reachable yet; search uses the last snapshot until it starts");
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match nex_core::runtime::parse_cli_args(&args) {

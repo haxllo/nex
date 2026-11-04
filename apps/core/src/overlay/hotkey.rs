@@ -639,17 +639,10 @@ unsafe extern "system" fn mouse_hook_proc(
     w_param: windows_sys::Win32::Foundation::WPARAM,
     l_param: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
-    use windows_sys::Win32::Foundation::{POINT, RECT};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowRect, MSLLHOOKSTRUCT,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSLLHOOKSTRUCT};
 
     if n_code < 0 {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
     }
 
     let msg = w_param as u32;
@@ -666,62 +659,12 @@ unsafe extern "system" fn mouse_hook_proc(
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN
     );
 
-    if !is_button_down || !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
-    }
-
-    let msll = unsafe { *(l_param as *const MSLLHOOKSTRUCT) };
-    // Skip injected (SendInput) clicks.
-    const LLMHF_INJECTED: u32 = 0x1;
-    if (msll.flags & LLMHF_INJECTED) != 0 {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
-    }
-
-    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
-    if hwnd.is_null() {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
-    }
-
-    let mut cursor = POINT { x: 0, y: 0 };
-    if unsafe { GetCursorPos(&mut cursor) } == 0 {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
-    }
-
-    let mut rect: RECT = unsafe { std::mem::zeroed() };
-    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
-        return unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                std::ptr::null_mut(), n_code, w_param, l_param,
-            )
-        };
-    }
-
-    // Cursor outside overlay rect → real outside click. Dedicated event
-    // (not Escape): keyboard Escape keeps picker-ignore semantics while
-    // a genuine click dismisses at once.
-    if cursor.x < rect.left || cursor.x >= rect.right
-        || cursor.y < rect.top || cursor.y >= rect.bottom
-    {
-        crate::runtime::log_info("[nex::debug] Mouse hook: outside click");
-        let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
-        if let Some(sender) = ctx {
-            let _ = sender.send(OverlayEvent::OutsideClick);
+    if is_button_down {
+        let msll = unsafe { *(l_param as *const MSLLHOOKSTRUCT) };
+        // Skip injected (SendInput) clicks.
+        const LLMHF_INJECTED: u32 = 0x1;
+        if (msll.flags & LLMHF_INJECTED) == 0 {
+            emit_outside_click_if_outside("mouse hook");
         }
     }
 
@@ -731,6 +674,64 @@ unsafe extern "system" fn mouse_hook_proc(
         )
     }
 }
+
+/// True when (x, y) lies outside the rect. Pure so the hit test is testable.
+fn cursor_outside_rect(x: i32, y: i32, left: i32, top: i32, right: i32, bottom: i32) -> bool {
+    x < left || x >= right || y < top || y >= bottom
+}
+
+/// Emit `OutsideClick` when the cursor is outside the overlay panel.
+///
+/// Shared by the in-process `WH_MOUSE_LL` hook and the elevated helper's
+/// forwarded `MOUSEDOWN`. The Medium-IL hook is UIPI-gated: it never fires for
+/// clicks routed to an elevated window (Task Manager, Settings), so the helper
+/// reports those. A short debounce collapses the duplicate for normal windows,
+/// where both paths observe the same click.
+fn emit_outside_click_if_outside(source: &str) {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
+
+    if !OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+        return;
+    }
+    let hwnd = OVERLAY_HWND.load(Ordering::SeqCst) as windows_sys::Win32::Foundation::HWND;
+    if hwnd.is_null() {
+        return;
+    }
+
+    let mut cursor = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return;
+    }
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        return;
+    }
+    if !cursor_outside_rect(cursor.x, cursor.y, rect.left, rect.top, rect.right, rect.bottom) {
+        return;
+    }
+
+    let clock = OUTSIDE_CLICK_CLOCK.get_or_init(Instant::now);
+    let now_ms = clock.elapsed().as_millis() as u64;
+    let last_ms = LAST_OUTSIDE_CLICK_MS.swap(now_ms, Ordering::SeqCst);
+    if now_ms.saturating_sub(last_ms) < OUTSIDE_CLICK_DEDUPE_MS {
+        return;
+    }
+
+    // Dedicated event (not Escape): keyboard Escape keeps picker-ignore
+    // semantics while a genuine click dismisses at once.
+    logging::info(&format!("[nex::debug] outside click ({source})"));
+    let ctx = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.sender.clone()));
+    if let Some(sender) = ctx {
+        let _ = sender.send(OverlayEvent::OutsideClick);
+    }
+}
+
+/// Both the UI hook and the helper report a normal-window click; collapse the
+/// pair into one dismissal.
+const OUTSIDE_CLICK_DEDUPE_MS: u64 = 150;
+static OUTSIDE_CLICK_CLOCK: OnceLock<Instant> = OnceLock::new();
+static LAST_OUTSIDE_CLICK_MS: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // HotkeyListener
@@ -1321,6 +1322,9 @@ fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
             }
             Ok(l) if l == "SUPPRESS_ON" => set_suppress_focus_escape(true),
             Ok(l) if l == "SUPPRESS_OFF" => set_suppress_focus_escape(false),
+            // Elevated-window click forwarded by the helper; the local hook
+            // cannot see these (UIPI).
+            Ok(l) if l == "MOUSEDOWN" => emit_outside_click_if_outside("helper"),
             Ok(_) => {}
             Err(_) => break,
         }
@@ -2128,6 +2132,15 @@ mod tests {
     #[test] fn dispatch_numpad_bounds() { assert_eq!(dispatch_for(0x6F, false, true, false), DispatchReason::NumpadKey); assert_eq!(dispatch_for(0x5F, false, true, false), DispatchReason::SystemHotkey); assert_eq!(dispatch_for(0x70, false, true, false), DispatchReason::SystemHotkey); }
     #[test] fn dispatch_refused_wins_over_win() { assert_eq!(dispatch_for(0x20, true, true, true), DispatchReason::RefusedDemoted); }
     #[test] fn send_helper_key_down_without_pipe() { assert!(!send_helper_key("play_pause")); }
+
+    #[test] fn outside_click_hit_test_excludes_panel() {
+        let (l, t, r, b) = (100, 100, 300, 200);
+        assert!(!cursor_outside_rect(200, 150, l, t, r, b), "inside panel");
+        assert!(!cursor_outside_rect(100, 100, l, t, r, b), "top-left edge is inside");
+        assert!(cursor_outside_rect(99, 150, l, t, r, b), "left of panel");
+        assert!(cursor_outside_rect(300, 150, l, t, r, b), "right edge is outside");
+        assert!(cursor_outside_rect(200, 200, l, t, r, b), "bottom edge is outside");
+    }
 
     // One press tracker for every detector: bare taps fire once, chords never.
     #[test] fn bare_press_fires_exactly_once() {

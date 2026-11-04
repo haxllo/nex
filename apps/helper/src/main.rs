@@ -729,6 +729,59 @@ unsafe extern "system" fn keyboard_hook_proc(
 
 static HOTKEY_FIRED: AtomicBool = AtomicBool::new(false);
 
+/// Set by the mouse hook proc when a real button-down arrives; the message
+/// loop forwards it to nex as `MOUSEDOWN`.
+static MOUSE_DOWN_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Forward button-down events to nex so it can dismiss the overlay.
+///
+/// nex's own `WH_MOUSE_LL` hook is Medium IL, and low-level hooks are
+/// UIPI-gated: they never fire for input routed to an elevated window. This
+/// High-IL hook sees clicks on Task Manager / Settings, which is exactly the
+/// case nex cannot observe itself.
+unsafe extern "system" fn mouse_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSLLHOOKSTRUCT};
+
+    if n_code < 0 {
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+    }
+
+    let msg = w_param as u32;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_MBUTTONDOWN: u32 = 0x0207;
+    const WM_XBUTTONDOWN: u32 = 0x020B;
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const WM_NCRBUTTONDOWN: u32 = 0x00A4;
+
+    if matches!(
+        msg,
+        WM_LBUTTONDOWN
+            | WM_RBUTTONDOWN
+            | WM_MBUTTONDOWN
+            | WM_XBUTTONDOWN
+            | WM_NCLBUTTONDOWN
+            | WM_NCRBUTTONDOWN
+    ) {
+        let msll = unsafe { *(l_param as *const MSLLHOOKSTRUCT) };
+        // Skip injected input: nex evaluates genuine clicks only, and
+        // SendInput-driven clicks must not dismiss the panel.
+        const LLMHF_INJECTED: u32 = 0x1;
+        if (msll.flags & LLMHF_INJECTED) == 0 {
+            MOUSE_DOWN_FIRED.store(true, Ordering::SeqCst);
+            if let Some(tid) = HELPER_THREAD_ID.get() {
+                unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0) };
+            }
+        }
+    }
+
+    unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) }
+}
+
 // Hot-path hotkey definition, published as plain atomics.
 //
 // `keyboard_hook_proc` runs inside the OS input pipeline for every
@@ -1332,6 +1385,25 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Install WH_MOUSE_LL so elevated-window clicks still dismiss the overlay.
+    // Non-fatal: without it, nex just cannot see clicks over elevated windows.
+    let mouse_hook_id = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WH_MOUSE_LL as i32,
+            Some(mouse_hook_proc),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if mouse_hook_id.is_null() {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        debug_log(&format!(
+            "WH_MOUSE_LL install failed: err={err}; elevated outside-click disabled"
+        ));
+    } else {
+        debug_log("WH_MOUSE_LL installed");
+    }
+
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
     /// Reason a binding skips RegisterHotKey, or None when the system
     /// hotkey path serves it. Pure so both registration sites agree.
@@ -1626,6 +1698,14 @@ fn main() {
             }
         }
 
+        // Forward elevated-window clicks (nex's own mouse hook is UIPI-blocked
+        // for those). nex decides whether the click was outside the panel.
+        if MOUSE_DOWN_FIRED.swap(false, Ordering::SeqCst) {
+            if pipe.write_all(b"MOUSEDOWN\n").is_err() {
+                break; // nex.exe disconnected
+            }
+        }
+
         // Check if Win key was released (send SUPPRESS_OFF to nex.exe)
         if WIN_KEY_RELEASED.swap(false, Ordering::SeqCst) {
             if pipe.write_all(b"SUPPRESS_OFF\n").is_err() {
@@ -1641,6 +1721,9 @@ fn main() {
             CloseHandle(nex_handle);
         }
         windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
+        if !mouse_hook_id.is_null() {
+            windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id);
+        }
     }
     if fallback_id != 0 {
         unsafe {

@@ -80,6 +80,12 @@ High-IL pipe (`Access is denied`). Therefore:
   with the helper as the read-only client.
 Do not invert that ownership.
 
+**Low-level hooks are UIPI-gated too:** `WH_KEYBOARD_LL`/`WH_MOUSE_LL` in the
+Medium-IL UI never fire for input routed to an elevated window (Task Manager,
+Settings). Keep that detection in the helper and forward it over the detection
+pipe (`HOTKEY`, `MOUSEDOWN`); the UI re-checks overlay visibility and the
+panel rect.
+
 **Supervision:** the UI's hotkey supervisor keeps the helper connected and
 reconnects with 2s→30s backoff when the pipe closes; the in-process hook stays
 active meanwhile. The snapshot-sync loop respawns a dead indexer.

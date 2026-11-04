@@ -49,6 +49,12 @@ LicenseFile=..\..\LICENSE
 Source: "{#StageDir}\bin\NexUIProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexIndexerProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexHelper.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+; One-release migration shim: pre-isolation installs (< 2.38.0) ship an
+; updater that restarts bin\Nex.exe after installing. Only updater-driven
+; upgrades need it; a later release drops it (the 2.38.0 updater already
+; prefers NexUIProcess.exe). [InstallDelete] removes the old real Nex.exe
+; before this file is written.
+Source: "{#StageDir}\bin\Nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion; Check: IsUpdaterRun
 Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
@@ -115,6 +121,11 @@ end;
 function ShouldLaunchNexAfterInstall(): Boolean;
 begin
   Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
+end;
+
+function IsUpdaterRun(): Boolean;
+begin
+  Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) > 0;
 end;
 
 procedure RemoveLegacyOrphan(); forward;

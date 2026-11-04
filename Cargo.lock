@@ -1678,6 +1678,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nex-shim"
+version = "2.37.0"
+dependencies = [
+ "winres",
+]
+
+[[package]]
 name = "nex-ui"
 version = "2.37.0"
 dependencies = [

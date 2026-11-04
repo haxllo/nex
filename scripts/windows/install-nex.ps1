@@ -130,6 +130,24 @@ New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
+# Upgrade safety: Windows locks running executables, and the elevated helper
+# cannot be replaced while it is alive. Stop everything before copying.
+Write-Host "Stopping any running Nex process..."
+foreach ($candidate in @(
+  (Join-Path $InstallRoot "bin\NexUIProcess.exe"),
+  (Join-Path $InstallRoot "bin\Nex.exe")
+)) {
+  if (Test-Path -LiteralPath $candidate) {
+    try { & $candidate --quit | Out-Null } catch { }
+    break
+  }
+}
+cmd /c "schtasks /end /tn NexHelperV2 >NUL 2>&1" | Out-Null
+foreach ($imageName in @("Nex.exe", "NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+  cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
+}
+Start-Sleep -Milliseconds 400
+
 Write-Host "[3/5] Copying runtime files..."
 Copy-Item $SourceExe (Join-Path $binDir "NexUIProcess.exe") -Force
 

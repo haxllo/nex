@@ -24,7 +24,7 @@
 
 ```bash
 cargo build --bin NexUIProcess         # debug build (UI only)
-cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess  # release build
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex  # release build (Nex = 2.37.0 migration shim)
 cargo build --release -p nex-helper      # release build (helper only)
 cargo test -p nex                        # all unit tests (Windows)
 cargo test -p nex-indexer --test process_isolation_test  # IPC/process-isolation e2e
@@ -36,13 +36,13 @@ cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 
 **Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification. `cargo test -p nex-helper` cannot run either: the helper embeds a `requireAdministrator` manifest, so the test harness exits with "The requested operation requires elevation" (os error 740).
 
-**CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess` → `cargo test -p nex` → perf gate → smoke gate.
+**CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex` → `cargo test -p nex` → perf gate → smoke gate.
 
 **Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `NexUIProcess.exe` and is found automatically.
 
 ## Running
 
-`Nex.exe` no longer exists; the UI entry point is `NexUIProcess.exe`.
+`Nex.exe` is not a runtime; the UI entry point is `NexUIProcess.exe`. A temporary `Nex.exe` forwarding shim ships in 2.38.0 for the 2.37.0 upgrade hop only (see Project Structure).
 
 ```bash
 .\target\release\NexUIProcess.exe --foreground   # dev mode, keeps terminal attached
@@ -59,7 +59,8 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 
 ## Project Structure
 
-- Workspace members: `apps/core` (crate `nex`, lib `nex_core`), `apps/ui` (bin `NexUIProcess`), `apps/indexer` (bin `NexIndexerProcess`), `apps/helper` (bin `NexHelper`)
+- Workspace members: `apps/core` (crate `nex`, lib `nex_core`), `apps/ui` (bin `NexUIProcess`), `apps/indexer` (bin `NexIndexerProcess`), `apps/helper` (bin `NexHelper`), `apps/shim` (bin `Nex`, migration only)
+- **`apps/shim` is temporary**: `Nex.exe` forwards to `NexUIProcess.exe` so the pre-2.38.0 updater (which resolves `bin\Nex.exe` by name) can complete its first upgrade. The installer ships it only on `/NEXUPDATER` runs. Remove the package and its `[Files]` entry once 2.38.0 is the oldest supported version.
 - Binary entry: `apps/ui/src/main.rs` → `nex_core::runtime::run_with_options`
 - Library entry: `apps/core/src/lib.rs`
 - **Two-process split**: `NexUIProcess.exe` owns the overlay, hotkeys, tray, and search over the indexer's published snapshot. `NexIndexerProcess.exe` owns discovery, SQLite writes, file/app watchers, and Tantivy. There is no in-process indexing fallback.
@@ -147,10 +148,10 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 **Trigger**: When the user asks to run, create, or publish a Nex release, execute this release procedure. It is a manual agent workflow, not a GitHub Actions dispatch.
 
 ```bash
-# 1. bump version in apps/core, apps/ui, and apps/indexer (all three
-#    build scripts stamp FileVersion from their own package); commit the
+# 1. bump version in apps/core, apps/ui, apps/indexer, and apps/shim (all
+#    four build scripts stamp FileVersion from their own package); commit the
 #    release changes; do not tag yet
-cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex
 
 # 2. build artifacts (zip, setup, manifest)
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable

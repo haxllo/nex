@@ -34,6 +34,15 @@ fn main() {
         .map(|value| !(value == "1" || value.eq_ignore_ascii_case("true")))
         .unwrap_or(true);
 
+    // The indexer is a separate process: it needs its own logger or every
+    // watcher/index diagnostic is silently dropped and only the UI half of the
+    // story reaches nex.log.
+    if let Err(error) = nex_core::logging::init() {
+        if stdio_enabled {
+            eprintln!("[nex-indexer] logging init warning: {error}");
+        }
+    }
+
     // Bind first: a second instance must not run a duplicate discovery pass.
     let Some(listener) = ipc::bind_indexer_listener(&addr) else {
         if stdio_enabled {
@@ -141,8 +150,11 @@ fn run_index_cycle(
 fn start_watchers(service: &Arc<RwLock<CoreService>>) {
     let service_guard = service.read().unwrap_or_else(|error| error.into_inner());
     service_guard.start_stale_pruner(service);
-    if let Err(error) = service_guard.start_file_watchers(service) {
-        nex_core::logging::warn(&format!("[nex-indexer] watcher start failed: {error}"));
+    match service_guard.start_file_watchers(service) {
+        Ok(()) => nex_core::logging::info("[nex-indexer] file watchers started"),
+        Err(error) => nex_core::logging::warn(&format!(
+            "[nex-indexer] watcher start failed: {error}"
+        )),
     }
     service_guard.start_application_watchers(service);
 }

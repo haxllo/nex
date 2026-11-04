@@ -222,6 +222,21 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         RuntimeCommand::Run => {}
     }
 
+    // This binary is the UI process. Discovery, SQLite writes, file/app
+    // watchers, and Tantivy ownership all live in NexIndexerProcess; the UI
+    // only searches the snapshot it publishes. There is no in-process
+    // fallback: if the indexer is unavailable the UI stays on its last known
+    // snapshot instead of silently turning back into an indexer.
+    #[cfg(target_os = "windows")]
+    {
+        unsafe {
+            std::env::set_var("NEX_UI_PROCESS", "1");
+        }
+        if !crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR) {
+            log_warn("[nex] NexIndexerProcess unavailable; searching the last known snapshot");
+        }
+    }
+
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let startup_started_at = Instant::now();
     let runtime_config = config::load(None)?;
@@ -268,7 +283,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         ));
     }
 
-    let service = CoreService::new(runtime_config.clone())?.with_runtime_providers();
+    let service = CoreService::new_ui_client_lazy(runtime_config.clone())?;
     #[cfg(target_os = "windows")]
     {
         run_windows_runtime(startup_started_at, runtime_config, service)

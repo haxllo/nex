@@ -15,11 +15,7 @@ use crate::clipboard_history;
 #[cfg(target_os = "windows")]
 use crate::config::Config;
 #[cfg(target_os = "windows")]
-use crate::config::DiscoveryBackend;
-#[cfg(target_os = "windows")]
 use crate::core_service::CoreService;
-#[cfg(target_os = "windows")]
-use crate::everything_bridge::EverythingBridge;
 #[cfg(target_os = "windows")]
 use crate::overlay_state::{HotkeyAction, OverlayState};
 #[cfg(target_os = "windows")]
@@ -71,8 +67,6 @@ use crate::overlay::host::Host;
 #[cfg(target_os = "windows")]
 use crate::overlay::hotkey::HotkeyListener;
 #[cfg(target_os = "windows")]
-use crate::overlay::indexing_progress::run_with_progress_window;
-#[cfg(target_os = "windows")]
 use crate::overlay::{
     signal_existing_instance_show, NativeOverlayShell, OverlayEvent, OverlayRow, OverlayRowRole,
 };
@@ -98,94 +92,44 @@ pub(crate) fn run_windows_runtime(
 ) -> Result<(), RuntimeError> {
     let service = Arc::new(RwLock::new(service));
 
-    let initial_cache_empty = {
-        let guard = service.read().unwrap_or_else(|e| e.into_inner());
-        guard.cached_items_len() == 0
-    };
-
-    let background_index_refresh = if initial_cache_empty {
-        let use_progress_window = match runtime_config.file_discovery_backend {
-            DiscoveryBackend::Everything => false,
-            DiscoveryBackend::Walkdir => true,
-            DiscoveryBackend::Auto => match EverythingBridge::detect() {
-                Some(bridge) if bridge.is_service_running() => false,
-                _ => true,
-            },
-        };
-        if use_progress_window {
-            log_info("[nex] startup cached_items=0 (first-time indexing with progress window)");
-            let service_arc = service.clone();
-            let result = run_with_progress_window(move |pct| {
-                let svc = service_arc.write().unwrap_or_else(|e| e.into_inner());
-                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = Some(pct);
-                let report = svc.rebuild_index_incremental_with_report();
-                *svc.progress.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                report
+    // The service starts empty so the hotkey is ready immediately. Fill the
+    // search cache off-thread, then warm the single-character prefix cache —
+    // paying either cost on the user's first keystroke is what made startup
+    // feel slow. Quick Launch reads SQLite directly and is unaffected.
+    {
+        let service = Arc::clone(&service);
+        let _ = std::thread::Builder::new()
+            .name("nex-store-load".into())
+            .spawn(move || match service.read() {
+                Ok(guard) => match guard.reload_cache_from_store() {
+                    Ok(count) => {
+                        log_info(&format!("[nex] startup cache loaded items={count}"));
+                        spawn_hot_prefix_prefetch(&service);
+                    }
+                    Err(error) => {
+                        log_warn(&format!("[nex] startup cache load failed: {error}"));
+                    }
+                },
+                Err(_) => log_warn("[nex] startup cache load skipped (service lock poisoned)"),
             });
-            match result {
-                Ok(report) => {
-                    log_info(&format!(
-                        "[nex] startup indexed_items={} discovered={} upserted={} removed={}",
-                        report.indexed_total,
-                        report.discovered_total,
-                        report.upserted_total,
-                        report.removed_total,
-                    ));
-                    for provider in &report.providers {
-                        log_info(&format!(
-                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
-                            provider.provider,
-                            provider.discovered,
-                            provider.upserted,
-                            provider.removed,
-                            provider.skipped,
-                            provider.elapsed_ms
-                        ));
-                    }
-                    // Sync Tantivy immediately so the first
-                    // keystroke never hits the CPU-bound cached_items
-                    // scan.  The progress window just closed and the
-                    // overlay + hotkey haven't been created yet, so
-                    // the user perceives no delay.
-                    if let Ok(svc) = service.write() {
-                        let _ = svc.sync_indexes_from_cache();
-                    }
-                    BackgroundIndexRefresh {
-                        completed: Arc::new(AtomicBool::new(true)),
-                        result: Arc::new(Mutex::new(Some(Ok(report)))),
-                        cache_applied: true,
-                        indexes_synced: true,
-                        initial_cache_empty: true,
-                        pending_discovery_reindex: false,
-                        pending_discovery_reindex_due_at: None,
-                        pending_discovery_reindex_requests: 0,
-                        started_at: Instant::now(),
-                        startup_started_at,
-                    }
-                }
-                Err(e) => {
-                    log_warn(&format!("[nex] first-time indexing failed: {e}"));
-                    start_background_index_refresh(&runtime_config, true, startup_started_at)
-                }
-            }
-        } else {
-            log_info("[nex] startup cached_items=0 (first-time indexing, Everything backend — async, no progress window)");
-            log_info(&format!(
-                "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=true cached_items=0",
-                startup_started_at.elapsed().as_millis()
-            ));
-            start_background_index_refresh(&runtime_config, true, startup_started_at)
-        }
-    } else {
-        log_info(&format!(
-            "[nex] startup cached_items={} (async indexing scheduled)",
-            {
-                let guard = service.read().unwrap_or_else(|e| e.into_inner());
-                guard.cached_items_len()
-            }
-        ));
-        start_background_index_refresh(&runtime_config, false, startup_started_at)
+    }
+
+    // The UI never indexes. The indexer owns discovery and Tantivy, and the
+    // snapshot sync below mirrors its published set. First-run indexing and
+    // the progress window are indexer concerns now.
+    let cached_items = {
+        let guard = service.read().unwrap_or_else(|e| e.into_inner());
+        guard.cached_items_len()
     };
+    log_info(&format!(
+        "[nex] startup cached_items={cached_items} (async index sync scheduled, ui process)"
+    ));
+    let background_index_refresh = start_background_index_refresh(
+        &service,
+        &runtime_config,
+        cached_items == 0,
+        startup_started_at,
+    );
 
     let plugin_registry = PluginRegistry::load_from_config(&runtime_config);
     for warning in &plugin_registry.load_warnings {
@@ -522,6 +466,16 @@ pub(crate) fn run_windows_runtime(
     if let Ok(guard) = service.read() {
         guard.shutdown_search_index();
     }
+    // The indexer is a child of this UI process only by convention (spawned
+    // detached). Ask it to exit now so `quit` never leaves it running; its
+    // parent-PID watchdog is only a backstop for crashes.
+    #[cfg(target_os = "windows")]
+    if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
+        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+            log_info("[nex] shutdown: stopping NexIndexerProcess");
+            crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR);
+        }
+    }
     log_info("[nex] shutdown: complete, process exiting");
 
     host_result.map_err(RuntimeError::Overlay)
@@ -533,7 +487,7 @@ pub(crate) fn run_windows_runtime(
 /// long-lived session pays the cost once per item-set generation. Keeping it
 /// off the event-loop thread means showing and typing in the overlay never
 /// waits on it.
-fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
+pub(crate) fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
     let needed = match service.try_read() {
         Ok(guard) => guard.hot_prefix_prefetch_needed(),
         Err(_) => false,
@@ -590,46 +544,18 @@ fn media_control(action: crate::media::MediaAction, overlay: &NativeOverlayShell
         .ok();
 }
 
-/// How often the recent-documents recency overlay is allowed to re-scan the
-/// shell MRU. Launching an app or opening a document is what moves the MRU,
-/// and the overlay only *advances* recency, so a coarse interval loses
-/// nothing while keeping the service write lock idle.
-const RECENT_DOCUMENTS_REFRESH_SECS: i64 = 600;
-
 /// The "Show all apps" result row is parked: the expanded view browses
 /// usage-ranked apps instead, and a full-index row inside every app query
 /// is noise. Flip back to `true` to restore it.
 const SHOW_ALL_APPS_ENTRY: bool = false;
 
-/// Apply the recent-documents recency overlay on a background thread.
+/// Ask the indexer to apply the recent-documents recency overlay.
 ///
-/// Takes the service write lock, so it must never run on the event-loop
-/// thread: the search worker holds a read guard while ranking, and blocking
-/// that would stall the first keystroke.
-fn spawn_recent_documents_refresh(service: &Arc<RwLock<CoreService>>) {
-    let due = match service.try_read() {
-        Ok(guard) => guard.recent_documents_scan_due(RECENT_DOCUMENTS_REFRESH_SECS),
-        Err(_) => false,
-    };
-    if !due {
-        return;
-    }
-
-    let service = Arc::clone(service);
-    let _ = std::thread::Builder::new()
-        .name("nex-recent-documents".into())
-        .spawn(move || match service.write() {
-            Ok(guard) => match guard.apply_recent_documents() {
-                Ok(applied) if applied > 0 => {
-                    log_info(&format!("[nex] recent_documents applied={applied}"))
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    log_info(&format!("[nex] recent_documents failed: {error}"))
-                }
-            },
-            Err(_) => log_info("[nex] recent_documents skipped (service busy)"),
-        });
+/// The indexer owns the store and the shell-MRU scan; it enforces its own
+/// interval, so a per-show request is cheap. Sending it off-thread keeps the
+/// event loop free.
+fn spawn_recent_documents_refresh(_service: &Arc<RwLock<CoreService>>) {
+    crate::ipc::send_indexer_command("recent_documents", serde_json::Value::Null);
 }
 
 /// All mutable state owned by the runtime worker thread. The
@@ -1641,6 +1567,7 @@ impl RuntimeWorker {
             let hotkey_changed = maybe_apply_runtime_config_reload(
                 &self.overlay,
                 &*svc,
+                &self.service,
                 &mut self.runtime_config,
                 &mut self.plugin_registry,
                 &mut self.search_session,
@@ -1684,27 +1611,32 @@ impl RuntimeWorker {
                 self.search_worker.clear_session();
                 self.last_sent_generation = 0;
             }
-            maybe_apply_background_index_refresh(
-                &*svc,
-                &mut self.background_index_refresh,
-                &self.runtime_config,
-            );
-
-            // Start per-root file watchers the first time the index
-            // cache becomes usable. The handle is idempotent: it is a
-            // no-op if a watcher is already running.
-            if self.background_index_refresh.cache_applied {
-                svc.start_stale_pruner(&self.service);
-                if let Err(error) = svc.start_file_watchers(&self.service) {
-                    log_warn(&format!("[nex] directory_watcher start failed: {error}"));
-                }
-                svc.start_application_watchers(&self.service);
-            }
+            // Heavy index apply is deferred to a background thread by
+            // maybe_apply_background_index_refresh; do not run it while
+            // holding the service write lock here.
         } else {
             // Service lock is held by a worker. The config reloader,
             // index-refresh applicator, and watcher starter will
             // retry on the next event; the cost of skipping a tick
             // is bounded by the worker's per-item critical section.
+        }
+
+        maybe_apply_background_index_refresh(
+            &self.service,
+            &mut self.background_index_refresh,
+            &self.runtime_config,
+        );
+        if self.background_index_refresh.cache_applied {
+            if let Ok(svc) = self.service.try_write() {
+                let ui_process = std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1");
+                if !ui_process {
+                    svc.start_stale_pruner(&self.service);
+                    if let Err(error) = svc.start_file_watchers(&self.service) {
+                        log_warn(&format!("[nex] directory_watcher start failed: {error}"));
+                    }
+                    svc.start_application_watchers(&self.service);
+                }
+            }
         }
 
         // Deferred full re-registration (svc borrow dropped above).
@@ -1889,7 +1821,7 @@ impl RuntimeWorker {
                         // the next show.
                         while self.search_worker.try_recv().is_some() {}
                         maybe_apply_background_index_refresh(
-                            &*self.service.write().unwrap_or_else(|e| e.into_inner()),
+                            &self.service,
                             &mut self.background_index_refresh,
                             &self.runtime_config,
                         );

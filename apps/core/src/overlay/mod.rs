@@ -20,7 +20,6 @@
 //!                    (`FindWindowW` + registered window messages).
 //!   * [`hotkey`]  — `RegisterHotKey` + `GetMessageW` listener thread.
 //!   * [`tray`]    — system tray icon with context menu.
-//!   * [`indexing_progress`] — progress window for first-time indexing.
 //!   * [`refraction`] — native glass spike: D3D11 child beneath WebView.
 
 #[cfg(target_os = "windows")]
@@ -41,8 +40,6 @@ pub(crate) mod platform;
 pub(crate) mod shim;
 #[cfg(target_os = "windows")]
 pub(crate) mod tray;
-#[cfg(target_os = "windows")]
-pub(crate) mod indexing_progress;
 #[cfg(target_os = "windows")]
 pub(crate) mod refraction;
 

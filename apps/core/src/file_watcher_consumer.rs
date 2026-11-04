@@ -83,7 +83,7 @@ impl FileWatcherHandle {
             let (watcher, rx) = match start_result {
                 Ok(pair) => pair,
                 Err(error) => {
-                    crate::runtime::log_warn(&format!(
+                    crate::logging::warn(&format!(
                         "[nex] directory_watcher root=\"{}\" start failed: {error}",
                         root.display()
                     ));
@@ -140,7 +140,7 @@ fn spawn_consumer(
             }));
             if let Err(payload) = outcome {
                 let message = panic_message_to_string(&payload);
-                crate::runtime::log_warn(&format!(
+                crate::logging::warn(&format!(
                     "[nex] directory_watcher consumer panicked: {message}"
                 ));
             }
@@ -226,7 +226,7 @@ fn run_consumer(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                crate::runtime::log_info(&format!(
+                crate::logging::info(&format!(
                     "[nex] directory_watcher root=\"{}\" watcher stopped",
                     root.display()
                 ));
@@ -239,7 +239,7 @@ fn run_consumer(
                     &mut pending_removed,
                 );
                 if total_dropped > 0 {
-                    crate::runtime::log_warn(&format!(
+                    crate::logging::warn(&format!(
                         "[nex] directory_watcher root=\"{}\" dropped {total_dropped} events due to batch cap",
                         root.display()
                     ));
@@ -291,7 +291,7 @@ fn run_consumer(
         // return `skipped=true` without scanning.
         if dropped_since_last_flush > 0 {
             overflow_count.fetch_add(dropped_since_last_flush, Ordering::SeqCst);
-            crate::runtime::log_warn(&format!(
+            crate::logging::warn(&format!(
                 "[nex] directory_watcher root=\"{}\" dropped {} events in current flush window; triggering resync",
                 root.display(),
                 dropped_since_last_flush
@@ -311,7 +311,7 @@ fn run_consumer(
             // to catch up on any missed changes.
             let accumulated = overflow_count.load(Ordering::SeqCst);
             if accumulated > 0 {
-                crate::runtime::log_info(&format!(
+                crate::logging::info(&format!(
                     "[nex] directory_watcher root=\"{}\" accumulated {} dropped events across {} flushes; triggering catch-up resync",
                     root.display(),
                     accumulated,
@@ -386,11 +386,11 @@ fn trigger_full_resync(
                 guard.rebuild_index_with_report()
             };
             match report_result {
-                Ok(report) => crate::runtime::log_info(&format!(
+                Ok(report) => crate::logging::info(&format!(
                     "[nex] directory_watcher root=\"{}\" resync ok discovered={} upserted={} removed={}",
                     root.display(), report.discovered_total, report.upserted_total, report.removed_total
                 )),
-                Err(error) => crate::runtime::log_warn(&format!(
+                Err(error) => crate::logging::warn(&format!(
                     "[nex] directory_watcher root=\"{}\" resync failed: {error}",
                     root.display()
                 )),
@@ -404,7 +404,7 @@ fn trigger_full_resync(
         }
         Err(error) => {
             in_flight.store(false, Ordering::SeqCst);
-            crate::runtime::log_warn(&format!(
+            crate::logging::warn(&format!(
                 "[nex] directory_watcher root=\"{}\" resync thread failed to start: {error}",
                 root_label
             ));
@@ -559,7 +559,7 @@ fn flush_pending(
     }
 
     if upserted > 0 || deleted > 0 {
-        crate::runtime::log_info(&format!(
+        crate::logging::info(&format!(
             "[nex] directory_watcher root=\"{}\" flush added={} removed={}",
             root.display(),
             upserted,

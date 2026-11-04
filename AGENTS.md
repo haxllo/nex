@@ -1,35 +1,56 @@
 # Nex — Agent Reference
 
+## Non-negotiables (read before editing)
+
+1. **Linear first.** For any user-reported bug, feature request, or implementation
+   task, search the Nex project (P-CIQ-2) for a matching issue *before touching
+   code*. Reuse it, or create one if none matches. Keep it current. Questions,
+   planning, and status requests do not need an issue. Details: "Linear Project
+   Tracking" below.
+2. **Never close an issue yourself.** Finished work moves to **In Review**; only
+   a merged PR moves it to **Done**. Setting Done before the PR merges is not
+   allowed, no matter how complete the implementation looks.
+3. **Verify, then report.** Use the release profile and `G:\nex-target`, run the
+   relevant gate, and never claim a check passed unless it was run.
+4. **Commit identity.** Author is the repo owner; commit bodies contain no
+   AI/bot names or co-author trailers. Do not commit unless asked.
+5. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
+   never renders; helper (High IL) is a broker, not a supervisor. See
+   "Process Model & Privilege Boundaries" below.
+
 ## Build & Test
 
 **Cargo target location**: Use `G:\nex-target` for Cargo commands when available. Set `$env:CARGO_TARGET_DIR='G:\nex-target'` before `cargo build`, `cargo check`, or `cargo test` to avoid C: drive pressure.
 
 ```bash
-cargo build --bin Nex                    # debug build (nex only)
-cargo build --release --bin Nex --bin NexHelper  # release build (both binaries)
+cargo build --bin NexUIProcess         # debug build (UI only)
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex  # release build (Nex = 2.37.0 migration shim)
 cargo build --release -p nex-helper      # release build (helper only)
 cargo test -p nex                        # all unit tests (Windows)
+cargo test -p nex-indexer --test process_isolation_test  # IPC/process-isolation e2e
 cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 ```
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
-**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification.
+**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification. `cargo test -p nex-helper` cannot run either: the helper embeds a `requireAdministrator` manifest, so the test harness exits with "The requested operation requires elevation" (os error 740).
 
-**CI order**: `vitest --run` → `cargo build --release --bin Nex --bin NexHelper` → `cargo test -p nex` → perf gate → smoke gate.
+**CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex` → `cargo test -p nex` → perf gate → smoke gate.
 
-**Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `nex.exe` and is found automatically.
+**Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `NexUIProcess.exe` and is found automatically.
 
 ## Running
 
+`Nex.exe` is not a runtime; the UI entry point is `NexUIProcess.exe`. A temporary `Nex.exe` forwarding shim ships in 2.38.0 for the 2.37.0 upgrade hop only (see Project Structure).
+
 ```bash
-nex --foreground              # dev mode, keeps terminal attached
-nex --quit                    # stop running instance
-nex --status                  # check if running
-nex --restart                 # restart
-nex --diagnostics-bundle      # dump diagnostics to a zip
-nex                           # normal: background hotkey runtime (Ctrl+Space)
+.\target\release\NexUIProcess.exe --foreground   # dev mode, keeps terminal attached
+.\target\release\NexUIProcess.exe --quit         # stop running instance
+.\target\release\NexUIProcess.exe --status       # check if running
+.\target\release\NexUIProcess.exe --restart      # restart
+.\target\release\NexUIProcess.exe --diagnostics-bundle
+.\target\release\NexUIProcess.exe                # normal: background hotkey runtime
 ```
 
 Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDATA%\Nex\index.sqlite3`.
@@ -38,11 +59,52 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 
 ## Project Structure
 
-- Single Rust workspace member: `apps/core` (crate `nex`, lib name `nex_core`)
-- Binary entry: `apps/core/src/main.rs` → `nex_core::runtime::run_with_options`
+- Workspace members: `apps/core` (crate `nex`, lib `nex_core`), `apps/ui` (bin `NexUIProcess`), `apps/indexer` (bin `NexIndexerProcess`), `apps/helper` (bin `NexHelper`), `apps/shim` (bin `Nex`, migration only)
+- **`apps/shim` is temporary**: `Nex.exe` forwards to `NexUIProcess.exe` so the pre-2.38.0 updater (which resolves `bin\Nex.exe` by name) can complete its first upgrade. The installer ships it only on `/NEXUPDATER` runs. Remove the package and its `[Files]` entry once 2.38.0 is the oldest supported version.
+- Binary entry: `apps/ui/src/main.rs` → `nex_core::runtime::run_with_options`
 - Library entry: `apps/core/src/lib.rs`
+- **Two-process split**: `NexUIProcess.exe` owns the overlay, hotkeys, tray, and search over the indexer's published snapshot. `NexIndexerProcess.exe` owns discovery, SQLite writes, file/app watchers, and Tantivy. There is no in-process indexing fallback.
+- **One binary per package on purpose**: a build script's Windows resource is linked into all of its package's binaries and inherited by dependent packages, so sharing a package would give every process the same `FileDescription` (Task Manager name).
 - **Windows-only modules**: `runtime_loop`, `everything`, `runtime_overlay_rows`
-- Tests in `apps/core/src/runtime.rs:tests` and `apps/core/tests/`, `tests/perf/`
+- Tests in `apps/core/src/runtime.rs:tests` and `apps/core/tests/`, `tests/perf/`, plus process-isolation e2e in `apps/indexer/tests/`
+
+## Process Model & Privilege Boundaries
+
+| Process | Integrity | Owns |
+|---|---|---|
+| `NexUIProcess.exe` | Medium | Overlay/WebView2, hotkeys, tray, settings, search over the published snapshot. Session owner: spawns, supervises, and stops the indexer and helper. |
+| `NexIndexerProcess.exe` | Medium | Discovery, SQLite writes, file/app watchers, Tantivy. Parent-PID watchdog; exits when the UI disappears. |
+| `NexHelper.exe` | High (elevated) | Narrow privileged broker: elevated hotkey detection, foreground grant, input simulation. **Never owns process lifecycle.** |
+
+**Pipe integrity rule (UIPI):** a Medium-IL process cannot write into a
+High-IL pipe (`Access is denied`). Therefore:
+- pipes the UI only *reads* may be created by the helper (`nex-hotkey`,
+  `NexHelperLog`);
+- the command pipe the UI *writes* must be created by the UI (`NexHelperCmd`),
+  with the helper as the read-only client.
+Do not invert that ownership.
+
+**Low-level hooks are UIPI-gated too:** `WH_KEYBOARD_LL`/`WH_MOUSE_LL` in the
+Medium-IL UI never fire for input routed to an elevated window (Task Manager,
+Settings). Keep that detection in the helper and forward it over the detection
+pipe (`HOTKEY`, `MOUSEDOWN`); the UI re-checks overlay visibility and the
+panel rect.
+
+**Supervision:** the UI's hotkey supervisor keeps the helper connected and
+reconnects with 2s→30s backoff when the pipe closes; the in-process hook stays
+active meanwhile. The snapshot-sync loop respawns a dead indexer.
+
+## Agent Tooling
+
+- `scripts/git-hooks/commit-msg` enforces the non-negotiables: it strips AI
+  co-author trailers and rejects a commit that changes `apps/`, `scripts/`, or
+  `manifests/` without a `CIQ-<n>` id. Enable it per clone with
+  `git config core.hooksPath scripts/git-hooks`. Exceptional commits can bypass
+  once via `NEX_ALLOW_NO_LINEAR=1`.
+- `CLAUDE.md`, `.github/copilot-instructions.md`, and `.cursor/rules/nex.mdc`
+  repeat the non-negotiables for agents that do not load this file.
+- CI rejects pull requests that change code paths without a Linear id in the
+  title or body.
 
 ## Toolchain
 
@@ -86,8 +148,10 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 **Trigger**: When the user asks to run, create, or publish a Nex release, execute this release procedure. It is a manual agent workflow, not a GitHub Actions dispatch.
 
 ```bash
-# 1. bump version and commit the release changes; do not tag yet
-cargo build --release --bin Nex --bin NexHelper
+# 1. bump version in apps/core, apps/ui, apps/indexer, and apps/shim (all
+#    four build scripts stamp FileVersion from their own package); commit the
+#    release changes; do not tag yet
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex
 
 # 2. build artifacts (zip, setup, manifest)
 pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
@@ -133,7 +197,9 @@ The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9
 - For Nex bug reports, feature requests, and coding tasks that require implementation, search the Nex project for a matching issue before editing code. Reuse the matching issue when one exists; otherwise create an issue in the Nex project. Do not create issues for questions, planning, or status requests that do not ask for implementation.
 - Track a release-only request with a Linear Release record, following the configured Nex release pipeline. Do not create a regular issue solely to build, package, tag, or publish a release. Link related implementation issues to the release when available. If no release pipeline is configured or accessible, tell the user and do not create a regular issue as a substitute.
 - Keep the issue current as work progresses. Before finishing, record the implemented behavior and the build/test checks that were or were not run.
-- Set the issue state to reflect the actual work. Do not say checks passed unless they were run.
+- **State policy:** agents may move issues to In Progress or In Review. Only a
+  merged PR closes an issue (moves it to Done). Do not set Done directly, even
+  for retroactive or verification-only work.
 - When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.
 - Use project status updates for periodic progress, health, and risks; use milestones for major deliverables with clear outcomes. Do not create a milestone for every issue or a health update without evidence.
 - If Linear is unavailable, ask the user to connect it for the current agent before starting implementation.

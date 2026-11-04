@@ -7,9 +7,10 @@ use crate::overlay::{is_instance_window_present, signal_existing_instance_quit};
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "Nex.exe";
+pub(crate) const CURRENT_RUNTIME_EXE_NAME: &str = "NexUIProcess.exe";
 #[cfg(target_os = "windows")]
-pub(crate) const LEGACY_RUNTIME_EXE_NAMES: &[&str] = &["nex-core.exe", "swiftfind-core.exe"];
+pub(crate) const LEGACY_RUNTIME_EXE_NAMES: &[&str] =
+    &["Nex.exe", "nex-core.exe", "swiftfind-core.exe"];
 
 #[cfg(target_os = "windows")]
 pub(crate) fn runtime_executable_names() -> impl Iterator<Item = &'static str> {
@@ -142,6 +143,11 @@ pub(crate) fn stop_runtime_instance(
 ) -> Result<StopRuntimeOutcome, RuntimeError> {
     let mut state = inspect_runtime_process_state();
     if !state.has_overlay_window && state.other_runtime_pids.is_empty() {
+        // No UI left, but a stray indexer may still hold the index files
+        // open (e.g. quit raced the orphan watchdog). Stop it directly.
+        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+            return Ok(stop_indexer_process());
+        }
         return Ok(StopRuntimeOutcome::AlreadyStopped);
     }
 
@@ -150,7 +156,7 @@ pub(crate) fn stop_runtime_instance(
         if wait_until_overlay_window_closed(timeout) {
             state = inspect_runtime_process_state();
             if state.other_runtime_pids.is_empty() {
-                return Ok(StopRuntimeOutcome::Graceful);
+                return Ok(stop_indexer_process());
             }
         }
     }
@@ -159,13 +165,46 @@ pub(crate) fn stop_runtime_instance(
     std::thread::sleep(std::time::Duration::from_millis(250));
     let post = inspect_runtime_process_state();
     if !post.has_overlay_window && post.other_runtime_pids.is_empty() {
-        if forced {
-            Ok(StopRuntimeOutcome::Forced)
-        } else {
-            Ok(StopRuntimeOutcome::Graceful)
+        match stop_indexer_process() {
+            StopRuntimeOutcome::Failed => return Ok(StopRuntimeOutcome::Failed),
+            StopRuntimeOutcome::Forced => return Ok(StopRuntimeOutcome::Forced),
+            _ if forced => return Ok(StopRuntimeOutcome::Forced),
+            _ => return Ok(StopRuntimeOutcome::Graceful),
         }
     } else {
         Ok(StopRuntimeOutcome::Failed)
+    }
+}
+
+/// Ask the indexer to exit and confirm it stopped listening. A graceful
+/// `shutdown` request is tried first; if the indexer ignores it, fall back
+/// to force-terminating the process so `quit` never leaves it running.
+#[cfg(target_os = "windows")]
+fn stop_indexer_process() -> StopRuntimeOutcome {
+    if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+        return StopRuntimeOutcome::AlreadyStopped;
+    }
+    if crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(3) {
+            if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+                return StopRuntimeOutcome::Graceful;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+    }
+    let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
+    let _ = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg(format!(
+            "taskkill /F /FI \"IMAGENAME eq NexIndexerProcess.exe\" /FI \"PID ne {current_pid}\" >NUL 2>&1"
+        ))
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+        StopRuntimeOutcome::Failed
+    } else {
+        StopRuntimeOutcome::Forced
     }
 }
 

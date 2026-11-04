@@ -118,6 +118,16 @@ unsafe extern "system" {
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
 
+    fn CreateFileW(
+        lpFileName: *const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: *mut core::ffi::c_void,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: PipeHandle,
+    ) -> PipeHandle;
+
     fn CloseHandle(hObject: PipeHandle) -> i32;
 }
 
@@ -138,10 +148,14 @@ unsafe extern "system" {
 }
 
 const PIPE_ACCESS_OUTBOUND: u32 = 0x00000002;
-const PIPE_ACCESS_INBOUND: u32 = 0x00000001;
 const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
 const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+
+const GENERIC_READ: u32 = 0x80000000;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const OPEN_EXISTING: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Config source: CLI args or JSON config file
@@ -496,32 +510,42 @@ fn exec_sim(action: SimTap) {
     };
 }
 
-/// Parked thread: serve the command pipe, execute allowlisted lines.
-fn spawn_cmd_pipe_server(cmd_path: String) {
+/// Connect to the UI-owned command pipe and execute allowlisted lines.
+///
+/// The UI creates this pipe at Medium IL and owns the write end. UIPI blocks a
+/// Medium-IL process from writing into a High-IL pipe, so the elevated helper
+/// must be the client here; reading down is permitted.
+fn spawn_cmd_pipe_client(cmd_path: String) {
     std::thread::Builder::new()
         .name("NexHelper-cmd-pipe".into())
         .spawn(move || {
             let wide = to_wide(&cmd_path);
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    wide.as_ptr(),
-                    PIPE_ACCESS_INBOUND,
-                    PIPE_TYPE_MESSAGE | PIPE_WAIT,
-                    PIPE_UNLIMITED_INSTANCES,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null_mut(),
-                )
+            let mut pipe = None;
+            // The UI opens its server end right after the detection pipe
+            // handshake; retry briefly so a slow supervisor is not fatal.
+            for _ in 0..40 {
+                let handle = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        std::ptr::null_mut(),
+                        OPEN_EXISTING,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if !handle.is_null() && handle as isize != -1 {
+                    pipe = Some(unsafe { std::fs::File::from_raw_handle(handle as *mut _) });
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+
+            let Some(file) = pipe else {
+                debug_log("cmd pipe connect failed");
+                return;
             };
-            if handle.is_null() || handle as isize == -1 {
-                debug_log("cmd pipe create failed");
-                return;
-            }
-            let file = unsafe { std::fs::File::from_raw_handle(handle as *mut _) };
-            if wait_for_client(&file).is_err() {
-                return;
-            }
             debug_log("cmd pipe client connected");
             // Single buffered reader for the session: recreating it per
             // line would drop buffered bytes with it.
@@ -704,6 +728,59 @@ unsafe extern "system" fn keyboard_hook_proc(
 }
 
 static HOTKEY_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Set by the mouse hook proc when a real button-down arrives; the message
+/// loop forwards it to nex as `MOUSEDOWN`.
+static MOUSE_DOWN_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// Forward button-down events to nex so it can dismiss the overlay.
+///
+/// nex's own `WH_MOUSE_LL` hook is Medium IL, and low-level hooks are
+/// UIPI-gated: they never fire for input routed to an elevated window. This
+/// High-IL hook sees clicks on Task Manager / Settings, which is exactly the
+/// case nex cannot observe itself.
+unsafe extern "system" fn mouse_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSLLHOOKSTRUCT};
+
+    if n_code < 0 {
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+    }
+
+    let msg = w_param as u32;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_MBUTTONDOWN: u32 = 0x0207;
+    const WM_XBUTTONDOWN: u32 = 0x020B;
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const WM_NCRBUTTONDOWN: u32 = 0x00A4;
+
+    if matches!(
+        msg,
+        WM_LBUTTONDOWN
+            | WM_RBUTTONDOWN
+            | WM_MBUTTONDOWN
+            | WM_XBUTTONDOWN
+            | WM_NCLBUTTONDOWN
+            | WM_NCRBUTTONDOWN
+    ) {
+        let msll = unsafe { *(l_param as *const MSLLHOOKSTRUCT) };
+        // Skip injected input: nex evaluates genuine clicks only, and
+        // SendInput-driven clicks must not dismiss the panel.
+        const LLMHF_INJECTED: u32 = 0x1;
+        if (msll.flags & LLMHF_INJECTED) == 0 {
+            MOUSE_DOWN_FIRED.store(true, Ordering::SeqCst);
+            if let Some(tid) = HELPER_THREAD_ID.get() {
+                unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0) };
+            }
+        }
+    }
+
+    unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) }
+}
 
 // Hot-path hotkey definition, published as plain atomics.
 //
@@ -1251,7 +1328,7 @@ fn main() {
 
     debug_log(&startup_privilege_report());
     spawn_log_pipe_server(log_pipe_for(&pipe_path));
-    spawn_cmd_pipe_server(cmd_pipe_for(&pipe_path));
+    spawn_cmd_pipe_client(cmd_pipe_for(&pipe_path));
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 
@@ -1306,6 +1383,25 @@ fn main() {
         debug_log(&format!("SetWindowsHookExW failed: err={err}"));
         eprintln!("NexHelper: SetWindowsHookExW failed");
         std::process::exit(1);
+    }
+
+    // Install WH_MOUSE_LL so elevated-window clicks still dismiss the overlay.
+    // Non-fatal: without it, nex just cannot see clicks over elevated windows.
+    let mouse_hook_id = unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SetWindowsHookExW(
+            windows_sys::Win32::UI::WindowsAndMessaging::WH_MOUSE_LL as i32,
+            Some(mouse_hook_proc),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if mouse_hook_id.is_null() {
+        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        debug_log(&format!(
+            "WH_MOUSE_LL install failed: err={err}; elevated outside-click disabled"
+        ));
+    } else {
+        debug_log("WH_MOUSE_LL installed");
     }
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win only).
@@ -1602,6 +1698,14 @@ fn main() {
             }
         }
 
+        // Forward elevated-window clicks (nex's own mouse hook is UIPI-blocked
+        // for those). nex decides whether the click was outside the panel.
+        if MOUSE_DOWN_FIRED.swap(false, Ordering::SeqCst) {
+            if pipe.write_all(b"MOUSEDOWN\n").is_err() {
+                break; // nex.exe disconnected
+            }
+        }
+
         // Check if Win key was released (send SUPPRESS_OFF to nex.exe)
         if WIN_KEY_RELEASED.swap(false, Ordering::SeqCst) {
             if pipe.write_all(b"SUPPRESS_OFF\n").is_err() {
@@ -1617,6 +1721,9 @@ fn main() {
             CloseHandle(nex_handle);
         }
         windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id);
+        if !mouse_hook_id.is_null() {
+            windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id);
+        }
     }
     if fallback_id != 0 {
         unsafe {

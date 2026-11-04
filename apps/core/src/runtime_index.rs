@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -38,48 +39,107 @@ pub(crate) struct BackgroundIndexRefresh {
     pub(crate) pending_discovery_reindex_requests: usize,
     pub(crate) started_at: Instant,
     pub(crate) startup_started_at: Instant,
+    pub(crate) apply_started: Arc<AtomicBool>,
+    pub(crate) apply_done: Arc<AtomicBool>,
+    /// Set in `NexUIProcess`: the indexer publishes snapshots and a monitor
+    /// thread reports when one has been applied.
+    pub(crate) ui_snapshot_applied: Option<Arc<AtomicBool>>,
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn start_background_index_refresh(
-    config: &Config,
+    service: &Arc<RwLock<CoreService>>,
+    _config: &Config,
     initial_cache_empty: bool,
     startup_started_at: Instant,
 ) -> BackgroundIndexRefresh {
-    let completed = Arc::new(AtomicBool::new(false));
-    let result = Arc::new(Mutex::new(None));
-    let completed_worker = completed.clone();
-    let result_worker = result.clone();
-    let worker_config = config.clone();
+    // The UI process never indexes: discovery and Tantivy live in the indexer.
+    start_ui_snapshot_sync(service, initial_cache_empty, startup_started_at)
+}
+
+/// `NexUIProcess` never discovers or indexes locally: it mirrors the indexer's
+/// published snapshot into its in-memory search set.
+#[cfg(target_os = "windows")]
+fn start_ui_snapshot_sync(
+    service: &Arc<RwLock<CoreService>>,
+    initial_cache_empty: bool,
+    startup_started_at: Instant,
+) -> BackgroundIndexRefresh {
+    let applied = Arc::new(AtomicBool::new(false));
+    let applied_worker = applied.clone();
+    let service = Arc::clone(service);
     std::thread::spawn(move || {
-        // Catch panics so a buggy provider can never silently leave the main
-        // thread waiting on a completion flag that will never flip.
-        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            CoreService::new_background(worker_config)
-                .map(|service| service.with_runtime_providers())
-                .and_then(|service| service.rebuild_index_incremental_with_report())
-                .map_err(|error| format!("background indexing failed: {error}"))
-        })) {
-            Ok(result) => result,
-            Err(payload) => {
-                let message = panic_message_to_string(&payload);
-                log_warn(&format!(
-                    "[nex] background indexing thread panicked: {message}"
-                ));
-                Err(format!("background indexing panicked: {message}"))
+        let mut last_generation = 0_u64;
+        let mut first_apply = true;
+        loop {
+            let applied_generation = match sync_indexer_snapshot(last_generation) {
+                SnapshotSync::Unchanged => None,
+                SnapshotSync::Unreachable => {
+                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+                    None
+                }
+                SnapshotSync::Full(generation, items) => {
+                    let count = items.len();
+                    let mut applied = false;
+                    // The main loop only takes short read locks; retry a
+                    // write instead of stalling it behind a writer request.
+                    for _ in 0..40 {
+                        match service.try_write() {
+                            Ok(svc) => {
+                                svc.apply_external_snapshot(items);
+                                applied_worker.store(true, Ordering::Release);
+                                log_info(&format!(
+                                    "[nex] ui_snapshot_applied items={count} generation={generation}"
+                                ));
+                                applied = true;
+                                break;
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                        }
+                    }
+                    applied.then_some((generation, true))
+                }
+                SnapshotSync::Delta(generation, upserts, deleted) => {
+                    let upserts_n = upserts.len();
+                    let deleted_n = deleted.len();
+                    let mut outcome = None;
+                    for _ in 0..40 {
+                        match service.try_write() {
+                            Ok(svc) => {
+                                let changed = svc.apply_external_delta(upserts, deleted);
+                                applied_worker.store(true, Ordering::Release);
+                                log_info(&format!(
+                                    "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation}"
+                                ));
+                                outcome = Some((generation, changed));
+                                break;
+                            }
+                            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                        }
+                    }
+                    outcome
+                }
+            };
+
+            if let Some((generation, changed)) = applied_generation {
+                last_generation = generation;
+                // A changed item set invalidates the prefix cache. Re-warm it
+                // off-thread: the first apply covers startup, later ones only
+                // while the overlay is visible, so hidden idle churn is free.
+                if changed
+                    && (first_apply || crate::overlay::hotkey::is_overlay_visible())
+                {
+                    crate::runtime_loop::spawn_hot_prefix_prefetch(&service);
+                }
+                first_apply = false;
             }
-        };
-        let mut slot = match result_worker.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *slot = Some(outcome);
-        completed_worker.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_secs(2));
+        }
     });
 
     BackgroundIndexRefresh {
-        completed,
-        result,
+        completed: Arc::new(AtomicBool::new(true)),
+        result: Arc::new(Mutex::new(None)),
         cache_applied: false,
         indexes_synced: false,
         initial_cache_empty,
@@ -88,18 +148,98 @@ pub(crate) fn start_background_index_refresh(
         pending_discovery_reindex_requests: 0,
         started_at: Instant::now(),
         startup_started_at,
+        apply_started: Arc::new(AtomicBool::new(true)),
+        apply_done: Arc::new(AtomicBool::new(true)),
+        ui_snapshot_applied: Some(applied),
     }
 }
 
 #[cfg(target_os = "windows")]
+enum SnapshotSync {
+    /// Nothing changed (or a rebuild is in flight); keep the last generation.
+    Unchanged,
+    Full(u64, Vec<crate::model::SearchItem>),
+    Delta(u64, Vec<crate::model::SearchItem>, Vec<String>),
+    Unreachable,
+}
+
+/// One request per poll: the indexer reports whether the generation moved and
+/// ships items only when it did. Replaces the old status+snapshot pair, which
+/// opened two connections and always transferred the full store.
+#[cfg(target_os = "windows")]
+fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
+    use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
+    use serde_json::{json, Value};
+
+    let response = match ipc_call(
+        INDEXER_ADDR,
+        &IpcRequest::new("sync", json!({ "generation": known_generation })),
+    ) {
+        Ok(response) if response.ok => response,
+        _ => return SnapshotSync::Unreachable,
+    };
+    let Some(result) = response.result else {
+        return SnapshotSync::Unchanged;
+    };
+    if result
+        .get("indexing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || !result
+            .get("changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return SnapshotSync::Unchanged;
+    }
+    let Some(generation) = result.get("generation").and_then(Value::as_u64) else {
+        return SnapshotSync::Unchanged;
+    };
+    if let Some(delta) = result.get("delta") {
+        let upserts = delta
+            .get("upserts")
+            .and_then(Value::as_array)
+            .map(|values| items_from_values(values))
+            .unwrap_or_default();
+        let deleted = delta
+            .get("deleted")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        return SnapshotSync::Delta(generation, upserts, deleted);
+    }
+    let Some(items) = result.get("items").and_then(Value::as_array) else {
+        return SnapshotSync::Unchanged;
+    };
+    SnapshotSync::Full(generation, items_from_values(items))
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn maybe_apply_background_index_refresh(
-    service: &CoreService,
+    service: &Arc<RwLock<CoreService>>,
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
+    if let Some(applied) = state.ui_snapshot_applied.clone() {
+        if applied.load(Ordering::Acquire) && !state.cache_applied {
+            state.cache_applied = true;
+            state.indexes_synced = true;
+            log_info(&format!(
+                "[nex] startup_phase phase=indexing_completed elapsed_ms={} source=nex-indexer",
+                state.startup_started_at.elapsed().as_millis()
+            ));
+        }
+        return;
+    }
     if state.cache_applied {
         if !state.indexes_synced {
-            match service.sync_indexes_from_cache() {
+            let svc = service.read().unwrap_or_else(|e| e.into_inner());
+            match svc.sync_indexes_from_cache() {
                 Ok(()) => {
                     state.indexes_synced = true;
                     log_info("[nex] Tantivy/FTS5 search indexes synced from cache");
@@ -139,61 +279,79 @@ pub(crate) fn maybe_apply_background_index_refresh(
                 report.upserted_total,
                 report.removed_total
             ));
-            match service.reload_cache_from_store() {
-                Ok(cached_items) => {
-                    log_info(&format!(
-                        "[nex] startup_phase phase=cache_applied elapsed_ms={} cached_items={} initial_cache_empty={}",
-                        startup_elapsed_ms,
-                        cached_items,
-                        state.initial_cache_empty
-                    ));
-                    for provider in &report.providers {
-                        log_info(&format!(
-                            "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
-                            provider.provider,
-                            provider.discovered,
-                            provider.upserted,
-                            provider.removed,
-                            provider.skipped,
-                            provider.elapsed_ms
-                        ));
+            for provider in &report.providers {
+                log_info(&format!(
+                    "[nex] index_provider name={} discovered={} upserted={} removed={} skipped={} elapsed_ms={}",
+                    provider.provider,
+                    provider.discovered,
+                    provider.upserted,
+                    provider.removed,
+                    provider.skipped,
+                    provider.elapsed_ms
+                ));
+            }
+
+            // Heavy cache/index apply runs off the UI thread.
+            if !state.apply_started.swap(true, Ordering::AcqRel) {
+                let service = Arc::clone(service);
+                let apply_done = state.apply_done.clone();
+                std::thread::spawn(move || {
+                    let svc = service.read().unwrap_or_else(|e| e.into_inner());
+                    match svc.reload_cache_from_store() {
+                        Ok(cached_items) => {
+                            let startup_elapsed_ms = 0usize;
+                            let _ = startup_elapsed_ms;
+                            log_info(&format!(
+                                "[nex] startup_phase phase=cache_applied cached_items={}",
+                                cached_items
+                            ));
+                            if let Err(e) = svc.sync_indexes_from_cache() {
+                                log_warn(&format!(
+                                    "[nex] background indexing Tantivy sync failed: {e}"
+                                ));
+                            } else {
+                                log_info("[nex] Tantivy search index synced from cache");
+                            }
+                        }
+                        Err(error) => {
+                            log_warn(&format!(
+                                "[nex] background indexing cache refresh failed: {error}"
+                            ));
+                        }
                     }
-                    if let Err(e) = service.sync_indexes_from_cache() {
-                        log_warn(&format!(
-                        "[nex] background indexing Tantivy sync failed: {e}"
-                        ));
-                    } else {
-                        state.indexes_synced = true;
-                    log_info("[nex] Tantivy search index synced from cache");
-                    }
-                }
-                Err(error) => {
-                    log_warn(&format!(
-                        "[nex] background indexing cache refresh failed: {error}"
-                    ));
-                }
+                    apply_done.store(true, Ordering::Release);
+                });
             }
         }
         Some(Err(error)) => {
             log_warn(&format!("[nex] {error}"));
+            state.apply_done.store(true, Ordering::Release);
         }
         None => {
             log_warn("[nex] background indexing completed without result");
+            state.apply_done.store(true, Ordering::Release);
         }
     }
 
-    state.cache_applied = true;
+    if state.apply_done.load(Ordering::Acquire) {
+        state.cache_applied = true;
+        state.indexes_synced = true;
 
-    if state.pending_discovery_reindex {
-        log_info(
-            "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
-        );
-        maybe_start_queued_discovery_reindex(service, state, runtime_config);
+        if state.pending_discovery_reindex {
+            log_info(
+                "[nex] discovery settings queued during indexing; pending reindex remains scheduled",
+            );
+            maybe_start_queued_discovery_reindex(service, state, runtime_config);
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 pub(crate) fn queue_discovery_reindex_after_active_index(state: &mut BackgroundIndexRefresh) {
+    if state.ui_snapshot_applied.is_some() {
+        // The UI process does not discover; the indexer picks up root changes.
+        return;
+    }
     state.pending_discovery_reindex = true;
     state.pending_discovery_reindex_requests =
         state.pending_discovery_reindex_requests.saturating_add(1);
@@ -213,7 +371,7 @@ pub(crate) fn queued_discovery_reindex_is_due(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_start_queued_discovery_reindex(
-    service: &CoreService,
+    service: &Arc<RwLock<CoreService>>,
     state: &mut BackgroundIndexRefresh,
     runtime_config: &Config,
 ) {
@@ -236,9 +394,9 @@ pub(crate) fn maybe_start_queued_discovery_reindex(
     log_info(&format!(
         "[nex] startup_phase phase=indexing_started elapsed_ms={} initial_cache_empty=false cached_items={}",
         startup_started_at.elapsed().as_millis(),
-        service.cached_items_len()
+        service.read().unwrap_or_else(|e| e.into_inner()).cached_items_len()
     ));
-    *state = start_background_index_refresh(runtime_config, false, startup_started_at);
+    *state = start_background_index_refresh(service, runtime_config, false, startup_started_at);
 }
 
 #[cfg(target_os = "windows")]
@@ -246,20 +404,11 @@ pub(crate) fn config_file_modified_time(path: &std::path::Path) -> Option<System
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-fn panic_message_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
-
 #[cfg(target_os = "windows")]
 pub(crate) fn maybe_apply_runtime_config_reload(
     overlay: &NativeOverlayShell,
     service: &CoreService,
+    service_arc: &Arc<RwLock<CoreService>>,
     runtime_config: &mut Config,
     plugin_registry: &mut PluginRegistry,
     search_session: &mut OverlaySearchSession,
@@ -325,23 +474,26 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                     log_warn(&format!(
                         "[nex] provider reconfigure failed after config reload: {error}"
                     ));
+                } else if background_index_refresh.ui_snapshot_applied.is_some() {
+                    log_info(
+                        "[nex] discovery settings changed; NexIndexerProcess reloads them",
+                    );
+                } else if background_index_refresh.cache_applied {
+                    *background_index_refresh = start_background_index_refresh(
+                        service_arc,
+                        runtime_config,
+                        false,
+                        background_index_refresh.startup_started_at,
+                    );
+                    log_info("[nex] discovery settings changed; background reindex started");
                 } else {
-                    if background_index_refresh.cache_applied {
-                        *background_index_refresh = start_background_index_refresh(
-                            runtime_config,
-                            false,
-                            background_index_refresh.startup_started_at,
-                        );
-                        log_info("[nex] discovery settings changed; background reindex started");
-                    } else {
-                        queue_discovery_reindex_after_active_index(background_index_refresh);
-                        discovery_reindex_queued = true;
-                        log_info(&format!(
-                            "[nex] discovery settings changed while indexing is active; reindex queued debounce_ms={} requests={}",
-                            QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS,
-                            background_index_refresh.pending_discovery_reindex_requests
-                        ));
-                    }
+                    queue_discovery_reindex_after_active_index(background_index_refresh);
+                    discovery_reindex_queued = true;
+                    log_info(&format!(
+                        "[nex] discovery settings changed while indexing is active; reindex queued debounce_ms={} requests={}",
+                        QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS,
+                        background_index_refresh.pending_discovery_reindex_requests
+                    ));
                 }
             }
 

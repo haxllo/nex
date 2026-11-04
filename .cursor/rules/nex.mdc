@@ -1,0 +1,18 @@
+---
+description: Nex repository rules (source of truth: AGENTS.md)
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+Read `AGENTS.md` before changing anything. Non-negotiable rules:
+
+1. Search the Nex Linear project (P-CIQ-2) for a matching issue before editing
+   code; create one if none exists, and set its state from the real outcome.
+2. Verify with a release build (`CARGO_TARGET_DIR=G:\nex-target`) and the
+   relevant gate; never claim an unrun check passed.
+3. Commit as the repo owner, with no AI/bot names or co-author trailers, and
+   only when asked.
+4. Keep process roles separate: UI (Medium IL) never indexes, indexer
+   (Medium IL) never renders, helper (High IL) is a broker not a supervisor.
+5. `Nex.exe` was removed; the UI binary is `NexUIProcess.exe`.

@@ -41,26 +41,34 @@ DisableProgramGroupPage=yes
 ; Runtime shutdown is handled explicitly in [UninstallRun] during upgrade/uninstall.
 CloseApplications=no
 RestartApplications=no
-UninstallDisplayIcon={app}\bin\Nex.exe
+UninstallDisplayIcon={app}\bin\NexUIProcess.exe
 SetupIconFile={#SetupIconPath}
 LicenseFile=..\..\LICENSE
 
 [Files]
-Source: "{#StageDir}\bin\Nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#StageDir}\bin\NexUIProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#StageDir}\bin\NexIndexerProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexHelper.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+; One-release migration shim: pre-isolation installs (< 2.38.0) ship an
+; updater that restarts bin\Nex.exe after installing. Only updater-driven
+; upgrades need it; a later release drops it (the 2.38.0 updater already
+; prefers NexUIProcess.exe). [InstallDelete] removes the old real Nex.exe
+; before this file is written.
+Source: "{#StageDir}\bin\Nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion; Check: IsUpdaterRun
 Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [InstallDelete]
+Type: files; Name: "{app}\bin\Nex.exe"
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
 ; Legacy-orphan removal lives in [Code] RemoveLegacyOrphan (called from
 ; CurStepChanged) so the hybrid-key check provably runs before deletion.
 
 [Icons]
-Name: "{autoprograms}\Nex"; Filename: "{app}\bin\Nex.exe"; Parameters: "--background"
-Name: "{autodesktop}\Nex"; Filename: "{app}\bin\Nex.exe"; Parameters: "--background"; Tasks: desktopicon
+Name: "{autoprograms}\Nex"; Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--background"
+Name: "{autodesktop}\Nex"; Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--background"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
@@ -68,16 +76,16 @@ Name: "startuplaunch"; Description: "Launch at startup (can be changed later in 
 
 [Registry]
 ; Startup registration — no process spawn needed.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nex"; ValueData: "{app}\bin\Nex.exe --background"; Flags: uninsdeletevalue; Tasks: startuplaunch
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Nex"; ValueData: "{app}\bin\NexUIProcess.exe --background"; Flags: uninsdeletevalue; Tasks: startuplaunch
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Nex"; Flags: deletevalue; Tasks: not startuplaunch
 
 [Run]
 ; Launch Nex after install (no config/setup processes needed — nex handles those on first run).
-Filename: "{app}\bin\Nex.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent; Check: ShouldLaunchNexAfterInstall
+Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--background"; Description: "Launch Nex now"; Flags: runhidden nowait postinstall skipifsilent; Check: ShouldLaunchNexAfterInstall
 
 [UninstallRun]
 ; Ask running instance to terminate cleanly first.
-Filename: "{app}\bin\Nex.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime"
+Filename: "{app}\bin\NexUIProcess.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime"
 Filename: "{app}\bin\nex-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime-legacy"
 Filename: "{app}\bin\swiftfind-core.exe"; Parameters: "--quit"; Flags: runhidden nowait skipifdoesntexist; RunOnceId: "nex-quit-runtime-swiftfind-legacy"
 ; Remove per-user startup registration even if config still had launch_at_startup=true.
@@ -97,7 +105,7 @@ function SetForegroundWindow(hWnd: HWND): Boolean;
 
 const
   NexUninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
-  NexRuntimeRelativePath = 'bin\Nex.exe';
+  NexRuntimeRelativePath = 'bin\NexUIProcess.exe';
   LegacyNexRuntimeRelativePath = 'bin\nex-core.exe';
   LegacySwiftFindRuntimeRelativePath = 'bin\swiftfind-core.exe';
 
@@ -113,6 +121,11 @@ end;
 function ShouldLaunchNexAfterInstall(): Boolean;
 begin
   Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
+end;
+
+function IsUpdaterRun(): Boolean;
+begin
+  Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) > 0;
 end;
 
 procedure RemoveLegacyOrphan(); forward;
@@ -441,7 +454,12 @@ end;
 
 procedure StopNexRuntime();
 begin
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\NexUIProcess.exe'));
+  // Pre-isolation installs still run Nex.exe as the runtime.
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\Nex.exe'));
+  // Process-isolation indexer: no `--quit` of its own, and the UI is gone by
+  // now, so terminate it by image name before files are replaced.
+  ForceStopRuntimeByPath(ExpandConstant('{app}\bin\NexIndexerProcess.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\NexHelper.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex-core.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));

@@ -10,7 +10,7 @@ use crate::model::SearchItem;
 
 const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
 const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
-const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "4";
+const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "5";
 pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "windows",
     "program files",
@@ -48,6 +48,37 @@ pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
     ".pi",
     ".rustup",
     "EBWebView",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    ".angular",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    ".nyc_output",
+    "coverage",
+    ".idea",
+    ".vs",
+    "obj",
+    "CMakeFiles",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "cmake-build-relwithdebinfo",
+    ".zig-cache",
+    ".zig-global-cache",
+    "zig-cache",
+    "zig-out",
+    ".stack-work",
+    ".dart_tool",
+    ".swiftpm",
+    "DerivedData",
+    ".pio",
+    ".terraform",
+    ".serverless",
+    ".aws-sam",
+    "bower_components",
+    "jspm_packages",
 ];
 pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &[
     "pagefile.sys",
@@ -55,6 +86,9 @@ pub(crate) const EXCLUDED_FILE_NAMES: &[&str] = &[
     "thumbs.db",
     "desktop.ini",
 ];
+/// Directory-name prefixes that are always build/cache output even when the
+/// concrete name carries a suffix (e.g. Cursor's `.node_modules.staging-9756.1`).
+pub(crate) const EXCLUDED_DIR_PREFIXES: &[&str] = &[".node_modules.", "cmake-build-"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
@@ -337,13 +371,13 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
                         FileBackend::Everything(bridge)
                     }
                     Some(_) => {
-                        crate::runtime::log_warn(
+                        crate::logging::warn(
                             "[nex] file_discovery_backend=everything requested but Everything service is not running; falling back to walkdir (start Everything.exe to use the SDK backend)",
                         );
                         FileBackend::Walkdir
                     }
                     None => {
-                        crate::runtime::log_warn(
+                        crate::logging::warn(
                             "[nex] file_discovery_backend=everything requested but Everything SDK was not detected; falling back to walkdir",
                         );
                         FileBackend::Walkdir
@@ -356,7 +390,7 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
                         FileBackend::Everything(bridge)
                     }
                     Some(_) => {
-                        crate::runtime::log_info(
+                        crate::logging::info(
                             "[nex] Everything SDK present but service not running; using walkdir (start Everything.exe to use the SDK backend)",
                         );
                         FileBackend::Walkdir
@@ -366,7 +400,7 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
             }
         };
         if matches!(backend, FileBackend::Everything(_)) {
-            crate::runtime::log_info("[nex] Everything SDK loaded; using Everything as filesystem backend");
+            crate::logging::info("[nex] Everything SDK loaded; using Everything as filesystem backend");
         }
         backend
     }
@@ -408,7 +442,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                         // populated index instead of a silent failure that
                         // leaves the launcher searching 80K items per
                         // keystroke.
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex] Everything discover failed ({e}); falling back to walkdir"
                         ));
                         discover_filesystem_walk(
@@ -468,7 +502,7 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                         Ok(items)
                     }
                     Err(e) => {
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex] Everything discover failed ({e}); falling back to walkdir"
                         ));
                         discover_filesystem_walk(
@@ -667,7 +701,7 @@ fn discover_filesystem_walk(
             }
         }
         if root_cap_hit {
-            crate::runtime::log_warn(&format!(
+            crate::logging::warn(&format!(
                 "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
                 root.display(),
                 per_root_budget
@@ -841,6 +875,12 @@ impl DiscoveryExclusionPolicy {
 
         for (index, component) in components.iter().enumerate() {
             let is_last = index + 1 == components.len();
+            if EXCLUDED_DIR_PREFIXES
+                .iter()
+                .any(|prefix| component.starts_with(prefix))
+            {
+                return true;
+            }
             if self.file_names.contains(component.as_str()) {
                 return true;
             }

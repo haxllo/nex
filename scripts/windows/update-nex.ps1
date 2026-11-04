@@ -181,6 +181,7 @@ function Get-RuntimeExecutableCandidates {
   param([string]$Root)
 
   return @(
+    (Join-Path $Root "bin\NexUIProcess.exe"),
     (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\NexHelper.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
@@ -197,7 +198,7 @@ function Resolve-InstalledRuntimePath {
     }
   }
 
-  return (Join-Path $Root "bin\Nex.exe")
+  return (Join-Path $Root "bin\NexUIProcess.exe")
 }
 
 function Test-IsUnderProgramFiles([string]$Path) {
@@ -228,7 +229,8 @@ function Get-RunningInstallRoot {
     return $null
   }
   $parent = Split-Path -Parent $dir
-  if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe"))) {
+  if ($parent -and ((Test-Path -LiteralPath (Join-Path $parent "bin\NexUIProcess.exe")) -or
+                    (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe")))) {
     return $parent
   }
   return $null
@@ -252,7 +254,8 @@ function Get-RegistryInstallLocation {
   if ($candidate.Length -eq 0) {
     return $null
   }
-  if (-not (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe"))) {
+  if (-not ((Test-Path -LiteralPath (Join-Path $candidate "bin\NexUIProcess.exe")) -or
+            (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe")))) {
     return $null
   }
   return $candidate
@@ -399,7 +402,7 @@ function Stop-Runtime {
   # Do not use taskkill /T here: the updater is a child of Nex.exe when launched
   # from the update button, so terminating the whole process tree would kill
   # the updater before it can install or restart the new version.
-  foreach ($imageName in @("Nex.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+  foreach ($imageName in @("Nex.exe", "NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
     cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
   }
 
@@ -407,11 +410,11 @@ function Stop-Runtime {
   # Aborting here is safe (nothing moved yet); proceeding with a live
   # process holding files is what bricks the install with no rollback.
   for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    $remaining = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+    $remaining = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
     if ($remaining.Count -eq 0) { break }
     Start-Sleep -Milliseconds 500
   }
-  $remaining = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+  $remaining = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
   if ($remaining.Count -gt 0) {
     throw "Could not stop running processes: $($remaining.Name -join ', '). Aborting update before touching the install."
   }
@@ -580,7 +583,7 @@ function Write-PreMoveDiagnostics {
   # the update they observe.
   param([string]$Root)
   try {
-    $procs = @(Get-Process -Name "Nex", "NexHelper", "nex-core", "swiftfind-core", "msedgewebview2" -ErrorAction SilentlyContinue |
+    $procs = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core", "msedgewebview2" -ErrorAction SilentlyContinue |
       ForEach-Object { "$($_.ProcessName) [pid $($_.Id)]" })
     Write-UpdateLog "Processes at backup time: $(if ($procs.Count) { $procs -join ', ' } else { '(none of Nex/NexHelper/msedgewebview2)' })"
   }
@@ -667,7 +670,8 @@ $needsElevation = $installInfo.NeedsElevation
 # unavoidable exactly once for this cleanup.
 $legacyOrphan = $false
 foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe'))) {
+  if ($programFiles -and ((Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\NexUIProcess.exe')) -or
+                          (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe')))) {
     $legacyOrphan = $true
     break
   }

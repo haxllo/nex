@@ -263,7 +263,7 @@ fn run_watch_loop(
                 match unsafe { create_watcher_handles(&config.root) } {
                     Ok((mut h, _)) => {
                         h.overlapped.hEvent = h.event;
-                        crate::runtime::log_warn(&format!(
+                        crate::logging::warn(&format!(
                             "[nex-dir-watcher] reopened watcher for {}; requesting resync",
                             config.root.display()
                         ));
@@ -293,7 +293,7 @@ fn run_watch_loop(
                 if progressed {
                     backoff = RESTART_BACKOFF_MIN;
                 }
-                crate::runtime::log_warn(&format!(
+                crate::logging::warn(&format!(
                     "[nex-dir-watcher] watcher for {} failed; restarting in {}s",
                     config.root.display(),
                     backoff.as_secs()
@@ -548,7 +548,15 @@ fn join_under_root(root_lower: &str, name: &str) -> PathBuf {
     if name.starts_with('\\') || name.contains(':') {
         return PathBuf::from(name);
     }
-    let mut path = PathBuf::from(root_lower);
+    let mut root = root_lower.to_string();
+    // normalize_path() trims the trailing separator, which turns a volume
+    // root ("g:") into a drive-relative path when joined: push("Pictures")
+    // yields "g:Pictures", not "g:\Pictures", and every under-root filter
+    // then rejects the event. Restore the separator for volume roots.
+    if root.len() == 2 && root.ends_with(':') {
+        root.push('\\');
+    }
+    let mut path = PathBuf::from(root);
     path.push(name);
     path
 }
@@ -615,7 +623,7 @@ fn last_error() -> u32 {
 }
 
 fn log_watcher_error(op: &str, detail: &str) {
-    crate::runtime::log_warn(&format!("[nex-dir-watcher] {} failed ({})", op, detail));
+    crate::logging::warn(&format!("[nex-dir-watcher] {} failed ({})", op, detail));
 }
 
 #[cfg(test)]
@@ -665,6 +673,14 @@ mod tests {
     fn join_under_root_passthrough_absolute() {
         let joined = join_under_root("c:\\users\\admin", "C:\\absolute\\path.txt");
         assert_eq!(joined, PathBuf::from("C:\\absolute\\path.txt"));
+    }
+
+    #[test]
+    fn join_under_root_keeps_volume_separator() {
+        // A drive root is normalized to "g:"; joining must produce
+        // "g:\pictures\a.txt", not the drive-relative "g:pictures\a.txt".
+        let joined = join_under_root("g:", "pictures\\a.txt");
+        assert_eq!(joined, PathBuf::from("g:\\pictures\\a.txt"));
     }
 
     #[test]

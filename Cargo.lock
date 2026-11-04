@@ -1655,7 +1655,6 @@ dependencies = [
  "windows-core",
  "windows-numerics",
  "windows-sys 0.61.2",
- "winres",
  "wry",
  "xxhash-rust",
 ]
@@ -1664,6 +1663,32 @@ dependencies = [
 name = "nex-helper"
 version = "0.2.0"
 dependencies = [
+ "windows-sys 0.61.2",
+ "winres",
+]
+
+[[package]]
+name = "nex-indexer"
+version = "2.37.0"
+dependencies = [
+ "nex",
+ "serde_json",
+ "windows-sys 0.61.2",
+ "winres",
+]
+
+[[package]]
+name = "nex-shim"
+version = "2.37.0"
+dependencies = [
+ "winres",
+]
+
+[[package]]
+name = "nex-ui"
+version = "2.37.0"
+dependencies = [
+ "nex",
  "windows-sys 0.61.2",
  "winres",
 ]

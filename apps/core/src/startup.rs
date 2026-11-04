@@ -264,7 +264,7 @@ pub fn registered_install_location() -> Option<std::path::PathBuf> {
 pub fn install_skew() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let registered = registered_install_location()?;
     let current_exe = std::env::current_exe().ok()?;
-    // Installed layout is `<root>\bin\Nex.exe`.
+    // Installed layout is `<root>\bin\NexUIProcess.exe`.
     let running_root = current_exe.parent()?.parent()?.to_path_buf();
     let normalize = |path: &std::path::Path| {
         path.to_string_lossy().trim().replace('/', "\\").to_ascii_lowercase()

@@ -139,6 +139,12 @@ pub struct CoreService {
     /// False once compaction dropped file/folder rows from `cached_items`;
     /// search then also recalls from SQLite so dropped rows stay reachable.
     cache_complete: AtomicBool,
+    /// True when this service keeps every store row in `cached_items` (the
+    /// indexer's publishing mode) and must not compact on refresh.
+    keep_all_items: bool,
+    /// True for the UI-process service: it reads the store but must never
+    /// write it. Mutations are forwarded to the indexer, which owns writes.
+    ui_client: bool,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
@@ -198,19 +204,51 @@ impl CoreService {
         Self::with_loaded_cache(config, db, true)
     }
 
-    /// Background rebuild service: SQLite + cache only, NO Tantivy index.
-    /// The background thread must never open its own IndexWriter on the
-    /// same directory as the main service — concurrent writers race and
-    /// corrupt meta.json (empty index). The main service syncs Tantivy
-    /// from cache after background completion instead.
-    pub(crate) fn new_background(config: Config) -> Result<Self, ServiceError> {
+    /// Indexer-process service: owns the index and publishes the full item set
+    /// over IPC. The cache keeps every row (no compaction) so snapshots are
+    /// served from memory instead of scanning SQLite on every poll.
+    pub fn new_indexer(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache(config, db, false)
+        Self::with_loaded_cache_mode(config, db, true, false, true)
+    }
+
+    /// UI-process service that starts empty: the runtime loads the store on a
+    /// background thread so the overlay and hotkey come up without waiting for
+    /// a full item scan. Search falls back to SQLite until that load lands.
+    pub fn new_ui_client_lazy(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        Self::with_loaded_cache_mode(config, db, false, false, false)
+    }
+
+    /// UI-process service: reads the store for launch/personalization state,
+    /// but owns no Tantivy index. Discovery and backends belong to the indexer
+    /// process; search runs over the snapshot it publishes.
+    pub fn new_ui_client(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        // Keep every store row: the UI must be able to find files that cache
+        // compaction would otherwise evict.
+        Self::with_loaded_cache_mode(config, db, false, false, true)
     }
 
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
-        let all_items = index_store::list_items(&db)?;
+        Self::with_loaded_cache_mode(config, db, enable_tantivy, true, true)
+    }
+
+    fn with_loaded_cache_mode(
+        config: Config,
+        db: Connection,
+        enable_tantivy: bool,
+        compact: bool,
+        load_items: bool,
+    ) -> Result<Self, ServiceError> {
+        let all_items = if load_items {
+            index_store::list_items(&db)?
+        } else {
+            Vec::new()
+        };
         let cached_apps = collect_app_items(&all_items);
 
         let index_dir = config.index_db_path.parent().unwrap_or(Path::new("."));
@@ -223,9 +261,13 @@ impl CoreService {
         };
         // Compact now rather than on the first refresh: an uncompacted cache
         // makes every cache-scan search walk the whole store.
-        let cache_complete = cache_compaction_summary(&all_items, &config).dropped_total == 0;
-        let cached = compact_cached_items(&all_items, &config);
-        drop(all_items);
+        let cache_complete = load_items
+            && (!compact || cache_compaction_summary(&all_items, &config).dropped_total == 0);
+        let cached = if compact {
+            compact_cached_items(&all_items, &config)
+        } else {
+            all_items
+        };
 
         Ok(Self {
             config: RwLock::new(config),
@@ -240,6 +282,8 @@ impl CoreService {
             tantivy_needs_heal: AtomicBool::new(false),
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
+            keep_all_items: !compact,
+            ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
@@ -351,7 +395,7 @@ fn runtime_providers_from_config(config: &Config) -> Vec<Box<dyn DiscoveryProvid
 
     // Register filesystem provider for roots-based file/folder discovery.
     let filesystem_provider = FileSystemDiscoveryProvider::from_config(config, config.discovery_max_depth as usize);
-    crate::runtime::log_info(&format!(
+    crate::logging::info(&format!(
         "[nex] file_discovery_backend = {} (requested={})",
         filesystem_provider.backend_label(),
         config.file_discovery_backend.as_str(),
@@ -597,9 +641,73 @@ impl CoreService {
         self.cached_len()
     }
 
+    pub fn is_ui_client(&self) -> bool {
+        self.ui_client
+    }
+
     pub fn reload_cache_from_store(&self) -> Result<usize, ServiceError> {
         self.refresh_cache_from_store()?;
         Ok(self.cached_len())
+    }
+
+    /// Full store contents, uncompacted. The indexer serves this to the UI so
+    /// search can reach rows that cache compaction evicted.
+    ///
+    /// Served from the cache when it holds every row (the indexer keeps the
+    /// uncompacted set): a poll costs no SQLite scan. Compacting services fall
+    /// back to a direct read.
+    pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
+        if self.cache_complete.load(Ordering::SeqCst) {
+            return Ok(self.cached_items_snapshot());
+        }
+        Ok(index_store::list_items(&*self.db())?)
+    }
+
+    /// Replace the searchable item set with one published by the indexer.
+    /// The snapshot is the whole store, so the cache counts as complete and
+    /// search never needs a direct SQLite pass.
+    pub fn apply_external_snapshot(&self, items: Vec<SearchItem>) -> usize {
+        let apps = collect_app_items(&items);
+        let count = items.len();
+        *self.cached_items.write().unwrap_or_else(|e| e.into_inner()) = items;
+        *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
+        self.cache_complete.store(true, Ordering::SeqCst);
+        self.bump_search_generation();
+        count
+    }
+
+    /// Apply an incremental change published by the indexer.
+    ///
+    /// Returns false when the delta was empty. Upserts replace by id (or are
+    /// appended); deleted ids are removed. Item order is not significant for
+    /// search, so this is a single rebuild pass rather than an index shuffle.
+    pub fn apply_external_delta(&self, upserts: Vec<SearchItem>, deleted: Vec<String>) -> bool {
+        if upserts.is_empty() && deleted.is_empty() {
+            return false;
+        }
+        let mut replacements: std::collections::HashMap<String, SearchItem> =
+            upserts.into_iter().map(|item| (item.id.clone(), item)).collect();
+        let deleted: std::collections::HashSet<String> = deleted.into_iter().collect();
+
+        let mut guard = self.cached_items.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = Vec::with_capacity(guard.len() + replacements.len());
+        for item in guard.drain(..) {
+            if deleted.contains(&item.id) {
+                continue;
+            }
+            match replacements.remove(&item.id) {
+                Some(replacement) => next.push(replacement),
+                None => next.push(item),
+            }
+        }
+        next.extend(replacements.into_values());
+        let apps = collect_app_items(&next);
+        *guard = next;
+        drop(guard);
+        *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
+        self.cache_complete.store(true, Ordering::SeqCst);
+        self.bump_search_generation();
+        true
     }
 
     pub fn launch(&self, target: LaunchTarget<'_>) -> Result<(), ServiceError> {
@@ -650,8 +758,16 @@ impl CoreService {
                             error
                         ));
                         if should_prune_after_launch_error(&item, &error) {
-                            if let Err(e) = index_store::delete_item(&*self.db(), &item.id) {
-                                crate::logging::warn(&format!("[nex] delete_item after launch error failed: {e}"));
+                            if self.ui_client {
+                                crate::ipc::send_indexer_command(
+                                    "delete_item",
+                                    serde_json::json!({ "id": item.id }),
+                                );
+                            } else if let Err(e) = index_store::delete_item(&*self.db(), &item.id)
+                            {
+                                crate::logging::warn(&format!(
+                                    "[nex] delete_item after launch error failed: {e}"
+                                ));
                             }
                             self.remove_cached_item_by_id(&item.id);
                         }
@@ -673,6 +789,26 @@ impl CoreService {
             return Ok(());
         }
         if matches!(mode, SearchMode::Actions | SearchMode::Clipboard) {
+            return Ok(());
+        }
+        if self.ui_client {
+            // The indexer owns the store; it records the selection. Drop the
+            // local personalization cache so the next read picks it up.
+            {
+                let mut cache = match self.personalization_cache.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                cache.invalidate();
+            }
+            crate::ipc::send_indexer_command(
+                "record_selection",
+                serde_json::json!({
+                    "query": query_norm,
+                    "mode": search_mode_key(mode),
+                    "id": item_id,
+                }),
+            );
             return Ok(());
         }
         index_store::record_query_selection(
@@ -1310,7 +1446,7 @@ impl CoreService {
         let excluded_roots = config.discovery_exclude_roots.clone();
 
         if roots.is_empty() {
-            crate::runtime::log_info(
+            crate::logging::info(
                 "[nex] directory_watcher: no discovery_roots configured; skipping start",
             );
             return Ok(());
@@ -1318,7 +1454,7 @@ impl CoreService {
 
         let handle =
             crate::file_watcher_consumer::FileWatcherHandle::start(roots, excluded_roots, Arc::clone(service_arc));
-        crate::runtime::log_info(&format!(
+        crate::logging::info(&format!(
             "[nex] directory_watcher: started on {} root(s)",
             handle.active_roots()
         ));
@@ -1341,7 +1477,7 @@ impl CoreService {
         }
 
         let handle = crate::application_watcher::ApplicationWatcherHandle::start(Arc::clone(service_arc));
-        crate::runtime::log_info(&format!(
+        crate::logging::info(&format!(
             "[nex] app discovery watcher: started on {} directories and {} registry keys",
             handle.active_directories(),
             handle.active_registry_keys()
@@ -1354,7 +1490,7 @@ impl CoreService {
     pub fn stop_application_watchers(&self) {
         if let Some(handle) = self.take_application_watchers() {
             drop(handle);
-            crate::runtime::log_info("[nex] app discovery watcher: stopped");
+            crate::logging::info("[nex] app discovery watcher: stopped");
         }
     }
 
@@ -1374,7 +1510,7 @@ impl CoreService {
     pub fn stop_file_watchers(&self) {
         if let Some(handle) = self.take_file_watchers() {
             drop(handle); // RAII joins threads
-            crate::runtime::log_info("[nex] directory_watcher: stopped");
+            crate::logging::info("[nex] directory_watcher: stopped");
         }
     }
 
@@ -1574,6 +1710,16 @@ impl CoreService {
     /// cold-page-fault latency.  Must be called with the outer service
     /// lock held (read or write).
     pub fn warm_search_cache(&self) {
+        // UI client mode owns no Tantivy reader: warming segment files there is
+        // pure I/O on the show path. Only the indexer owns and warms the index.
+        let has_index = self
+            .tantivy_index
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        if !has_index {
+            return;
+        }
         // Called on the show path: never read index files synchronously
         // here; the warmer only re-reads new or changed segment files.
         let index_dir = {
@@ -1912,7 +2058,12 @@ impl CoreService {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&*self.db())?;
         let latest_apps = collect_app_items(&latest_full);
-        let latest = {
+        let latest = if self.keep_all_items {
+            // Indexer publishing mode: the IPC snapshot must contain the whole
+            // store, so compaction would only force a SQLite scan per poll.
+            self.cache_complete.store(true, Ordering::SeqCst);
+            latest_full
+        } else {
             let compact_started = std::time::Instant::now();
             let summary = cache_compaction_summary(&latest_full, &config_snapshot);
             let compacted = compact_cached_items(&latest_full, &config_snapshot);
@@ -2247,6 +2398,15 @@ impl CoreService {
         updated.last_accessed_epoch_secs = now.max(updated.last_accessed_epoch_secs);
         updated.last_launched_at = now.max(updated.last_launched_at);
 
+        let id = updated.id.clone();
+        if self.ui_client {
+            // The indexer owns the store. Bump the local cache now so ranking
+            // and Quick Launch reflect the launch immediately; the next delta
+            // carries the authoritative row.
+            self.upsert_cached_item(updated);
+            crate::ipc::send_indexer_command("record_launch", serde_json::json!({ "id": id }));
+            return Ok(());
+        }
         index_store::upsert_item(&self.db(), &updated)?;
         self.upsert_cached_item(updated);
         Ok(())

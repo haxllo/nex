@@ -432,7 +432,7 @@ fn load_entries_windows() -> Result<Vec<UninstallEntry>, String> {
 
     match collect_appx_packages(&mut entries) {
         Ok(()) => {}
-        Err(e) => crate::runtime::log_warn(&format!("[nex] appx uninstall enumeration failed: {e}")),
+        Err(e) => crate::logging::warn(&format!("[nex] appx uninstall enumeration failed: {e}")),
     }
 
     let mut seen = HashSet::new();

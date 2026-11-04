@@ -69,12 +69,12 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "docs") | Out-Nul
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-Null
 
 $workspaceManifest = Join-Path $repoRoot "Cargo.toml"
-cargo build --manifest-path $workspaceManifest -p nex --release --quiet
+cargo build --manifest-path $workspaceManifest --release --quiet --bin NexUIProcess --bin NexIndexerProcess --bin Nex
 if ($LASTEXITCODE -ne 0) { throw "Failed to build Nex (exit code $LASTEXITCODE)." }
 cargo build --manifest-path $workspaceManifest -p nex-helper --release --quiet
 if ($LASTEXITCODE -ne 0) { throw "Failed to build NexHelper (exit code $LASTEXITCODE)." }
 
-$coreExe = Join-Path $targetRoot "release/Nex.exe"
+$coreExe = Join-Path $targetRoot "release/NexUIProcess.exe"
 if (-not (Test-Path $coreExe)) {
   throw "Expected core executable not found at $coreExe"
 }
@@ -126,7 +126,12 @@ else {
   Write-Host "Signing skipped (unsigned artifact)." -ForegroundColor Yellow
 }
 
-Copy-Item $coreExe (Join-Path $stageDir "bin/Nex.exe") -Force
+Copy-Item $coreExe (Join-Path $stageDir "bin/NexUIProcess.exe") -Force
+$indexerExe = Join-Path $targetRoot "release/NexIndexerProcess.exe"
+if (-not (Test-Path $indexerExe)) {
+  throw "Expected indexer executable not found at $indexerExe (process isolation requires it)."
+}
+Copy-Item $indexerExe (Join-Path $stageDir "bin/NexIndexerProcess.exe") -Force
 
 $helperExe = Join-Path $targetRoot "release/NexHelper.exe"
 if (-not (Test-Path $helperExe)) {
@@ -202,7 +207,7 @@ try {
     }
   }
   if ($extracted) {
-    Write-Host "Bundled $EverythingDllName next to Nex.exe" -ForegroundColor Green
+    Write-Host "Bundled $EverythingDllName next to NexUIProcess.exe" -ForegroundColor Green
     $everythingDllBundled = $true
   } else {
     Write-Host "WARNING: Could not extract $EverythingDllName from Everything-SDK.zip" -ForegroundColor Yellow
@@ -246,7 +251,7 @@ function Compute-Sha256Hash($path) {
 
 $zipHash = Compute-Sha256Hash $zipPath
 $zipSize = (Get-Item -LiteralPath $zipPath).Length
-$exePath = Join-Path $stageDir "bin/Nex.exe"
+$exePath = Join-Path $stageDir "bin/NexUIProcess.exe"
 $exeHash = Compute-Sha256Hash $exePath
 $exeSize = (Get-Item -LiteralPath $exePath).Length
 
@@ -285,7 +290,7 @@ $manifest = [ordered]@{
       sha256 = $null
     }
     core_exe = [ordered]@{
-      path = "bin/Nex.exe"
+      path = "bin/NexUIProcess.exe"
       size_bytes = $exeSize
       sha256 = $exeHash
     }
@@ -298,3 +303,14 @@ $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $manifestPath
 Write-Host "Created artifact: $zipPath" -ForegroundColor Green
 Write-Host "Created manifest: $manifestPath" -ForegroundColor Green
 Write-Host "Staging dir retained: $stageDir" -ForegroundColor Green
+
+# Migration shim for pre-process-isolation installs: their updater restarts
+# bin\Nex.exe after installing. The installer needs it; the portable zip does
+# not, so it is staged after the zip and manifest are produced. The next
+# release stops shipping it (the 2.38.0 updater prefers NexUIProcess.exe).
+$shimExe = Join-Path $targetRoot "release/Nex.exe"
+if (-not (Test-Path $shimExe)) {
+  throw "Expected migration shim not found at $shimExe"
+}
+Copy-Item $shimExe (Join-Path $stageDir "bin/Nex.exe") -Force
+Write-Host "Staged migration shim: bin/Nex.exe" -ForegroundColor Green

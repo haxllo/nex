@@ -10,6 +10,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   test:
@@ -26,6 +27,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Require Linear issue for code changes
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          changed=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
+            --jq '.[].filename' | grep -E '^(apps|scripts|manifests)/' || true)
+          if [ -z "$changed" ]; then
+            echo "No code-path changes; Linear issue not required."
+            exit 0
+          fi
+          if printf '%s\n%s' "$PR_TITLE" "$PR_BODY" | grep -Eq 'CIQ-[0-9]+'; then
+            echo "Linear issue referenced."
+            exit 0
+          fi
+          echo "::error::This PR changes apps/, scripts/, or manifests/ but names no Linear issue (CIQ-<n>) in its title or body."
+          exit 1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -57,12 +81,14 @@ jobs:
 
       - name: Run release build gate
         timeout-minutes: 60
-        run: cargo build --locked --release --bin Nex --bin NexHelper
+        run: cargo build --locked --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess --bin Nex
 
       - name: Verify release binaries
         run: |
-          test -f target/release/Nex.exe
+          test -f target/release/NexUIProcess.exe
           test -f target/release/NexHelper.exe
+          test -f target/release/NexIndexerProcess.exe
+          test -f target/release/Nex.exe
 
       - name: Run Rust test gate
         timeout-minutes: 60

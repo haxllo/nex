@@ -9,7 +9,7 @@ fn main() {
     if std::path::Path::new("../assets/nex.ico").exists() {
         res.set_icon("../assets/nex.ico");
     }
-    res.set("FileDescription", "Nex Helper");
+    res.set("FileDescription", "NexAdminAccess");
     res.set("InternalName", "NexHelper");
     res.set("OriginalFilename", "NexHelper.exe");
     res.set("ProductName", "Nex");

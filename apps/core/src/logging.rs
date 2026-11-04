@@ -70,11 +70,14 @@ pub fn open_logs_folder() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let target = dir.to_string_lossy().into_owned();
-        let status = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("start")
-            .arg("")
-            .arg(&target)
+        let mut command = std::process::Command::new("cmd");
+        command.arg("/C").arg("start").arg("").arg(&target);
+        {
+            use std::os::windows::process::CommandExt;
+            // No console flash from the GUI process.
+            command.creation_flags(0x0800_0000);
+        }
+        let status = command
             .status()
             .map_err(|e| format!("failed to open logs folder: {e}"))?;
         if !status.success() {

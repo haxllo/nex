@@ -194,7 +194,7 @@ fn stop_indexer_process() -> StopRuntimeOutcome {
         }
     }
     let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
-    let _ = std::process::Command::new("cmd")
+    let _ = hidden_command("cmd")
         .arg("/C")
         .arg(format!(
             "taskkill /F /FI \"IMAGENAME eq NexIndexerProcess.exe\" /FI \"PID ne {current_pid}\" >NUL 2>&1"
@@ -206,6 +206,17 @@ fn stop_indexer_process() -> StopRuntimeOutcome {
     } else {
         StopRuntimeOutcome::Forced
     }
+}
+
+#[cfg(target_os = "windows")]
+fn hidden_command(program: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = std::process::Command::new(program);
+    // The GUI process has no console; without this every cmd/taskkill/
+    // tasklist helper allocates a visible console window that flashes on
+    // screen (the indexer used to leave one open permanently).
+    command.creation_flags(0x0800_0000);
+    command
 }
 
 #[cfg(target_os = "windows")]
@@ -229,7 +240,7 @@ fn force_terminate_other_runtime_processes() -> Result<bool, RuntimeError> {
             "taskkill /F /T /FI \"IMAGENAME eq {exe_name}\" /FI \"PID ne {}\" >NUL 2>&1",
             current_pid
         );
-        let status = std::process::Command::new("cmd")
+        let status = hidden_command("cmd")
             .arg("/C")
             .arg(command)
             .status()
@@ -244,7 +255,7 @@ fn runtime_process_pids_excluding_current() -> Result<Vec<u32>, RuntimeError> {
     let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
     let mut pids = Vec::new();
     for exe_name in runtime_executable_names() {
-        let output = std::process::Command::new("cmd")
+        let output = hidden_command("cmd")
             .arg("/C")
             .arg(format!(
                 "tasklist /FI \"IMAGENAME eq {exe_name}\" /FO LIST /NH"

@@ -569,18 +569,24 @@ mod tests {
 
     #[test]
     fn delta_lists_upserts_and_deletes() {
-        let a = SearchItem::new("a", "app", "Alpha", r"C:\a.exe");
-        let b = SearchItem::new("b", "app", "Beta", r"C:\b.exe");
-        let a2 = SearchItem::new("a", "app", "Alpha 2", r"C:\a.exe");
-        let c = SearchItem::new("c", "app", "Gamma", r"C:\c.exe");
+        // A delta only wins when it is small relative to the published set, so
+        // the fixture needs a set big enough for the 4x threshold.
+        let previous: Vec<SearchItem> = (0..20)
+            .map(|i| SearchItem::new(&format!("id{i}"), "app", "Item", r"C:\item.exe"))
+            .collect();
+        let mut current = previous.clone();
+        current[0] = SearchItem::new("id0", "app", "Changed", r"C:\item.exe");
+        current.push(SearchItem::new("new", "app", "New", r"C:\new.exe"));
+        current.retain(|item| item.id != "id5");
 
         let (upserts, deleted) =
-            build_item_delta(&[a, b], &[a2, c]).expect("small change should be a delta");
+            build_item_delta(&previous, &current).expect("small change should be a delta");
         let ids: Vec<&str> = upserts.iter().map(|item| item.id.as_str()).collect();
-        assert!(ids.contains(&"a"), "changed item is an upsert");
-        assert!(ids.contains(&"c"), "new item is an upsert");
-        assert!(!ids.contains(&"b"), "unchanged item is not resent");
-        assert_eq!(deleted, vec!["b".to_string()]);
+        assert!(ids.contains(&"id0"), "changed item is an upsert");
+        assert!(ids.contains(&"new"), "new item is an upsert");
+        assert!(!ids.contains(&"id1"), "unchanged item is not resent");
+        assert_eq!(deleted, vec!["id5".to_string()]);
+        assert!(upserts.len() + deleted.len() <= 3);
     }
 
     #[test]

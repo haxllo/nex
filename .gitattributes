@@ -17,6 +17,9 @@
 *.cjs text eol=lf
 *.mjs text eol=lf
 
+# Git hooks run through sh; a CRLF shebang breaks them on Windows clones.
+scripts/git-hooks/* text eol=lf
+
 # Binary files — do not touch
 *.ico binary
 *.png binary

@@ -1637,6 +1637,16 @@ impl CoreService {
     /// cold-page-fault latency.  Must be called with the outer service
     /// lock held (read or write).
     pub fn warm_search_cache(&self) {
+        // UI client mode owns no Tantivy reader: warming segment files there is
+        // pure I/O on the show path. Only the indexer owns and warms the index.
+        let has_index = self
+            .tantivy_index
+            .read()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        if !has_index {
+            return;
+        }
         // Called on the show path: never read index files synchronously
         // here; the warmer only re-reads new or changed segment files.
         let index_dir = {

@@ -139,6 +139,9 @@ pub struct CoreService {
     /// False once compaction dropped file/folder rows from `cached_items`;
     /// search then also recalls from SQLite so dropped rows stay reachable.
     cache_complete: AtomicBool,
+    /// True when this service keeps every store row in `cached_items` (the
+    /// indexer's publishing mode) and must not compact on refresh.
+    keep_all_items: bool,
     last_stale_prune: Mutex<Option<Instant>>,
     stale_prune_cursor: Mutex<usize>,
     stale_pruner_started: AtomicBool,
@@ -196,6 +199,15 @@ impl CoreService {
     pub fn with_connection(config: Config, db: Connection) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         Self::with_loaded_cache(config, db, true)
+    }
+
+    /// Indexer-process service: owns the index and publishes the full item set
+    /// over IPC. The cache keeps every row (no compaction) so snapshots are
+    /// served from memory instead of scanning SQLite on every poll.
+    pub fn new_indexer(config: Config) -> Result<Self, ServiceError> {
+        validate(&config).map_err(ServiceError::Config)?;
+        let db = index_store::open_from_config(&config)?;
+        Self::with_loaded_cache_mode(config, db, true, false)
     }
 
     /// UI-process service: reads the store for launch/personalization state,
@@ -264,6 +276,7 @@ impl CoreService {
             tantivy_needs_heal: AtomicBool::new(false),
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
+            keep_all_items: !compact,
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
             stale_pruner_started: AtomicBool::new(false),
@@ -628,7 +641,14 @@ impl CoreService {
 
     /// Full store contents, uncompacted. The indexer serves this to the UI so
     /// search can reach rows that cache compaction evicted.
+    ///
+    /// Served from the cache when it holds every row (the indexer keeps the
+    /// uncompacted set): a poll costs no SQLite scan. Compacting services fall
+    /// back to a direct read.
     pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
+        if self.cache_complete.load(Ordering::SeqCst) {
+            return Ok(self.cached_items_snapshot());
+        }
         Ok(index_store::list_items(&*self.db())?)
     }
 
@@ -1955,7 +1975,12 @@ impl CoreService {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&*self.db())?;
         let latest_apps = collect_app_items(&latest_full);
-        let latest = {
+        let latest = if self.keep_all_items {
+            // Indexer publishing mode: the IPC snapshot must contain the whole
+            // store, so compaction would only force a SQLite scan per poll.
+            self.cache_complete.store(true, Ordering::SeqCst);
+            latest_full
+        } else {
             let compact_started = std::time::Instant::now();
             let summary = cache_compaction_summary(&latest_full, &config_snapshot);
             let compacted = compact_cached_items(&latest_full, &config_snapshot);

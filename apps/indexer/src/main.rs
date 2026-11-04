@@ -53,7 +53,7 @@ fn main() {
         }
     };
 
-    let service = match CoreService::new(config.clone()) {
+    let service = match CoreService::new_indexer(config.clone()) {
         Ok(service) => Arc::new(RwLock::new(service.with_runtime_providers())),
         Err(error) => {
             if stdio_enabled {

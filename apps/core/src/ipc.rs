@@ -226,6 +226,38 @@ fn dispatch(
                 "items": items_to_values(&items),
             }))
         }
+        // One round trip for the UI's poll: reports whether anything changed
+        // and ships the item set only when it did. Mirrors the old
+        // status+snapshot pair so the caller does not open two connections.
+        "sync" => {
+            let known = request
+                .params
+                .get("generation")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            let generation = service.search_generation();
+            let indexing = indexing.load(Ordering::Acquire);
+            // While a rebuild runs the cache is mid-refresh: echo the caller's
+            // generation so it does not advance past an item set it never saw.
+            if generation == known || indexing {
+                return IpcResponse::ok(json!({
+                    "generation": if indexing { known } else { generation },
+                    "changed": false,
+                    "indexing": indexing,
+                }));
+            }
+            let items = match service.all_items_snapshot() {
+                Ok(items) => items,
+                Err(error) => return IpcResponse::error(format!("snapshot failed: {error}")),
+            };
+            IpcResponse::ok(json!({
+                "generation": generation,
+                "changed": true,
+                "indexing": false,
+                "items": items_to_values(&items),
+            }))
+        }
         "search" => {
             let query = request
                 .params

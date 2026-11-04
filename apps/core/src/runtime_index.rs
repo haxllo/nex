@@ -120,10 +120,8 @@ fn start_ui_snapshot_sync(
     std::thread::spawn(move || {
         let mut last_generation = 0_u64;
         loop {
-            // shortcut: every change ships the whole store, which costs CPU on
-            // large churn; switch to per-change deltas if watcher churn hurts.
-            if let Some((generation, items)) = fetch_indexer_snapshot() {
-                if generation != last_generation {
+            match sync_indexer_snapshot(last_generation) {
+                SnapshotSync::Applied(generation, items) => {
                     let count = items.len();
                     // The main loop only takes short read locks; retry a
                     // write instead of stalling it behind a writer request.
@@ -142,8 +140,10 @@ fn start_ui_snapshot_sync(
                         }
                     }
                 }
-            } else {
-                crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+                SnapshotSync::Unchanged => {}
+                SnapshotSync::Unreachable => {
+                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+                }
             }
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -167,27 +167,49 @@ fn start_ui_snapshot_sync(
 }
 
 #[cfg(target_os = "windows")]
-fn fetch_indexer_snapshot() -> Option<(u64, Vec<crate::model::SearchItem>)> {
-    use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
-    use serde_json::Value;
+enum SnapshotSync {
+    /// Nothing changed (or a rebuild is in flight); keep the last generation.
+    Unchanged,
+    Applied(u64, Vec<crate::model::SearchItem>),
+    Unreachable,
+}
 
-    let status = ipc_call(INDEXER_ADDR, &IpcRequest::new("status", Value::Null)).ok()?;
-    if !status.ok {
-        return None;
+/// One request per poll: the indexer reports whether the generation moved and
+/// ships items only when it did. Replaces the old status+snapshot pair, which
+/// opened two connections and always transferred the full store.
+#[cfg(target_os = "windows")]
+fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
+    use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
+    use serde_json::{json, Value};
+
+    let response = match ipc_call(
+        INDEXER_ADDR,
+        &IpcRequest::new("sync", json!({ "generation": known_generation })),
+    ) {
+        Ok(response) if response.ok => response,
+        _ => return SnapshotSync::Unreachable,
+    };
+    let Some(result) = response.result else {
+        return SnapshotSync::Unchanged;
+    };
+    if result
+        .get("indexing")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || !result
+            .get("changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return SnapshotSync::Unchanged;
     }
-    let status = status.result?;
-    // A snapshot taken mid-rebuild would only be replaced moments later.
-    if status.get("indexing").and_then(Value::as_bool).unwrap_or(false) {
-        return None;
-    }
-    let snapshot = ipc_call(INDEXER_ADDR, &IpcRequest::new("snapshot", Value::Null)).ok()?;
-    if !snapshot.ok {
-        return None;
-    }
-    let snapshot = snapshot.result?;
-    let generation = snapshot.get("generation").and_then(Value::as_u64)?;
-    let items = snapshot.get("items").and_then(Value::as_array)?;
-    Some((generation, items_from_values(items)))
+    let Some(generation) = result.get("generation").and_then(Value::as_u64) else {
+        return SnapshotSync::Unchanged;
+    };
+    let Some(items) = result.get("items").and_then(Value::as_array) else {
+        return SnapshotSync::Unchanged;
+    };
+    SnapshotSync::Applied(generation, items_from_values(items))
 }
 
 #[cfg(target_os = "windows")]

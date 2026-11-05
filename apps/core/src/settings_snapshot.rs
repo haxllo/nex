@@ -20,10 +20,6 @@ struct SettingsSaveCfg {
     quick_launch_max_items: Option<u8>,
     #[serde(default, rename = "quickLaunchAutoFill")]
     quick_launch_auto_fill: Option<bool>,
-    #[serde(default, rename = "indexMaxItemsTotal")]
-    index_max_items_total: Option<u32>,
-    #[serde(default, rename = "indexMaxItemsPerRoot")]
-    index_max_items_per_root: Option<u32>,
     #[serde(default, rename = "showFiles")]
     show_files: Option<bool>,
     #[serde(default, rename = "showFolders")]
@@ -88,22 +84,6 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     }
     if let Some(v) = cfg_obj.quick_launch_auto_fill {
         cfg.quick_launch.auto_fill = v;
-    }
-    if let Some(v) = cfg_obj.index_max_items_total {
-        if !(10_000..=2_000_000).contains(&v) {
-            return Err(format!(
-                "indexMaxItemsTotal must be between 10000 and 2000000, got {v}"
-            ));
-        }
-        cfg.index_max_items_total = v;
-    }
-    if let Some(v) = cfg_obj.index_max_items_per_root {
-        if !(1_000..=1_000_000).contains(&v) {
-            return Err(format!(
-                "indexMaxItemsPerRoot must be between 1000 and 1000000, got {v}"
-            ));
-        }
-        cfg.index_max_items_per_root = v;
     }
     if let Some(v) = cfg_obj.show_files {
         cfg.show_files = v;
@@ -195,8 +175,6 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
         "maxResults": cfg.max_results,
         "quickLaunchMaxItems": cfg.quick_launch.max_items,
         "quickLaunchAutoFill": cfg.quick_launch.auto_fill,
-        "indexMaxItemsTotal": cfg.index_max_items_total,
-        "indexMaxItemsPerRoot": cfg.index_max_items_per_root,
         "hotkey": cfg.hotkey,
         "theme": theme,
         "showFiles": cfg.show_files,
@@ -272,19 +250,6 @@ mod tests {
             .expect("valid roots");
         assert_eq!(updated.discovery_roots.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn save_sets_per_root_item_limit() {
-        let raw = r#"{"t":"save","cfg":{"indexMaxItemsPerRoot":150000}}"#;
-        let updated = apply(&Config::default(), raw).expect("valid limit");
-        assert_eq!(updated.index_max_items_per_root, 150_000);
-    }
-
-    #[test]
-    fn save_rejects_per_root_above_total() {
-        let raw = r#"{"t":"save","cfg":{"indexMaxItemsPerRoot":600000}}"#;
-        assert!(apply(&Config::default(), raw).is_err());
     }
 
     #[test]

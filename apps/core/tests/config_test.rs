@@ -167,8 +167,6 @@ fn writes_user_template_with_comments_and_loads_it() {
     assert!(raw.contains(&format!("show_folders = {}", cfg.show_folders)));
     assert!(raw.contains("uninstall_actions_enabled = true"));
     assert!(raw.contains("web_search_provider = \"google\""));
-    assert!(raw.contains("index_max_items_total ="));
-    assert!(raw.contains("index_max_items_per_root ="));
     assert!(raw.contains("index_max_items_per_query_seed ="));
     assert!(raw.contains("game_mode_enabled = false"));
     if cfg.discovery_exclude_roots.is_empty() {
@@ -255,8 +253,6 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("show_files = true"));
     assert!(updated_raw.contains("show_folders = true"));
     assert!(updated_raw.contains("uninstall_actions_enabled = true"));
-    assert!(updated_raw.contains("index_max_items_total = 500000"));
-    assert!(updated_raw.contains("index_max_items_per_root = 200000"));
     assert!(updated_raw.contains("index_max_items_per_query_seed = 5000"));
     assert!(updated_raw.contains("game_mode_enabled = false"));
     assert!(!updated_raw.contains("search_backend ="));

@@ -55,8 +55,6 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "idle_cache_trim_ms",
     "active_memory_target_mb",
     "ui_warm_release_ms",
-    "index_max_items_total",
-    "index_max_items_per_root",
     "index_max_items_per_query_seed",
     "discovery_max_depth",
     "search_backend",
@@ -1125,14 +1123,6 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("# how long (ms) after hide before the icon cache is cleared; WebView stays warm (valid range: 500..600000)\n");
     text.push_str("ui_warm_release_ms = ");
     text.push_str(&cfg.ui_warm_release_ms.to_string());
-    text.push('\n');
-    text.push_str("# Maximum indexed file/folder items retained in discovery pass\n");
-    text.push_str("index_max_items_total = ");
-    text.push_str(&cfg.index_max_items_total.to_string());
-    text.push('\n');
-    text.push_str("# Maximum indexed file/folder items retained per discovery root\n");
-    text.push_str("index_max_items_per_root = ");
-    text.push_str(&cfg.index_max_items_per_root.to_string());
     text.push('\n');
     text.push_str("# Runtime candidate budget for per-query file/folder retrieval\n");
     text.push_str("index_max_items_per_query_seed = ");

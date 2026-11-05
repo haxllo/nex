@@ -115,6 +115,9 @@ impl std::error::Error for ProviderError {}
 pub struct IncrementalUpdate {
     pub upserts: Vec<SearchItem>,
     pub deleted_ids: Vec<String>,
+    /// Directory paths whose whole subtree should be removed (deletes and
+    /// rename-old records).
+    pub deleted_prefixes: Vec<String>,
     /// `(volume letter, journal id, next usn)` to persist after the caller has
     /// applied the update, so a failed apply never advances the journal.
     pub states: Vec<(char, u64, i64)>,
@@ -1085,6 +1088,7 @@ fn mft_incremental(
 
     let mut upserts = Vec::new();
     let mut deleted = Vec::new();
+    let mut deleted_prefixes: Vec<String> = Vec::new();
     let mut seen_upserts: HashSet<String> = HashSet::new();
     let mut seen_deletes: HashSet<String> = HashSet::new();
     let mut states = Vec::new();
@@ -1156,13 +1160,18 @@ fn mft_incremental(
                 continue;
             }
             if record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                // Renames and deletes move whole subtrees, so they still need
-                // the full pass. A plain create is one entry and can be
-                // applied here; its children arrive as their own records.
-                if record.reason & (FILE_DELETE | FILE_RENAME_OLD_NAME | FILE_RENAME_NEW_NAME) != 0
-                {
+                if record.reason & (FILE_DELETE | FILE_RENAME_OLD_NAME) != 0 {
+                    let lower = path.to_string_lossy().to_ascii_lowercase();
+                    if seen_deletes.insert(format!("folder:{lower}")) {
+                        deleted.push(format!("folder:{lower}"));
+                    }
+                    deleted_prefixes.push(path.to_string_lossy().to_string());
+                    continue;
+                }
+                if record.reason & FILE_RENAME_NEW_NAME != 0 {
+                    // The moved subtree's children are not in the delta.
                     crate::logging::info(&format!(
-                        "[nex] discovery_delta volume={letter} skip=directory_change path={}",
+                        "[nex] discovery_delta volume={letter} skip=directory_move path={}",
                         path.display()
                     ));
                     return Some(Err(ProviderError::new(
@@ -1229,6 +1238,7 @@ fn mft_incremental(
     Some(Ok(IncrementalUpdate {
         upserts,
         deleted_ids: deleted,
+        deleted_prefixes,
         states,
     }))
 }

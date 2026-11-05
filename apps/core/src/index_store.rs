@@ -271,6 +271,23 @@ pub fn list_item_ids_for_kinds(
     Ok(out)
 }
 
+/// Delete every row whose path is `prefix` or below it, and return the ids.
+pub fn delete_items_under_prefix(db: &Connection, prefix: &str) -> Result<Vec<String>, StoreError> {
+    let like = format!("{}%", escape_like(prefix));
+    let mut ids = Vec::new();
+    {
+        let mut stmt = db.prepare("SELECT id FROM item WHERE path LIKE ?1 ESCAPE '!'")?;
+        let mut rows = stmt.query(params![like])?;
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+    }
+    for chunk in ids.chunks(500) {
+        delete_items(db, chunk)?;
+    }
+    Ok(ids)
+}
+
 /// Start a discovery scan: the seen table records every id the pass touched
 /// so the prune can remove rows that are no longer discovered.
 pub fn scan_begin(db: &Connection) -> Result<(), StoreError> {

@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+mod mft;
+
 // ---------------------------------------------------------------------------
 // Static state shared with hook proc
 // ---------------------------------------------------------------------------
@@ -978,7 +980,7 @@ fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String
 /// The helper has no console (windows_subsystem = "windows"), so file logging
 /// is the only way to observe failures. Lines also fan out to the log pipe
 /// (when nex connected) so they land in nex's own log.
-fn debug_log(msg: &str) {
+pub(crate) fn debug_log(msg: &str) {
     let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1329,6 +1331,9 @@ fn main() {
     debug_log(&startup_privilege_report());
     spawn_log_pipe_server(log_pipe_for(&pipe_path));
     spawn_cmd_pipe_client(cmd_pipe_for(&pipe_path));
+    // MFT snapshot servers for fixed NTFS volumes: the indexer reads them to
+    // avoid cold directory walks. No-op when no volume qualifies.
+    mft::spawn_snapshot_servers();
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 

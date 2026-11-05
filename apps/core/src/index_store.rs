@@ -73,12 +73,15 @@ pub fn open_from_config(cfg: &Config) -> Result<Connection, StoreError> {
     open_file(&cfg.index_db_path)
 }
 
-pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError> {
-    db.execute(
-        "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+const UPSERT_ITEM_SQL: &str =
+    "INSERT INTO item (id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, title=excluded.title, path=excluded.path, subtitle=excluded.subtitle,
          use_count=excluded.use_count, last_accessed_epoch_secs=excluded.last_accessed_epoch_secs,
-         launch_count=excluded.launch_count, last_launched_at=excluded.last_launched_at",
+         launch_count=excluded.launch_count, last_launched_at=excluded.last_launched_at";
+
+pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError> {
+    db.execute(
+        UPSERT_ITEM_SQL,
         params![
             item.id,
             item.kind,
@@ -92,6 +95,42 @@ pub fn upsert_item(db: &Connection, item: &SearchItem) -> Result<(), StoreError>
         ],
     )?;
     Ok(())
+}
+
+/// Write many items in one transaction. The FTS triggers fire per row, so the
+/// search index stays identical to the single-row path.
+pub fn upsert_items(db: &Connection, items: &[SearchItem]) -> Result<(), StoreError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<(), StoreError> {
+        let mut stmt = db.prepare_cached(UPSERT_ITEM_SQL)?;
+        for item in items {
+            stmt.execute(params![
+                item.id,
+                item.kind,
+                item.title,
+                item.path,
+                item.subtitle,
+                item.use_count,
+                item.last_accessed_epoch_secs,
+                item.launch_count,
+                item.last_launched_at,
+            ])?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            db.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = db.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 pub fn get_item(db: &Connection, id: &str) -> Result<Option<SearchItem>, StoreError> {
@@ -150,6 +189,31 @@ pub fn clear_items(db: &Connection) -> Result<(), StoreError> {
 pub fn delete_item(db: &Connection, id: &str) -> Result<(), StoreError> {
     db.execute("DELETE FROM item WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+/// Delete many ids in one transaction.
+pub fn delete_items(db: &Connection, ids: &[String]) -> Result<(), StoreError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    db.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<(), StoreError> {
+        let mut stmt = db.prepare_cached("DELETE FROM item WHERE id = ?1")?;
+        for id in ids {
+            stmt.execute(params![id])?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            db.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = db.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 /// Escape `%`, `_` and the escape char itself for a `LIKE ... ESCAPE '!'`.
@@ -776,6 +840,35 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         rows.join(" | ")
+    }
+
+    #[test]
+    fn batch_upsert_and_delete_keep_store_consistent() {
+        let db = open_memory().unwrap();
+        let a = SearchItem::new(
+            "file:c:\\temp\\a.txt",
+            "file",
+            "a.txt",
+            "C:\\temp\\a.txt",
+        );
+        let b = SearchItem::new(
+            "file:c:\\temp\\b.txt",
+            "file",
+            "b.txt",
+            "C:\\temp\\b.txt",
+        );
+
+        upsert_items(&db, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(count_items(&db).unwrap(), 2);
+        assert!(get_item(&db, &a.id).unwrap().is_some());
+
+        upsert_items(&db, &[a.clone()]).unwrap();
+        assert_eq!(count_items(&db).unwrap(), 2);
+
+        delete_items(&db, &[a.id.clone()]).unwrap();
+        assert_eq!(count_items(&db).unwrap(), 1);
+        assert!(get_item(&db, &a.id).unwrap().is_none());
+        assert!(get_item(&db, &b.id).unwrap().is_some());
     }
 
     #[test]

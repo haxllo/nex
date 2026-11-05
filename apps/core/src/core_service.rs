@@ -23,6 +23,8 @@ const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
 /// ~31 h to sweep a 120k-item index; 128 sweeps in ~4 h with the same
 /// `try_write` politeness (skips under load).
 const STALE_PRUNE_BATCH_SIZE: usize = 128;
+/// Items per SQLite write transaction in the discovery rebuild.
+const STORE_WRITE_BATCH_SIZE: usize = 500;
 const PERSONALIZATION_CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// In-memory TTL cache for personalization boosts.
@@ -1033,11 +1035,11 @@ impl CoreService {
                     Ok(update) => {
                         let upserted = update.upserts.len();
                         let removed = update.deleted_ids.len();
-                        for id in &update.deleted_ids {
-                            index_store::delete_item(&*self.db(), id)?;
+                        for chunk in update.deleted_ids.chunks(STORE_WRITE_BATCH_SIZE) {
+                            index_store::delete_items(&*self.db(), chunk)?;
                         }
-                        for item in &update.upserts {
-                            index_store::upsert_item(&*self.db(), item)?;
+                        for chunk in update.upserts.chunks(STORE_WRITE_BATCH_SIZE) {
+                            index_store::upsert_items(&*self.db(), chunk)?;
                         }
                         // Advance the journal only after every write landed.
                         #[cfg(target_os = "windows")]
@@ -1139,6 +1141,8 @@ impl CoreService {
 
             let mut upserted = 0_usize;
             let mut discovered_ids = HashSet::with_capacity(discovered_count);
+            let mut pending_upserts: Vec<SearchItem> =
+                Vec::with_capacity(STORE_WRITE_BATCH_SIZE);
 
             for (item_idx, mut item) in discovered.into_iter().enumerate() {
                 let cached = cached_by_id.get(&item.id);
@@ -1168,9 +1172,13 @@ impl CoreService {
                     .map(|previous| previous != &item)
                     .unwrap_or(true);
                 if changed {
-                    index_store::upsert_item(&*self.db(), &item)?;
+                    pending_upserts.push(item.clone());
                     upserted += 1;
                     upserted_total += 1;
+                    if pending_upserts.len() >= STORE_WRITE_BATCH_SIZE {
+                        index_store::upsert_items(&*self.db(), &pending_upserts)?;
+                        pending_upserts.clear();
+                    }
                 }
                 existing_by_id.insert(item.id.clone(), item);
 
@@ -1182,6 +1190,9 @@ impl CoreService {
                         pct.store(pct_val.min(95), Ordering::Relaxed);
                     }
                 }
+            }
+            if !pending_upserts.is_empty() {
+                index_store::upsert_items(&*self.db(), &pending_upserts)?;
             }
 
             cumulative_weight += provider_weight;
@@ -1195,8 +1206,10 @@ impl CoreService {
                 .map(|item| item.id.clone())
                 .collect();
 
+            for chunk in removable_ids.chunks(STORE_WRITE_BATCH_SIZE) {
+                index_store::delete_items(&*self.db(), chunk)?;
+            }
             for id in &removable_ids {
-                index_store::delete_item(&*self.db(), id)?;
                 existing_by_id.remove(id);
             }
 

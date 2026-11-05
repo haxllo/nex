@@ -259,6 +259,7 @@ window.applySettings = function (s) {
   renderDiscoveryRoots();
   document.getElementById("rootsIndexNote")?.classList.add("hidden");
   window.rootsChanged = false;
+  window.rootsAdded = 0;
   const statusEl = document.getElementById("status");
   statusEl.classList.remove("error", "ok");
   statusEl.querySelector(".status-text").textContent = "Ready";
@@ -318,12 +319,11 @@ function save(closeAfterSave = false) {
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;
   cfg.discoveryRoots = window.discoveryRoots.slice();
-  const previousRoots = (window.currentSettings?.discoveryRoots || [])
-    .map(rootKey)
-    .sort()
-    .join("\n");
-  const nextRoots = cfg.discoveryRoots.map(rootKey).sort().join("\n");
-  window.rootsChanged = previousRoots !== nextRoots;
+  const previousRoots = new Set((window.currentSettings?.discoveryRoots || []).map(rootKey));
+  const nextRoots = new Set(cfg.discoveryRoots.map(rootKey));
+  const addedRoots = [...nextRoots].filter((key) => !previousRoots.has(key));
+  window.rootsAdded = addedRoots.length;
+  window.rootsChanged = addedRoots.length > 0;
   window.closeAfterSave = closeAfterSave;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
@@ -333,10 +333,20 @@ window.saveResult = function (r) {
   el.classList.remove("error", "ok");
   if (r.saved) {
     el.classList.add("ok");
-    el.querySelector(".status-text").textContent = window.rootsChanged
-      ? "Saved — indexing started"
-      : "Saved";
-    document.getElementById("rootsIndexNote")?.classList.toggle("hidden", !window.rootsChanged);
+    const note = document.getElementById("rootsIndexNote");
+    const noteText = document.getElementById("rootsIndexNoteText");
+    if (window.rootsAdded > 0) {
+      noteText.textContent = window.rootsAdded === 1
+        ? "Indexing new folder — usually a few seconds."
+        : `Indexing ${window.rootsAdded} new folders — usually a few seconds.`;
+      note.title =
+        "Large drives or slow USB/exFAT folders can take a minute or more. Existing results stay searchable; you can close Settings.";
+      note.classList.remove("hidden");
+      el.querySelector(".status-text").textContent = "Saved — indexing";
+    } else {
+      note.classList.add("hidden");
+      el.querySelector(".status-text").textContent = "Saved";
+    }
     window.currentSettings = { ...window.currentSettings, ...readSettingsForBaseline() };
     window.settingsBaseline = settingsState();
     window.settingsDirty = false;

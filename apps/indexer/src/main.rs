@@ -43,6 +43,10 @@ fn main() {
         }
     }
 
+    // Background daemon: a startup rescan must never starve the desktop or the
+    // first overlay show (login startup already saturates the disks).
+    lower_process_priority();
+
     // Bind first: a second instance must not run a duplicate discovery pass.
     let Some(listener) = ipc::bind_indexer_listener(&addr) else {
         if stdio_enabled {
@@ -87,9 +91,12 @@ fn main() {
         });
     }
 
-    run_index_cycle(&service, &indexing, stdio_enabled);
-
+    // Watchers first: the first scan runs at background I/O priority and may
+    // take a while on a cold HDD, and events that arrive meanwhile must not be
+    // missed. The periodic reconcile already runs with watchers active.
     start_watchers(&service);
+
+    run_index_cycle(&service, &indexing, stdio_enabled);
 
     {
         let service = Arc::clone(&service);
@@ -117,10 +124,14 @@ fn run_index_cycle(
     stdio_enabled: bool,
 ) -> Option<IndexRefreshReport> {
     indexing.store(true, Ordering::Release);
+    // Low CPU *and* I/O priority for the scan/sync: the UI keeps the desktop
+    // responsive during login even while the first pass reads a cold disk.
+    enter_background_priority();
     let outcome = {
         let service = service.read().unwrap_or_else(|error| error.into_inner());
         service.rebuild_index_incremental_with_report()
     };
+    leave_background_priority();
     indexing.store(false, Ordering::Release);
 
     match outcome {
@@ -213,6 +224,46 @@ fn maintenance_loop(
         }
     }
 }
+
+#[cfg(windows)]
+fn lower_process_priority() {
+    use windows_sys::Win32::System::Threading::{
+        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
+    };
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+#[cfg(not(windows))]
+fn lower_process_priority() {}
+
+/// Windows background mode lowers both CPU and I/O priority for this thread.
+#[cfg(windows)]
+fn enter_background_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+#[cfg(windows)]
+fn leave_background_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
+    };
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+    }
+}
+
+#[cfg(not(windows))]
+fn enter_background_priority() {}
+
+#[cfg(not(windows))]
+fn leave_background_priority() {}
 
 fn config_file_modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()

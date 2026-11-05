@@ -61,7 +61,7 @@ Expected:
 - Set `discovery_roots = ["C:\\"]` and keep:
 - `windows_search_enabled = true`
 - `windows_search_fallback_filesystem = true`
-- `index_max_items_total`, `index_max_items_per_root`, `index_max_items_per_query_seed` at defaults unless testing overrides.
+- `index_max_items_per_query_seed` at its default unless testing overrides.
 - Exercise launcher with short and medium queries for at least 2 minutes.
 - Expected: active working set tracks close to `active_memory_target_mb`; idle trims occur after hide.
 - Expected: `cache_compaction` shows `broad_root_mode = true` and a smaller `effective_file_seed_cap` than the configured `index_max_items_per_query_seed`.
@@ -71,7 +71,7 @@ Expected:
 4. Live config apply (no restart for discovery/search tuning)
 - Keep runtime running.
 - Edit and save `%APPDATA%\Nex\config.toml` fields:
-- hot-apply fields: `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`, `clipboard_*`, `plugins_*`, `web_search_*`, `idle_cache_trim_ms`, `active_memory_target_mb`, `index_max_items_*`.
+- hot-apply fields: `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`, `clipboard_*`, `plugins_*`, `web_search_*`, `idle_cache_trim_ms`, `active_memory_target_mb`, `index_max_items_per_query_seed`.
 - provider-refresh fields: `discovery_roots`, `discovery_exclude_roots`, `windows_search_enabled`, `windows_search_fallback_filesystem`.
 - Expected: launcher status updates to `Settings applied`, `Discovery settings updated; reindexing...`, or `Discovery settings queued; reindex starts after debounce`; no process restart required.
 

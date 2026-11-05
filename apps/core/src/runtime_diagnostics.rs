@@ -663,8 +663,6 @@ pub(crate) fn index_completeness_report(cfg: &config::Config, include_paths: boo
     let tantivy_docs =
         crate::tantivy_search::TantivyIndex::read_only_doc_count(&index_dir.join("index.tantivy")).ok();
 
-    let per_root_cap = cfg.index_max_items_per_root as u64;
-    let mut indexed_total = 0_u64;
     let roots: Vec<serde_json::Value> = cfg
         .discovery_roots
         .iter()
@@ -678,7 +676,6 @@ pub(crate) fn index_completeness_report(cfg: &config::Config, include_paths: boo
             let (db_files, db_folders) =
                 crate::index_store::count_file_folder_items_under_root(&db, &root.to_string_lossy())
                     .unwrap_or((0, 0));
-            indexed_total += db_files + db_folders;
             let fs = crate::discovery::count_filesystem_entries_for_root(root, cfg);
             let expected_files = if cfg.show_files { fs.files } else { 0 };
             let expected_folders = if cfg.show_folders { fs.folders } else { 0 };
@@ -698,7 +695,6 @@ pub(crate) fn index_completeness_report(cfg: &config::Config, include_paths: boo
                 "coverage_pct": if expected == 0 { 100.0 } else {
                     ((indexed.min(expected) as f64 / expected as f64) * 1000.0).round() / 10.0
                 },
-                "per_root_cap_hit": indexed >= per_root_cap,
                 "depth_limited": fs.depth_limited,
             })
         })
@@ -714,9 +710,6 @@ pub(crate) fn index_completeness_report(cfg: &config::Config, include_paths: boo
         },
         "limits": {
             "discovery_max_depth": cfg.discovery_max_depth,
-            "index_max_items_per_root": cfg.index_max_items_per_root,
-            "index_max_items_total": cfg.index_max_items_total,
-            "total_cap_hit": indexed_total >= cfg.index_max_items_total as u64,
             "show_files": cfg.show_files,
             "show_folders": cfg.show_folders,
         },
@@ -781,8 +774,6 @@ pub(crate) fn write_diagnostics_bundle(
         "game_mode_enabled": cfg.game_mode_enabled,
         "idle_cache_trim_ms": cfg.idle_cache_trim_ms,
         "active_memory_target_mb": cfg.active_memory_target_mb,
-        "index_max_items_total": cfg.index_max_items_total,
-        "index_max_items_per_root": cfg.index_max_items_per_root,
         "index_max_items_per_query_seed": cfg.index_max_items_per_query_seed,
         "discovery_roots_count": cfg.discovery_roots.len(),
         "discovery_exclude_roots_count": cfg.discovery_exclude_roots.len(),

@@ -7,6 +7,7 @@ const FIELDS = [
   ["maxResults", "valueNumber"],
   ["quickLaunchMaxItems", "valueNumber"],
   ["indexMaxItemsTotal", "valueNumber"],
+  ["indexMaxItemsPerRoot", "valueNumber"],
   ["searchModeDefault", "valueSelect"],
   ["panelBackground", "valueSelect"],
   ["viewMode", "valueSelect"],

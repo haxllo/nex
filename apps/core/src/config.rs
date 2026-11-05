@@ -19,9 +19,11 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 26;
+pub const CURRENT_CONFIG_VERSION: u32 = 27;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
+const LEGACY_INDEX_MAX_ITEMS_TOTAL_V1: u32 = 120_000;
+const LEGACY_INDEX_MAX_ITEMS_PER_ROOT_V1: u32 = 40_000;
 const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "hotkey",
     "launch_at_startup",
@@ -131,6 +133,30 @@ impl DiscoveryBackend {
 #[cfg(test)]
 mod discovery_backend_tests {
     use super::*;
+
+    #[test]
+    fn old_item_limits_move_to_new_defaults() {
+        let mut cfg = Config::default();
+        cfg.version = 26;
+        cfg.index_max_items_total = 120_000;
+        cfg.index_max_items_per_root = 40_000;
+        let changed = apply_migrations(&mut cfg, "");
+        assert!(changed);
+        assert_eq!(cfg.index_max_items_per_root, 200_000);
+        assert_eq!(cfg.index_max_items_total, 500_000);
+        assert_eq!(cfg.version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn custom_item_limits_are_kept() {
+        let mut cfg = Config::default();
+        cfg.version = 26;
+        cfg.index_max_items_total = 300_000;
+        cfg.index_max_items_per_root = 80_000;
+        let _ = apply_migrations(&mut cfg, "");
+        assert_eq!(cfg.index_max_items_per_root, 80_000);
+        assert_eq!(cfg.index_max_items_total, 300_000);
+    }
 
     #[test]
     fn user_template_persists_the_schema_version() {
@@ -607,8 +633,8 @@ impl Default for Config {
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
-            index_max_items_total: 120_000,
-            index_max_items_per_root: 40_000,
+            index_max_items_total: 500_000,
+            index_max_items_per_root: 200_000,
             index_max_items_per_query_seed: 5_000,
             discovery_max_depth: 0,
             quick_launch: QuickLaunchConfig::default(),
@@ -1582,6 +1608,20 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
         // Previously depth was a hardcoded 5; adopt the new default (unlimited).
         cfg.discovery_max_depth = Config::default().discovery_max_depth;
         changed = true;
+    }
+
+    if source_version < 27 {
+        // The old per-folder limit kept only the first 40k items from each
+        // folder, which left most files out of the index. Raise configs that
+        // still use the old defaults; custom values stay as set.
+        if cfg.index_max_items_total == LEGACY_INDEX_MAX_ITEMS_TOTAL_V1 {
+            cfg.index_max_items_total = Config::default().index_max_items_total;
+            changed = true;
+        }
+        if cfg.index_max_items_per_root == LEGACY_INDEX_MAX_ITEMS_PER_ROOT_V1 {
+            cfg.index_max_items_per_root = Config::default().index_max_items_per_root;
+            changed = true;
+        }
     }
 
     if TEMPLATE_REQUIRED_KEYS

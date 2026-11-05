@@ -947,8 +947,27 @@ impl CoreService {
                 provider_weight
             };
             let write_weight = provider_weight.saturating_sub(discovery_weight);
-            let mut force_provider_refresh = false;
-            if let Some(result) = provider.take_incremental() {
+            let provider_stamp = if incremental_mode {
+                provider.change_stamp()
+            } else {
+                None
+            };
+            // The roots/excludes/caps changed since the last completed full
+            // scan. The saved USN position cannot describe items that were
+            // never under an old root, so take one full pass before trusting
+            // deltas again.
+            let mut force_provider_refresh = incremental_mode
+                && provider_stamp_changed(
+                    &*self.db(),
+                    &provider_name,
+                    provider_stamp.as_deref(),
+                )?;
+            let incremental = if force_provider_refresh {
+                None
+            } else {
+                provider.take_incremental()
+            };
+            if let Some(result) = incremental {
                 match result {
                     Ok(update) => {
                         let upserted = update.upserts.len();
@@ -994,11 +1013,6 @@ impl CoreService {
                     }
                 }
             }
-            let provider_stamp = if incremental_mode {
-                provider.change_stamp()
-            } else {
-                None
-            };
             if incremental_mode
                 && !force_provider_refresh
                 && should_skip_provider_discovery(
@@ -2894,6 +2908,18 @@ fn should_prune_after_launch_error(item: &SearchItem, error: &LaunchError) -> bo
         && (item.kind.eq_ignore_ascii_case("app")
             || item.kind.eq_ignore_ascii_case("file")
             || item.kind.eq_ignore_ascii_case("folder"))
+}
+
+fn provider_stamp_changed(
+    db: &Connection,
+    provider_name: &str,
+    stamp: Option<&str>,
+) -> Result<bool, ServiceError> {
+    let Some(stamp) = stamp else {
+        return Ok(false);
+    };
+    let previous = index_store::get_meta(db, &provider_stamp_meta_key(provider_name))?;
+    Ok(previous.as_deref() != Some(stamp))
 }
 
 fn should_skip_provider_discovery(

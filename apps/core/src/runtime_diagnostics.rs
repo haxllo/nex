@@ -926,6 +926,7 @@ mod completeness_tests {
         assert_eq!(r["db_files"], 2);
         assert_eq!(r["missing_files"], 1);
         assert_eq!(r["missing_folders"], 1);
-        assert_eq!(r["per_root_cap_hit"], false);
+        assert!(r.get("per_root_cap_hit").is_none());
+        assert!(report["limits"].get("total_cap_hit").is_none());
     }
 }

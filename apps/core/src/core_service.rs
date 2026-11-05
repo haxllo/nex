@@ -637,6 +637,17 @@ impl CoreService {
         guard.clone()
     }
 
+    /// Borrow the cached items without cloning. The IPC delta path diffs the
+    /// live set against a compact index; cloning 80k items on every poll was
+    /// both a large allocation and a stall for the writer.
+    pub fn with_cached_items<R>(&self, f: impl FnOnce(&[SearchItem]) -> R) -> R {
+        let guard = match self.cached_items.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(&guard)
+    }
+
     pub fn cached_items_len(&self) -> usize {
         self.cached_len()
     }

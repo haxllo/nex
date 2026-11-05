@@ -285,7 +285,7 @@ fn file_system_provider_excludes_configured_roots() {
 }
 
 #[test]
-fn file_system_provider_honors_item_caps() {
+fn file_system_provider_has_no_item_caps() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -299,10 +299,9 @@ fn file_system_provider_honors_item_caps() {
         std::fs::write(file, b"cap").unwrap();
     }
 
-    let provider =
-        FileSystemDiscoveryProvider::new(vec![root.clone()], 6, vec![]).with_index_limits(6, 4);
+    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 6, vec![]);
     let items = provider.discover().unwrap();
-    assert!(items.len() <= 6);
+    assert_eq!(items.len(), 10);
 
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -549,11 +548,9 @@ fn unique_temp_root(label: &str) -> PathBuf {
 }
 
 #[test]
-fn file_system_walk_cap_keeps_shallow_entries_of_every_top_level_folder() {
-    let root = unique_temp_root("shallow-first");
+fn file_system_walk_keeps_deep_folders_without_caps() {
+    let root = unique_temp_root("deep-no-cap");
 
-    // `a/` sorts first and holds a deep subtree: 12 files at each of the
-    // depths 2..=6. `m/` and `z/` each hold one file at depth 2.
     let mut dir = root.join("a");
     for depth in 2..=6 {
         std::fs::create_dir_all(&dir).unwrap();
@@ -567,26 +564,10 @@ fn file_system_walk_cap_keeps_shallow_entries_of_every_top_level_folder() {
         std::fs::write(root.join(name).join("shallow.txt"), b"x").unwrap();
     }
 
-    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 0, vec![])
-        .with_index_limits(20, 20);
+    let provider = FileSystemDiscoveryProvider::new(vec![root.clone()], 0, vec![]);
     let items = provider.discover().unwrap();
-    let paths: Vec<String> = items.iter().map(|item| item.path.clone()).collect();
-    let root_depth = |path: &str| {
-        std::path::Path::new(path)
-            .strip_prefix(&root)
-            .unwrap()
-            .components()
-            .count()
-    };
-
-    assert_eq!(items.len(), 20);
-    for name in ["m", "z"] {
-        let shallow = root.join(name).join("shallow.txt").to_string_lossy().to_string();
-        assert!(paths.contains(&shallow), "missing {shallow}");
-    }
-    // Everything at depth <= 2 fits the cap; only the remainder comes from deeper.
-    assert_eq!(paths.iter().filter(|p| root_depth(p) <= 2).count(), 18);
-    assert!(paths.iter().all(|p| root_depth(p) <= 3));
+    let files = items.iter().filter(|item| item.kind == "file").count();
+    assert_eq!(files, 62, "60 deep files plus the m/z shallow files");
 
     let _ = std::fs::remove_dir_all(&root);
 }

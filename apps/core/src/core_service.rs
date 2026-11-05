@@ -740,10 +740,14 @@ impl CoreService {
         Ok(index_store::list_items(&*self.db())?)
     }
 
-    /// Replace the searchable item set with one published by the indexer.
-    /// The snapshot is the whole store, so the cache counts as complete and
-    /// search never needs a direct SQLite pass.
+    /// Replace the searchable item set from the indexer. The UI keeps a
+    /// smaller subset; the rest is found by the indexer's search or SQLite.
     pub fn apply_external_snapshot(&self, items: Vec<SearchItem>) -> usize {
+        let items = if self.ui_client {
+            bounded_ui_items(&items)
+        } else {
+            items
+        };
         let apps = collect_app_items(&items);
         let count = items.len();
         {
@@ -755,7 +759,7 @@ impl CoreService {
             self.rebuild_search_index_for_cache(&guard);
         }
         *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
-        self.cache_complete.store(true, Ordering::SeqCst);
+        self.cache_complete.store(!self.ui_client, Ordering::SeqCst);
         self.bump_search_generation();
         count
     }
@@ -785,12 +789,17 @@ impl CoreService {
             }
         }
         next.extend(replacements.into_values());
+        let next = if self.ui_client {
+            bounded_ui_items(&next)
+        } else {
+            next
+        };
         let apps = collect_app_items(&next);
         *guard = next;
         self.rebuild_search_index_for_cache(&guard);
         drop(guard);
         *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
-        self.cache_complete.store(true, Ordering::SeqCst);
+        self.cache_complete.store(!self.ui_client, Ordering::SeqCst);
         self.bump_search_generation();
         true
     }
@@ -2212,7 +2221,12 @@ impl CoreService {
         let config_snapshot = self.config_snapshot();
         let latest_full = index_store::list_items(&*self.db())?;
         let latest_apps = collect_app_items(&latest_full);
-        let latest = if self.keep_all_items {
+        let latest = if self.ui_client {
+            let bounded = bounded_ui_items(&latest_full);
+            self.cache_complete
+                .store(bounded.len() == latest_full.len(), Ordering::SeqCst);
+            bounded
+        } else if self.keep_all_items {
             // Indexer publishing mode: the IPC snapshot must contain the whole
             // store, so compaction would only force a SQLite scan per poll.
             self.cache_complete.store(true, Ordering::SeqCst);
@@ -2276,6 +2290,13 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         upsert_cached_item_inner(&mut items_guard, item);
+        if self.ui_client {
+            let bounded = bounded_ui_items(&items_guard);
+            if bounded.len() != items_guard.len() {
+                self.cache_complete.store(false, Ordering::SeqCst);
+            }
+            *items_guard = bounded;
+        }
         self.rebuild_search_index_for_cache(&items_guard);
         drop(items_guard);
         match self.cached_app_items.write() {
@@ -2304,6 +2325,9 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         items_guard.retain(|entry| entry.id != id);
+        if self.ui_client {
+            *items_guard = bounded_ui_items(&items_guard);
+        }
         self.rebuild_search_index_for_cache(&items_guard);
         drop(items_guard);
         match self.cached_app_items.write() {
@@ -2606,6 +2630,9 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         items_guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
+        if self.ui_client {
+            *items_guard = bounded_ui_items(&items_guard);
+        }
         self.rebuild_search_index_for_cache(&items_guard);
         drop(items_guard);
         match self.cached_app_items.write() {
@@ -2678,6 +2705,35 @@ fn collect_app_items(items: &[SearchItem]) -> Vec<SearchItem> {
         .filter(|item| item.kind.eq_ignore_ascii_case("app"))
         .cloned()
         .collect()
+}
+
+/// The UI keeps a small local set. Everything else is found through the
+/// indexer's search path or the SQLite fallback.
+pub(crate) const UI_CACHE_MAX_ITEMS: usize = 10_000;
+
+pub(crate) fn bounded_ui_items(items: &[SearchItem]) -> Vec<SearchItem> {
+    let mut apps = Vec::new();
+    let mut others = Vec::new();
+    for item in items {
+        if item.kind.eq_ignore_ascii_case("app") {
+            apps.push(item.clone());
+        } else {
+            others.push(item.clone());
+        }
+    }
+    let keep = UI_CACHE_MAX_ITEMS.saturating_sub(apps.len());
+    if others.len() > keep {
+        others.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then_with(|| b.last_accessed_epoch_secs.cmp(&a.last_accessed_epoch_secs))
+                .then_with(|| b.last_launched_at.cmp(&a.last_launched_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        others.truncate(keep);
+    }
+    apps.extend(others);
+    apps
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3478,6 +3534,41 @@ mod tests {
         cfg.show_folders = true;
         cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
         assert!(broad_root_discovery_enabled(&cfg));
+    }
+
+    #[test]
+    fn bounded_ui_items_keeps_apps_and_most_used() {
+        let mut items: Vec<SearchItem> = (0..5)
+            .map(|index| {
+                SearchItem::new(
+                    &format!("app{index}"),
+                    "app",
+                    &format!("App {index}"),
+                    "C:\\app.exe",
+                )
+            })
+            .collect();
+        for index in 0..super::UI_CACHE_MAX_ITEMS + 20 {
+            let mut item = SearchItem::new(
+                &format!("file{index}"),
+                "file",
+                &format!("file-{index}.txt"),
+                &format!("C:\\file-{index}.txt"),
+            );
+            item.use_count = index as u32;
+            items.push(item);
+        }
+
+        let bounded = super::bounded_ui_items(&items);
+        assert_eq!(bounded.len(), super::UI_CACHE_MAX_ITEMS);
+        assert_eq!(
+            bounded.iter().filter(|item| item.kind == "app").count(),
+            5
+        );
+        assert!(bounded
+            .iter()
+            .any(|item| item.use_count == (super::UI_CACHE_MAX_ITEMS + 19) as u32));
+        assert!(!bounded.iter().any(|item| item.id == "file0"));
     }
 
     #[test]

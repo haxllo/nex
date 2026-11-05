@@ -129,6 +129,21 @@ pub trait DiscoveryProvider: Send + Sync {
     ) -> Result<Vec<SearchItem>, ProviderError> {
         self.discover()
     }
+    /// Stream discovered items to `emit` instead of materializing them all.
+    /// The default is fine for the small app providers; the filesystem
+    /// provider overrides it so large roots never build a full Vec.
+    fn discover_into(
+        &self,
+        on_item_discovered: Option<&mut dyn FnMut(usize)>,
+        emit: &mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
+    ) -> Result<usize, ProviderError> {
+        let items = self.discover_with_progress(on_item_discovered)?;
+        let count = items.len();
+        for item in items {
+            emit(item)?;
+        }
+        Ok(count)
+    }
     /// Optional incremental pass. `Some` means the caller applies the update
     /// and skips `discover()`/prune for this cycle.
     fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
@@ -441,6 +456,40 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         "filesystem"
     }
 
+    fn discover_into(
+        &self,
+        on_item_discovered: Option<&mut dyn FnMut(usize)>,
+        emit: &mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
+    ) -> Result<usize, ProviderError> {
+        if !self.show_files && !self.show_folders {
+            return Ok(0);
+        }
+
+        match &self.backend {
+            #[cfg(target_os = "windows")]
+            FileBackend::Everything(_) => {
+                // Deprecated backend; it already produces one snapshot.
+                let items = self.discover_with_progress(on_item_discovered)?;
+                let count = items.len();
+                for item in items {
+                    emit(item)?;
+                }
+                Ok(count)
+            }
+            FileBackend::Walkdir => discover_filesystem_walk_into(
+                &self.roots,
+                &self.excluded_roots,
+                self.max_depth,
+                self.show_files,
+                self.show_folders,
+                self.max_items_total,
+                self.max_items_per_root,
+                emit,
+                on_item_discovered,
+            ),
+        }
+    }
+
     fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
         #[cfg(target_os = "windows")]
         {
@@ -616,34 +665,40 @@ fn discover_filesystem_everything(
     )
 }
 
-/// Accumulates walk results; callers check the budgets before pushing.
-struct WalkSink<'a> {
-    out: Vec<SearchItem>,
+/// Streams walk results to the caller; callers check the budgets before pushing.
+struct WalkSink<'a, 'b> {
+    emit: &'a mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
+    error: Option<ProviderError>,
     total_added: usize,
     root_added: usize,
-    on_item_discovered: Option<&'a mut dyn FnMut(usize)>,
+    on_item_discovered: Option<&'b mut dyn FnMut(usize)>,
 }
 
-impl WalkSink<'_> {
+impl WalkSink<'_, '_> {
     fn push(&mut self, kind: &str, path: &Path) {
+        if self.error.is_some() {
+            return;
+        }
         let title = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
         let id = format!("{kind}:{}", path.to_string_lossy().to_ascii_lowercase());
-        self.out
-            .push(SearchItem::new(&id, kind, &title, &path.to_string_lossy()));
+        let item = SearchItem::new(&id, kind, &title, &path.to_string_lossy());
         self.total_added += 1;
         self.root_added += 1;
         if let Some(callback) = self.on_item_discovered.as_deref_mut() {
             callback(self.total_added);
+        }
+        if let Err(error) = (self.emit)(item) {
+            self.error = Some(error);
         }
     }
 }
 
 /// Breadth-first so a budget cap keeps the shallowest entries of every
 /// subtree instead of exhausting itself inside the first deep folder.
-fn discover_filesystem_walk(
+fn discover_filesystem_walk_into<'a, 'b>(
     roots: &[PathBuf],
     excluded_roots: &[PathBuf],
     max_depth: usize,
@@ -651,15 +706,17 @@ fn discover_filesystem_walk(
     show_folders: bool,
     max_items_total: usize,
     max_items_per_root: usize,
-    on_item_discovered: Option<&mut dyn FnMut(usize)>,
-) -> Result<Vec<SearchItem>, ProviderError> {
+    emit: &'a mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
+    on_item_discovered: Option<&'b mut dyn FnMut(usize)>,
+) -> Result<usize, ProviderError> {
     let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
     let total_budget = max_items_total.max(1);
     let per_root_budget = max_items_per_root.max(1).min(total_budget);
     let mut skipped_due_exclusion = 0_usize;
     let walk_depth = effective_walk_depth(max_depth);
     let mut sink = WalkSink {
-        out: Vec::new(),
+        emit,
+        error: None,
         total_added: 0,
         root_added: 0,
         on_item_discovered,
@@ -774,7 +831,41 @@ fn discover_filesystem_walk(
         ));
     }
 
-    Ok(sink.out)
+    if let Some(error) = sink.error {
+        return Err(error);
+    }
+    Ok(sink.total_added)
+}
+
+fn discover_filesystem_walk(
+    roots: &[PathBuf],
+    excluded_roots: &[PathBuf],
+    max_depth: usize,
+    show_files: bool,
+    show_folders: bool,
+    max_items_total: usize,
+    max_items_per_root: usize,
+    on_item_discovered: Option<&mut dyn FnMut(usize)>,
+) -> Result<Vec<SearchItem>, ProviderError> {
+    let mut out = Vec::new();
+    {
+        let mut emit = |item: SearchItem| {
+            out.push(item);
+            Ok(())
+        };
+        discover_filesystem_walk_into(
+            roots,
+            excluded_roots,
+            max_depth,
+            show_files,
+            show_folders,
+            max_items_total,
+            max_items_per_root,
+            &mut emit,
+            on_item_discovered,
+        )?;
+    }
+    Ok(out)
 }
 
 /// Config depth 0 means unlimited.
@@ -810,7 +901,7 @@ fn try_mft_root(
     max_depth: usize,
     total_budget: usize,
     per_root_budget: usize,
-    sink: &mut WalkSink<'_>,
+    sink: &mut WalkSink<'_, '_>,
     skipped_due_exclusion: &mut usize,
 ) -> bool {
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -1315,101 +1315,96 @@ impl CoreService {
                     );
                 }
             };
-            let discovered = if progress_pct.is_some() {
-                provider.discover_with_progress(Some(&mut discovery_progress))?
-            } else {
-                provider.discover()?
-            };
-            if let Some(ref pct) = progress_pct {
-                pct.store(
-                    cumulative_weight.saturating_add(discovery_weight).min(95),
-                    Ordering::Relaxed,
-                );
-            }
-
-            let discovered_count = discovered.len();
-            discovered_total += discovered_count;
-
+            index_store::scan_begin(&*self.db())?;
+            let mut discovered_count = 0_usize;
             let mut upserted = 0_usize;
-            let mut discovered_ids = HashSet::with_capacity(discovered_count);
             let mut pending_upserts: Vec<SearchItem> =
                 Vec::with_capacity(STORE_WRITE_BATCH_SIZE);
+            let mut pending_seen: Vec<String> = Vec::with_capacity(STORE_WRITE_BATCH_SIZE);
+            {
+                let mut sink =
+                    |mut item: SearchItem| -> Result<(), crate::discovery::ProviderError> {
+                        discovered_count += 1;
+                        // One PK lookup per discovered item replaces the full
+                        // store map: usage merge and change detection use the
+                        // stored row.
+                        let stored = index_store::get_item(&*self.db(), &item.id)
+                            .map_err(|e| crate::discovery::ProviderError::new(e.to_string()))?;
+                        if let Some(previous) = stored.as_ref() {
+                            if item.use_count == 0 {
+                                item.use_count = previous.use_count;
+                            }
+                            if item.last_accessed_epoch_secs <= 0 {
+                                item.last_accessed_epoch_secs =
+                                    previous.last_accessed_epoch_secs;
+                            }
+                            // Usage counters belong to the user, not the scanner:
+                            // a rescan must never reset launch history, or the
+                            // idle "your apps" list empties itself every scan.
+                            if item.launch_count == 0 {
+                                item.launch_count = previous.launch_count;
+                            }
+                            if item.last_launched_at <= 0 {
+                                item.last_launched_at = previous.last_launched_at;
+                            }
+                        }
 
-            for (item_idx, mut item) in discovered.into_iter().enumerate() {
-                // One PK lookup per discovered item replaces the full store
-                // map: usage merge and change detection use the stored row.
-                let stored = index_store::get_item(&*self.db(), &item.id)?;
-                if let Some(previous) = stored.as_ref() {
-                    if item.use_count == 0 {
-                        item.use_count = previous.use_count;
-                    }
-                    if item.last_accessed_epoch_secs <= 0 {
-                        item.last_accessed_epoch_secs = previous.last_accessed_epoch_secs;
-                    }
-                    // Usage counters belong to the user, not the scanner:
-                    // a rescan must never reset launch history, or the
-                    // idle "your apps" list empties itself every scan.
-                    if item.launch_count == 0 {
-                        item.launch_count = previous.launch_count;
-                    }
-                    if item.last_launched_at <= 0 {
-                        item.last_launched_at = previous.last_launched_at;
-                    }
-                }
+                        pending_seen.push(item.id.clone());
+                        let changed = stored
+                            .as_ref()
+                            .map(|previous| previous != &item)
+                            .unwrap_or(true);
+                        if changed {
+                            pending_upserts.push(item);
+                            upserted += 1;
+                            upserted_total += 1;
+                        }
 
-                discovered_ids.insert(item.id.clone());
-
-                let changed = stored
-                    .as_ref()
-                    .map(|previous| previous != &item)
-                    .unwrap_or(true);
-                if changed {
-                    pending_upserts.push(item.clone());
-                    upserted += 1;
-                    upserted_total += 1;
-                    if pending_upserts.len() >= STORE_WRITE_BATCH_SIZE {
-                        index_store::upsert_items(&*self.db(), &pending_upserts)?;
-                        self.index_items_on_backends(&pending_upserts);
-                        self.record_publish(&pending_upserts, &[]);
-                        pending_upserts.clear();
-                    }
-                }
-
-                if let Some(ref pct) = progress_pct {
-                    if discovered_count > 0 {
-                        let pct_val = cumulative_weight
-                            + discovery_weight
-                            + (write_weight * (item_idx as u32 + 1)) / discovered_count as u32;
-                        pct.store(pct_val.min(95), Ordering::Relaxed);
-                    }
-                }
+                        if pending_seen.len() >= STORE_WRITE_BATCH_SIZE {
+                            index_store::upsert_items(&*self.db(), &pending_upserts)
+                                .map_err(|e| crate::discovery::ProviderError::new(e.to_string()))?;
+                            self.index_items_on_backends(&pending_upserts);
+                            self.record_publish(&pending_upserts, &[]);
+                            pending_upserts.clear();
+                            index_store::scan_mark(&*self.db(), &pending_seen)
+                                .map_err(|e| crate::discovery::ProviderError::new(e.to_string()))?;
+                            pending_seen.clear();
+                        }
+                        Ok(())
+                    };
+                provider.discover_into(Some(&mut discovery_progress), &mut sink)?;
             }
             if !pending_upserts.is_empty() {
                 index_store::upsert_items(&*self.db(), &pending_upserts)?;
                 self.index_items_on_backends(&pending_upserts);
                 self.record_publish(&pending_upserts, &[]);
             }
+            index_store::scan_mark(&*self.db(), &pending_seen)?;
 
+            if let Some(ref pct) = progress_pct {
+                pct.store(
+                    cumulative_weight
+                        .saturating_add(discovery_weight)
+                        .saturating_add(write_weight)
+                        .min(95),
+                    Ordering::Relaxed,
+                );
+            }
+            discovered_total += discovered_count;
             cumulative_weight += provider_weight;
 
             // Kind-based ownership is safe for current runtime provider composition:
             // start-menu apps own kind=app, filesystem owns kind=file/folder.
-            let removable_ids: Vec<String> =
-                index_store::list_item_ids_for_kinds(
-                    &*self.db(),
-                    provider_kinds(provider.provider_name()),
-                )?
-                .into_iter()
-                .filter(|id| !discovered_ids.contains(id))
-                .collect();
+            let removable_ids =
+                index_store::scan_prune(&*self.db(), provider_kinds(provider.provider_name()))?;
 
             for chunk in removable_ids.chunks(STORE_WRITE_BATCH_SIZE) {
-                index_store::delete_items(&*self.db(), chunk)?;
                 for id in chunk {
                     self.remove_item_from_backends(id);
                 }
                 self.record_publish(&[], chunk);
             }
+            index_store::scan_end(&*self.db())?;
 
             removed_total += removable_ids.len();
             provider_reports.push(ProviderRefreshReport {

@@ -271,6 +271,66 @@ pub fn list_item_ids_for_kinds(
     Ok(out)
 }
 
+/// Start a discovery scan: the seen table records every id the pass touched
+/// so the prune can remove rows that are no longer discovered.
+pub fn scan_begin(db: &Connection) -> Result<(), StoreError> {
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS rebuild_seen (id TEXT PRIMARY KEY) WITHOUT ROWID;
+         DELETE FROM rebuild_seen;",
+    )?;
+    Ok(())
+}
+
+/// Record a batch of discovered ids in the current scan.
+pub fn scan_mark(db: &Connection, ids: &[String]) -> Result<(), StoreError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    {
+        let mut stmt = tx.prepare("INSERT OR IGNORE INTO rebuild_seen (id) VALUES (?1)")?;
+        for id in ids {
+            stmt.execute(params![id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Delete rows of the given kinds that the current scan never saw, and return
+/// their ids for the search backends and the UI publish log.
+pub fn scan_prune(db: &Connection, kinds: &[&str]) -> Result<Vec<String>, StoreError> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(kinds.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id FROM item WHERE kind IN ({placeholders})
+         AND id NOT IN (SELECT id FROM rebuild_seen)"
+    );
+    let mut ids = Vec::new();
+    {
+        let mut stmt = db.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(kinds.iter().copied()))?;
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+    }
+    for chunk in ids.chunks(500) {
+        delete_items(db, chunk)?;
+    }
+    Ok(ids)
+}
+
+/// Drop the scan seen table.
+pub fn scan_end(db: &Connection) -> Result<(), StoreError> {
+    db.execute_batch("DROP TABLE IF EXISTS rebuild_seen")?;
+    Ok(())
+}
+
 /// One page of store rows ordered by id, for a full-store stale scan.
 /// Pass the last id of the previous page to continue; `None` starts over.
 pub fn list_item_page(

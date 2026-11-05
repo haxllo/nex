@@ -239,6 +239,47 @@
     overflow: hidden;
   }
 
+  /* ── Discovery roots ── */
+  .root-row {
+    height: auto;
+    min-height: var(--row-h);
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+  .root-path {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .root-remove {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  .root-add {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 8px 0;
+  }
+  .root-add-field {
+    flex: 1;
+    min-width: 0;
+  }
+  .root-add-field input {
+    width: 100%;
+  }
+  .root-empty {
+    padding: 12px 14px;
+    font-size: 11.5px;
+    color: var(--fg-muted);
+  }
+  .roots-hint {
+    margin: 8px 0 0;
+    padding: 0 8px;
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
+
   /* ── Row (2-col inside the group: label | control) ── */
   .row {
     display: grid;
@@ -736,6 +777,12 @@
         </svg>
         Search
       </button>
+      <button type="button" class="nav-item" data-page="folders">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1.8 4.2c0-.6.5-1.1 1.1-1.1h3l1.2 1.5h5.1c.6 0 1.1.5 1.1 1.1v6.1c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1z"/>
+        </svg>
+        Files &amp; Folders
+      </button>
 
       <div class="nav-spacer"></div>
     </div>
@@ -925,6 +972,21 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Files & Folders -->
+      <div class="page" id="page-folders">
+        <div class="group">
+          <div class="group-label">Discovery Roots</div>
+          <div class="group-rows" id="discoveryRootsList"></div>
+          <div class="root-add">
+            <div class="field root-add-field">
+              <input type="text" id="newDiscoveryRoot" placeholder="D:\Projects" spellcheck="false" autocomplete="off"/>
+            </div>
+            <button type="button" class="btn" onclick="addDiscoveryRoot()">Add folder</button>
+          </div>
+          <p class="roots-hint">Nex indexes these folders in the background. Saving a new folder starts a rescan automatically.</p>
         </div>
       </div>
 

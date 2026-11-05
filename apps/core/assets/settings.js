@@ -14,6 +14,66 @@ const FIELDS = [
   ["webSearchProvider", "valueSelect"],
 ];
 
+window.discoveryRoots = [];
+
+function rootKey(value) {
+  return value.trim().replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function renderDiscoveryRoots() {
+  const list = document.getElementById("discoveryRootsList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!window.discoveryRoots.length) {
+    const empty = document.createElement("div");
+    empty.className = "root-empty";
+    empty.textContent = "No folders configured yet.";
+    list.appendChild(empty);
+    return;
+  }
+  window.discoveryRoots.forEach((root, index) => {
+    const row = document.createElement("div");
+    row.className = "row root-row";
+    const label = document.createElement("div");
+    label.className = "row-label";
+    const name = document.createElement("span");
+    name.className = "name root-path";
+    name.textContent = root;
+    label.appendChild(name);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "btn root-remove";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => removeDiscoveryRoot(index));
+    row.appendChild(label);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+}
+
+function addDiscoveryRoot() {
+  const input = document.getElementById("newDiscoveryRoot");
+  if (!input) return;
+  const value = input.value.trim().replace(/^["']+|["']+$/g, "").trim();
+  if (!value) return;
+  const key = rootKey(value);
+  if (window.discoveryRoots.some((root) => rootKey(root) === key)) {
+    input.select();
+    return;
+  }
+  window.discoveryRoots.push(value);
+  input.value = "";
+  renderDiscoveryRoots();
+  refreshDirty();
+}
+
+function removeDiscoveryRoot(index) {
+  if (index < 0 || index >= window.discoveryRoots.length) return;
+  window.discoveryRoots.splice(index, 1);
+  renderDiscoveryRoots();
+  refreshDirty();
+}
+
 // ── Dropdowns ───────────────────────────────────────────────────────
 const CHECK_SVG = '<svg class="dd-check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6.5l2.5 2.5L10 3.5"/></svg>';
 
@@ -195,6 +255,8 @@ window.applySettings = function (s) {
       }
     } else el.value = s[id];
   }
+  window.discoveryRoots = Array.isArray(s.discoveryRoots) ? s.discoveryRoots.slice() : [];
+  renderDiscoveryRoots();
   const statusEl = document.getElementById("status");
   statusEl.classList.remove("error", "ok");
   statusEl.querySelector(".status-text").textContent = "Ready";
@@ -213,6 +275,7 @@ function settingsState() {
     else if (kind === "valueSelect") cfg[id] = el.querySelector('input[type="hidden"]')?.value || el.value;
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings?.hotkey || "";
+  cfg.discoveryRoots = window.discoveryRoots.slice();
   return JSON.stringify(cfg);
 }
 
@@ -252,6 +315,7 @@ function save(closeAfterSave = false) {
     } else cfg[id] = el.value.trim();
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;
+  cfg.discoveryRoots = window.discoveryRoots.slice();
   window.closeAfterSave = closeAfterSave;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
@@ -284,6 +348,13 @@ window.confirmSaveAndClose = function () {
   document.getElementById("unsaved-dialog")?.classList.add("hidden");
   save(true);
 };
+
+document.getElementById("newDiscoveryRoot")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addDiscoveryRoot();
+  }
+});
 
 initDropdowns();
 window.chrome.webview.postMessage(JSON.stringify({ t: "ready" }));

@@ -74,6 +74,53 @@ function removeDiscoveryRoot(index) {
   refreshDirty();
 }
 
+// ── Live indexing status ────────────────────────────────────────────
+window.indexingPoll = null;
+window.indexingMode = null;
+window.indexingSeen = false;
+window.indexingStartedAt = 0;
+
+function startIndexingPoll(mode) {
+  stopIndexingPoll();
+  window.indexingMode = mode;
+  window.indexingSeen = false;
+  window.indexingStartedAt = Date.now();
+  window.indexingPoll = setInterval(() => {
+    window.chrome.webview.postMessage(JSON.stringify({ t: "indexingStatus" }));
+  }, 1500);
+}
+
+function stopIndexingPoll() {
+  if (window.indexingPoll) {
+    clearInterval(window.indexingPoll);
+    window.indexingPoll = null;
+  }
+}
+
+window.indexingStatus = function (s) {
+  if (!s || typeof s.indexing !== "boolean") return;
+  if (s.indexing) {
+    window.indexingSeen = true;
+    return;
+  }
+  const waited = Date.now() - window.indexingStartedAt;
+  // The indexer polls the config file every 2 s, so a false right after the
+  // save means "hasn't started yet", not "done".
+  if (!window.indexingSeen && waited < 8000) return;
+  stopIndexingPoll();
+  document.getElementById("rootsIndexNote")?.classList.add("hidden");
+  if (waited <= 300000) {
+    const status = document.getElementById("status");
+    if (status) {
+      status.classList.remove("error");
+      status.classList.add("ok");
+      status.querySelector(".status-text").textContent =
+        window.indexingMode === "removing" ? "Saved — folder removed" : "Saved — index updated";
+    }
+  }
+  window.indexingMode = null;
+};
+
 // ── Dropdowns ───────────────────────────────────────────────────────
 const CHECK_SVG = '<svg class="dd-check" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6.5l2.5 2.5L10 3.5"/></svg>';
 
@@ -260,6 +307,8 @@ window.applySettings = function (s) {
   document.getElementById("rootsIndexNote")?.classList.add("hidden");
   window.rootsChanged = false;
   window.rootsAdded = 0;
+  window.rootsRemoved = 0;
+  stopIndexingPoll();
   const statusEl = document.getElementById("status");
   statusEl.classList.remove("error", "ok");
   statusEl.querySelector(".status-text").textContent = "Ready";
@@ -322,8 +371,11 @@ function save(closeAfterSave = false) {
   const previousRoots = new Set((window.currentSettings?.discoveryRoots || []).map(rootKey));
   const nextRoots = new Set(cfg.discoveryRoots.map(rootKey));
   const addedRoots = [...nextRoots].filter((key) => !previousRoots.has(key));
+  const removedRoots = [...previousRoots].filter((key) => !nextRoots.has(key));
   window.rootsAdded = addedRoots.length;
-  window.rootsChanged = addedRoots.length > 0;
+  window.rootsRemoved = removedRoots.length;
+  window.rootsChanged = addedRoots.length > 0 || removedRoots.length > 0;
+  stopIndexingPoll();
   window.closeAfterSave = closeAfterSave;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
@@ -343,7 +395,18 @@ window.saveResult = function (r) {
         "Large drives or slow USB/exFAT folders can take a minute or more. Existing results stay searchable; you can close Settings.";
       note.classList.remove("hidden");
       el.querySelector(".status-text").textContent = "Saved — indexing";
+      startIndexingPoll("adding");
+    } else if (window.rootsRemoved > 0) {
+      noteText.textContent = window.rootsRemoved === 1
+        ? "Removing folder from the index — about a minute."
+        : `Removing ${window.rootsRemoved} folders from the index — about a minute.`;
+      note.title =
+        "The indexer rescans the remaining roots before pruning. Existing results stay searchable until the cycle finishes.";
+      note.classList.remove("hidden");
+      el.querySelector(".status-text").textContent = "Saved — removing";
+      startIndexingPoll("removing");
     } else {
+      stopIndexingPoll();
       note.classList.add("hidden");
       el.querySelector(".status-text").textContent = "Saved";
     }
@@ -376,6 +439,7 @@ document.getElementById("newDiscoveryRoot")?.addEventListener("keydown", (e) => 
     addDiscoveryRoot();
   }
 });
+window.addEventListener("beforeunload", stopIndexingPoll);
 
 initDropdowns();
 window.chrome.webview.postMessage(JSON.stringify({ t: "ready" }));

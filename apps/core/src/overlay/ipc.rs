@@ -364,6 +364,8 @@ pub(crate) enum SettingsMessage {
     Minimize(NoPayload),
     #[serde(rename = "close")]
     Close(NoPayload),
+    #[serde(rename = "indexingStatus")]
+    IndexingStatus(NoPayload),
 }
 
 /// Extract the `"t"` tag for error reporting when full parsing fails.
@@ -596,6 +598,7 @@ pub(crate) fn parse_settings(body: &str) -> Result<SettingsMessage, IpcReject> {
         "cancelRecord",
         "minimize",
         "close",
+        "indexingStatus",
     ];
     if !tag.is_empty() && !KNOWN.contains(&tag.as_str()) {
         return Err(IpcReject::UnknownType(tag));
@@ -709,6 +712,14 @@ mod tests {
             parse_settings(r#"{"t":"save"}"#),
             Err(IpcReject::BadPayload(_))
         ));
+    }
+
+    #[test]
+    fn indexing_status_request_parses() {
+        assert_eq!(
+            parse_settings(r#"{"t":"indexingStatus"}"#),
+            Ok(SettingsMessage::IndexingStatus(NoPayload {}))
+        );
     }
 
     #[test]

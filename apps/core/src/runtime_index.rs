@@ -445,8 +445,6 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 || next_config.discovery_exclude_roots != previous.discovery_exclude_roots
                 || next_config.show_files != previous.show_files
                 || next_config.show_folders != previous.show_folders
-                || next_config.index_max_items_total != previous.index_max_items_total
-                || next_config.index_max_items_per_root != previous.index_max_items_per_root
                 || next_config.index_max_items_per_query_seed
                     != previous.index_max_items_per_query_seed;
             let mut discovery_reindex_queued = false;
@@ -507,7 +505,7 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             }
 
             log_info(&format!(
-                "[nex] config reloaded max_results={} mode={:?} show_files={} show_folders={} game_mode={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_caps_total={} index_caps_per_root={} index_seed_cap={}",
+                "[nex] config reloaded max_results={} mode={:?} show_files={} show_folders={} game_mode={} dsl={} clipboard={} uninstall_actions={} plugins_enabled={} plugins_actions={} index_seed_cap={}",
                 runtime_config.max_results,
                 runtime_config.search_mode_default,
                 runtime_config.show_files,
@@ -518,8 +516,6 @@ pub(crate) fn maybe_apply_runtime_config_reload(
                 runtime_config.uninstall_actions_enabled,
                 runtime_config.plugins_enabled,
                 plugin_registry.action_items.len(),
-                runtime_config.index_max_items_total,
-                runtime_config.index_max_items_per_root,
                 runtime_config.index_max_items_per_query_seed,
             ));
 

@@ -1295,8 +1295,10 @@ impl CoreService {
             if let Some(ref pct) = progress_pct {
                 pct.store(cumulative_weight.min(95), Ordering::Relaxed);
             }
+            // Discovery has no item cap; this is only the progress scale.
+            const DISCOVERY_PROGRESS_SCALE: usize = 1_000_000;
             let discovery_cap = if is_filesystem {
-                (config_snapshot.index_max_items_total as usize).max(1)
+                DISCOVERY_PROGRESS_SCALE
             } else {
                 1
             };

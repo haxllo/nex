@@ -132,7 +132,7 @@ Notes:
 - You can keep inline comments in this file (`// ...`).
 - Most users only need to edit `hotkey`.
 - `launch_at_startup`, `max_results`, `discovery_roots`, and `discovery_exclude_roots` are optional tuning.
-- `index_max_items_total`, `index_max_items_per_root`, and `index_max_items_per_query_seed` tune memory/coverage tradeoffs for large discovery roots.
+- `index_max_items_per_query_seed` tunes the per-query file/folder candidate budget.
 
 ## Live Config Apply Matrix
 
@@ -140,7 +140,7 @@ Notes:
 - `max_results`, `show_files`, `show_folders`, `search_mode_default`, `search_dsl_enabled`
 - `clipboard_*`, `plugins_*`, `web_search_*`
 - `idle_cache_trim_ms`, `active_memory_target_mb`
-- `index_max_items_total`, `index_max_items_per_root`, `index_max_items_per_query_seed`
+- `index_max_items_per_query_seed`
 
 - Applies with provider refresh + background reindex:
 - `discovery_roots`, `discovery_exclude_roots`

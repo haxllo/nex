@@ -295,7 +295,7 @@ impl EverythingBridge {
 
             if eligible.len() > per_root_budget {
                 crate::logging::warn(&format!(
-                    "[nex] discovery_cap provider=filesystem backend=everything root={} per_root_cap={per_root_budget} eligible={} reached=true; deepest entries were not indexed (raise index_max_items_per_root)",
+                    "[nex] discovery_cap provider=filesystem backend=everything root={} per_root_cap={per_root_budget} eligible={} reached=true; deepest entries were not indexed",
                     root.display(),
                     eligible.len()
                 ));

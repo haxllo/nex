@@ -633,6 +633,22 @@ fn discover_filesystem_walk(
         if sink.total_added >= total_budget {
             break;
         }
+        #[cfg(target_os = "windows")]
+        if mft_backend_enabled()
+            && try_mft_root(
+                root,
+                &exclusion_policy,
+                show_files,
+                show_folders,
+                max_depth,
+                total_budget,
+                per_root_budget,
+                &mut sink,
+                &mut skipped_due_exclusion,
+            )
+        {
+            continue;
+        }
         if !root.exists() {
             continue;
         }
@@ -732,6 +748,139 @@ fn effective_walk_depth(max_depth: usize) -> usize {
     } else {
         max_depth
     }
+}
+
+/// MFT is the primary backend for NTFS roots; the directory walk is the
+/// fallback (non-NTFS, helper unavailable, unlocked/denied volumes).
+/// `NEX_DISCOVERY_BACKEND=walkdir` forces the old path.
+#[cfg(target_os = "windows")]
+fn mft_backend_enabled() -> bool {
+    match std::env::var("NEX_DISCOVERY_BACKEND") {
+        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "walkdir" | "off"),
+        Err(_) => true,
+    }
+}
+
+/// Try one NTFS volume snapshot for a root. Returns true when the snapshot was
+/// available and the root was handled (even with zero matches), so the caller
+/// must not walk a volume that was fully enumerated.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+fn try_mft_root(
+    root: &Path,
+    exclusion_policy: &DiscoveryExclusionPolicy,
+    show_files: bool,
+    show_folders: bool,
+    max_depth: usize,
+    total_budget: usize,
+    per_root_budget: usize,
+    sink: &mut WalkSink<'_>,
+    skipped_due_exclusion: &mut usize,
+) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let Some(letter) = crate::mft_discovery::root_volume_letter(root) else {
+        return false;
+    };
+    if !crate::mft_discovery::is_fixed_volume(letter)
+        || !crate::mft_discovery::is_ntfs_volume(letter)
+    {
+        return false;
+    }
+    // The helper starts asynchronously with the UI; give the first root time
+    // to see its pipe, then keep later attempts short. When the helper is
+    // absent (portable run, no scheduled task), skip MFT for a while so the
+    // walk fallback is not delayed on every root.
+    static FIRST_ATTEMPT: AtomicBool = AtomicBool::new(true);
+    static BACKOFF_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    if let Ok(guard) = BACKOFF_UNTIL.lock() {
+        if guard.is_some_and(|until| Instant::now() < until) {
+            return false;
+        }
+    }
+    let timeout_ms = if FIRST_ATTEMPT.swap(false, Ordering::Relaxed) {
+        6000
+    } else {
+        1000
+    };
+
+    let started = Instant::now();
+    let snapshot = match crate::mft_discovery::fetch_snapshot(letter, timeout_ms) {
+        Ok(snapshot) => {
+            if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
+                *guard = None;
+            }
+            snapshot
+        }
+        Err(error) => {
+            if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
+                *guard = Some(Instant::now() + std::time::Duration::from_secs(60));
+            }
+            crate::logging::info(&format!(
+                "[nex] discovery_mft root={} unavailable: {error}",
+                root.display()
+            ));
+            return false;
+        }
+    };
+
+    let mut entries = crate::mft_discovery::paths_under_root(&snapshot, letter, root);
+    // Shallowest first, matching the walk's breadth-first budget behaviour.
+    entries.sort_by(|a, b| {
+        a.0.components()
+            .count()
+            .cmp(&b.0.components().count())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let matched = entries.len();
+    let root_depth = root.components().count();
+    let mut kept = 0usize;
+    let mut root_cap_hit = false;
+    sink.root_added = 0;
+
+    for (path, is_dir) in entries {
+        if sink.total_added >= total_budget || sink.root_added >= per_root_budget {
+            root_cap_hit = sink.root_added >= per_root_budget;
+            break;
+        }
+        if max_depth != 0 && path.components().count().saturating_sub(root_depth) > max_depth {
+            continue;
+        }
+        if exclusion_policy.should_exclude_entry_under_root(&path, root, is_dir) {
+            *skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+            continue;
+        }
+        if is_dir {
+            if show_folders {
+                sink.push("folder", &path);
+                kept += 1;
+            }
+        } else if show_files {
+            sink.push("file", &path);
+            kept += 1;
+        }
+    }
+
+    crate::logging::info(&format!(
+        "[nex] discovery_mft root={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
+        root.display(),
+        snapshot.records.len(),
+        matched,
+        kept,
+        max_depth,
+        started.elapsed().as_millis(),
+        snapshot.journal_id,
+        snapshot.next_usn
+    ));
+    if root_cap_hit {
+        crate::logging::warn(&format!(
+            "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
+            root.display(),
+            per_root_budget
+        ));
+    }
+    true
 }
 
 /// Uncapped raw entry counts for one discovery root, using discovery's

@@ -57,7 +57,6 @@ const TEMPLATE_REQUIRED_KEYS: &[&str] = &[
     "ui_warm_release_ms",
     "index_max_items_per_query_seed",
     "discovery_max_depth",
-    "search_backend",
     "file_discovery_backend",
 ];
 

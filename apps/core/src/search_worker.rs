@@ -104,6 +104,13 @@ impl SearchWorker {
                                 continue;
                             }
 
+                            // The UI starts with an empty cache while the
+                            // store/snapshot loads off-thread. Searching that
+                            // set returns nothing, and nothing re-runs the
+                            // query, so the first results only appeared on a
+                            // later keystroke (1-2 s at login).
+                            wait_for_initial_cache(&service);
+
                             // Bounded retry on lock contention: a refresh or
                             // watcher batch can hold the service write lock
                             // for a few milliseconds. Retrying a handful of
@@ -224,5 +231,45 @@ impl Drop for SearchWorker {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Hold a query until the UI's initial cache load lands.
+///
+/// The loader holds a shared read guard for the duration of the load, so the
+/// lock is free between polls; waiting instead of searching an empty set is
+/// what makes the first keystroke show results without a second keystroke.
+/// Bounded so a failed load (or a genuinely empty store) cannot wedge the
+/// worker.
+fn wait_for_initial_cache(service: &Arc<RwLock<CoreService>>) {
+    const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(2_500);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+    let started = std::time::Instant::now();
+    loop {
+        let still_loading = match service.try_read() {
+            Ok(guard) => {
+                guard.is_ui_client()
+                    && guard.cached_items_len() == 0
+                    && !guard.cache_is_complete()
+            }
+            Err(_) => true,
+        };
+        if !still_loading {
+            break;
+        }
+        if started.elapsed() >= WAIT_LIMIT {
+            crate::logging::info(
+                "[nex] search_waited_for_cache timed_out=true elapsed_ms=2500",
+            );
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    let waited = started.elapsed();
+    if waited >= std::time::Duration::from_millis(50) {
+        crate::logging::info(&format!(
+            "[nex] search_waited_for_cache elapsed_ms={}",
+            waited.as_millis()
+        ));
     }
 }

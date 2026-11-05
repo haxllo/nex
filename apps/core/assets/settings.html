@@ -280,6 +280,16 @@
     font-size: 11px;
     color: var(--fg-muted);
   }
+  .roots-note {
+    margin: 8px 8px 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--row);
+    font-size: 11px;
+    color: var(--fg);
+    line-height: 1.45;
+  }
+  .roots-note.hidden { display: none; }
 
   /* ── Row (2-col inside the group: label | control) ── */
   .row {
@@ -988,6 +998,7 @@
             <button type="button" class="btn" onclick="addDiscoveryRoot()">Add folder</button>
           </div>
           <p class="roots-hint">Nex indexes these folders in the background. Saving a new folder starts a rescan automatically.</p>
+          <p id="rootsIndexNote" class="roots-note hidden">Indexing started. Small local NTFS folders usually appear within a few seconds; a large drive or a slow USB/exFAT folder can take a minute or more. Existing results stay searchable, and you can close Settings — indexing continues.</p>
         </div>
       </div>
 

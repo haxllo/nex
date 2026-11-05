@@ -257,6 +257,8 @@ window.applySettings = function (s) {
   }
   window.discoveryRoots = Array.isArray(s.discoveryRoots) ? s.discoveryRoots.slice() : [];
   renderDiscoveryRoots();
+  document.getElementById("rootsIndexNote")?.classList.add("hidden");
+  window.rootsChanged = false;
   const statusEl = document.getElementById("status");
   statusEl.classList.remove("error", "ok");
   statusEl.querySelector(".status-text").textContent = "Ready";
@@ -316,6 +318,12 @@ function save(closeAfterSave = false) {
   }
   cfg.hotkey = window.pendingHotkey || window.currentSettings.hotkey;
   cfg.discoveryRoots = window.discoveryRoots.slice();
+  const previousRoots = (window.currentSettings?.discoveryRoots || [])
+    .map(rootKey)
+    .sort()
+    .join("\n");
+  const nextRoots = cfg.discoveryRoots.map(rootKey).sort().join("\n");
+  window.rootsChanged = previousRoots !== nextRoots;
   window.closeAfterSave = closeAfterSave;
   window.chrome.webview.postMessage(JSON.stringify({ t: "save", cfg }));
 }
@@ -325,7 +333,10 @@ window.saveResult = function (r) {
   el.classList.remove("error", "ok");
   if (r.saved) {
     el.classList.add("ok");
-    el.querySelector(".status-text").textContent = "Saved";
+    el.querySelector(".status-text").textContent = window.rootsChanged
+      ? "Saved — indexing started"
+      : "Saved";
+    document.getElementById("rootsIndexNote")?.classList.toggle("hidden", !window.rootsChanged);
     window.currentSettings = { ...window.currentSettings, ...readSettingsForBaseline() };
     window.settingsBaseline = settingsState();
     window.settingsDirty = false;

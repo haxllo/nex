@@ -148,6 +148,9 @@ pub struct CoreService {
     /// True when this service keeps every store row in `cached_items` (the
     /// indexer's publishing mode) and must not compact on refresh.
     keep_all_items: bool,
+    /// True when the resident cache is the bounded hot set rather than every
+    /// store row (the indexer and the UI after CIQ-78 Phase 3).
+    hot_cache: bool,
     /// True for the UI-process service: it reads the store but must never
     /// write it. Mutations are forwarded to the indexer, which owns writes.
     ui_client: bool,
@@ -400,7 +403,7 @@ impl CoreService {
     pub fn new_indexer(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache_mode(config, db, true, false, true)
+        Self::with_loaded_cache_mode(config, db, true, false, true, true)
     }
 
     /// UI-process service that starts empty: the runtime loads the store on a
@@ -409,7 +412,7 @@ impl CoreService {
     pub fn new_ui_client_lazy(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache_mode(config, db, false, false, false)
+        Self::with_loaded_cache_mode(config, db, false, false, false, true)
     }
 
     /// UI-process service: reads the store for launch/personalization state,
@@ -420,11 +423,11 @@ impl CoreService {
         let db = index_store::open_from_config(&config)?;
         // Keep every store row: the UI must be able to find files that cache
         // compaction would otherwise evict.
-        Self::with_loaded_cache_mode(config, db, false, false, true)
+        Self::with_loaded_cache_mode(config, db, false, false, true, true)
     }
 
     fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
-        Self::with_loaded_cache_mode(config, db, enable_tantivy, true, true)
+        Self::with_loaded_cache_mode(config, db, enable_tantivy, true, true, false)
     }
 
     fn with_loaded_cache_mode(
@@ -433,9 +436,14 @@ impl CoreService {
         enable_tantivy: bool,
         compact: bool,
         load_items: bool,
+        hot_cache: bool,
     ) -> Result<Self, ServiceError> {
         let all_items = if load_items {
-            index_store::list_items(&db)?
+            if hot_cache {
+                index_store::list_hot_items(&db, UI_CACHE_MAX_ITEMS)?
+            } else {
+                index_store::list_items(&db)?
+            }
         } else {
             Vec::new()
         };
@@ -445,13 +453,26 @@ impl CoreService {
         let tantivy_path = index_dir.join("index.tantivy");
 
         let tantivy_index = if enable_tantivy {
-            open_or_reset_tantivy_index(&tantivy_path, &all_items)
+            if hot_cache {
+                // Only read the whole store when the index is missing/empty;
+                // an existing index already covers it.
+                let docs = TantivyIndex::read_only_doc_count(&tantivy_path).unwrap_or(0);
+                let seed = if docs == 0 {
+                    index_store::list_items(&db)?
+                } else {
+                    Vec::new()
+                };
+                open_or_reset_tantivy_index(&tantivy_path, &seed)
+            } else {
+                open_or_reset_tantivy_index(&tantivy_path, &all_items)
+            }
         } else {
             None
         };
         // Compact now rather than on the first refresh: an uncompacted cache
         // makes every cache-scan search walk the whole store.
         let cache_complete = load_items
+            && !hot_cache
             && (!compact || cache_compaction_summary(&all_items, &config).dropped_total == 0);
         let cached = if compact {
             compact_cached_items(&all_items, &config)
@@ -474,7 +495,8 @@ impl CoreService {
             tantivy_needs_heal: AtomicBool::new(false),
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
-            keep_all_items: !compact,
+            keep_all_items: !compact && !hot_cache,
+            hot_cache,
             ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(0),
@@ -2421,51 +2443,59 @@ impl CoreService {
     }
 
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
-        let config_snapshot = self.config_snapshot();
-        let latest_full = index_store::list_items(&*self.db())?;
-        let latest_apps = collect_app_items(&latest_full);
-        let latest = if self.ui_client {
-            let bounded = bounded_ui_items(&latest_full);
-            self.cache_complete
-                .store(bounded.len() == latest_full.len(), Ordering::SeqCst);
-            bounded
-        } else if self.keep_all_items {
-            // Indexer publishing mode: the IPC snapshot must contain the whole
-            // store, so compaction would only force a SQLite scan per poll.
-            self.cache_complete.store(true, Ordering::SeqCst);
-            latest_full
+        let (latest, latest_apps) = if self.hot_cache {
+            let hot = index_store::list_hot_items(&*self.db(), UI_CACHE_MAX_ITEMS)?;
+            let apps = collect_app_items(&hot);
+            self.cache_complete.store(false, Ordering::SeqCst);
+            (hot, apps)
         } else {
-            let compact_started = std::time::Instant::now();
-            let summary = cache_compaction_summary(&latest_full, &config_snapshot);
-            let compacted = compact_cached_items(&latest_full, &config_snapshot);
-            self.cache_complete
-                .store(summary.dropped_total == 0, Ordering::SeqCst);
-            let compact_elapsed_ms = compact_started.elapsed().as_millis();
-            if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
-                if compact_elapsed_ms > 100 {
-                    crate::logging::info(&format!(
-                        "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
-                        summary.input_total,
-                        summary.retained_total,
-                        summary.dropped_total,
-                        compact_elapsed_ms,
-                    ));
-                } else {
-                    crate::logging::info(&format!(
-                        "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
-                        summary.input_total,
-                        summary.retained_total,
-                        summary.dropped_total,
-                        summary.retained_apps,
-                        summary.retained_file_folders,
-                        summary.retained_other,
-                        summary.effective_file_seed_cap,
-                        summary.broad_root_mode,
-                        summary.active_memory_target_mb
-                    ));
+            let config_snapshot = self.config_snapshot();
+            let latest_full = index_store::list_items(&*self.db())?;
+            let latest_apps = collect_app_items(&latest_full);
+            let latest = if self.ui_client {
+                let bounded = bounded_ui_items(&latest_full);
+                self.cache_complete
+                    .store(bounded.len() == latest_full.len(), Ordering::SeqCst);
+                bounded
+            } else if self.keep_all_items {
+                // Indexer publishing mode: the IPC snapshot must contain the whole
+                // store, so compaction would only force a SQLite scan per poll.
+                self.cache_complete.store(true, Ordering::SeqCst);
+                latest_full
+            } else {
+                let compact_started = std::time::Instant::now();
+                let summary = cache_compaction_summary(&latest_full, &config_snapshot);
+                let compacted = compact_cached_items(&latest_full, &config_snapshot);
+                self.cache_complete
+                    .store(summary.dropped_total == 0, Ordering::SeqCst);
+                let compact_elapsed_ms = compact_started.elapsed().as_millis();
+                if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
+                    if compact_elapsed_ms > 100 {
+                        crate::logging::info(&format!(
+                            "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
+                            summary.input_total,
+                            summary.retained_total,
+                            summary.dropped_total,
+                            compact_elapsed_ms,
+                        ));
+                    } else {
+                        crate::logging::info(&format!(
+                            "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
+                            summary.input_total,
+                            summary.retained_total,
+                            summary.dropped_total,
+                            summary.retained_apps,
+                            summary.retained_file_folders,
+                            summary.retained_other,
+                            summary.effective_file_seed_cap,
+                            summary.broad_root_mode,
+                            summary.active_memory_target_mb
+                        ));
+                    }
                 }
-            }
-            compacted
+                compacted
+            };
+            (latest, latest_apps)
         };
         let mut items_guard = match self.cached_items.write() {
             Ok(guard) => guard,

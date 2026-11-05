@@ -137,9 +137,17 @@ pub(crate) fn search_overlay_results_with_session(
             &indexed_filter,
         )
     } else {
-        service
-            .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
-            .map_err(|error| format!("indexed search failed: {error}"))?
+        let remote = if service.is_ui_client() {
+            crate::ipc::search_seed(crate::ipc::INDEXER_ADDR, text_query, indexed_seed_limit)
+        } else {
+            Err("not a UI client".to_string())
+        };
+        match remote {
+            Ok(items) if !items.is_empty() => items,
+            _ => service
+                .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
+                .map_err(|error| format!("indexed search failed: {error}"))?,
+        }
     };
     let indexed_ms = indexed_started.elapsed().as_millis();
     if !indexed_cache_hit {

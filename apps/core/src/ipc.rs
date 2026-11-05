@@ -86,6 +86,7 @@ pub fn item_to_value(item: &SearchItem) -> Value {
         "last_accessed": item.last_accessed_epoch_secs,
         "launch_count": item.launch_count,
         "last_launched": item.last_launched_at,
+        "pre_score": item.pre_score,
     })
 }
 
@@ -101,7 +102,7 @@ pub fn item_from_value(value: &Value) -> Option<SearchItem> {
     if id.is_empty() {
         return None;
     }
-    Some(SearchItem::from_owned_with_usage(
+    let mut item = SearchItem::from_owned_with_usage(
         id,
         text("kind"),
         text("title"),
@@ -117,7 +118,9 @@ pub fn item_from_value(value: &Value) -> Option<SearchItem> {
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
         value.get("last_launched").and_then(Value::as_i64).unwrap_or(0),
-    ))
+    );
+    item.pre_score = value.get("pre_score").and_then(Value::as_i64);
+    Some(item)
 }
 
 pub fn items_to_values(items: &[SearchItem]) -> Vec<Value> {
@@ -403,6 +406,26 @@ fn dispatch(
                 Err(error) => IpcResponse::error(error.to_string()),
             }
         }
+        // Tantivy-only seed for the UI process. The UI re-ranks these
+        // candidates with its own filter and personalization; this avoids
+        // the UI's full-cache scan at scale.
+        "search_seed" => {
+            let query = request
+                .params
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let limit = request
+                .params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(500) as usize;
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            match service.search_tantivy_seed(query, limit) {
+                Ok(items) => IpcResponse::ok(json!({ "items": items_to_values(&items) })),
+                Err(error) => IpcResponse::error(error.to_string()),
+            }
+        }
         other => IpcResponse::error(format!("unknown method: {other}")),
     }
 }
@@ -471,6 +494,32 @@ pub fn ipc_call(addr: &str, request: &IpcRequest) -> Result<IpcResponse, String>
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| e.to_string())?;
     serde_json::from_str(line.trim()).map_err(|e| e.to_string())
+}
+
+/// Ask the indexer for Tantivy candidates. The UI re-ranks them with its own
+/// filter and personalization; an IPC failure or an empty index lets the
+/// caller fall back to the local cache.
+pub fn search_seed(
+    addr: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SearchItem>, String> {
+    let response = ipc_call(
+        addr,
+        &IpcRequest::new("search_seed", json!({ "query": query, "limit": limit })),
+    )?;
+    if !response.ok {
+        return Err(response
+            .error
+            .unwrap_or_else(|| "indexer search failed".to_string()));
+    }
+    let result = response.result.unwrap_or(Value::Null);
+    let items = result
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| items_from_values(items))
+        .unwrap_or_default();
+    Ok(items)
 }
 
 pub fn indexer_is_alive(addr: &str) -> bool {

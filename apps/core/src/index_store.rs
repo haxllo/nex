@@ -216,6 +216,62 @@ pub fn delete_items(db: &Connection, ids: &[String]) -> Result<(), StoreError> {
     }
 }
 
+const HOT_APPS_SQL: &str =
+    "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at
+     FROM item WHERE kind = 'app' ORDER BY title COLLATE NOCASE";
+const HOT_OTHERS_SQL: &str =
+    "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at
+     FROM item WHERE kind != 'app'
+     ORDER BY use_count DESC, last_accessed_epoch_secs DESC, last_launched_at DESC, id ASC
+     LIMIT ?1";
+
+fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchItem> {
+    let id: String = row.get(0)?;
+    let kind: String = row.get(1)?;
+    let title: String = row.get(2)?;
+    let path: String = row.get(3)?;
+    let subtitle: String = row.get(4)?;
+    let use_count: u32 = row.get(5)?;
+    let last_accessed_epoch_secs: i64 = row.get(6)?;
+    let launch_count: u32 = row.get(7)?;
+    let last_launched_at: i64 = row.get(8)?;
+    Ok(SearchItem::from_owned_with_usage(
+        id,
+        kind,
+        title,
+        path,
+        subtitle,
+        use_count,
+        last_accessed_epoch_secs,
+        launch_count,
+        last_launched_at,
+    ))
+}
+
+/// All apps plus the highest-use/most-recent non-app rows, capped at `limit`.
+/// Matches `core_service::bounded_ui_items` without reading the full store.
+pub fn list_hot_items(db: &Connection, limit: usize) -> Result<Vec<SearchItem>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut stmt = db.prepare(HOT_APPS_SQL)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        out.push(row_to_item(row)?);
+    }
+    if out.len() >= limit {
+        return Ok(out);
+    }
+    let remaining = limit - out.len();
+    let mut stmt = db.prepare(HOT_OTHERS_SQL)?;
+    let mut rows = stmt.query(params![remaining as i64])?;
+    while let Some(row) = rows.next()? {
+        out.push(row_to_item(row)?);
+    }
+    Ok(out)
+}
+
 /// Escape `%`, `_` and the escape char itself for a `LIKE ... ESCAPE '!'`.
 pub(crate) fn escape_like(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -633,9 +689,12 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
         if current_version < 6 {
             migration_v6(conn)?;
         }
+        if current_version < 7 {
+            migration_v7(conn)?;
+        }
 
-        if current_version < 6 {
-            conn.pragma_update(None, "user_version", 6_i64)?;
+        if current_version < 7 {
+            conn.pragma_update(None, "user_version", 7_i64)?;
         }
 
         Ok::<(), StoreError>(())
@@ -718,6 +777,16 @@ fn migration_v4(conn: &Connection) -> Result<(), StoreError> {
             [],
         )?;
     }
+    Ok(())
+}
+
+/// Cover the bounded-UI snapshot ordering (apps are fetched separately).
+fn migration_v7(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_item_hot
+             ON item(use_count DESC, last_accessed_epoch_secs DESC, last_launched_at DESC, id)
+             WHERE kind != 'app';",
+    )?;
     Ok(())
 }
 
@@ -869,6 +938,49 @@ mod tests {
         assert_eq!(count_items(&db).unwrap(), 1);
         assert!(get_item(&db, &a.id).unwrap().is_none());
         assert!(get_item(&db, &b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn hot_items_match_the_bounded_ui_policy_and_use_the_index() {
+        let db = open_memory().unwrap();
+        for index in 0..5 {
+            upsert_item(
+                &db,
+                &SearchItem::new(
+                    &format!("app{index}"),
+                    "app",
+                    &format!("App {index}"),
+                    "C:\\app.exe",
+                ),
+            )
+            .unwrap();
+        }
+        for index in 0..20 {
+            let mut item = SearchItem::new(
+                &format!("file{index}"),
+                "file",
+                &format!("File {index}"),
+                &format!("C:\\file{index}.txt"),
+            );
+            item.use_count = index as u32;
+            upsert_item(&db, &item).unwrap();
+        }
+
+        let mut expected: Vec<String> = crate::core_service::bounded_ui_items(&list_items(&db).unwrap())
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        let mut hot: Vec<String> = list_hot_items(&db, crate::core_service::UI_CACHE_MAX_ITEMS)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        expected.sort();
+        hot.sort();
+        assert_eq!(hot, expected);
+
+        let plan = plan(&db, HOT_OTHERS_SQL);
+        assert!(plan.contains("idx_item_hot"), "hot query plan: {plan}");
     }
 
     #[test]

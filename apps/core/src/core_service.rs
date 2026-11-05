@@ -908,6 +908,12 @@ impl CoreService {
     /// Served from the cache when it holds every row (the indexer keeps the
     /// uncompacted set): a poll costs no SQLite scan. Compacting services fall
     /// back to a direct read.
+    /// Bounded first-sync snapshot read from SQLite, without cloning the
+    /// indexer's full cache.
+    pub fn hot_snapshot_items(&self) -> Result<Vec<SearchItem>, ServiceError> {
+        Ok(index_store::list_hot_items(&*self.db(), UI_CACHE_MAX_ITEMS)?)
+    }
+
     pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
         if self.cache_complete.load(Ordering::SeqCst) {
             return Ok(self.cached_items_snapshot());

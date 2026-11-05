@@ -23,8 +23,8 @@ fn accepts_default_config() {
         cfg.web_search_provider,
         nex_core::config::WebSearchProvider::Google
     );
-    assert_eq!(cfg.index_max_items_total, 120_000);
-    assert_eq!(cfg.index_max_items_per_root, 40_000);
+    assert_eq!(cfg.index_max_items_total, 500_000);
+    assert_eq!(cfg.index_max_items_per_root, 200_000);
     assert_eq!(cfg.index_max_items_per_query_seed, 5_000);
     assert!(!cfg.game_mode_enabled);
     assert!(
@@ -237,8 +237,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(loaded.show_files);
     assert!(loaded.show_folders);
     assert!(loaded.uninstall_actions_enabled);
-    assert_eq!(loaded.index_max_items_total, 120_000);
-    assert_eq!(loaded.index_max_items_per_root, 40_000);
+    assert_eq!(loaded.index_max_items_total, 500_000);
+    assert_eq!(loaded.index_max_items_per_root, 200_000);
     assert_eq!(loaded.index_max_items_per_query_seed, 5_000);
     assert!(!loaded.game_mode_enabled);
     assert_eq!(
@@ -255,8 +255,8 @@ fn migrates_legacy_config_and_preserves_user_values() {
     assert!(updated_raw.contains("show_files = true"));
     assert!(updated_raw.contains("show_folders = true"));
     assert!(updated_raw.contains("uninstall_actions_enabled = true"));
-    assert!(updated_raw.contains("index_max_items_total = 120000"));
-    assert!(updated_raw.contains("index_max_items_per_root = 40000"));
+    assert!(updated_raw.contains("index_max_items_total = 500000"));
+    assert!(updated_raw.contains("index_max_items_per_root = 200000"));
     assert!(updated_raw.contains("index_max_items_per_query_seed = 5000"));
     assert!(updated_raw.contains("game_mode_enabled = false"));
     assert!(!updated_raw.contains("search_backend ="));

@@ -198,18 +198,26 @@ fn maintenance_loop(
             match nex_core::config::load(config_path.as_deref()) {
                 Ok(reloaded) => {
                     nex_core::logging::info("[nex-indexer] config changed; reloading index");
-                    {
+                    // Take the watcher handles while holding the read guard,
+                    // then drop the guard BEFORE joining them: a consumer
+                    // thread may be blocked on service.write(), and joining
+                    // under the read guard deadlocks.
+                    let reconfigured = {
                         let service_guard =
                             service.read().unwrap_or_else(|error| error.into_inner());
-                        if let Err(error) = service_guard.reconfigure_runtime_providers(&reloaded) {
-                            nex_core::logging::warn(&format!(
-                                "[nex-indexer] config reload failed: {error}"
-                            ));
+                        service_guard.reconfigure_runtime_providers(&reloaded)
+                    };
+                    match reconfigured {
+                        Ok(watchers) => {
+                            drop(watchers);
+                            run_index_cycle(&service, &indexing, stdio_enabled);
+                            start_watchers(&service);
+                            last_reconcile = Instant::now();
                         }
+                        Err(error) => nex_core::logging::warn(&format!(
+                            "[nex-indexer] config reload failed: {error}"
+                        )),
                     }
-                    run_index_cycle(&service, &indexing, stdio_enabled);
-                    start_watchers(&service);
-                    last_reconcile = Instant::now();
                 }
                 Err(error) => nex_core::logging::warn(&format!(
                     "[nex-indexer] config reload skipped: {error}"

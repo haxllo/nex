@@ -192,6 +192,18 @@ pub struct IndexRefreshReport {
     pub providers: Vec<ProviderRefreshReport>,
 }
 
+/// Watchers removed from the service during a config reload.
+///
+/// Dropping these joins the consumer threads. They may be blocked on
+/// `service.write()`, so callers must drop this value **after** releasing
+/// the service `RwLock` read guard.
+pub struct DeferredWatcherStop {
+    #[cfg(target_os = "windows")]
+    file: Option<crate::file_watcher_consumer::FileWatcherHandle>,
+    #[cfg(target_os = "windows")]
+    application: Option<crate::application_watcher::ApplicationWatcherHandle>,
+}
+
 impl CoreService {
     pub fn new(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
@@ -326,21 +338,24 @@ impl CoreService {
         self
     }
 
-    pub fn reconfigure_runtime_providers(&self, cfg: &Config) -> Result<(), ServiceError> {
+    pub fn reconfigure_runtime_providers(
+        &self,
+        cfg: &Config,
+    ) -> Result<DeferredWatcherStop, ServiceError> {
         validate(cfg).map_err(ServiceError::Config)?;
         let providers = runtime_providers_from_config(cfg);
         self.replace_runtime_config(cfg.clone());
         self.replace_providers(providers);
-        // Discovery roots or excludes changed: stop the existing watchers
-        // so the next indexing pass can restart them on the new paths.
-        // They will be re-spawned by the runtime once the next reindex
-        // completes.
-        #[cfg(target_os = "windows")]
-        {
-            self.stop_file_watchers();
-            self.stop_application_watchers();
-        }
-        Ok(())
+        // Hand the old watchers back instead of joining here: the caller may
+        // still hold the service read guard, and the consumer threads can be
+        // blocked on `service.write()`. Dropping the returned value after the
+        // guard is released joins them safely.
+        Ok(DeferredWatcherStop {
+            #[cfg(target_os = "windows")]
+            file: self.take_file_watchers(),
+            #[cfg(target_os = "windows")]
+            application: self.take_application_watchers(),
+        })
     }
 
     fn replace_providers(&self, providers: Vec<Box<dyn DiscoveryProvider>>) {

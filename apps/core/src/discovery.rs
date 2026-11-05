@@ -1102,13 +1102,43 @@ fn mft_incremental(
                 }
                 if record.reason & FILE_RENAME_NEW_NAME != 0 {
                     // The moved subtree's children are not in the delta.
-                    crate::logging::info(&format!(
-                        "[nex] discovery_delta volume={letter} skip=directory_move path={}",
-                        path.display()
-                    ));
-                    return Some(Err(ProviderError::new(
-                        "MFT delta includes a directory move; running a full pass",
-                    )));
+                    // Enumerate the new path locally instead of a full pass;
+                    // the rename-old record already removed the old subtree.
+                    if !path.exists() {
+                        continue;
+                    }
+                    if provider.show_folders {
+                        let lower = path.to_string_lossy().to_ascii_lowercase();
+                        let id = format!("folder:{lower}");
+                        if seen_upserts.insert(id.clone()) {
+                            let title = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.to_string_lossy().to_string());
+                            upserts.push(SearchItem::new(
+                                &id,
+                                "folder",
+                                &title,
+                                &path.to_string_lossy(),
+                            ));
+                        }
+                    }
+                    let mut moved = Vec::new();
+                    collect_subtree_items(
+                        &path,
+                        provider.max_depth,
+                        provider.show_files,
+                        provider.show_folders,
+                        &policy,
+                        root,
+                        &mut moved,
+                    );
+                    for item in moved {
+                        if seen_upserts.insert(item.id.clone()) {
+                            upserts.push(item);
+                        }
+                    }
+                    continue;
                 }
                 if provider.show_folders {
                     let lower = path.to_string_lossy().to_ascii_lowercase();
@@ -1173,6 +1203,76 @@ fn mft_incremental(
         deleted_prefixes,
         states,
     }))
+}
+
+/// Enumerate one moved directory locally (no MFT) so a rename can apply the
+/// new subtree as part of the delta instead of a full discovery pass.
+#[cfg(target_os = "windows")]
+fn collect_subtree_items(
+    dir: &Path,
+    max_depth: usize,
+    show_files: bool,
+    show_folders: bool,
+    policy: &DiscoveryExclusionPolicy,
+    root: &Path,
+    out: &mut Vec<SearchItem>,
+) {
+    let limit = if max_depth == 0 {
+        usize::MAX
+    } else {
+        max_depth
+    };
+    let mut queue: std::collections::VecDeque<(std::path::PathBuf, usize)> =
+        std::collections::VecDeque::new();
+    queue.push_back((dir.to_path_buf(), 0));
+    while let Some((current, depth)) = queue.pop_front() {
+        let Ok(read_dir) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read_dir.filter_map(Result::ok) {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            let is_symlink = file_type.is_symlink();
+            let (is_dir, is_file) = if is_symlink {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => (meta.is_dir(), meta.is_file()),
+                    Err(_) => (false, false),
+                }
+            } else {
+                (file_type.is_dir(), file_type.is_file())
+            };
+            if policy.should_exclude_entry_under_root(&path, root, is_dir) {
+                continue;
+            }
+            let lower = path.to_string_lossy().to_ascii_lowercase();
+            let title = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string_lossy().to_string());
+            if is_dir {
+                if show_folders {
+                    out.push(SearchItem::new(
+                        &format!("folder:{lower}"),
+                        "folder",
+                        &title,
+                        &path.to_string_lossy(),
+                    ));
+                }
+                if !is_symlink && depth + 1 < limit {
+                    queue.push_back((path, depth + 1));
+                }
+            } else if is_file && show_files {
+                out.push(SearchItem::new(
+                    &format!("file:{lower}"),
+                    "file",
+                    &title,
+                    &path.to_string_lossy(),
+                ));
+            }
+        }
+    }
 }
 
 /// Uncapped raw entry counts for one discovery root, using discovery's

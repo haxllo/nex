@@ -133,6 +133,26 @@ mod discovery_backend_tests {
     use super::*;
 
     #[test]
+    fn user_template_persists_the_schema_version() {
+        let dir = std::env::temp_dir().join(format!("nex-config-template-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.toml");
+        let cfg = Config::default();
+        write_user_template(&cfg, &path).expect("write template");
+        let text = std::fs::read_to_string(&path).expect("read template");
+        assert!(
+            text.lines()
+                .any(|line| line.trim() == format!("version = {CURRENT_CONFIG_VERSION}")),
+            "the user template must persist the schema version"
+        );
+        let loaded = load(Some(&path)).expect("load template");
+        assert_eq!(loaded.version, CURRENT_CONFIG_VERSION);
+        let after = std::fs::read_to_string(&path).expect("read template after load");
+        assert_eq!(text, after, "loading a complete template must not rewrite it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn parse_known_values() {
         assert_eq!(DiscoveryBackend::parse("auto"), Some(DiscoveryBackend::Auto));
         assert_eq!(
@@ -715,10 +735,11 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                         .join("index.sqlite3");
                 }
 
+                let original_cfg = cfg.clone();
                 let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
                 should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
                 validate(&cfg).map_err(ConfigError::Validation)?;
-                if should_persist_migration {
+                if should_persist_migration && cfg != original_cfg {
                     persist_migrated_config(
                         &cfg,
                         &resolved_path,
@@ -750,10 +771,14 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
             .join("index.sqlite3");
     }
 
+    let original_cfg = cfg.clone();
     let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
     should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
     validate(&cfg).map_err(ConfigError::Validation)?;
-    if should_persist_migration {
+    // Only rewrite when the migration actually changed the config. A missing
+    // template key alone must not trigger a write: the mtime change would
+    // make the config watcher reload and rewrite forever.
+    if should_persist_migration && cfg != original_cfg {
         persist_migrated_config(&cfg, &resolved_path, &raw, source_version, &resolved_path)?;
     }
     Ok(cfg)
@@ -850,6 +875,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
         text.push('\n');
     }
     text.push_str("# Avoid common OS-reserved shortcuts like Alt+Tab, Ctrl+Esc. \"Win\" alone is safe.\n");
+    text.push_str("# Internal schema version used by migrations; do not edit.\n");
+    text.push_str("version = ");
+    text.push_str(&cfg.version.to_string());
+    text.push_str("\n\n");
     text.push_str("hotkey = ");
     text.push_str(&json_string(&cfg.hotkey));
     text.push_str("\n\n");

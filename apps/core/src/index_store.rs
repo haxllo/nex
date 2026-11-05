@@ -271,6 +271,40 @@ pub fn list_item_ids_for_kinds(
     Ok(out)
 }
 
+/// One page of store rows ordered by id, for a full-store stale scan.
+/// Pass the last id of the previous page to continue; `None` starts over.
+pub fn list_item_page(
+    db: &Connection,
+    after_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SearchItem>, StoreError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    const ITEM_COLUMNS: &str =
+        "SELECT id, kind, title, path, subtitle, use_count, last_accessed_epoch_secs, launch_count, last_launched_at FROM item";
+    let mut out = Vec::with_capacity(limit);
+    match after_id {
+        Some(after) => {
+            let mut stmt = db.prepare(&format!(
+                "{ITEM_COLUMNS} WHERE id > ?1 ORDER BY id LIMIT ?2"
+            ))?;
+            let mut rows = stmt.query(params![after, limit as i64])?;
+            while let Some(row) = rows.next()? {
+                out.push(row_to_item(row)?);
+            }
+        }
+        None => {
+            let mut stmt = db.prepare(&format!("{ITEM_COLUMNS} ORDER BY id LIMIT ?1"))?;
+            let mut rows = stmt.query(params![limit as i64])?;
+            while let Some(row) = rows.next()? {
+                out.push(row_to_item(row)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// All apps plus the highest-use/most-recent non-app rows, capped at `limit`.
 /// Matches `core_service::bounded_ui_items` without reading the full store.
 pub fn list_hot_items(db: &Connection, limit: usize) -> Result<Vec<SearchItem>, StoreError> {

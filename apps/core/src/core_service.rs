@@ -155,7 +155,7 @@ pub struct CoreService {
     /// write it. Mutations are forwarded to the indexer, which owns writes.
     ui_client: bool,
     last_stale_prune: Mutex<Option<Instant>>,
-    stale_prune_cursor: Mutex<usize>,
+    stale_prune_cursor: Mutex<Option<String>>,
     stale_pruner_started: AtomicBool,
     stale_pruner_stop: Arc<AtomicBool>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
@@ -499,7 +499,7 @@ impl CoreService {
             hot_cache,
             ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
-            stale_prune_cursor: Mutex::new(0),
+            stale_prune_cursor: Mutex::new(None),
             stale_pruner_started: AtomicBool::new(false),
             stale_pruner_stop: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(None),
@@ -2935,26 +2935,20 @@ impl CoreService {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let guard = match self.cached_items.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+        let page = match index_store::list_item_page(&*self.db(), cursor.as_deref(), batch_size) {
+            Ok(page) => page,
+            Err(error) => {
+                crate::logging::warn(&format!("[nex] stale prune page failed: {error}"));
+                return Vec::new();
+            }
         };
-
-        if guard.is_empty() {
-            *cursor = 0;
-            return Vec::new();
-        }
-
-        let len = guard.len();
-        let start = (*cursor).min(len - 1);
-        let take = batch_size.min(len);
-        let mut out = Vec::with_capacity(take);
-        for offset in 0..take {
-            let idx = (start + offset) % len;
-            out.push(guard[idx].clone());
-        }
-        *cursor = (start + take) % len;
-        out
+        // A short page means the scan reached the end; start over next time.
+        *cursor = if page.len() < batch_size {
+            None
+        } else {
+            page.last().map(|item| item.id.clone())
+        };
+        page
     }
 }
 

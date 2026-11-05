@@ -271,12 +271,13 @@ fn dispatch(
                 // First sync, a reconnected caller, or a missed generation.
                 let items = service.with_cached_items(|current| current.to_vec());
                 let index = build_item_index(&items);
+                let snapshot = crate::core_service::bounded_ui_items(&items);
                 *published = Some(PublishedSet { generation, index });
                 return IpcResponse::ok(json!({
                     "generation": generation,
                     "changed": true,
                     "indexing": false,
-                    "items": items_to_values(&items),
+                    "items": items_to_values(&snapshot),
                 }));
             }
 
@@ -309,11 +310,12 @@ fn dispatch(
                 let items = service.with_cached_items(|current| current.to_vec());
                 state.index = build_item_index(&items);
                 state.generation = generation;
+                let snapshot = crate::core_service::bounded_ui_items(&items);
                 return IpcResponse::ok(json!({
                     "generation": generation,
                     "changed": true,
                     "indexing": false,
-                    "items": items_to_values(&items),
+                    "items": items_to_values(&snapshot),
                 }));
             }
             state.generation = generation;

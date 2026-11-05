@@ -8,8 +8,6 @@ use std::time::UNIX_EPOCH;
 
 use crate::model::SearchItem;
 
-const DEFAULT_INDEX_MAX_ITEMS_TOTAL: usize = 120_000;
-const DEFAULT_INDEX_MAX_ITEMS_PER_ROOT: usize = 40_000;
 const FILESYSTEM_DISCOVERY_SCHEMA_VERSION: &str = "5";
 pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "windows",
@@ -305,8 +303,6 @@ pub struct FileSystemDiscoveryProvider {
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
-    max_items_total: usize,
-    max_items_per_root: usize,
     backend: FileBackend,
 }
 
@@ -349,18 +345,8 @@ impl FileSystemDiscoveryProvider {
             max_depth,
             show_files,
             show_folders,
-            max_items_total: DEFAULT_INDEX_MAX_ITEMS_TOTAL,
-            max_items_per_root: DEFAULT_INDEX_MAX_ITEMS_PER_ROOT,
             backend: FileBackend::Walkdir,
         }
-    }
-
-    pub fn with_index_limits(mut self, max_items_total: usize, max_items_per_root: usize) -> Self {
-        let total = max_items_total.max(1);
-        let per_root = max_items_per_root.max(1).min(total);
-        self.max_items_total = total;
-        self.max_items_per_root = per_root;
-        self
     }
 
     pub fn backend_label(&self) -> &'static str {
@@ -377,10 +363,6 @@ impl FileSystemDiscoveryProvider {
             config.discovery_exclude_roots.clone(),
             config.show_files,
             config.show_folders,
-        )
-        .with_index_limits(
-            config.index_max_items_total as usize,
-            config.index_max_items_per_root as usize,
         );
 
         let requested = config.file_discovery_backend;
@@ -482,8 +464,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                 self.max_depth,
                 self.show_files,
                 self.show_folders,
-                self.max_items_total,
-                self.max_items_per_root,
                 emit,
                 on_item_discovered,
             ),
@@ -516,8 +496,8 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                     self.max_depth,
                     self.show_files,
                     self.show_folders,
-                    self.max_items_total,
-                    self.max_items_per_root,
+                    usize::MAX,
+                    usize::MAX,
                 ) {
                     Ok(items) => Ok(items),
                     Err(e) => {
@@ -536,8 +516,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                             self.max_depth,
                             self.show_files,
                             self.show_folders,
-                            self.max_items_total,
-                            self.max_items_per_root,
                             None,
                         )
                     }
@@ -549,8 +527,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                 self.max_depth,
                 self.show_files,
                 self.show_folders,
-                self.max_items_total,
-                self.max_items_per_root,
                 None,
             ),
         }
@@ -575,8 +551,8 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                     self.max_depth,
                     self.show_files,
                     self.show_folders,
-                    self.max_items_total,
-                    self.max_items_per_root,
+                    usize::MAX,
+                    usize::MAX,
                 ) {
                     Ok(items) => {
                         if let Some(ref mut cb) = cb {
@@ -596,8 +572,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                             self.max_depth,
                             self.show_files,
                             self.show_folders,
-                            self.max_items_total,
-                            self.max_items_per_root,
                             cb,
                         )
                     }
@@ -609,8 +583,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                 self.max_depth,
                 self.show_files,
                 self.show_folders,
-                self.max_items_total,
-                self.max_items_per_root,
                 on_item_discovered,
             ),
         }
@@ -631,10 +603,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         stamp.push_str(if self.show_files { "true" } else { "false" });
         stamp.push_str(";show_folders=");
         stamp.push_str(if self.show_folders { "true" } else { "false" });
-        stamp.push_str(";cap_total=");
-        stamp.push_str(&self.max_items_total.to_string());
-        stamp.push_str(";cap_per_root=");
-        stamp.push_str(&self.max_items_per_root.to_string());
         Some(stamp)
     }
 }
@@ -704,14 +672,10 @@ fn discover_filesystem_walk_into<'a, 'b>(
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
-    max_items_total: usize,
-    max_items_per_root: usize,
     emit: &'a mut dyn FnMut(SearchItem) -> Result<(), ProviderError>,
     on_item_discovered: Option<&'b mut dyn FnMut(usize)>,
 ) -> Result<usize, ProviderError> {
     let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
-    let total_budget = max_items_total.max(1);
-    let per_root_budget = max_items_per_root.max(1).min(total_budget);
     let mut skipped_due_exclusion = 0_usize;
     let walk_depth = effective_walk_depth(max_depth);
     let mut sink = WalkSink {
@@ -723,9 +687,6 @@ fn discover_filesystem_walk_into<'a, 'b>(
     };
 
     for root in roots {
-        if sink.total_added >= total_budget {
-            break;
-        }
         #[cfg(target_os = "windows")]
         if mft_backend_enabled()
             && try_mft_root(
@@ -734,8 +695,6 @@ fn discover_filesystem_walk_into<'a, 'b>(
                 show_files,
                 show_folders,
                 max_depth,
-                total_budget,
-                per_root_budget,
                 &mut sink,
                 &mut skipped_due_exclusion,
             )
@@ -754,7 +713,6 @@ fn discover_filesystem_walk_into<'a, 'b>(
         };
 
         sink.root_added = 0;
-        let mut root_cap_hit = false;
         if !root_meta.is_dir() {
             if root_meta.is_file() && show_files {
                 sink.push("file", root);
@@ -764,7 +722,7 @@ fn discover_filesystem_walk_into<'a, 'b>(
 
         let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
         queue.push_back((root.clone(), 0));
-        'walk: while let Some((dir, depth)) = queue.pop_front() {
+        while let Some((dir, depth)) = queue.pop_front() {
             // Unreadable directories are skipped silently.
             let Ok(read_dir) = std::fs::read_dir(&dir) else {
                 continue;
@@ -792,10 +750,6 @@ fn discover_filesystem_walk_into<'a, 'b>(
                     skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
                     continue;
                 }
-                if sink.total_added >= total_budget || sink.root_added >= per_root_budget {
-                    root_cap_hit = sink.root_added >= per_root_budget;
-                    break 'walk;
-                }
 
                 if is_dir {
                     if show_folders {
@@ -809,21 +763,8 @@ fn discover_filesystem_walk_into<'a, 'b>(
                 }
             }
         }
-        if root_cap_hit {
-            crate::logging::warn(&format!(
-                "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
-                root.display(),
-                per_root_budget
-            ));
-        }
     }
 
-    if sink.total_added >= total_budget {
-        crate::logging::info(&format!(
-            "[nex] discovery_cap provider=filesystem total_cap={} reached=true (raise index_max_items_total)",
-            total_budget
-        ));
-    }
     if skipped_due_exclusion > 0 {
         crate::logging::info(&format!(
             "[nex] discovery_exclusion provider=filesystem skipped={} policy_schema={}",
@@ -843,8 +784,6 @@ fn discover_filesystem_walk(
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
-    max_items_total: usize,
-    max_items_per_root: usize,
     on_item_discovered: Option<&mut dyn FnMut(usize)>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     let mut out = Vec::new();
@@ -859,8 +798,6 @@ fn discover_filesystem_walk(
             max_depth,
             show_files,
             show_folders,
-            max_items_total,
-            max_items_per_root,
             &mut emit,
             on_item_discovered,
         )?;
@@ -899,8 +836,6 @@ fn try_mft_root(
     show_files: bool,
     show_folders: bool,
     max_depth: usize,
-    total_budget: usize,
-    per_root_budget: usize,
     sink: &mut WalkSink<'_, '_>,
     skipped_due_exclusion: &mut usize,
 ) -> bool {
@@ -935,12 +870,56 @@ fn try_mft_root(
     let started = Instant::now();
     // This slice always asks for a full snapshot; the delta path lands next.
     crate::mft_discovery::write_full_request(letter);
-    let snapshot = match crate::mft_discovery::fetch_snapshot(letter, timeout_ms) {
-        Ok(snapshot) => {
+
+    let root_text = root.to_string_lossy().to_ascii_lowercase();
+    let root_ends_separator = root_text.ends_with('\\') || root_text.ends_with('/');
+    let root_depth = root.components().count();
+    let mut matched = 0usize;
+    let mut kept = 0usize;
+    sink.root_added = 0;
+
+    let result = crate::mft_discovery::read_snapshot_into(letter, timeout_ms, |record| {
+        let Some(path) = record.path.as_deref() else {
+            return Ok(());
+        };
+        let lower = path.to_ascii_lowercase();
+        if lower == root_text || !lower.starts_with(&root_text) {
+            return Ok(());
+        }
+        if !root_ends_separator {
+            match lower.as_bytes().get(root_text.len()) {
+                Some(b'\\') | Some(b'/') => {}
+                _ => return Ok(()),
+            }
+        }
+        matched += 1;
+        let path_buf = std::path::PathBuf::from(path);
+        let is_dir = record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        if max_depth != 0 && path_buf.components().count().saturating_sub(root_depth) > max_depth {
+            return Ok(());
+        }
+        if exclusion_policy.should_exclude_entry_under_root(&path_buf, root, is_dir) {
+            *skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+            return Ok(());
+        }
+        if is_dir {
+            if show_folders {
+                sink.push("folder", &path_buf);
+                kept += 1;
+            }
+        } else if show_files {
+            sink.push("file", &path_buf);
+            kept += 1;
+        }
+        Ok(())
+    });
+
+    let meta = match result {
+        Ok(meta) => {
             if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
                 *guard = None;
             }
-            snapshot
+            meta
         }
         Err(error) => {
             if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
@@ -953,70 +932,22 @@ fn try_mft_root(
             return false;
         }
     };
-    if !snapshot.delta {
-        crate::mft_discovery::write_processed_state(
-            letter,
-            snapshot.journal_id,
-            snapshot.next_usn,
-        );
-    }
-
-    let mut entries = crate::mft_discovery::paths_under_root(&snapshot, letter, root);
-    // Shallowest first, matching the walk's breadth-first budget behaviour.
-    entries.sort_by(|a, b| {
-        a.0.components()
-            .count()
-            .cmp(&b.0.components().count())
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    let matched = entries.len();
-    let root_depth = root.components().count();
-    let mut kept = 0usize;
-    let mut root_cap_hit = false;
-    sink.root_added = 0;
-
-    for (path, is_dir) in entries {
-        if sink.total_added >= total_budget || sink.root_added >= per_root_budget {
-            root_cap_hit = sink.root_added >= per_root_budget;
-            break;
-        }
-        if max_depth != 0 && path.components().count().saturating_sub(root_depth) > max_depth {
-            continue;
-        }
-        if exclusion_policy.should_exclude_entry_under_root(&path, root, is_dir) {
-            *skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
-            continue;
-        }
-        if is_dir {
-            if show_folders {
-                sink.push("folder", &path);
-                kept += 1;
-            }
-        } else if show_files {
-            sink.push("file", &path);
-            kept += 1;
-        }
+    if !meta.delta {
+        crate::mft_discovery::write_processed_state(letter, meta.journal_id, meta.next_usn);
     }
 
     crate::logging::info(&format!(
         "[nex] discovery_mft root={} mode={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
         root.display(),
-        if snapshot.delta { "delta" } else { "full" },
-        snapshot.records.len(),
+        if meta.delta { "delta" } else { "full" },
+        meta.records,
         matched,
         kept,
         max_depth,
         started.elapsed().as_millis(),
-        snapshot.journal_id,
-        snapshot.next_usn
+        meta.journal_id,
+        meta.next_usn
     ));
-    if root_cap_hit {
-        crate::logging::warn(&format!(
-            "[nex] discovery_cap provider=filesystem root={} per_root_cap={} reached=true; some items were not indexed (raise index_max_items_per_root)",
-            root.display(),
-            per_root_budget
-        ));
-    }
     true
 }
 

@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
 const HEADER_LEN: usize = 32;
 const RECORD_PREFIX_LEN: usize = 36;
-const PROTOCOL_VERSION: u16 = 2;
+const PROTOCOL_VERSION: u16 = 3;
 const DELTA_MODE: u8 = 1;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const ROOT_RECORD_NUMBER: u64 = 5;
@@ -49,6 +49,14 @@ pub(crate) struct Snapshot {
     pub start_usn: i64,
     pub next_usn: i64,
     pub records: Vec<MftRecord>,
+}
+
+pub(crate) struct SnapshotMeta {
+    pub delta: bool,
+    pub journal_id: u64,
+    pub start_usn: i64,
+    pub next_usn: i64,
+    pub records: usize,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -99,8 +107,15 @@ pub(crate) fn is_fixed_volume(letter: char) -> bool {
     unsafe { GetDriveTypeW(root.as_ptr()) == 3 }
 }
 
-/// Wait for the helper's pipe, then read one full snapshot.
-pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, String> {
+/// Wait for the helper's pipe, then stream one snapshot into `on_record`.
+pub(crate) fn read_snapshot_into<F>(
+    letter: char,
+    timeout_ms: u32,
+    mut on_record: F,
+) -> Result<SnapshotMeta, String>
+where
+    F: FnMut(&MftRecord) -> Result<(), String>,
+{
     use std::time::{Duration, Instant};
 
     let pipe_name = format!("\\\\.\\pipe\\NexMft-{letter}");
@@ -153,7 +168,7 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
     let start_usn = i64::from_le_bytes(header[16..24].try_into().unwrap());
     let mut next_usn = i64::from_le_bytes(header[24..32].try_into().unwrap());
 
-    let mut records = Vec::with_capacity(120_000);
+    let mut record_count = 0usize;
     let mut prefix = [0u8; RECORD_PREFIX_LEN];
     loop {
         match file.read_exact(&mut prefix) {
@@ -185,7 +200,7 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
         if name.is_empty() {
             continue;
         }
-        records.push(MftRecord {
+        let record = MftRecord {
             frn,
             parent,
             attributes,
@@ -196,14 +211,32 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
             } else {
                 None
             },
-        });
+        };
+        record_count += 1;
+        on_record(&record)?;
     }
 
-    Ok(Snapshot {
+    Ok(SnapshotMeta {
         delta,
         journal_id,
         start_usn,
         next_usn,
+        records: record_count,
+    })
+}
+
+/// Collect a whole snapshot; used by the delta path and the tests.
+pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, String> {
+    let mut records = Vec::new();
+    let meta = read_snapshot_into(letter, timeout_ms, |record| {
+        records.push(record.clone());
+        Ok(())
+    })?;
+    Ok(Snapshot {
+        delta: meta.delta,
+        journal_id: meta.journal_id,
+        start_usn: meta.start_usn,
+        next_usn: meta.next_usn,
         records,
     })
 }

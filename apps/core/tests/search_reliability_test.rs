@@ -159,7 +159,7 @@ fn large_root_stays_searchable_beyond_cache_cap() {
 }
 
 #[test]
-fn per_root_cap_truncation_is_deterministic() {
+fn per_root_cap_no_longer_truncates() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("profile");
     std::fs::create_dir_all(&root).unwrap();
@@ -167,11 +167,9 @@ fn per_root_cap_truncation_is_deterministic() {
         std::fs::write(root.join(format!("cap-{i:05}.txt")), b"x").unwrap();
     }
 
-    let mut cfg = root_config(tmp.path(), &root);
-    cfg.index_max_items_per_root = 1_000;
+    let cfg = root_config(tmp.path(), &root);
     let service = indexed_service(cfg);
 
-    // Sorted traversal keeps the first entries by name.
     assert!(found(&service, "cap-00000", &root.join("cap-00000.txt")));
-    assert!(!found(&service, "cap-01099", &root.join("cap-01099.txt")));
+    assert!(found(&service, "cap-01099", &root.join("cap-01099.txt")));
 }

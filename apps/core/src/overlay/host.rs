@@ -279,6 +279,10 @@ pub(crate) enum UiCommand {
     SettingsHotkeyRecorded {
         combo: String,
     },
+    /// Push the indexer's live status into the settings page.
+    SettingsIndexingStatus {
+        json: String,
+    },
     /// Delayed focus re-assertion after show (fights Explorer focus theft
     /// on Win key hotkeys).  Spawned ~250ms after Painted.
     FocusReassert,
@@ -1648,6 +1652,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         );
                     }
                 }
+                UiCommand::SettingsIndexingStatus { json } => {
+                    if let Some((_, wv)) = &settings_ui {
+                        let arg = serde_json::to_string(&json).unwrap_or_else(|_| "\"{}\"".into());
+                        let script = format!(
+                            "window.indexingStatus && window.indexingStatus(JSON.parse({arg}))"
+                        );
+                        let _ = wv.evaluate_script(&script);
+                    }
+                }
                 UiCommand::SettingsHotkeyRecorded { combo } => {
                     if let Some((_, wv)) = &settings_ui {
                         // Combo originates from the recordHotkey native path,
@@ -1719,6 +1732,27 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     Ok(SettingsMessage::CancelRecord(_)) => {
                                         RECORDING_HOTKEY.store(false, Ordering::SeqCst);
                                         register_raw_input_sink(record_hwnd);
+                                    }
+                                    Ok(SettingsMessage::IndexingStatus(_)) => {
+                                        let proxy = proxy_for_ipc.clone();
+                                        std::thread::spawn(move || {
+                                            let json = match crate::ipc::ipc_call(
+                                                crate::ipc::INDEXER_ADDR,
+                                                &crate::ipc::IpcRequest::new(
+                                                    "status",
+                                                    serde_json::Value::Null,
+                                                ),
+                                            ) {
+                                                Ok(response) if response.ok => response
+                                                    .result
+                                                    .unwrap_or_default()
+                                                    .to_string(),
+                                                _ => "{}".to_string(),
+                                            };
+                                            let _ = proxy.send_event(
+                                                UiCommand::SettingsIndexingStatus { json },
+                                            );
+                                        });
                                     }
                                     Ok(SettingsMessage::Minimize(_)) => {
                                         use windows_sys::Win32::UI::WindowsAndMessaging::{

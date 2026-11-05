@@ -109,6 +109,26 @@ pub fn search_with_filter_with_boosts(
     filter: &SearchFilter,
     personalization_boosts: Option<&HashMap<String, i64>>,
 ) -> Vec<SearchItem> {
+    search_with_filter_with_boosts_indexed(items, None, query, limit, filter, personalization_boosts)
+}
+
+/// Same as [`search_with_filter_with_boosts`], but can use a
+/// [`SearchIndex`] to score only the items that can possibly match.
+///
+/// The index is a character-presence postings index: any item that survives
+/// `item_may_match_query` contains every normalised query character, so the
+/// shortest per-character posting list is a strict superset of every match
+/// (exact, prefix, substring and fuzzy). Scoring that list therefore returns
+/// exactly the same results as the full scan, while items whose match is
+/// decided elsewhere (`pre_score`, `match_target`) are always included.
+pub fn search_with_filter_with_boosts_indexed(
+    items: &[SearchItem],
+    index: Option<&SearchIndex>,
+    query: &str,
+    limit: usize,
+    filter: &SearchFilter,
+    personalization_boosts: Option<&HashMap<String, i64>>,
+) -> Vec<SearchItem> {
     if limit == 0 || items.is_empty() {
         return Vec::new();
     }
@@ -129,7 +149,27 @@ pub fn search_with_filter_with_boosts(
         filter,
         personalization_boosts,
     };
-    let mut scored: Vec<ScoredItem<'_>> = score_items(items, &context);
+    let mut scored: Vec<ScoredItem<'_>> = match index {
+        Some(index) if index.item_count == items.len() => {
+            match index.candidate_indices(required_mask) {
+                Some((postings, always)) => {
+                    let mut scored = score_indices(items, postings, &context);
+                    // Items with a pre-score or match target bypass the mask
+                    // check; include them unless the chosen posting already
+                    // scored them.
+                    let extra: Vec<u32> = always
+                        .iter()
+                        .copied()
+                        .filter(|idx| postings.binary_search(idx).is_err())
+                        .collect();
+                    scored.extend(score_indices(items, &extra, &context));
+                    scored
+                }
+                None => score_items(items, &context),
+            }
+        }
+        _ => score_items(items, &context),
+    };
 
     deduplicate_apps(&mut scored);
     if scored.len() > limit {
@@ -152,7 +192,65 @@ pub fn search_with_filter_with_boosts(
 
 /// Below this many items, splitting the scan costs more than it saves.
 const PARALLEL_SEARCH_MIN_ITEMS: usize = 20_000;
+const PARALLEL_INDEX_MIN_ITEMS: usize = 2_000;
 const PARALLEL_SEARCH_MAX_THREADS: usize = 8;
+const SEARCH_MASK_BITS: usize = 64;
+
+/// Character-presence postings over the cached item set.
+///
+/// Built when the cache changes. `normalized_search_mask` is the same mask the
+/// scorer uses as an O(1) reject, so intersecting (taking) one required
+/// character's posting list is always a superset of the items that can match.
+pub struct SearchIndex {
+    char_postings: Vec<Vec<u32>>,
+    always: Vec<u32>,
+    item_count: usize,
+}
+
+impl SearchIndex {
+    pub fn build(items: &[SearchItem]) -> Self {
+        let mut char_postings = vec![Vec::new(); SEARCH_MASK_BITS];
+        let mut always = Vec::new();
+        for (position, item) in items.iter().enumerate() {
+            let position = position as u32;
+            if item.pre_score.is_some() || item.match_target.is_some() {
+                always.push(position);
+            }
+            let mut mask = item.normalized_search_mask();
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                if let Some(posting) = char_postings.get_mut(bit) {
+                    posting.push(position);
+                }
+                mask &= mask - 1;
+            }
+        }
+        Self {
+            char_postings,
+            always,
+            item_count: items.len(),
+        }
+    }
+
+    /// The shortest required-character posting plus the always-admitted items.
+    /// Returns `None` when the query has no character mask (scan everything).
+    fn candidate_indices(&self, required_mask: u64) -> Option<(&[u32], &[u32])> {
+        if required_mask == 0 {
+            return None;
+        }
+        let mut chosen: Option<&Vec<u32>> = None;
+        let mut mask = required_mask;
+        while mask != 0 {
+            let bit = mask.trailing_zeros() as usize;
+            let posting = self.char_postings.get(bit)?;
+            if chosen.is_none_or(|best| posting.len() < best.len()) {
+                chosen = Some(posting);
+            }
+            mask &= mask - 1;
+        }
+        chosen.map(|posting| (posting.as_slice(), self.always.as_slice()))
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ScoreContext<'a> {
@@ -208,6 +306,65 @@ fn score_items<'a>(items: &'a [SearchItem], context: &ScoreContext<'_>) -> Vec<S
     })
 }
 
+/// Score only the candidate positions from a [`SearchIndex`], using the same
+/// per-item path as the full scan.
+fn score_indices<'a>(
+    items: &'a [SearchItem],
+    indices: &[u32],
+    context: &ScoreContext<'_>,
+) -> Vec<ScoredItem<'a>> {
+    if indices.len() < PARALLEL_INDEX_MIN_ITEMS {
+        return indices
+            .iter()
+            .filter_map(|&index| {
+                items
+                    .get(index as usize)
+                    .and_then(|item| score_candidate(item, context))
+            })
+            .collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .clamp(1, PARALLEL_SEARCH_MAX_THREADS);
+    if threads <= 1 {
+        return indices
+            .iter()
+            .filter_map(|&index| {
+                items
+                    .get(index as usize)
+                    .and_then(|item| score_candidate(item, context))
+            })
+            .collect();
+    }
+    let chunk_len = indices.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = indices
+            .chunks(chunk_len)
+            .map(|chunk| {
+                let context = *context;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|&index| {
+                            items
+                                .get(index as usize)
+                                .and_then(|item| score_candidate(item, &context))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut scored = Vec::with_capacity(indices.len());
+        for handle in handles {
+            if let Ok(mut chunk) = handle.join() {
+                scored.append(&mut chunk);
+            }
+        }
+        scored
+    })
+}
+
 fn score_candidate<'a>(
     item: &'a SearchItem,
     context: &ScoreContext<'_>,
@@ -249,7 +406,6 @@ fn score_candidate<'a>(
         item,
     })
 }
-
 /// Presence bits the query requires of an item's normalised search text.
 /// Empty when the query has no normalised characters.
 fn query_presence_requirement(normalized_query: &str) -> u64 {
@@ -1010,6 +1166,131 @@ fn now_epoch_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod candidate_index_tests {
+    use super::*;
+    use crate::config::SearchMode;
+    use std::time::Instant;
+
+    fn item(id: &str, title: &str, path: &str) -> SearchItem {
+        SearchItem::new(id, "file", title, path)
+    }
+
+    fn ids(items: &[SearchItem]) -> Vec<String> {
+        items.iter().map(|item| item.id.clone()).collect()
+    }
+
+    fn compare(items: &[SearchItem], query: &str, filter: &SearchFilter) {
+        let index = SearchIndex::build(items);
+        let full = search_with_filter_with_boosts(items, query, 20, filter, None);
+        let indexed = search_with_filter_with_boosts_indexed(
+            items,
+            Some(&index),
+            query,
+            20,
+            filter,
+            None,
+        );
+        assert_eq!(
+            ids(&full),
+            ids(&indexed),
+            "indexed search must match the full scan for {query:?}"
+        );
+    }
+
+    #[test]
+    fn candidate_index_matches_full_scan() {
+        let items = vec![
+            item("f1", "document-1.txt", r"C:\Data\document-1.txt"),
+            item("f2", "report-final.pdf", r"C:\Docs\report-final.pdf"),
+            item("f3", "alpha.txt", r"C:\misc\alpha.txt"),
+            item("f4", "zeta.log", r"C:\logs\zeta.log"),
+            item("f5", "readme.md", r"C:\README.md"),
+        ];
+        let mut pre = item("f6", "unrelated.bin", r"C:\unrelated.bin").with_pre_score(4000);
+        pre.use_count = 3;
+        let mut target = item("f7", "some.exe", r"C:\some.exe");
+        target.match_target = Some("special target".into());
+
+        let mut items = items;
+        items.push(pre);
+        items.push(target);
+
+        let default_filter = SearchFilter::default();
+        for query in [
+            "a", "al", "alpha", "report", "port", "doc-1", "zzz", "x", "special", "",
+        ] {
+            compare(&items, query, &default_filter);
+        }
+
+        let files_only = SearchFilter {
+            mode: SearchMode::Files,
+            include_folders: false,
+            ..SearchFilter::default()
+        };
+        compare(&items, "report", &files_only);
+        compare(&items, "a", &files_only);
+
+        let extension = SearchFilter {
+            extension_filter: Some("txt".into()),
+            ..SearchFilter::default()
+        };
+        compare(&items, "document", &extension);
+    }
+
+    #[test]
+    fn candidate_index_matches_full_scan_on_a_larger_set() {
+        let items: Vec<SearchItem> = (0..2_000)
+            .map(|index| {
+                item(
+                    &format!("file:{index}"),
+                    &format!("file-{index}.txt"),
+                    &format!("C:\\data\\file-{index}.txt"),
+                )
+            })
+            .collect();
+        let default_filter = SearchFilter::default();
+        for query in ["1", "4", "file", "file-19", "xyz", "document"] {
+            compare(&items, query, &default_filter);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual latency benchmark"]
+    fn bench_candidate_index_80k() {
+        let items: Vec<SearchItem> = (0..80_000)
+            .map(|index| {
+                item(
+                    &format!("file:c:\\data\\file{index}.txt"),
+                    &format!("document-{index}.txt"),
+                    &format!("C:\\Data\\file{index}.txt"),
+                )
+            })
+            .collect();
+        let build_started = Instant::now();
+        let index = SearchIndex::build(&items);
+        eprintln!("index build 80k: {} ms", build_started.elapsed().as_millis());
+        let filter = SearchFilter::default();
+        for query in ["d", "do", "document-4", "ument-4"] {
+            let started = Instant::now();
+            let full = search_with_filter_with_boosts(&items, query, 20, &filter, None);
+            let full_ms = started.elapsed().as_millis();
+            let started = Instant::now();
+            let indexed = search_with_filter_with_boosts_indexed(
+                &items,
+                Some(&index),
+                query,
+                20,
+                &filter,
+                None,
+            );
+            let indexed_ms = started.elapsed().as_millis();
+            assert_eq!(ids(&full), ids(&indexed));
+            eprintln!("query={query:?} full_ms={full_ms} indexed_ms={indexed_ms}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -122,6 +122,10 @@ pub struct CoreService {
     providers: RwLock<Vec<Box<dyn DiscoveryProvider>>>,
     cached_items: RwLock<Vec<SearchItem>>,
     cached_app_items: RwLock<Vec<SearchItem>>,
+    /// Candidate postings for UI searches; rebuilt with the cache.
+    search_index: RwLock<Option<(u64, Arc<crate::search::SearchIndex>)>>,
+    /// Bumped only when the cache changes; keys the candidate index.
+    cache_revision: AtomicU64,
     /// RwLock so searches, commits and syncs (all `&TantivyIndex`; the
     /// writer has its own mutex) run concurrently; only replacing or
     /// closing the index takes the write side.
@@ -287,6 +291,8 @@ impl CoreService {
             providers: RwLock::new(Vec::new()),
             cached_items: RwLock::new(cached),
             cached_app_items: RwLock::new(cached_apps),
+            search_index: RwLock::new(None),
+            cache_revision: AtomicU64::new(0),
             tantivy_index: RwLock::new(tantivy_index),
             last_index_commit: Mutex::new(None),
             index_warmer: Arc::new(crate::tantivy_search::IndexWarmer::default()),
@@ -523,14 +529,16 @@ impl CoreService {
                 if ranked.len() < effective_limit {
                     // Augment with in-memory cache items the index missed,
                     // ranked from the same live snapshot.
-                    let (_generation, items) = self.cached_snapshot();
-                    let cache_ranked = crate::search::search_with_filter_with_boosts(
-                        &items,
-                        query,
-                        effective_limit.saturating_sub(ranked.len()),
-                        filter,
-                        Some(&query_boosts),
-                    );
+                    let cache_ranked = self.with_cached_items_and_index(|items, index| {
+                        crate::search::search_with_filter_with_boosts_indexed(
+                            items,
+                            index,
+                            query,
+                            effective_limit.saturating_sub(ranked.len()),
+                            filter,
+                            Some(&query_boosts),
+                        )
+                    });
                     for item in cache_ranked {
                         let dominated = ranked.iter().any(|r| {
                             (!r.path.is_empty() && !item.path.is_empty()
@@ -569,14 +577,16 @@ impl CoreService {
         // whole-Vec swap, so contention surfaces as a slightly older (but
         // valid) result set, never a blank flash.
         let query_boosts = self.query_personalization_boosts(query, filter.mode)?;
-        let (_generation, items) = self.cached_snapshot();
-        let mut ranked = crate::search::search_with_filter_with_boosts(
-            &items,
-            query,
-            effective_limit,
-            filter,
-            Some(&query_boosts),
-        );
+        let mut ranked = self.with_cached_items_and_index(|items, index| {
+            crate::search::search_with_filter_with_boosts_indexed(
+                items,
+                index,
+                query,
+                effective_limit,
+                filter,
+                Some(&query_boosts),
+            )
+        });
         if ranked.len() < effective_limit {
             self.append_store_recall(&mut ranked, query, effective_limit, filter, &query_boosts);
         }
@@ -663,6 +673,40 @@ impl CoreService {
         f(&guard)
     }
 
+    /// Borrow the cache together with the candidate index built for that
+    /// exact revision. The cache read guard is held while the index is read,
+    /// so a cache writer cannot swap the items between the two.
+    pub fn with_cached_items_and_index<R>(
+        &self,
+        f: impl FnOnce(&[SearchItem], Option<&crate::search::SearchIndex>) -> R,
+    ) -> R {
+        let guard = match self.cached_items.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let revision = self.cache_revision.load(Ordering::Acquire);
+        let index = self.search_index.read().ok().and_then(|slot| {
+            slot.as_ref()
+                .filter(|(stored, _)| *stored == revision)
+                .map(|(_, index)| Arc::clone(index))
+        });
+        f(&guard, index.as_deref())
+    }
+
+    /// Rebuild the candidate index while the cache write guard is held. The
+    /// revision and index are published before the writer releases the cache,
+    /// so a reader can never pair new items with an old index.
+    fn rebuild_search_index_for_cache(&self, items: &[SearchItem]) {
+        if !self.ui_client {
+            return;
+        }
+        let revision = self.cache_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let index = Arc::new(crate::search::SearchIndex::build(items));
+        if let Ok(mut slot) = self.search_index.write() {
+            *slot = Some((revision, index));
+        }
+    }
+
     pub fn cached_items_len(&self) -> usize {
         self.cached_len()
     }
@@ -702,7 +746,14 @@ impl CoreService {
     pub fn apply_external_snapshot(&self, items: Vec<SearchItem>) -> usize {
         let apps = collect_app_items(&items);
         let count = items.len();
-        *self.cached_items.write().unwrap_or_else(|e| e.into_inner()) = items;
+        {
+            let mut guard = self
+                .cached_items
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = items;
+            self.rebuild_search_index_for_cache(&guard);
+        }
         *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
         self.cache_complete.store(true, Ordering::SeqCst);
         self.bump_search_generation();
@@ -736,6 +787,7 @@ impl CoreService {
         next.extend(replacements.into_values());
         let apps = collect_app_items(&next);
         *guard = next;
+        self.rebuild_search_index_for_cache(&guard);
         drop(guard);
         *self.cached_app_items.write().unwrap_or_else(|e| e.into_inner()) = apps;
         self.cache_complete.store(true, Ordering::SeqCst);
@@ -2191,24 +2243,19 @@ impl CoreService {
             }
             compacted
         };
-        match self.cached_items.write() {
-            Ok(mut guard) => {
-                *guard = latest;
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                *guard = latest;
-            }
-        }
-        match self.cached_app_items.write() {
-            Ok(mut guard) => {
-                *guard = latest_apps;
-            }
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                *guard = latest_apps;
-            }
-        }
+        let mut items_guard = match self.cached_items.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *items_guard = latest;
+        self.rebuild_search_index_for_cache(&items_guard);
+        drop(items_guard);
+        let mut apps_guard = match self.cached_app_items.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *apps_guard = latest_apps;
+        drop(apps_guard);
         self.bump_search_generation();
         Ok(())
     }
@@ -2217,13 +2264,13 @@ impl CoreService {
         let item_for_apps = item.clone();
         let item_id = item.id.clone();
         let is_app = item.kind.eq_ignore_ascii_case("app");
-        match self.cached_items.write() {
-            Ok(mut guard) => upsert_cached_item_inner(&mut guard, item),
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                upsert_cached_item_inner(&mut guard, item);
-            }
-        }
+        let mut items_guard = match self.cached_items.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        upsert_cached_item_inner(&mut items_guard, item);
+        self.rebuild_search_index_for_cache(&items_guard);
+        drop(items_guard);
         match self.cached_app_items.write() {
             Ok(mut guard) => {
                 if is_app {
@@ -2245,13 +2292,13 @@ impl CoreService {
     }
 
     fn remove_cached_item_by_id(&self, id: &str) {
-        match self.cached_items.write() {
-            Ok(mut guard) => guard.retain(|entry| entry.id != id),
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                guard.retain(|entry| entry.id != id);
-            }
-        }
+        let mut items_guard = match self.cached_items.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        items_guard.retain(|entry| entry.id != id);
+        self.rebuild_search_index_for_cache(&items_guard);
+        drop(items_guard);
         match self.cached_app_items.write() {
             Ok(mut guard) => guard.retain(|entry| entry.id != id),
             Err(poisoned) => {
@@ -2547,12 +2594,13 @@ impl CoreService {
         }
 
         let stale_lookup: HashSet<&str> = stale_ids.iter().map(String::as_str).collect();
-        match self.cached_items.write() {
-            Ok(mut guard) => guard.retain(|entry| !stale_lookup.contains(entry.id.as_str())),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .retain(|entry| !stale_lookup.contains(entry.id.as_str())),
-        }
+        let mut items_guard = match self.cached_items.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        items_guard.retain(|entry| !stale_lookup.contains(entry.id.as_str()));
+        self.rebuild_search_index_for_cache(&items_guard);
+        drop(items_guard);
         match self.cached_app_items.write() {
             Ok(mut guard) => guard.retain(|entry| !stale_lookup.contains(entry.id.as_str())),
             Err(poisoned) => poisoned

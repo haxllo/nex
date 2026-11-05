@@ -953,6 +953,7 @@ fn try_mft_root(
 }
 
 const FILE_RENAME_OLD_NAME: u32 = 0x0000_0001;
+const FILE_RENAME_NEW_NAME: u32 = 0x0000_0002;
 const FILE_DELETE: u32 = 0x0000_0200;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 
@@ -1087,14 +1088,36 @@ fn mft_incremental(
                 continue;
             }
             if record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                // A directory create/rename/delete moves whole subtrees.
-                crate::logging::info(&format!(
-                    "[nex] discovery_delta volume={letter} skip=directory_change path={}",
-                    path.display()
-                ));
-                return Some(Err(ProviderError::new(
-                    "MFT delta includes a directory change; running a full pass",
-                )));
+                // Renames and deletes move whole subtrees, so they still need
+                // the full pass. A plain create is one entry and can be
+                // applied here; its children arrive as their own records.
+                if record.reason & (FILE_DELETE | FILE_RENAME_OLD_NAME | FILE_RENAME_NEW_NAME) != 0
+                {
+                    crate::logging::info(&format!(
+                        "[nex] discovery_delta volume={letter} skip=directory_change path={}",
+                        path.display()
+                    ));
+                    return Some(Err(ProviderError::new(
+                        "MFT delta includes a directory move; running a full pass",
+                    )));
+                }
+                if provider.show_folders {
+                    let lower = path.to_string_lossy().to_ascii_lowercase();
+                    let id = format!("folder:{lower}");
+                    if seen_upserts.insert(id.clone()) {
+                        let title = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string_lossy().to_string());
+                        upserts.push(SearchItem::new(
+                            &id,
+                            "folder",
+                            &title,
+                            &path.to_string_lossy(),
+                        ));
+                    }
+                }
+                continue;
             }
             let lower = path.to_string_lossy().to_ascii_lowercase();
             let id = format!("file:{lower}");

@@ -373,6 +373,7 @@ pub(crate) fn run_windows_runtime(
         last_query: String::new(),
         last_sent_generation: 0,
         last_applied_generation: 0,
+        last_cache_generation: 0,
         search_session: OverlaySearchSession::default(),
         config_generation: 0,
         hotkey_issue_status,
@@ -589,6 +590,9 @@ struct RuntimeWorker {
     /// Guards against an older empty result clearing a newer non-empty
     /// list while keystrokes are still in flight.
     last_applied_generation: u64,
+    /// Last cache generation observed by the event loop. When it moves, the
+    /// visible query is re-run so results do not wait for another keystroke.
+    last_cache_generation: u64,
     search_session: OverlaySearchSession,
     hotkey_issue_status: Option<String>,
     event_rx: crossbeam_channel::Receiver<OverlayEvent>,
@@ -1669,6 +1673,45 @@ impl RuntimeWorker {
                 &mut self.last_query,
                 &mut self.last_sent_generation,
             );
+        }
+
+        // The indexer can add or remove items while the overlay is open. Re-run
+        // the visible query so the rows match the new set; a hidden overlay only
+        // drops its caches. Bursts coalesce inside the search worker.
+        let cache_generation = self
+            .service
+            .try_read()
+            .map(|svc| svc.search_generation())
+            .unwrap_or(self.last_cache_generation);
+        if cache_generation != self.last_cache_generation {
+            self.last_cache_generation = cache_generation;
+            self.search_session.clear();
+            self.search_worker.clear_session();
+            if self.overlay.is_visible() {
+                let active_query = self.overlay.query_text();
+                if !active_query.trim().is_empty() {
+                    log_info(&format!(
+                        "[nex] requery_on_cache_change generation={cache_generation} query_len={}",
+                        active_query.trim().len()
+                    ));
+                    apply_query_change(
+                        active_query,
+                        &self.overlay,
+                        &self.search_worker,
+                        &self.runtime_config,
+                        self.config_generation,
+                        self.max_results,
+                        &mut self.pending_confirmation,
+                        &mut self.current_results,
+                        &mut self.selected_index,
+                        &mut self.last_query,
+                        &mut self.last_sent_generation,
+                    );
+                }
+            } else {
+                self.current_results.clear();
+                self.selected_index = 0;
+            }
         }
 
         // Retry a quick-launch load deferred by a busy indexer. The show

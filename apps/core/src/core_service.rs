@@ -11,7 +11,7 @@ use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
 use crate::tantivy_search::{TantivyIndex, TantivyOpenError};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -173,10 +173,182 @@ pub struct CoreService {
     last_indexing_peak_memory: Mutex<Option<usize>>,
     /// Number of completed indexing cycles.
     indexing_cycle_count: AtomicU64,
+    /// Bounded changelog of item-set mutations for the UI sync.
+    publish_log: Mutex<PublishLog>,
     #[cfg(target_os = "windows")]
     file_watchers: Mutex<Option<crate::file_watcher_consumer::FileWatcherHandle>>,
     #[cfg(target_os = "windows")]
     application_watchers: Mutex<Option<crate::application_watcher::ApplicationWatcherHandle>>,
+}
+
+const PUBLISH_MAX_DELTA_ENTRIES: usize = 512;
+const PUBLISH_RESET_THRESHOLD: usize = 512;
+const PUBLISH_LOG_MAX_BATCHES: usize = 128;
+const PUBLISH_LOG_MAX_ENTRIES: usize = 8192;
+
+/// One sealed changelog batch.
+#[derive(Debug)]
+struct PublishBatch {
+    seq: u64,
+    upserts: Vec<SearchItem>,
+    deleted: Vec<String>,
+}
+
+/// The outcome of a UI sync against the mutation log.
+#[derive(Debug)]
+pub(crate) enum PublishOutcome {
+    Unchanged { generation: u64, instance: u64 },
+    Delta {
+        generation: u64,
+        instance: u64,
+        upserts: Vec<SearchItem>,
+        deleted: Vec<String>,
+    },
+    Snapshot { generation: u64, instance: u64 },
+}
+
+/// Bounded changelog of item-set mutations.
+///
+/// Mutations append to an open batch; a sync seals it and hands out the sealed
+/// batches after the caller's sequence. A batch larger than
+/// `PUBLISH_RESET_THRESHOLD` resets the log (the caller gets a bounded
+/// snapshot instead), so the log never holds a rebuild-sized set.
+#[derive(Debug)]
+struct PublishLog {
+    instance: u64,
+    next_seq: u64,
+    reset_floor: u64,
+    open_upserts: Vec<SearchItem>,
+    open_deleted: Vec<String>,
+    open_entries: usize,
+    sealed: VecDeque<PublishBatch>,
+    sealed_entries: usize,
+}
+
+impl PublishLog {
+    fn new(instance: u64) -> Self {
+        Self {
+            instance,
+            next_seq: 1,
+            reset_floor: 0,
+            open_upserts: Vec::new(),
+            open_deleted: Vec::new(),
+            open_entries: 0,
+            sealed: VecDeque::new(),
+            sealed_entries: 0,
+        }
+    }
+
+    fn current(&self) -> u64 {
+        self.next_seq.saturating_sub(1)
+    }
+
+    fn reset(&mut self) {
+        let seq = self.next_seq;
+        self.next_seq = seq.saturating_add(1);
+        self.reset_floor = seq;
+        self.sealed.clear();
+        self.sealed_entries = 0;
+        self.open_upserts.clear();
+        self.open_deleted.clear();
+        self.open_entries = 0;
+    }
+
+    fn record(&mut self, upserts: &[SearchItem], deleted: &[String]) {
+        let entries = upserts.len() + deleted.len();
+        if entries == 0 {
+            return;
+        }
+        if self.open_entries + entries > PUBLISH_RESET_THRESHOLD {
+            // The caller already applied the change to the store/cache; the
+            // snapshot that follows covers it. Do not retain the batch.
+            self.reset();
+            return;
+        }
+        self.open_upserts.extend(upserts.iter().cloned());
+        self.open_deleted.extend(deleted.iter().cloned());
+        self.open_entries += entries;
+    }
+
+    fn seal(&mut self) {
+        if self.open_entries == 0 {
+            return;
+        }
+        let seq = self.next_seq;
+        self.next_seq = seq.saturating_add(1);
+        let upserts = std::mem::take(&mut self.open_upserts);
+        let deleted = std::mem::take(&mut self.open_deleted);
+        self.open_entries = 0;
+        self.sealed_entries += upserts.len() + deleted.len();
+        self.sealed.push_back(PublishBatch {
+            seq,
+            upserts,
+            deleted,
+        });
+        while self.sealed.len() > PUBLISH_LOG_MAX_BATCHES
+            || self.sealed_entries > PUBLISH_LOG_MAX_ENTRIES
+        {
+            let Some(old) = self.sealed.pop_front() else {
+                break;
+            };
+            self.sealed_entries = self
+                .sealed_entries
+                .saturating_sub(old.upserts.len() + old.deleted.len());
+        }
+    }
+
+    fn outcome(&mut self, known: u64, client_instance: u64) -> PublishOutcome {
+        self.seal();
+        let instance = self.instance;
+        let current = self.current();
+        if client_instance != instance || known < self.reset_floor || known > current {
+            return PublishOutcome::Snapshot {
+                generation: current,
+                instance,
+            };
+        }
+        if known == current {
+            return PublishOutcome::Unchanged {
+                generation: known,
+                instance,
+            };
+        }
+        let oldest = self.sealed.front().map(|batch| batch.seq).unwrap_or(current);
+        if known.saturating_add(1) < oldest {
+            return PublishOutcome::Snapshot {
+                generation: current,
+                instance,
+            };
+        }
+        let mut upserts = Vec::new();
+        let mut deleted = Vec::new();
+        let mut entries = 0_usize;
+        for batch in self.sealed.iter().filter(|batch| batch.seq > known) {
+            entries += batch.upserts.len() + batch.deleted.len();
+            if entries > PUBLISH_MAX_DELTA_ENTRIES {
+                return PublishOutcome::Snapshot {
+                    generation: current,
+                    instance,
+                };
+            }
+            upserts.extend(batch.upserts.iter().cloned());
+            deleted.extend(batch.deleted.iter().cloned());
+        }
+        PublishOutcome::Delta {
+            generation: current,
+            instance,
+            upserts,
+            deleted,
+        }
+    }
+}
+
+fn publish_instance() -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(1);
+    (nanos ^ ((std::process::id() as u64) << 32)) | 1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +491,7 @@ impl CoreService {
             recent_docs_last_scan: AtomicU64::new(0),
             last_indexing_peak_memory: Mutex::new(None),
             indexing_cycle_count: AtomicU64::new(0),
+            publish_log: Mutex::new(PublishLog::new(publish_instance())),
             #[cfg(target_os = "windows")]
             file_watchers: Mutex::new(None),
             #[cfg(target_os = "windows")]
@@ -1041,6 +1214,7 @@ impl CoreService {
                         for chunk in update.upserts.chunks(STORE_WRITE_BATCH_SIZE) {
                             index_store::upsert_items(&*self.db(), chunk)?;
                         }
+                        self.record_publish(&update.upserts, &update.deleted_ids);
                         // Advance the journal only after every write landed.
                         #[cfg(target_os = "windows")]
                         for (letter, journal_id, next_usn) in &update.states {
@@ -1177,6 +1351,7 @@ impl CoreService {
                     upserted_total += 1;
                     if pending_upserts.len() >= STORE_WRITE_BATCH_SIZE {
                         index_store::upsert_items(&*self.db(), &pending_upserts)?;
+                        self.record_publish(&pending_upserts, &[]);
                         pending_upserts.clear();
                     }
                 }
@@ -1193,6 +1368,7 @@ impl CoreService {
             }
             if !pending_upserts.is_empty() {
                 index_store::upsert_items(&*self.db(), &pending_upserts)?;
+                self.record_publish(&pending_upserts, &[]);
             }
 
             cumulative_weight += provider_weight;
@@ -1208,6 +1384,7 @@ impl CoreService {
 
             for chunk in removable_ids.chunks(STORE_WRITE_BATCH_SIZE) {
                 index_store::delete_items(&*self.db(), chunk)?;
+                self.record_publish(&[], chunk);
             }
             for id in &removable_ids {
                 existing_by_id.remove(id);
@@ -1282,10 +1459,28 @@ impl CoreService {
         Ok(report.indexed_total)
     }
 
+    fn record_publish(&self, upserts: &[SearchItem], deleted: &[String]) {
+        let mut log = self
+            .publish_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        log.record(upserts, deleted);
+    }
+
+    /// Consume the mutations since `known` for one publishing client.
+    pub(crate) fn publish_outcome(&self, known: u64, client_instance: u64) -> PublishOutcome {
+        let mut log = self
+            .publish_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        log.outcome(known, client_instance)
+    }
+
     pub fn upsert_item(&self, item: &SearchItem) -> Result<(), ServiceError> {
         index_store::upsert_item(&*self.db(), item)?;
         self.upsert_cached_item(item.clone());
         self.index_item_on_backends(item);
+        self.record_publish(std::slice::from_ref(item), &[]);
         Ok(())
     }
 
@@ -1296,6 +1491,7 @@ impl CoreService {
         index_store::delete_item(&*self.db(), id)?;
         self.remove_cached_item_by_id(id);
         self.remove_item_from_backends(id);
+        self.record_publish(&[], std::slice::from_ref(&id.to_string()));
         Ok(())
     }
 
@@ -2594,7 +2790,8 @@ impl CoreService {
             return Ok(());
         }
         index_store::upsert_item(&self.db(), &updated)?;
-        self.upsert_cached_item(updated);
+        self.upsert_cached_item(updated.clone());
+        self.record_publish(std::slice::from_ref(&updated), &[]);
         Ok(())
     }
 
@@ -2668,6 +2865,7 @@ impl CoreService {
             self.cached_len()
         ));
 
+        self.record_publish(&[], stale_ids);
         self.bump_search_generation();
         Ok(())
     }
@@ -3284,6 +3482,67 @@ mod tests {
             results.iter().any(|item| item.id == "app-zulu"),
             "newly added item must be visible immediately"
         );
+    }
+
+    #[test]
+    fn publish_log_streams_deltas_and_resets_large_batches() {
+        let service = CoreService::with_connection(
+            isolated_config("publish-log"),
+            open_memory().unwrap(),
+        )
+        .expect("service should initialize");
+        let a = SearchItem::new(
+            "file:c:\\publish-a.txt",
+            "file",
+            "publish-a.txt",
+            "C:\\publish-a.txt",
+        );
+        service.upsert_item(&a).expect("item should upsert");
+
+        let instance = match service.publish_outcome(0, 0) {
+            super::PublishOutcome::Snapshot { instance, .. } => instance,
+            other => panic!("expected snapshot, got {other:?}"),
+        };
+        match service.publish_outcome(0, instance) {
+            super::PublishOutcome::Delta {
+                upserts, deleted, ..
+            } => {
+                assert_eq!(upserts.len(), 1);
+                assert!(deleted.is_empty());
+            }
+            other => panic!("expected delta, got {other:?}"),
+        }
+        assert!(matches!(
+            service.publish_outcome(1, instance),
+            super::PublishOutcome::Unchanged { .. }
+        ));
+
+        service
+            .delete_item_by_id(&a.id)
+            .expect("delete should succeed");
+        match service.publish_outcome(1, instance) {
+            super::PublishOutcome::Delta {
+                upserts, deleted, ..
+            } => {
+                assert!(upserts.is_empty());
+                assert_eq!(deleted, vec![a.id.clone()]);
+            }
+            other => panic!("expected delete delta, got {other:?}"),
+        }
+
+        for index in 0..(super::PUBLISH_RESET_THRESHOLD + 10) {
+            let item = SearchItem::new(
+                &format!("file:c:\\publish-{index}.txt"),
+                "file",
+                &format!("publish-{index}.txt"),
+                &format!("C:\\publish-{index}.txt"),
+            );
+            service.upsert_item(&item).expect("item should upsert");
+        }
+        assert!(matches!(
+            service.publish_outcome(2, instance),
+            super::PublishOutcome::Snapshot { .. }
+        ));
     }
 
     #[test]

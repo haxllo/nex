@@ -5,8 +5,6 @@
 //! ever transports an item snapshot; it never reads the Tantivy index and never
 //! runs discovery, so the two processes cannot race on index files.
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,16 +141,6 @@ pub fn bind_indexer_listener(addr: &str) -> Option<TcpListener> {
     }
 }
 
-/// What the last sync handed to the UI. A compact content index (id -> hash)
-/// is enough to report creates, renames, and deletes without keeping a second
-/// copy of the item set.
-struct PublishedSet {
-    generation: u64,
-    index: HashMap<String, u64>,
-}
-
-const MAX_SYNC_DELTA_ENTRIES: usize = 512;
-
 /// Serve requests until the process exits.
 pub fn serve_indexer(
     listener: TcpListener,
@@ -160,15 +148,12 @@ pub fn serve_indexer(
     indexing: Arc<AtomicBool>,
 ) {
     crate::logging::info(&format!("[nex-ipc] listening on {INDEXER_ADDR}"));
-    // Last item set handed to a poll, so a later sync can send a delta.
-    let published: Arc<Mutex<Option<PublishedSet>>> = Arc::new(Mutex::new(None));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let service = Arc::clone(&service);
                 let indexing = Arc::clone(&indexing);
-                let published = Arc::clone(&published);
-                std::thread::spawn(move || handle_connection(stream, service, indexing, published));
+                std::thread::spawn(move || handle_connection(stream, service, indexing));
             }
             Err(error) => crate::logging::warn(&format!("[nex-ipc] accept failed: {error}")),
         }
@@ -179,7 +164,6 @@ fn handle_connection(
     mut stream: TcpStream,
     service: Arc<RwLock<CoreService>>,
     indexing: Arc<AtomicBool>,
-    published: Arc<Mutex<Option<PublishedSet>>>,
 ) {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(clone) => clone,
@@ -204,7 +188,7 @@ fn handle_connection(
             request.version
         ))
     } else {
-        dispatch(&request, &service, &indexing, &published)
+        dispatch(&request, &service, &indexing)
     };
     let _ = write_response(&mut stream, &response);
 }
@@ -213,7 +197,6 @@ fn dispatch(
     request: &IpcRequest,
     service: &Arc<RwLock<CoreService>>,
     indexing: &AtomicBool,
-    published: &Mutex<Option<PublishedSet>>,
 ) -> IpcResponse {
     match request.method.as_str() {
         "ping" => IpcResponse::ok(json!({ "version": PROTOCOL_VERSION })),
@@ -256,8 +239,12 @@ fn dispatch(
                 .get("generation")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
+            let client_instance = request
+                .params
+                .get("instance")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let service = service.read().unwrap_or_else(|e| e.into_inner());
-            let generation = service.search_generation();
             let indexing = indexing.load(Ordering::Acquire);
             // While a rebuild runs the cache is mid-refresh: echo the caller's
             // generation so it does not advance past an item set it never saw.
@@ -269,68 +256,47 @@ fn dispatch(
                 }));
             }
 
-            let mut published = published.lock().unwrap_or_else(|e| e.into_inner());
-            if !matches!(published.as_ref(), Some(state) if state.generation == known) {
-                // First sync, a reconnected caller, or a missed generation.
-                let items = service.with_cached_items(|current| current.to_vec());
-                let index = build_item_index(&items);
-                let snapshot = crate::core_service::bounded_ui_items(&items);
-                *published = Some(PublishedSet { generation, index });
-                return IpcResponse::ok(json!({
+            match service.publish_outcome(known, client_instance) {
+                crate::core_service::PublishOutcome::Unchanged {
+                    generation,
+                    instance,
+                } => IpcResponse::ok(json!({
                     "generation": generation,
-                    "changed": true,
-                    "indexing": false,
-                    "items": items_to_values(&snapshot),
-                }));
-            }
-
-            // Diff the live set against the compact index. Unchanged items are
-            // never cloned, and an unchanged set allocates nothing.
-            let (upserts, deleted) = {
-                let state = published.as_mut().expect("checked above");
-                service.with_cached_items(|current| apply_item_delta(&mut state.index, current))
-            };
-            if upserts.is_empty() && deleted.is_empty() {
-                // Echo the caller's generation: the next poll takes the same
-                // path and stays allocation-free.
-                return IpcResponse::ok(json!({
-                    "generation": known,
+                    "instance": instance,
                     "changed": false,
                     "indexing": false,
-                }));
-            }
-
-            let state = published.as_mut().expect("checked above");
-            let current_len = state.index.len();
-            let upserts_n = upserts.len();
-            let deleted_n = deleted.len();
-            // Replacing most of the set is cheaper as one snapshot than as a
-            // huge delta.
-            if upserts_n > MAX_SYNC_DELTA_ENTRIES
-                || deleted_n > MAX_SYNC_DELTA_ENTRIES
-                || (upserts_n + deleted_n) * 4 > current_len.max(1)
-            {
-                let items = service.with_cached_items(|current| current.to_vec());
-                state.index = build_item_index(&items);
-                state.generation = generation;
-                let snapshot = crate::core_service::bounded_ui_items(&items);
-                return IpcResponse::ok(json!({
+                })),
+                crate::core_service::PublishOutcome::Delta {
+                    generation,
+                    instance,
+                    upserts,
+                    deleted,
+                } => IpcResponse::ok(json!({
                     "generation": generation,
+                    "instance": instance,
                     "changed": true,
                     "indexing": false,
-                    "items": items_to_values(&snapshot),
-                }));
+                    "delta": {
+                        "upserts": items_to_values(&upserts),
+                        "deleted": deleted,
+                    },
+                })),
+                crate::core_service::PublishOutcome::Snapshot {
+                    generation,
+                    instance,
+                } => {
+                    let snapshot = service.with_cached_items(|current| {
+                        crate::core_service::bounded_ui_items(current)
+                    });
+                    IpcResponse::ok(json!({
+                        "generation": generation,
+                        "instance": instance,
+                        "changed": true,
+                        "indexing": false,
+                        "items": items_to_values(&snapshot),
+                    }))
+                }
             }
-            state.generation = generation;
-            IpcResponse::ok(json!({
-                "generation": generation,
-                "changed": true,
-                "indexing": false,
-                "delta": {
-                    "upserts": items_to_values(&upserts),
-                    "deleted": deleted,
-                },
-            }))
         }
         // Writes the UI must not perform itself: the indexer owns the store.
         "record_launch" => {
@@ -430,52 +396,6 @@ fn dispatch(
         }
         other => IpcResponse::error(format!("unknown method: {other}")),
     }
-}
-
-/// Content hash of everything the UI needs from an item. Any create, rename,
-/// path change, or usage-count change produces a different hash.
-fn hash_item(item: &SearchItem) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    item.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn build_item_index(items: &[SearchItem]) -> HashMap<String, u64> {
-    items
-        .iter()
-        .map(|item| (item.id.clone(), hash_item(item)))
-        .collect()
-}
-
-/// Update `index` to match `current`, returning changed items and deleted ids.
-/// Unchanged items are never cloned, so an idle poll allocates nothing.
-fn apply_item_delta(
-    index: &mut HashMap<String, u64>,
-    current: &[SearchItem],
-) -> (Vec<SearchItem>, Vec<String>) {
-    let mut seen: HashSet<&str> = HashSet::with_capacity(current.len());
-    let mut upserts = Vec::new();
-    for item in current {
-        seen.insert(item.id.as_str());
-        let hash = hash_item(item);
-        match index.get(item.id.as_str()) {
-            Some(&known) if known == hash => {}
-            _ => {
-                upserts.push(item.clone());
-                index.insert(item.id.clone(), hash);
-            }
-        }
-    }
-    let mut deleted = Vec::new();
-    index.retain(|id, _| {
-        if seen.contains(id.as_str()) {
-            true
-        } else {
-            deleted.push(id.clone());
-            false
-        }
-    });
-    (upserts, deleted)
 }
 
 fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Result<()> {
@@ -668,58 +588,5 @@ mod tests {
         let decoded: IpcRequest =
             serde_json::from_str(r#"{"version":999,"method":"ping"}"#).unwrap();
         assert_ne!(decoded.version, PROTOCOL_VERSION);
-    }
-
-    #[test]
-    fn delta_detects_create_change_delete_and_rename() {
-        // A delta only wins when it is small relative to the published set, so
-        // the fixture needs a set big enough for the 4x threshold.
-        let previous: Vec<SearchItem> = (0..20)
-            .map(|i| SearchItem::new(&format!("id{i}"), "file", "Item", r"C:\item.txt"))
-            .collect();
-        let mut index = build_item_index(&previous);
-
-        let mut current = previous.clone();
-        // Rename in place: same id, new title and path.
-        current[0] = SearchItem::new("id0", "file", "Renamed", r"C:\renamed.txt");
-        // Create.
-        current.push(SearchItem::new("new", "file", "New", r"C:\new.txt"));
-        // Delete.
-        current.retain(|item| item.id != "id5");
-
-        let (upserts, deleted) = apply_item_delta(&mut index, &current);
-        let ids: Vec<&str> = upserts.iter().map(|item| item.id.as_str()).collect();
-        assert!(ids.contains(&"id0"), "rename is an upsert");
-        assert!(ids.contains(&"new"), "create is an upsert");
-        assert!(!ids.contains(&"id1"), "unchanged item is not resent");
-        assert_eq!(deleted, vec!["id5".to_string()]);
-        assert_eq!(index.len(), current.len());
-
-        // The same set again is empty: idle polls do not churn.
-        let (again, deleted_again) = apply_item_delta(&mut index, &current);
-        assert!(again.is_empty());
-        assert!(deleted_again.is_empty());
-    }
-
-    #[test]
-    fn rename_with_a_new_id_deletes_the_old_one() {
-        let old = SearchItem::new(r"file:c:\old.txt", "file", "old.txt", r"C:\old.txt");
-        let new = SearchItem::new(r"file:c:\new.txt", "file", "new.txt", r"C:\new.txt");
-        let mut index = build_item_index(std::slice::from_ref(&old));
-
-        let (upserts, deleted) = apply_item_delta(&mut index, std::slice::from_ref(&new));
-        assert_eq!(upserts.len(), 1);
-        assert_eq!(upserts[0].id, new.id);
-        assert_eq!(deleted, vec![old.id.clone()]);
-        assert_eq!(index.len(), 1);
-        assert!(index.contains_key(new.id.as_str()));
-        assert!(!index.contains_key(old.id.as_str()));
-    }
-
-    #[test]
-    fn fingerprint_changes_when_the_path_changes() {
-        let before = SearchItem::new("file:c:\\a.txt", "file", "a.txt", r"C:\a.txt");
-        let after = SearchItem::new("file:c:\\a.txt", "file", "a.txt", r"C:\moved\a.txt");
-        assert_ne!(hash_item(&before), hash_item(&after));
     }
 }

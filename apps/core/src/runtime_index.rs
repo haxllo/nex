@@ -70,15 +70,16 @@ fn start_ui_snapshot_sync(
     let service = Arc::clone(service);
     std::thread::spawn(move || {
         let mut last_generation = 0_u64;
+        let mut last_instance = 0_u64;
         let mut first_apply = true;
         loop {
-            let applied_generation = match sync_indexer_snapshot(last_generation) {
+            let applied_generation = match sync_indexer_snapshot(last_generation, last_instance) {
                 SnapshotSync::Unchanged => None,
                 SnapshotSync::Unreachable => {
                     crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
                     None
                 }
-                SnapshotSync::Full(generation, items) => {
+                SnapshotSync::Full(generation, instance, items) => {
                     let count = items.len();
                     let mut applied = false;
                     // The main loop only takes short read locks; retry a
@@ -89,7 +90,7 @@ fn start_ui_snapshot_sync(
                                 svc.apply_external_snapshot(items);
                                 applied_worker.store(true, Ordering::Release);
                                 log_info(&format!(
-                                    "[nex] ui_snapshot_applied items={count} generation={generation}"
+                                    "[nex] ui_snapshot_applied items={count} generation={generation} instance={instance}"
                                 ));
                                 applied = true;
                                 break;
@@ -97,9 +98,9 @@ fn start_ui_snapshot_sync(
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
                         }
                     }
-                    applied.then_some((generation, true))
+                    applied.then_some((generation, instance, true))
                 }
-                SnapshotSync::Delta(generation, upserts, deleted) => {
+                SnapshotSync::Delta(generation, instance, upserts, deleted) => {
                     let upserts_n = upserts.len();
                     let deleted_n = deleted.len();
                     let mut outcome = None;
@@ -109,9 +110,9 @@ fn start_ui_snapshot_sync(
                                 let changed = svc.apply_external_delta(upserts, deleted);
                                 applied_worker.store(true, Ordering::Release);
                                 log_info(&format!(
-                                    "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation}"
+                                    "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation} instance={instance}"
                                 ));
-                                outcome = Some((generation, changed));
+                                outcome = Some((generation, instance, changed));
                                 break;
                             }
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -121,8 +122,9 @@ fn start_ui_snapshot_sync(
                 }
             };
 
-            if let Some((generation, changed)) = applied_generation {
+            if let Some((generation, instance, changed)) = applied_generation {
                 last_generation = generation;
+                last_instance = instance;
                 // A changed item set invalidates the prefix cache. Re-warm it
                 // off-thread: the first apply covers startup, later ones only
                 // while the overlay is visible, so hidden idle churn is free.
@@ -158,22 +160,25 @@ fn start_ui_snapshot_sync(
 enum SnapshotSync {
     /// Nothing changed (or a rebuild is in flight); keep the last generation.
     Unchanged,
-    Full(u64, Vec<crate::model::SearchItem>),
-    Delta(u64, Vec<crate::model::SearchItem>, Vec<String>),
+    Full(u64, u64, Vec<crate::model::SearchItem>),
+    Delta(u64, u64, Vec<crate::model::SearchItem>, Vec<String>),
     Unreachable,
 }
 
-/// One request per poll: the indexer reports whether the generation moved and
-/// ships items only when it did. Replaces the old status+snapshot pair, which
-/// opened two connections and always transferred the full store.
+/// One request per poll: the indexer reports whether the changelog moved and
+/// ships items only when it did. The instance id distinguishes an indexer
+/// restart from a sequence gap.
 #[cfg(target_os = "windows")]
-fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
+fn sync_indexer_snapshot(known_generation: u64, known_instance: u64) -> SnapshotSync {
     use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
     use serde_json::{json, Value};
 
     let response = match ipc_call(
         INDEXER_ADDR,
-        &IpcRequest::new("sync", json!({ "generation": known_generation })),
+        &IpcRequest::new(
+            "sync",
+            json!({ "generation": known_generation, "instance": known_instance }),
+        ),
     ) {
         Ok(response) if response.ok => response,
         _ => return SnapshotSync::Unreachable,
@@ -195,6 +200,10 @@ fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
     let Some(generation) = result.get("generation").and_then(Value::as_u64) else {
         return SnapshotSync::Unchanged;
     };
+    let instance = result
+        .get("instance")
+        .and_then(Value::as_u64)
+        .unwrap_or(known_instance);
     if let Some(delta) = result.get("delta") {
         let upserts = delta
             .get("upserts")
@@ -211,12 +220,12 @@ fn sync_indexer_snapshot(known_generation: u64) -> SnapshotSync {
                     .collect()
             })
             .unwrap_or_default();
-        return SnapshotSync::Delta(generation, upserts, deleted);
+        return SnapshotSync::Delta(generation, instance, upserts, deleted);
     }
     let Some(items) = result.get("items").and_then(Value::as_array) else {
         return SnapshotSync::Unchanged;
     };
-    SnapshotSync::Full(generation, items_from_values(items))
+    SnapshotSync::Full(generation, instance, items_from_values(items))
 }
 
 #[cfg(target_os = "windows")]

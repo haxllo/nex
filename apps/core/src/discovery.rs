@@ -19,6 +19,7 @@ pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "appdata",
 ];
 pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
+    "appdata",
     "node_modules",
     ".git",
     ".venv",
@@ -1306,6 +1307,10 @@ fn builtin_exclusion_roots() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let mut roots = Vec::new();
+
+        // The app's own data holds the SQLite store and Tantivy segments, which
+        // change on every write. Indexing them feeds the watcher and the prune.
+        roots.push(crate::config::stable_app_data_dir());
 
         if let Ok(system_drive) = std::env::var("SystemDrive") {
             let trimmed = system_drive.trim();

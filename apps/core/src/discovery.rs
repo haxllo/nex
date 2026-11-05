@@ -17,6 +17,7 @@ pub(crate) const TOP_LEVEL_EXCLUDED_DIR_NAMES: &[&str] = &[
     "program files (x86)",
     "$recycle.bin",
     "system volume information",
+    "$extend",
     "appdata",
 ];
 pub(crate) const ANY_DEPTH_EXCLUDED_DIR_NAMES: &[&str] = &[
@@ -111,6 +112,14 @@ impl Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+pub struct IncrementalUpdate {
+    pub upserts: Vec<SearchItem>,
+    pub deleted_ids: Vec<String>,
+    /// `(volume letter, journal id, next usn)` to persist after the caller has
+    /// applied the update, so a failed apply never advances the journal.
+    pub states: Vec<(char, u64, i64)>,
+}
+
 pub trait DiscoveryProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
     fn discover(&self) -> Result<Vec<SearchItem>, ProviderError>;
@@ -119,6 +128,11 @@ pub trait DiscoveryProvider: Send + Sync {
         _on_item_discovered: Option<&mut dyn FnMut(usize)>,
     ) -> Result<Vec<SearchItem>, ProviderError> {
         self.discover()
+    }
+    /// Optional incremental pass. `Some` means the caller applies the update
+    /// and skips `discover()`/prune for this cycle.
+    fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
+        None
     }
     fn change_stamp(&self) -> Option<String> {
         None
@@ -414,6 +428,17 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
 impl DiscoveryProvider for FileSystemDiscoveryProvider {
     fn provider_name(&self) -> &'static str {
         "filesystem"
+    }
+
+    fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
+        #[cfg(target_os = "windows")]
+        {
+            return mft_incremental(self);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
     }
 
     fn discover(&self) -> Result<Vec<SearchItem>, ProviderError> {
@@ -806,6 +831,8 @@ fn try_mft_root(
     };
 
     let started = Instant::now();
+    // This slice always asks for a full snapshot; the delta path lands next.
+    crate::mft_discovery::write_full_request(letter);
     let snapshot = match crate::mft_discovery::fetch_snapshot(letter, timeout_ms) {
         Ok(snapshot) => {
             if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
@@ -824,6 +851,13 @@ fn try_mft_root(
             return false;
         }
     };
+    if !snapshot.delta {
+        crate::mft_discovery::write_processed_state(
+            letter,
+            snapshot.journal_id,
+            snapshot.next_usn,
+        );
+    }
 
     let mut entries = crate::mft_discovery::paths_under_root(&snapshot, letter, root);
     // Shallowest first, matching the walk's breadth-first budget behaviour.
@@ -863,8 +897,9 @@ fn try_mft_root(
     }
 
     crate::logging::info(&format!(
-        "[nex] discovery_mft root={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
+        "[nex] discovery_mft root={} mode={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
         root.display(),
+        if snapshot.delta { "delta" } else { "full" },
         snapshot.records.len(),
         matched,
         kept,
@@ -881,6 +916,184 @@ fn try_mft_root(
         ));
     }
     true
+}
+
+const FILE_RENAME_OLD_NAME: u32 = 0x0000_0001;
+const FILE_DELETE: u32 = 0x0000_0200;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+
+fn path_under_root(path: &Path, root: &Path) -> bool {
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    let root = root.to_string_lossy().to_ascii_lowercase();
+    if path == root || !path.starts_with(&root) {
+        return false;
+    }
+    if root.ends_with('\\') || root.ends_with('/') {
+        return true;
+    }
+    matches!(path.as_bytes().get(root.len()), Some(b'\\') | Some(b'/'))
+}
+
+/// USN delta pass. `None` means a full pass is required: no saved journal
+/// position, helper unavailable, journal invalid/rolled, directory changes,
+/// or an unresolvable path. Non-delete records upsert; delete and rename-old
+/// records remove the old path.
+#[cfg(target_os = "windows")]
+fn mft_incremental(
+    provider: &FileSystemDiscoveryProvider,
+) -> Option<Result<IncrementalUpdate, ProviderError>> {
+    use crate::mft_discovery;
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The helper starts asynchronously with the UI; the first delta attempt
+    // waits for its pipe, later volumes reuse the same session.
+    static FIRST_ATTEMPT: AtomicBool = AtomicBool::new(true);
+    let timeout_ms = if FIRST_ATTEMPT.swap(false, Ordering::Relaxed) {
+        6000
+    } else {
+        1500
+    };
+
+    if !mft_backend_enabled() || provider.roots.is_empty() {
+        return None;
+    }
+    let policy = DiscoveryExclusionPolicy::new(&provider.excluded_roots);
+    let mut roots_by_volume: BTreeMap<char, Vec<&Path>> = BTreeMap::new();
+    for root in &provider.roots {
+        let letter = mft_discovery::root_volume_letter(root)?;
+        if !mft_discovery::is_fixed_volume(letter) || !mft_discovery::is_ntfs_volume(letter) {
+            return None;
+        }
+        roots_by_volume
+            .entry(letter)
+            .or_default()
+            .push(root.as_path());
+    }
+
+    let mut upserts = Vec::new();
+    let mut deleted = Vec::new();
+    let mut seen_upserts: HashSet<String> = HashSet::new();
+    let mut seen_deletes: HashSet<String> = HashSet::new();
+    let mut states = Vec::new();
+    let mut skipped_unresolved = 0usize;
+    let started = std::time::Instant::now();
+
+    for (letter, roots) in roots_by_volume {
+        let Some((journal_id, start_usn)) = mft_discovery::read_processed_state(letter) else {
+            crate::logging::info(&format!(
+                "[nex] discovery_delta volume={letter} skip=no_saved_position"
+            ));
+            return Some(Err(ProviderError::new(
+                "MFT delta needs a saved journal position; running a full pass",
+            )));
+        };
+        mft_discovery::write_delta_request(letter, journal_id, start_usn);
+        let snapshot = match mft_discovery::fetch_snapshot(letter, timeout_ms) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::logging::info(&format!(
+                    "[nex] discovery_delta volume={letter} skip=pipe_unavailable: {error}"
+                ));
+                return Some(Err(ProviderError::new(
+                    "MFT delta pipe unavailable; running a full pass",
+                )));
+            }
+        };
+        if !snapshot.delta {
+            crate::logging::info(&format!(
+                "[nex] discovery_delta volume={letter} skip=journal_invalid"
+            ));
+            return Some(Err(ProviderError::new(
+                "MFT journal invalid; running a full pass",
+            )));
+        }
+        for record in &snapshot.records {
+            let Some(path_text) = record.path.as_deref() else {
+                // Protected/orphaned parents cannot be resolved by file id.
+                // Ignore them: the stale pruner and periodic full pass cover
+                // any rare miss under a root.
+                skipped_unresolved += 1;
+                continue;
+            };
+            let path = PathBuf::from(path_text);
+            let Some(root) = roots
+                .iter()
+                .copied()
+                .find(|root| path_under_root(&path, *root))
+            else {
+                continue;
+            };
+            if provider.max_depth != 0
+                && path
+                    .components()
+                    .count()
+                    .saturating_sub(root.components().count())
+                    > provider.max_depth
+            {
+                continue;
+            }
+            if policy.should_exclude_entry_under_root(
+                &path,
+                root,
+                record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            ) {
+                continue;
+            }
+            if record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                // A directory create/rename/delete moves whole subtrees.
+                crate::logging::info(&format!(
+                    "[nex] discovery_delta volume={letter} skip=directory_change path={}",
+                    path.display()
+                ));
+                return Some(Err(ProviderError::new(
+                    "MFT delta includes a directory change; running a full pass",
+                )));
+            }
+            let lower = path.to_string_lossy().to_ascii_lowercase();
+            let id = format!("file:{lower}");
+            if record.reason & (FILE_DELETE | FILE_RENAME_OLD_NAME) != 0 {
+                if seen_deletes.insert(id.clone()) {
+                    deleted.push(id);
+                }
+                continue;
+            }
+            if !provider.show_files || !path.exists() {
+                continue;
+            }
+            if seen_upserts.insert(id.clone()) {
+                let title = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                upserts.push(SearchItem::new(
+                    &id,
+                    "file",
+                    &title,
+                    &path.to_string_lossy(),
+                ));
+            }
+        }
+        states.push((letter, snapshot.journal_id, snapshot.next_usn));
+    }
+
+    // A path recreated in the same batch must survive its delete.
+    deleted.retain(|id| !seen_upserts.contains(id));
+    // Unresolved records are transient/inaccessible entries (deleted between
+    // the journal write and the read, or protected parents). They are not
+    // actionable here; the stale pruner and the periodic full pass reconcile.
+    crate::logging::info(&format!(
+        "[nex] discovery_delta provider=filesystem upserts={} deletes={} unresolved={} elapsed_ms={}",
+        upserts.len(),
+        deleted.len(),
+        skipped_unresolved,
+        started.elapsed().as_millis()
+    ));
+    Some(Ok(IncrementalUpdate {
+        upserts,
+        deleted_ids: deleted,
+        states,
+    }))
 }
 
 /// Uncapped raw entry counts for one discovery root, using discovery's

@@ -961,14 +961,23 @@ fn mft_incremental(
     let policy = DiscoveryExclusionPolicy::new(&provider.excluded_roots);
     let mut roots_by_volume: BTreeMap<char, Vec<&Path>> = BTreeMap::new();
     for root in &provider.roots {
-        let letter = mft_discovery::root_volume_letter(root)?;
+        // Non-NTFS roots (FAT32/exFAT/network) have no USN journal. They are
+        // covered by the full pass after a root-set change and by the file
+        // watchers; one of them must never disable the delta for the NTFS
+        // roots alongside it.
+        let Some(letter) = mft_discovery::root_volume_letter(root) else {
+            continue;
+        };
         if !mft_discovery::is_fixed_volume(letter) || !mft_discovery::is_ntfs_volume(letter) {
-            return None;
+            continue;
         }
         roots_by_volume
             .entry(letter)
             .or_default()
             .push(root.as_path());
+    }
+    if roots_by_volume.is_empty() {
+        return None;
     }
 
     let mut upserts = Vec::new();

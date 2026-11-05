@@ -248,6 +248,29 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchItem> {
     ))
 }
 
+/// Ids owned by the given kinds, for provider-scoped stale pruning.
+pub fn list_item_ids_for_kinds(
+    db: &Connection,
+    kinds: &[&str],
+) -> Result<Vec<String>, StoreError> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(kinds.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut stmt = db.prepare(&format!(
+        "SELECT id FROM item WHERE kind IN ({placeholders})"
+    ))?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(kinds.iter().copied()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(row.get(0)?);
+    }
+    Ok(out)
+}
+
 /// All apps plus the highest-use/most-recent non-app rows, capped at `limit`.
 /// Matches `core_service::bounded_ui_items` without reading the full store.
 pub fn list_hot_items(db: &Connection, limit: usize) -> Result<Vec<SearchItem>, StoreError> {
@@ -938,6 +961,23 @@ mod tests {
         assert_eq!(count_items(&db).unwrap(), 1);
         assert!(get_item(&db, &a.id).unwrap().is_none());
         assert!(get_item(&db, &b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn list_item_ids_for_kinds_filters_and_handles_empty() {
+        let db = open_memory().unwrap();
+        upsert_item(&db, &SearchItem::new("app1", "app", "App", "C:\\app.exe")).unwrap();
+        upsert_item(&db, &SearchItem::new("file1", "file", "File", "C:\\file.txt")).unwrap();
+        upsert_item(&db, &SearchItem::new("folder1", "folder", "Folder", "C:\\folder"))
+            .unwrap();
+        let mut files = list_item_ids_for_kinds(&db, &["file", "folder"]).unwrap();
+        files.sort();
+        assert_eq!(files, vec!["file1".to_string(), "folder1".to_string()]);
+        assert_eq!(
+            list_item_ids_for_kinds(&db, &["app"]).unwrap(),
+            vec!["app1".to_string()]
+        );
+        assert!(list_item_ids_for_kinds(&db, &[]).unwrap().is_empty());
     }
 
     #[test]

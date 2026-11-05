@@ -284,18 +284,18 @@ fn dispatch(
                 crate::core_service::PublishOutcome::Snapshot {
                     generation,
                     instance,
-                } => {
-                    let snapshot = service.with_cached_items(|current| {
-                        crate::core_service::bounded_ui_items(current)
-                    });
-                    IpcResponse::ok(json!({
+                } => match service.hot_snapshot_items() {
+                    Ok(items) => IpcResponse::ok(json!({
                         "generation": generation,
                         "instance": instance,
                         "changed": true,
                         "indexing": false,
-                        "items": items_to_values(&snapshot),
-                    }))
-                }
+                        "items": items_to_values(&items),
+                    })),
+                    Err(error) => {
+                        IpcResponse::error(format!("snapshot failed: {error}"))
+                    }
+                },
             }
         }
         // Writes the UI must not perform itself: the indexer owns the store.

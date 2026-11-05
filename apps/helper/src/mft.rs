@@ -53,7 +53,7 @@ const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
 const PIPE_READMODE_BYTE: u32 = 0x0000_0000;
 const PIPE_WAIT: u32 = 0x0000_0000;
 const HEADER_MAGIC: &[u8; 4] = b"NXMF";
-const PROTOCOL_VERSION: u16 = 2;
+const PROTOCOL_VERSION: u16 = 3;
 const HEADER_LEN: usize = 32;
 const RECORD_PREFIX_LEN: usize = 36;
 const ENUM_BUFFER_BYTES: usize = 1 << 20;
@@ -353,6 +353,16 @@ fn stream_volume(
     result
 }
 
+struct FullEntry {
+    frn: u64,
+    parent: u64,
+    attributes: u32,
+    timestamp: i64,
+    name: String,
+}
+
+/// Full snapshots resolve paths here so the indexer can stream records
+/// instead of rebuilding a parent map (that map was the 1.8M-item peak).
 fn stream_full(
     handle: HANDLE,
     letter: char,
@@ -360,6 +370,9 @@ fn stream_full(
     writer: &mut impl Write,
     stats: &mut StreamStats,
 ) -> Result<i64, String> {
+    let mut entries: Vec<FullEntry> = Vec::with_capacity(1_200_000);
+    let mut index: std::collections::HashMap<u64, usize> =
+        std::collections::HashMap::with_capacity(1_200_000);
     let mut input = MftEnumDataV0 {
         start_file_reference_number: 0,
         low_usn: 0,
@@ -413,9 +426,15 @@ fn stream_full(
             let name_len = u16::from_le_bytes(record[56..58].try_into().unwrap()) as usize;
             let name_off = u16::from_le_bytes(record[58..60].try_into().unwrap()) as usize;
             if let Some(name) = record_name(record, record_len, name_off, name_len) {
-                write_record(
-                    writer, frn, parent, attributes, timestamp, 0, &name, None, stats,
-                )?;
+                let idx = entries.len();
+                entries.push(FullEntry {
+                    frn,
+                    parent,
+                    attributes,
+                    timestamp,
+                    name,
+                });
+                index.insert(frn, idx);
             } else {
                 stats.skipped += 1;
             }
@@ -426,8 +445,63 @@ fn stream_full(
         }
         input.start_file_reference_number = next_frn;
     }
-    let _ = letter;
+
+    let root = format!("{letter}:\\");
+    let mut dir_paths: std::collections::HashMap<u64, Option<String>> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        let is_dir = entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let path = if is_dir {
+            resolve_full_dir(entry.frn, &index, &entries, &mut dir_paths, &root, 0)
+        } else {
+            resolve_full_dir(entry.parent, &index, &entries, &mut dir_paths, &root, 0)
+                .map(|parent| join_path(&parent, &entry.name))
+        };
+        let Some(path) = path else {
+            stats.skipped += 1;
+            continue;
+        };
+        write_record(
+            writer,
+            entry.frn,
+            entry.parent,
+            entry.attributes,
+            entry.timestamp,
+            0,
+            &entry.name,
+            Some(&path),
+            stats,
+        )?;
+    }
     Ok(high_usn)
+}
+
+/// Resolve a directory path from the enumerated table. Only directories are
+/// memoized, so the map stays proportional to the folder count.
+fn resolve_full_dir(
+    frn: u64,
+    index: &std::collections::HashMap<u64, usize>,
+    entries: &[FullEntry],
+    memo: &mut std::collections::HashMap<u64, Option<String>>,
+    root: &str,
+    depth: usize,
+) -> Option<String> {
+    if (frn & FRN_RECORD_MASK) == ROOT_RECORD_NUMBER {
+        return Some(root.to_string());
+    }
+    if let Some(cached) = memo.get(&frn) {
+        return cached.clone();
+    }
+    if depth > 256 {
+        return None;
+    }
+    let resolved = index.get(&frn).and_then(|&idx| {
+        let entry = &entries[idx];
+        resolve_full_dir(entry.parent, index, entries, memo, root, depth + 1)
+            .map(|parent| join_path(&parent, &entry.name))
+    });
+    memo.insert(frn, resolved.clone());
+    resolved
 }
 
 fn stream_deltas(

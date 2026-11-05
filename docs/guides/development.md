@@ -238,7 +238,7 @@ Modules marked `#[cfg(target_os = "windows")]` in `lib.rs`:
 | `overlay` | WebView2 overlay (tao + wry window, hotkey, tray, icons, indexing progress) |
 | `runtime_loop` | Windows message pump for background runtime |
 | `runtime_overlay_rows` | Overlay result rendering logic |
-| `everything_bridge` | Integration with Everything SDK for instant file search |
+| `everything_bridge` | Legacy Everything SDK opt-in (native discovery is the default) |
 | `file_watcher` | NTFS file change notifications |
 | `file_watcher_consumer` | File change event consumer |
 | `console_signal` | Console event handler |

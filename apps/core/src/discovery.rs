@@ -380,6 +380,9 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
         let backend = match requested {
             crate::config::DiscoveryBackend::Walkdir => FileBackend::Walkdir,
             crate::config::DiscoveryBackend::Everything => {
+                crate::logging::warn(
+                    "[nex] file_discovery_backend=everything is deprecated; use \"auto\" for native discovery (the Everything backend will be removed in a future release)",
+                );
                 match crate::everything_bridge::EverythingBridge::detect() {
                     Some(bridge) if bridge.is_service_running() => {
                         FileBackend::Everything(bridge)
@@ -399,18 +402,13 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
                 }
             }
             crate::config::DiscoveryBackend::Auto => {
-                match crate::everything_bridge::EverythingBridge::detect() {
-                    Some(bridge) if bridge.is_service_running() => {
-                        FileBackend::Everything(bridge)
-                    }
-                    Some(_) => {
-                        crate::logging::info(
-                            "[nex] Everything SDK present but service not running; using walkdir (start Everything.exe to use the SDK backend)",
-                        );
-                        FileBackend::Walkdir
-                    }
-                    None => FileBackend::Walkdir,
-                }
+                // Auto is native: the filesystem provider uses the NTFS MFT
+                // snapshot when the per-root cap allows and walkdir otherwise.
+                // Everything is opt-in only.
+                crate::logging::info(
+                    "[nex] file_discovery_backend=auto uses native discovery (MFT for NTFS, walkdir otherwise)",
+                );
+                FileBackend::Walkdir
             }
         };
         if matches!(backend, FileBackend::Everything(_)) {
@@ -422,6 +420,19 @@ fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBacke
     {
         let _ = requested;
         FileBackend::Walkdir
+    }
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+
+    #[test]
+    fn auto_uses_native_not_everything() {
+        assert!(matches!(
+            resolve_file_backend(crate::config::DiscoveryBackend::Auto),
+            FileBackend::Walkdir
+        ));
     }
 }
 

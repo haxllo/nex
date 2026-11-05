@@ -286,9 +286,9 @@ The overlay uses a **WS_POPUP** window hosting a **WebView2** control via `tao +
 ### Discovery Providers
 
 1. **StartMenuAppDiscoveryProvider**: Enumerates Windows Start Menu shortcuts (`shell:AppsFolder`, `%ProgramData%\Microsoft\Windows\Start Menu`, `%AppData%\Microsoft\Windows\Start Menu`).
-2. **FileSystemDiscoveryProvider**: Walks configured `discovery_roots` using either:
-   - **walkdir**: Pure Rust recursive directory traversal.
-   - **Everything SDK** (via IPC): Queries the Voidtools Everything service for near-instant file enumeration.
+2. **FileSystemDiscoveryProvider**: Walks configured `discovery_roots` using:
+   - **Native (default)**: MFT snapshot for NTFS roots when the per-root cap allows, walkdir + `ReadDirectoryChangesW` otherwise.
+   - **Everything SDK** (legacy opt-in): Queries the Voidtools Everything service; deprecated.
 
 Both apply exclusion policies (well-known dirs like `node_modules`, `.git`, `appdata`, system dirs).
 

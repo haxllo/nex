@@ -6,6 +6,7 @@
 //! runs discovery, so the two processes cannot race on index files.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,6 +140,16 @@ pub fn bind_indexer_listener(addr: &str) -> Option<TcpListener> {
     }
 }
 
+/// What the last sync handed to the UI. A compact content index (id -> hash)
+/// is enough to report creates, renames, and deletes without keeping a second
+/// copy of the item set.
+struct PublishedSet {
+    generation: u64,
+    index: HashMap<String, u64>,
+}
+
+const MAX_SYNC_DELTA_ENTRIES: usize = 512;
+
 /// Serve requests until the process exits.
 pub fn serve_indexer(
     listener: TcpListener,
@@ -147,7 +158,7 @@ pub fn serve_indexer(
 ) {
     crate::logging::info(&format!("[nex-ipc] listening on {INDEXER_ADDR}"));
     // Last item set handed to a poll, so a later sync can send a delta.
-    let published: Arc<Mutex<Option<(u64, Vec<SearchItem>)>>> = Arc::new(Mutex::new(None));
+    let published: Arc<Mutex<Option<PublishedSet>>> = Arc::new(Mutex::new(None));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -165,7 +176,7 @@ fn handle_connection(
     mut stream: TcpStream,
     service: Arc<RwLock<CoreService>>,
     indexing: Arc<AtomicBool>,
-    published: Arc<Mutex<Option<(u64, Vec<SearchItem>)>>>,
+    published: Arc<Mutex<Option<PublishedSet>>>,
 ) {
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(clone) => clone,
@@ -199,7 +210,7 @@ fn dispatch(
     request: &IpcRequest,
     service: &Arc<RwLock<CoreService>>,
     indexing: &AtomicBool,
-    published: &Mutex<Option<(u64, Vec<SearchItem>)>>,
+    published: &Mutex<Option<PublishedSet>>,
 ) -> IpcResponse {
     match request.method.as_str() {
         "ping" => IpcResponse::ok(json!({ "version": PROTOCOL_VERSION })),
@@ -247,51 +258,74 @@ fn dispatch(
             let indexing = indexing.load(Ordering::Acquire);
             // While a rebuild runs the cache is mid-refresh: echo the caller's
             // generation so it does not advance past an item set it never saw.
-            if generation == known || indexing {
+            if indexing {
                 return IpcResponse::ok(json!({
-                    "generation": if indexing { known } else { generation },
+                    "generation": known,
                     "changed": false,
-                    "indexing": indexing,
+                    "indexing": true,
                 }));
             }
-            let items = match service.all_items_snapshot() {
-                Ok(items) => items,
-                Err(error) => return IpcResponse::error(format!("snapshot failed: {error}")),
-            };
-            drop(service); // diffing/serializing does not need the service lock
 
             let mut published = published.lock().unwrap_or_else(|e| e.into_inner());
-            let response = match published.as_ref() {
-                // Delta only when the caller's set is exactly the one we
-                // published last; a missed generation needs a full snapshot.
-                Some((published_generation, previous)) if *published_generation == known => {
-                    match build_item_delta(previous, &items) {
-                        Some((upserts, deleted)) => json!({
-                            "generation": generation,
-                            "changed": true,
-                            "indexing": false,
-                            "delta": {
-                                "upserts": items_to_values(&upserts),
-                                "deleted": deleted,
-                            },
-                        }),
-                        None => json!({
-                            "generation": generation,
-                            "changed": true,
-                            "indexing": false,
-                            "items": items_to_values(&items),
-                        }),
-                    }
-                }
-                _ => json!({
+            if !matches!(published.as_ref(), Some(state) if state.generation == known) {
+                // First sync, a reconnected caller, or a missed generation.
+                let items = service.with_cached_items(|current| current.to_vec());
+                let index = build_item_index(&items);
+                *published = Some(PublishedSet { generation, index });
+                return IpcResponse::ok(json!({
                     "generation": generation,
                     "changed": true,
                     "indexing": false,
                     "items": items_to_values(&items),
-                }),
+                }));
+            }
+
+            // Diff the live set against the compact index. Unchanged items are
+            // never cloned, and an unchanged set allocates nothing.
+            let (upserts, deleted) = {
+                let state = published.as_mut().expect("checked above");
+                service.with_cached_items(|current| apply_item_delta(&mut state.index, current))
             };
-            *published = Some((generation, items));
-            IpcResponse::ok(response)
+            if upserts.is_empty() && deleted.is_empty() {
+                // Echo the caller's generation: the next poll takes the same
+                // path and stays allocation-free.
+                return IpcResponse::ok(json!({
+                    "generation": known,
+                    "changed": false,
+                    "indexing": false,
+                }));
+            }
+
+            let state = published.as_mut().expect("checked above");
+            let current_len = state.index.len();
+            let upserts_n = upserts.len();
+            let deleted_n = deleted.len();
+            // Replacing most of the set is cheaper as one snapshot than as a
+            // huge delta.
+            if upserts_n > MAX_SYNC_DELTA_ENTRIES
+                || deleted_n > MAX_SYNC_DELTA_ENTRIES
+                || (upserts_n + deleted_n) * 4 > current_len.max(1)
+            {
+                let items = service.with_cached_items(|current| current.to_vec());
+                state.index = build_item_index(&items);
+                state.generation = generation;
+                return IpcResponse::ok(json!({
+                    "generation": generation,
+                    "changed": true,
+                    "indexing": false,
+                    "items": items_to_values(&items),
+                }));
+            }
+            state.generation = generation;
+            IpcResponse::ok(json!({
+                "generation": generation,
+                "changed": true,
+                "indexing": false,
+                "delta": {
+                    "upserts": items_to_values(&upserts),
+                    "deleted": deleted,
+                },
+            }))
         }
         // Writes the UI must not perform itself: the indexer owns the store.
         "record_launch" => {
@@ -373,40 +407,50 @@ fn dispatch(
     }
 }
 
-/// Compute small upserts/deletes between the previously published set and the
-/// current one. Returns None when the change is large enough that a full
-/// snapshot is cheaper than a delta.
-fn build_item_delta(
-    previous: &[SearchItem],
+/// Content hash of everything the UI needs from an item. Any create, rename,
+/// path change, or usage-count change produces a different hash.
+fn hash_item(item: &SearchItem) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    item.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn build_item_index(items: &[SearchItem]) -> HashMap<String, u64> {
+    items
+        .iter()
+        .map(|item| (item.id.clone(), hash_item(item)))
+        .collect()
+}
+
+/// Update `index` to match `current`, returning changed items and deleted ids.
+/// Unchanged items are never cloned, so an idle poll allocates nothing.
+fn apply_item_delta(
+    index: &mut HashMap<String, u64>,
     current: &[SearchItem],
-) -> Option<(Vec<SearchItem>, Vec<String>)> {
-    const MAX_DELTA_ENTRIES: usize = 512;
-
-    let previous_by_id: HashMap<&str, &SearchItem> =
-        previous.iter().map(|item| (item.id.as_str(), item)).collect();
-    let current_ids: HashSet<&str> = current.iter().map(|item| item.id.as_str()).collect();
-
+) -> (Vec<SearchItem>, Vec<String>) {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(current.len());
     let mut upserts = Vec::new();
     for item in current {
-        match previous_by_id.get(item.id.as_str()) {
-            Some(old) if *old == item => {}
-            _ => upserts.push(item.clone()),
+        seen.insert(item.id.as_str());
+        let hash = hash_item(item);
+        match index.get(item.id.as_str()) {
+            Some(&known) if known == hash => {}
+            _ => {
+                upserts.push(item.clone());
+                index.insert(item.id.clone(), hash);
+            }
         }
     }
-    let deleted: Vec<String> = previous
-        .iter()
-        .filter(|item| !current_ids.contains(item.id.as_str()))
-        .map(|item| item.id.clone())
-        .collect();
-
-    if upserts.len() > MAX_DELTA_ENTRIES || deleted.len() > MAX_DELTA_ENTRIES {
-        return None;
-    }
-    // Replacing most of the set costs more than a full snapshot.
-    if (upserts.len() + deleted.len()) * 4 > current.len() {
-        return None;
-    }
-    Some((upserts, deleted))
+    let mut deleted = Vec::new();
+    index.retain(|id, _| {
+        if seen.contains(id.as_str()) {
+            true
+        } else {
+            deleted.push(id.clone());
+            false
+        }
+    });
+    (upserts, deleted)
 }
 
 fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Result<()> {
@@ -576,35 +620,55 @@ mod tests {
     }
 
     #[test]
-    fn delta_lists_upserts_and_deletes() {
+    fn delta_detects_create_change_delete_and_rename() {
         // A delta only wins when it is small relative to the published set, so
         // the fixture needs a set big enough for the 4x threshold.
         let previous: Vec<SearchItem> = (0..20)
-            .map(|i| SearchItem::new(&format!("id{i}"), "app", "Item", r"C:\item.exe"))
+            .map(|i| SearchItem::new(&format!("id{i}"), "file", "Item", r"C:\item.txt"))
             .collect();
+        let mut index = build_item_index(&previous);
+
         let mut current = previous.clone();
-        current[0] = SearchItem::new("id0", "app", "Changed", r"C:\item.exe");
-        current.push(SearchItem::new("new", "app", "New", r"C:\new.exe"));
+        // Rename in place: same id, new title and path.
+        current[0] = SearchItem::new("id0", "file", "Renamed", r"C:\renamed.txt");
+        // Create.
+        current.push(SearchItem::new("new", "file", "New", r"C:\new.txt"));
+        // Delete.
         current.retain(|item| item.id != "id5");
 
-        let (upserts, deleted) =
-            build_item_delta(&previous, &current).expect("small change should be a delta");
+        let (upserts, deleted) = apply_item_delta(&mut index, &current);
         let ids: Vec<&str> = upserts.iter().map(|item| item.id.as_str()).collect();
-        assert!(ids.contains(&"id0"), "changed item is an upsert");
-        assert!(ids.contains(&"new"), "new item is an upsert");
+        assert!(ids.contains(&"id0"), "rename is an upsert");
+        assert!(ids.contains(&"new"), "create is an upsert");
         assert!(!ids.contains(&"id1"), "unchanged item is not resent");
         assert_eq!(deleted, vec!["id5".to_string()]);
-        assert!(upserts.len() + deleted.len() <= 3);
+        assert_eq!(index.len(), current.len());
+
+        // The same set again is empty: idle polls do not churn.
+        let (again, deleted_again) = apply_item_delta(&mut index, &current);
+        assert!(again.is_empty());
+        assert!(deleted_again.is_empty());
     }
 
     #[test]
-    fn delta_falls_back_to_full_for_large_changes() {
-        let previous: Vec<SearchItem> = (0..100)
-            .map(|i| SearchItem::new(&format!("old{i}"), "app", "Old", "C:\\old.exe"))
-            .collect();
-        let current: Vec<SearchItem> = (0..100)
-            .map(|i| SearchItem::new(&format!("new{i}"), "app", "New", "C:\\new.exe"))
-            .collect();
-        assert!(build_item_delta(&previous, &current).is_none());
+    fn rename_with_a_new_id_deletes_the_old_one() {
+        let old = SearchItem::new(r"file:c:\old.txt", "file", "old.txt", r"C:\old.txt");
+        let new = SearchItem::new(r"file:c:\new.txt", "file", "new.txt", r"C:\new.txt");
+        let mut index = build_item_index(std::slice::from_ref(&old));
+
+        let (upserts, deleted) = apply_item_delta(&mut index, std::slice::from_ref(&new));
+        assert_eq!(upserts.len(), 1);
+        assert_eq!(upserts[0].id, new.id);
+        assert_eq!(deleted, vec![old.id.clone()]);
+        assert_eq!(index.len(), 1);
+        assert!(index.contains_key(new.id.as_str()));
+        assert!(!index.contains_key(old.id.as_str()));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_the_path_changes() {
+        let before = SearchItem::new("file:c:\\a.txt", "file", "a.txt", r"C:\a.txt");
+        let after = SearchItem::new("file:c:\\a.txt", "file", "a.txt", r"C:\moved\a.txt");
+        assert_ne!(hash_item(&before), hash_item(&after));
     }
 }

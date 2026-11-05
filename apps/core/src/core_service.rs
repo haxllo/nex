@@ -1224,14 +1224,26 @@ impl CoreService {
                 match result {
                     Ok(update) => {
                         let upserted = update.upserts.len();
-                        let removed = update.deleted_ids.len();
+                        let mut removed_ids = update.deleted_ids.clone();
                         for chunk in update.deleted_ids.chunks(STORE_WRITE_BATCH_SIZE) {
                             index_store::delete_items(&*self.db(), chunk)?;
+                        }
+                        for prefix in &update.deleted_prefixes {
+                            removed_ids.extend(index_store::delete_items_under_prefix(
+                                &*self.db(),
+                                prefix,
+                            )?);
+                        }
+                        // Delta deletes must reach the search backends too;
+                        // otherwise the Tantivy index keeps serving them.
+                        for id in &removed_ids {
+                            self.remove_item_from_backends(id);
                         }
                         for chunk in update.upserts.chunks(STORE_WRITE_BATCH_SIZE) {
                             index_store::upsert_items(&*self.db(), chunk)?;
                         }
-                        self.record_publish(&update.upserts, &update.deleted_ids);
+                        let removed = removed_ids.len();
+                        self.record_publish(&update.upserts, &removed_ids);
                         // Advance the journal only after every write landed.
                         #[cfg(target_os = "windows")]
                         for (letter, journal_id, next_usn) in &update.states {

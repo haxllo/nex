@@ -806,6 +806,8 @@ fn try_mft_root(
     };
 
     let started = Instant::now();
+    // This slice always asks for a full snapshot; the delta path lands next.
+    crate::mft_discovery::write_full_request(letter);
     let snapshot = match crate::mft_discovery::fetch_snapshot(letter, timeout_ms) {
         Ok(snapshot) => {
             if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
@@ -824,6 +826,13 @@ fn try_mft_root(
             return false;
         }
     };
+    if !snapshot.delta {
+        crate::mft_discovery::write_processed_state(
+            letter,
+            snapshot.journal_id,
+            snapshot.next_usn,
+        );
+    }
 
     let mut entries = crate::mft_discovery::paths_under_root(&snapshot, letter, root);
     // Shallowest first, matching the walk's breadth-first budget behaviour.
@@ -863,8 +872,9 @@ fn try_mft_root(
     }
 
     crate::logging::info(&format!(
-        "[nex] discovery_mft root={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
+        "[nex] discovery_mft root={} mode={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
         root.display(),
+        if snapshot.delta { "delta" } else { "full" },
         snapshot.records.len(),
         matched,
         kept,

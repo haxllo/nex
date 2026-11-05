@@ -20,23 +20,31 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
-const HEADER_LEN: usize = 24;
-const RECORD_PREFIX_LEN: usize = 30;
+const HEADER_LEN: usize = 32;
+const RECORD_PREFIX_LEN: usize = 36;
+const PROTOCOL_VERSION: u16 = 2;
+const DELTA_MODE: u8 = 1;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const ROOT_RECORD_NUMBER: u64 = 5;
 const FRN_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 const MAX_PARENT_DEPTH: usize = 256;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct MftRecord {
     pub frn: u64,
     pub parent: u64,
     pub attributes: u32,
+    pub reason: u32,
     pub name: String,
+    /// Helper-resolved full path (delta mode only).
+    pub path: Option<String>,
 }
 
 pub(crate) struct Snapshot {
+    pub delta: bool,
     pub journal_id: u64,
+    pub start_usn: i64,
     pub next_usn: i64,
     pub records: Vec<MftRecord>,
 }
@@ -135,11 +143,13 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
         return Err("snapshot header mismatch".to_string());
     }
     let version = u16::from_le_bytes([header[4], header[5]]);
-    if version != 1 {
+    if version != PROTOCOL_VERSION {
         return Err(format!("snapshot version {version} unsupported"));
     }
+    let delta = header[7] == DELTA_MODE;
     let journal_id = u64::from_le_bytes(header[8..16].try_into().unwrap());
-    let next_usn = i64::from_le_bytes(header[16..24].try_into().unwrap());
+    let start_usn = i64::from_le_bytes(header[16..24].try_into().unwrap());
+    let mut next_usn = i64::from_le_bytes(header[24..32].try_into().unwrap());
 
     let mut records = Vec::with_capacity(120_000);
     let mut prefix = [0u8; RECORD_PREFIX_LEN];
@@ -152,10 +162,23 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
         let frn = u64::from_le_bytes(prefix[0..8].try_into().unwrap());
         let parent = u64::from_le_bytes(prefix[8..16].try_into().unwrap());
         let attributes = u32::from_le_bytes(prefix[16..20].try_into().unwrap());
-        let name_len = u16::from_le_bytes([prefix[28], prefix[29]]) as usize;
+        let reason = u32::from_le_bytes(prefix[28..32].try_into().unwrap());
+        let name_len = u16::from_le_bytes([prefix[32], prefix[33]]) as usize;
+        let path_len = u16::from_le_bytes([prefix[34], prefix[35]]) as usize;
+        if frn == 0 && name_len == 0 && path_len == 0 && reason == u32::MAX {
+            // Trailer: final journal position.
+            let mut tail = [0u8; 8];
+            file.read_exact(&mut tail)
+                .map_err(|e| format!("read trailer: {e}"))?;
+            next_usn = i64::from_le_bytes(tail);
+            break;
+        }
         let mut name_bytes = vec![0u8; name_len];
         file.read_exact(&mut name_bytes)
             .map_err(|e| format!("read name: {e}"))?;
+        let mut path_bytes = vec![0u8; path_len];
+        file.read_exact(&mut path_bytes)
+            .map_err(|e| format!("read path: {e}"))?;
         let name = String::from_utf8_lossy(&name_bytes).into_owned();
         if name.is_empty() {
             continue;
@@ -164,12 +187,20 @@ pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, 
             frn,
             parent,
             attributes,
+            reason,
             name,
+            path: if path_len > 0 {
+                Some(String::from_utf8_lossy(&path_bytes).into_owned())
+            } else {
+                None
+            },
         });
     }
 
     Ok(Snapshot {
+        delta,
         journal_id,
+        start_usn,
         next_usn,
         records,
     })
@@ -254,6 +285,75 @@ fn resolve_path(
     resolved
 }
 
+fn nex_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(base).join("Nex"))
+}
+
+fn request_path(letter: char) -> Option<PathBuf> {
+    Some(nex_dir()?.join(format!("mft-{letter}.req")))
+}
+
+fn processed_path(letter: char) -> Option<PathBuf> {
+    Some(nex_dir()?.join(format!("mft-processed-{letter}.txt")))
+}
+
+/// Ask the helper for a full snapshot for this volume.
+pub(crate) fn write_full_request(letter: char) {
+    let Some(path) = request_path(letter) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, b"full\n");
+}
+
+/// Ask the helper for journal deltas from a saved position.
+#[allow(dead_code)]
+pub(crate) fn write_delta_request(letter: char, journal_id: u64, start_usn: i64) {
+    let Some(path) = request_path(letter) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        format!("journal_id={journal_id}\nstart_usn={start_usn}\n"),
+    );
+}
+
+/// Volume position after the last successful full snapshot or delta pass.
+#[allow(dead_code)]
+pub(crate) fn read_processed_state(letter: char) -> Option<(u64, i64)> {
+    let content = std::fs::read_to_string(processed_path(letter)?).ok()?;
+    let mut journal_id = None;
+    let mut next_usn = None;
+    for line in content.lines() {
+        let (key, value) = line.split_once('=')?;
+        match key.trim() {
+            "journal_id" => journal_id = value.trim().parse::<u64>().ok(),
+            "next_usn" => next_usn = value.trim().parse::<i64>().ok(),
+            _ => {}
+        }
+    }
+    Some((journal_id?, next_usn?))
+}
+
+pub(crate) fn write_processed_state(letter: char, journal_id: u64, next_usn: i64) {
+    let Some(path) = processed_path(letter) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        format!("journal_id={journal_id}\nnext_usn={next_usn}\n"),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,7 +363,9 @@ mod tests {
             frn,
             parent,
             attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
+            reason: 0,
             name: name.to_string(),
+            path: None,
         }
     }
 
@@ -279,7 +381,9 @@ mod tests {
         let root_frn = (5u64 << 48) | 5;
         let users_frn = (7u64 << 48) | 42;
         let snapshot = Snapshot {
+            delta: false,
             journal_id: 1,
+            start_usn: 0,
             next_usn: 0,
             records: vec![
                 record(users_frn, root_frn, "Users", true),
@@ -302,7 +406,9 @@ mod tests {
         let root_frn = (5u64 << 48) | 5;
         let pictures_frn = (7u64 << 48) | 42;
         let snapshot = Snapshot {
+            delta: false,
             journal_id: 1,
+            start_usn: 0,
             next_usn: 0,
             records: vec![record(pictures_frn, root_frn, "Pictures", true)],
         };
@@ -317,7 +423,9 @@ mod tests {
     #[test]
     fn unresolved_parents_are_dropped() {
         let snapshot = Snapshot {
+            delta: false,
             journal_id: 1,
+            start_usn: 0,
             next_usn: 0,
             records: vec![record(77, 999, "orphan.txt", false)],
         };

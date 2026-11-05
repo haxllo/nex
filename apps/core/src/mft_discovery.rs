@@ -41,6 +41,8 @@ pub(crate) struct MftRecord {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct Snapshot {
     pub delta: bool,
     pub journal_id: u64,

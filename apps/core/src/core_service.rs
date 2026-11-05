@@ -914,12 +914,60 @@ impl CoreService {
                 provider_weight
             };
             let write_weight = provider_weight.saturating_sub(discovery_weight);
+            let mut force_provider_refresh = false;
+            if let Some(result) = provider.take_incremental() {
+                match result {
+                    Ok(update) => {
+                        let upserted = update.upserts.len();
+                        let removed = update.deleted_ids.len();
+                        for id in &update.deleted_ids {
+                            index_store::delete_item(&*self.db(), id)?;
+                        }
+                        for item in &update.upserts {
+                            index_store::upsert_item(&*self.db(), item)?;
+                        }
+                        // Advance the journal only after every write landed.
+                        #[cfg(target_os = "windows")]
+                        for (letter, journal_id, next_usn) in &update.states {
+                            crate::mft_discovery::write_processed_state(
+                                *letter,
+                                *journal_id,
+                                *next_usn,
+                            );
+                        }
+                        upserted_total += upserted;
+                        removed_total += removed;
+                        provider_reports.push(ProviderRefreshReport {
+                            provider: provider_name.clone(),
+                            discovered: upserted + removed,
+                            upserted,
+                            removed,
+                            skipped: false,
+                            elapsed_ms: started.elapsed().as_millis(),
+                        });
+                        cumulative_weight = cumulative_weight.saturating_add(provider_weight);
+                        if let Some(ref pct) = progress_pct {
+                            pct.store(cumulative_weight.min(95), Ordering::Relaxed);
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "[nex] discovery_delta provider={provider_name} failed: {error}"
+                        ));
+                        // A delta that could not be applied must not be masked
+                        // by the provider freshness skip: run the full pass.
+                        force_provider_refresh = true;
+                    }
+                }
+            }
             let provider_stamp = if incremental_mode {
                 provider.change_stamp()
             } else {
                 None
             };
             if incremental_mode
+                && !force_provider_refresh
                 && should_skip_provider_discovery(
                     &*self.db(),
                     &provider_name,

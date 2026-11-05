@@ -44,6 +44,8 @@ const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_RENAME_OLD_NAME: u32 = 0x0000_0001;
+const FILE_DELETE: u32 = 0x0000_0200;
 // Pipe access rights are file access rights, but windows-sys keeps the pipe
 // mode constants in System::Pipes and the access bits here.
 const PIPE_ACCESS_OUTBOUND: u32 = 0x0000_0002;
@@ -94,6 +96,9 @@ struct FileIdDescriptor {
     size: u32,
     id_type: u32,
     file_id: u64,
+    // The real union also carries a 16-byte GUID; keep the struct at its
+    // documented 24-byte size so OpenFileById accepts the descriptor.
+    reserved: u64,
 }
 
 #[link(name = "kernel32")]
@@ -496,8 +501,33 @@ fn stream_deltas(
                 offset += record_len;
                 continue;
             };
-            let path = resolve_parent_path(handle, letter, parent)
-                .map(|parent_path| join_path(&parent_path, &name));
+            // System metadata ($Extend, $Recycle.Bin, $Secure, ...) never
+            // lives under a user discovery root; skip it before path work.
+            let parent_record = parent & FRN_RECORD_MASK;
+            if parent_record < 16 && parent_record != ROOT_RECORD_NUMBER {
+                stats.skipped += 1;
+                offset += record_len;
+                continue;
+            }
+            let removed = reason & (FILE_DELETE | FILE_RENAME_OLD_NAME) != 0;
+            let path = if removed {
+                resolve_parent_path(handle, letter, parent)
+                    .map(|parent_path| join_path(&parent_path, &name))
+            } else {
+                // The file still exists (create/modify/rename-new): resolving
+                // its own FRN also works when the parent handle is blocked.
+                resolve_by_frn(handle, frn).or_else(|| {
+                    resolve_parent_path(handle, letter, parent)
+                        .map(|parent_path| join_path(&parent_path, &name))
+                })
+            };
+            if path.is_none() && removed {
+                // The stale pruner removes missing files; do not fail the whole
+                // delta for a delete whose parent directory is gone.
+                stats.skipped += 1;
+                offset += record_len;
+                continue;
+            }
             write_record(
                 writer,
                 frn,
@@ -595,10 +625,16 @@ fn resolve_parent_path(volume: HANDLE, letter: char, parent_frn: u64) -> Option<
     if parent_frn & FRN_RECORD_MASK == ROOT_RECORD_NUMBER {
         return Some(format!("{letter}:\\"));
     }
+    resolve_by_frn(volume, parent_frn)
+}
+
+/// Full path for any file or directory reference number.
+fn resolve_by_frn(volume: HANDLE, frn: u64) -> Option<String> {
     let descriptor = FileIdDescriptor {
         size: std::mem::size_of::<FileIdDescriptor>() as u32,
-        id_type: 1, // FileIdType
-        file_id: parent_frn,
+        id_type: 0, // FileIdType
+        file_id: frn,
+        reserved: 0,
     };
     let file = unsafe {
         OpenFileById(

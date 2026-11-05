@@ -1817,6 +1817,14 @@ impl CoreService {
         }
     }
 
+    pub fn search_tantivy_seed(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchItem>, ServiceError> {
+        self.search_indexed_candidates(query, limit)
+    }
+
     fn search_indexed_candidates(
         &self,
         query: &str,
@@ -1825,7 +1833,6 @@ impl CoreService {
         if limit == 0 || query.trim().is_empty() {
             return Ok(Vec::new());
         }
-
         // try_read: while the index is being replaced (rare rebuild),
         // fall back to cache + store recall instead of blocking the keystroke.
         let tantivy_guard = match self.tantivy_index.try_read() {

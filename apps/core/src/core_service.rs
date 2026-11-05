@@ -1165,7 +1165,7 @@ impl CoreService {
         if providers_guard.is_empty() {
             self.refresh_cache_from_store()?;
             return Ok(IndexRefreshReport {
-                indexed_total: self.cached_len(),
+                indexed_total: index_store::count_items(&*self.db())? as usize,
                 discovered_total: 0,
                 upserted_total: 0,
                 removed_total: 0,
@@ -1369,6 +1369,7 @@ impl CoreService {
                     upserted_total += 1;
                     if pending_upserts.len() >= STORE_WRITE_BATCH_SIZE {
                         index_store::upsert_items(&*self.db(), &pending_upserts)?;
+                        self.index_items_on_backends(&pending_upserts);
                         self.record_publish(&pending_upserts, &[]);
                         pending_upserts.clear();
                     }
@@ -1385,6 +1386,7 @@ impl CoreService {
             }
             if !pending_upserts.is_empty() {
                 index_store::upsert_items(&*self.db(), &pending_upserts)?;
+                self.index_items_on_backends(&pending_upserts);
                 self.record_publish(&pending_upserts, &[]);
             }
 
@@ -1403,6 +1405,9 @@ impl CoreService {
 
             for chunk in removable_ids.chunks(STORE_WRITE_BATCH_SIZE) {
                 index_store::delete_items(&*self.db(), chunk)?;
+                for id in chunk {
+                    self.remove_item_from_backends(id);
+                }
                 self.record_publish(&[], chunk);
             }
 
@@ -1432,12 +1437,21 @@ impl CoreService {
         }
         self.refresh_cache_from_store()?;
         if progress_pct.is_none() {
-            self.sync_indexes_from_cache_with_force(upserted_total > 0 || removed_total > 0)?;
+            // The rebuild now applies Tantivy per batch; the full-store sync is
+            // only needed when the index is missing and has to be reseeded.
+            let tantivy_available = self
+                .tantivy_index
+                .read()
+                .map(|guard| guard.is_some())
+                .unwrap_or_else(|poisoned| poisoned.into_inner().is_some());
+            if !tantivy_available {
+                self.sync_indexes_from_cache_with_force(upserted_total > 0 || removed_total > 0)?;
+            }
         }
         if let Some(ref pct) = progress_pct {
             pct.store(100, Ordering::Relaxed);
         }
-        let indexed_total = self.cached_len();
+        let indexed_total = index_store::count_items(&*self.db())? as usize;
 
         // Record memory and cycle metrics
         let memory_after = self_measure_memory();
@@ -2688,6 +2702,24 @@ impl CoreService {
         }
         // Release before bumping: compaction re-locks `tantivy_index`, and
         // std Mutex is not re-entrant (deadlocked on the 500th write).
+        drop(tantivy_guard);
+        self.bump_compaction_counter();
+    }
+
+    fn index_items_on_backends(&self, items: &[SearchItem]) {
+        if items.is_empty() {
+            return;
+        }
+        let tantivy_guard = match self.tantivy_index.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(ref idx) = *tantivy_guard {
+            if let Err(e) = idx.upsert_items(items) {
+                crate::logging::warn(&format!("[nex] Tantivy batch upsert failed: {e}"));
+                self.tantivy_needs_heal.store(true, Ordering::SeqCst);
+            }
+        }
         drop(tantivy_guard);
         self.bump_compaction_counter();
     }

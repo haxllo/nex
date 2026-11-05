@@ -324,6 +324,38 @@ impl TantivyIndex {
         self.maybe_commit_and_gc()
     }
 
+    /// Upsert a whole batch with one writer lock. Used by the discovery
+    /// rebuild so per-item lock churn does not dominate the write phase.
+    pub fn upsert_items(&self, items: &[SearchItem]) -> Result<(), String> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("tantivy writer lock error: {e}"))?;
+
+        for item in items {
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.id, &item.id));
+            writer
+                .add_document(doc!(
+                    self.fields.id => item.id.as_str(),
+                    self.fields.title => item.title.as_str(),
+                    self.fields.title_norm => crate::model::normalize_for_search(item.title.as_str()),
+                    self.fields.path => item.path.as_str(),
+                    self.fields.subtitle => item.subtitle.as_str(),
+                    self.fields.kind => item.kind.as_str(),
+                    self.fields.extension => extract_extension(&item.path),
+                    self.fields.use_count => item.use_count as i64,
+                    self.fields.last_accessed_epoch_secs => item.last_accessed_epoch_secs,
+                ))
+                .map_err(|e| format!("tantivy add document error: {e}"))?;
+        }
+        drop(writer);
+
+        self.maybe_commit_and_gc()
+    }
+
     pub fn incremental_sync_items(&self, items: &[SearchItem]) -> Result<(), String> {
         // Publish buffered upserts/deletes before using the reader to compute
         // the existing-ID set; otherwise an uncommitted document can escape

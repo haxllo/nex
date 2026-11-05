@@ -634,7 +634,7 @@ fn discover_filesystem_walk(
             break;
         }
         #[cfg(target_os = "windows")]
-        if mft_backend_enabled(per_root_budget)
+        if mft_backend_enabled()
             && try_mft_root(
                 root,
                 &exclusion_policy,
@@ -750,18 +750,14 @@ fn effective_walk_depth(max_depth: usize) -> usize {
     }
 }
 
-/// MFT pays off when the index is meant to cover most of a volume; a small
-/// per-root cap is cheaper to satisfy with the early-stopping directory walk.
-/// `NEX_DISCOVERY_BACKEND=mft` forces it, `walkdir` disables it.
+/// MFT is the primary backend for NTFS roots; the directory walk is the
+/// fallback (non-NTFS, helper unavailable, unlocked/denied volumes).
+/// `NEX_DISCOVERY_BACKEND=walkdir` forces the old path.
 #[cfg(target_os = "windows")]
-fn mft_backend_enabled(per_root_budget: usize) -> bool {
+fn mft_backend_enabled() -> bool {
     match std::env::var("NEX_DISCOVERY_BACKEND") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "mft" => true,
-            "walkdir" | "off" => false,
-            _ => per_root_budget >= 100_000,
-        },
-        Err(_) => per_root_budget >= 100_000,
+        Ok(value) => !matches!(value.trim().to_ascii_lowercase().as_str(), "walkdir" | "off"),
+        Err(_) => true,
     }
 }
 
@@ -793,8 +789,16 @@ fn try_mft_root(
         return false;
     }
     // The helper starts asynchronously with the UI; give the first root time
-    // to see its pipe, then keep later attempts short.
+    // to see its pipe, then keep later attempts short. When the helper is
+    // absent (portable run, no scheduled task), skip MFT for a while so the
+    // walk fallback is not delayed on every root.
     static FIRST_ATTEMPT: AtomicBool = AtomicBool::new(true);
+    static BACKOFF_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    if let Ok(guard) = BACKOFF_UNTIL.lock() {
+        if guard.is_some_and(|until| Instant::now() < until) {
+            return false;
+        }
+    }
     let timeout_ms = if FIRST_ATTEMPT.swap(false, Ordering::Relaxed) {
         6000
     } else {
@@ -803,8 +807,16 @@ fn try_mft_root(
 
     let started = Instant::now();
     let snapshot = match crate::mft_discovery::fetch_snapshot(letter, timeout_ms) {
-        Ok(snapshot) => snapshot,
+        Ok(snapshot) => {
+            if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
+                *guard = None;
+            }
+            snapshot
+        }
         Err(error) => {
+            if let Ok(mut guard) = BACKOFF_UNTIL.lock() {
+                *guard = Some(Instant::now() + std::time::Duration::from_secs(60));
+            }
             crate::logging::info(&format!(
                 "[nex] discovery_mft root={} unavailable: {error}",
                 root.display()

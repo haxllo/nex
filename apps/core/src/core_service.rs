@@ -641,6 +641,13 @@ impl CoreService {
         self.cached_len()
     }
 
+    /// True once the cache holds the full published set (or the store load
+    /// finished). The UI starts with an empty cache, so this is how the
+    /// search worker knows a query arrived before the initial load landed.
+    pub fn cache_is_complete(&self) -> bool {
+        self.cache_complete.load(Ordering::SeqCst)
+    }
+
     pub fn is_ui_client(&self) -> bool {
         self.ui_client
     }

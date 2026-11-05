@@ -1034,9 +1034,10 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
 
     text.push_str("# File/folder discovery backend for filesystem enumeration.\n");
     text.push_str("# Options: \"auto\" (default) | \"everything\" | \"walkdir\"\n");
-    text.push_str("# - auto: try Everything SDK (Everything64.dll / Everything32.dll);\n");
-    text.push_str("#   fall back to walkdir + ReadDirectoryChangesW if Everything is not running.\n");
-    text.push_str("# - everything: require Everything (fails back to walkdir with a warning).\n");
+    text.push_str("# - auto: native discovery; MFT for NTFS roots when the item cap allows,\n");
+    text.push_str("#   walkdir otherwise. Never uses Everything.\n");
+    text.push_str("# - everything: deprecated opt-in; requires Everything and falls back\n");
+    text.push_str("#   to walkdir with a warning.\n");
     text.push_str("# - walkdir: always use the built-in walkdir + ReadDirectoryChangesW pipeline.\n");
     text.push_str("file_discovery_backend = ");
     text.push_str(&json_string(cfg.file_discovery_backend.as_str()));

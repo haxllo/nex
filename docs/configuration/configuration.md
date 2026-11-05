@@ -36,7 +36,7 @@ All settings, their defaults, valid ranges, and descriptions:
 | `clipboard_enabled` | `bool` | `false` | — | Enable clipboard history provider. |
 | `clipboard_retention_minutes` | `u32` | `480` | `5..43200` | Clipboard entry retention in minutes (default 8 hours). |
 | `clipboard_exclude_sensitive_patterns` | `string[]` | `["password", "passcode", "otp", "token", "secret", "apikey", "api_key"]` | — | Substring patterns that prevent clipboard capture. |
-| `file_discovery_backend` | `string` | `"auto"` | `auto`, `everything`, `walkdir` | File/folder discovery backend. `auto`: try Everything SDK, fall back to walkdir. |
+| `file_discovery_backend` | `string` | `"auto"` | `auto`, `everything`, `walkdir` | File/folder discovery backend. `auto`: native discovery (MFT for NTFS when the cap allows, walkdir otherwise); `everything` is a deprecated opt-in. |
 | `plugins_enabled` | `bool` | `true` | — | Enable plugin SDK. |
 | `plugins_safe_mode` | `bool` | `true` | — | Prevent plugin command execution when `true`. |
 | `plugin_paths` | `string[]` | `["%APPDATA%\\Nex\\plugins"]` | — | Directories scanned for plugins. |
@@ -44,8 +44,8 @@ All settings, their defaults, valid ranges, and descriptions:
 | `idle_cache_trim_ms` | `u32` | `900` | `100..10000` | Cache trim delay after overlay hide (ms). |
 | `active_memory_target_mb` | `u16` | `72` | `20..512` | Active memory target in MB. |
 | `ui_warm_release_ms` | `u32` | `5000` | `500..600000` | How long (ms) the WebView stays resident after hide before teardown. |
-| `index_max_items_total` | `u32` | `120000` | `10000..2000000` | Maximum indexed items across all roots. |
-| `index_max_items_per_root` | `u32` | `40000` | `1000..1000000` | Maximum indexed items per discovery root. Must be ≤ `index_max_items_total`. |
+| `index_max_items_total` | `u32` | `500000` | `10000..2000000` | Maximum indexed items across all roots. |
+| `index_max_items_per_root` | `u32` | `200000` | `1000..1000000` | Maximum indexed items per discovery root. Must be ≤ `index_max_items_total`. |
 | `discovery_max_depth` | `u32` | `0` | `0..256` | Maximum folder depth walked below each discovery root. `0` = unlimited (bounded by the item caps). |
 | `index_max_items_per_query_seed` | `u32` | `5000` | `250..200000` | Runtime candidate budget for per-query file/folder retrieval. |
 | `discovery_roots` | `string[]` | `["C:\\Users\\<user>"]` | — | Folders scanned for local file/folder discovery. |
@@ -76,8 +76,8 @@ These fields are managed by Nex and written into the saved config:
 
 | Value | Description |
 |---|---|
-| `auto` | Try Everything SDK (`Everything64.dll`/`Everything32.dll`); fall back to walkdir + `ReadDirectoryChangesW`. |
-| `everything` | Require Everything. Fails back to walkdir with a warning. |
+| `auto` | Native discovery: MFT snapshot for NTFS roots when the per-root cap allows, walkdir + `ReadDirectoryChangesW` otherwise. Never selects Everything. |
+| `everything` | Deprecated opt-in. Requires the Everything service (`Everything64.dll`/`Everything32.dll`); falls back to walkdir with a warning. |
 | `walkdir` | Always use built-in walkdir + `ReadDirectoryChangesW`. |
 
 ### Web Search Provider Values

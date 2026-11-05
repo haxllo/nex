@@ -1151,17 +1151,6 @@ impl CoreService {
             });
         }
 
-        let mut existing_items = index_store::list_items(&*self.db())?;
-        let mut existing_by_id: HashMap<String, SearchItem> = existing_items
-            .drain(..)
-            .map(|item| (item.id.clone(), item))
-            .collect();
-        let cached_by_id: HashMap<String, SearchItem> = self
-            .cached_items_snapshot()
-            .into_iter()
-            .map(|item| (item.id.clone(), item))
-            .collect();
-
         let mut discovered_total = 0_usize;
         let mut upserted_total = 0_usize;
         let mut removed_total = 0_usize;
@@ -1325,9 +1314,10 @@ impl CoreService {
                 Vec::with_capacity(STORE_WRITE_BATCH_SIZE);
 
             for (item_idx, mut item) in discovered.into_iter().enumerate() {
-                let cached = cached_by_id.get(&item.id);
-                let previous = cached.or_else(|| existing_by_id.get(&item.id));
-                if let Some(previous) = previous {
+                // One PK lookup per discovered item replaces the full store
+                // map: usage merge and change detection use the stored row.
+                let stored = index_store::get_item(&*self.db(), &item.id)?;
+                if let Some(previous) = stored.as_ref() {
                     if item.use_count == 0 {
                         item.use_count = previous.use_count;
                     }
@@ -1347,8 +1337,8 @@ impl CoreService {
 
                 discovered_ids.insert(item.id.clone());
 
-                let changed = existing_by_id
-                    .get(&item.id)
+                let changed = stored
+                    .as_ref()
                     .map(|previous| previous != &item)
                     .unwrap_or(true);
                 if changed {
@@ -1361,7 +1351,6 @@ impl CoreService {
                         pending_upserts.clear();
                     }
                 }
-                existing_by_id.insert(item.id.clone(), item);
 
                 if let Some(ref pct) = progress_pct {
                     if discovered_count > 0 {
@@ -1381,19 +1370,18 @@ impl CoreService {
 
             // Kind-based ownership is safe for current runtime provider composition:
             // start-menu apps own kind=app, filesystem owns kind=file/folder.
-            let removable_ids: Vec<String> = existing_by_id
-                .values()
-                .filter(|item| provider_manages_kind(provider.provider_name(), &item.kind))
-                .filter(|item| !discovered_ids.contains(&item.id))
-                .map(|item| item.id.clone())
+            let removable_ids: Vec<String> =
+                index_store::list_item_ids_for_kinds(
+                    &*self.db(),
+                    provider_kinds(provider.provider_name()),
+                )?
+                .into_iter()
+                .filter(|id| !discovered_ids.contains(id))
                 .collect();
 
             for chunk in removable_ids.chunks(STORE_WRITE_BATCH_SIZE) {
                 index_store::delete_items(&*self.db(), chunk)?;
                 self.record_publish(&[], chunk);
-            }
-            for id in &removable_ids {
-                existing_by_id.remove(id);
             }
 
             removed_total += removable_ids.len();
@@ -3214,12 +3202,11 @@ fn looks_like_filesystem_path(path: &str) -> bool {
     bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
-fn provider_manages_kind(provider_name: &str, kind: &str) -> bool {
-    let kind = kind.to_ascii_lowercase();
+fn provider_kinds(provider_name: &str) -> &'static [&'static str] {
     match provider_name {
-        "start-menu-apps" | "app" => kind == "app",
-        "filesystem" | "file" => kind == "file" || kind == "folder",
-        _ => false,
+        "start-menu-apps" | "app" => &["app"],
+        "filesystem" | "file" => &["file", "folder"],
+        _ => &[],
     }
 }
 

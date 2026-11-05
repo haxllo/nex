@@ -990,12 +990,15 @@ fn mft_incremental(
 
     for (letter, roots) in roots_by_volume {
         let Some((journal_id, start_usn)) = mft_discovery::read_processed_state(letter) else {
+            // A volume with no saved position (a new root, or a volume whose
+            // USN journal is disabled) cannot produce a delta. The full pass
+            // after a root-set change has already indexed it, and the file
+            // watchers keep it current; skipping it must not force a full
+            // pass for every provider cycle.
             crate::logging::info(&format!(
                 "[nex] discovery_delta volume={letter} skip=no_saved_position"
             ));
-            return Some(Err(ProviderError::new(
-                "MFT delta needs a saved journal position; running a full pass",
-            )));
+            continue;
         };
         mft_discovery::write_delta_request(letter, journal_id, start_usn);
         let snapshot = match mft_discovery::fetch_snapshot(letter, timeout_ms) {

@@ -120,44 +120,16 @@ pub fn search_with_filter_with_boosts(
     // Characters the query needs. Any item whose normalised text lacks one of
     // them cannot match (exact, substring, or fuzzy) — reject with one AND.
     let required_mask = query_presence_requirement(&normalized_query);
-    let mut scored: Vec<ScoredItem<'_>> = items
-        .iter()
-        .filter(|item| matches_visibility(item, filter))
-        .filter_map(|item| {
-            if !item_may_match_query(item, required_mask) {
-                return None;
-            }
-            let personalization_boost = personalization_boosts
-                .and_then(|boosts| boosts.get(item.id.as_str()))
-                .copied()
-                .unwrap_or(0);
-            let score = if fast_path {
-                score_item_fast(
-                    item,
-                    &normalized_query,
-                    now_epoch_secs,
-                    app_intent_query,
-                    personalization_boost,
-                )
-            } else {
-                score_item(
-                    item,
-                    &normalized_query,
-                    now_epoch_secs,
-                    filter,
-                    app_intent_query,
-                    personalization_boost,
-                )
-            };
-            score.map(|score| ScoredItem {
-                source_rank: source_rank(item),
-                score: score.score,
-                match_kind: score.kind,
-                title_len: item.normalized_title().len(),
-                item,
-            })
-        })
-        .collect();
+    let context = ScoreContext {
+        normalized_query: &normalized_query,
+        now_epoch_secs,
+        app_intent_query,
+        fast_path,
+        required_mask,
+        filter,
+        personalization_boosts,
+    };
+    let mut scored: Vec<ScoredItem<'_>> = score_items(items, &context);
 
     deduplicate_apps(&mut scored);
     if scored.len() > limit {
@@ -176,6 +148,106 @@ pub fn search_with_filter_with_boosts(
             item
         })
         .collect()
+}
+
+/// Below this many items, splitting the scan costs more than it saves.
+const PARALLEL_SEARCH_MIN_ITEMS: usize = 20_000;
+const PARALLEL_SEARCH_MAX_THREADS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct ScoreContext<'a> {
+    normalized_query: &'a str,
+    now_epoch_secs: i64,
+    app_intent_query: bool,
+    fast_path: bool,
+    required_mask: u64,
+    filter: &'a SearchFilter,
+    personalization_boosts: Option<&'a HashMap<String, i64>>,
+}
+
+/// Score every candidate, on one thread for small sets and chunked across
+/// cores for the full index (the 80k-item scan was 60-84 ms per keystroke).
+fn score_items<'a>(items: &'a [SearchItem], context: &ScoreContext<'_>) -> Vec<ScoredItem<'a>> {
+    if items.len() < PARALLEL_SEARCH_MIN_ITEMS {
+        return items
+            .iter()
+            .filter_map(|item| score_candidate(item, context))
+            .collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .clamp(1, PARALLEL_SEARCH_MAX_THREADS);
+    if threads <= 1 {
+        return items
+            .iter()
+            .filter_map(|item| score_candidate(item, context))
+            .collect();
+    }
+    let chunk_len = items.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk_len)
+            .map(|chunk| {
+                let context = *context;
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|item| score_candidate(item, &context))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut scored = Vec::with_capacity(items.len());
+        for handle in handles {
+            if let Ok(mut chunk) = handle.join() {
+                scored.append(&mut chunk);
+            }
+        }
+        scored
+    })
+}
+
+fn score_candidate<'a>(
+    item: &'a SearchItem,
+    context: &ScoreContext<'_>,
+) -> Option<ScoredItem<'a>> {
+    if !matches_visibility(item, context.filter) {
+        return None;
+    }
+    if !item_may_match_query(item, context.required_mask) {
+        return None;
+    }
+    let personalization_boost = context
+        .personalization_boosts
+        .and_then(|boosts| boosts.get(item.id.as_str()))
+        .copied()
+        .unwrap_or(0);
+    let score = if context.fast_path {
+        score_item_fast(
+            item,
+            context.normalized_query,
+            context.now_epoch_secs,
+            context.app_intent_query,
+            personalization_boost,
+        )
+    } else {
+        score_item(
+            item,
+            context.normalized_query,
+            context.now_epoch_secs,
+            context.filter,
+            context.app_intent_query,
+            personalization_boost,
+        )
+    };
+    score.map(|score| ScoredItem {
+        source_rank: source_rank(item),
+        score: score.score,
+        match_kind: score.kind,
+        title_len: item.normalized_title().len(),
+        item,
+    })
 }
 
 /// Presence bits the query requires of an item's normalised search text.
@@ -943,6 +1015,31 @@ fn now_epoch_secs() -> i64 {
 #[cfg(test)]
 mod lexical_scan_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual latency benchmark"]
+    fn bench_indexed_search_80k() {
+        let items: Vec<SearchItem> = (0..80_000)
+            .map(|index| {
+                SearchItem::new(
+                    &format!("file:c:\\data\\file{index}.txt"),
+                    "file",
+                    &format!("document-{index}.txt"),
+                    &format!("C:\\Data\\file{index}.txt"),
+                )
+            })
+            .collect();
+        let filter = SearchFilter::default();
+        for query in ["d", "do", "document-4", "ument-4"] {
+            let started = std::time::Instant::now();
+            let results = search_with_filter(&items, query, 20, &filter);
+            eprintln!(
+                "query={query:?} elapsed_ms={} results={}",
+                started.elapsed().as_millis(),
+                results.len()
+            );
+        }
+    }
 
     /// Reference implementation mirroring the original allocating scanner.
     /// Kept verbatim so the allocation-free rewrite can be proven equivalent.

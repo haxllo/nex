@@ -163,20 +163,11 @@ else {
 }
 
 # Leftovers from older releases (Nex.exe is the 2.38.0-2.39.0 updater shim).
-foreach ($legacyName in @("Nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
+foreach ($legacyName in @("Nex.exe", "nex-core.exe", "swiftfind-core.exe", "Everything64.dll", "Everything32.dll")) {
   $legacyPath = Join-Path $binDir $legacyName
   if (Test-Path -LiteralPath $legacyPath) {
     Remove-Item -LiteralPath $legacyPath -Force
     Write-Host "  Removed legacy $legacyName"
-  }
-}
-
-$sourceDir = Split-Path -Parent $SourceExe
-foreach ($dllName in @("Everything64.dll", "Everything32.dll")) {
-  $sourceDll = Join-Path $sourceDir $dllName
-  if (Test-Path -LiteralPath $sourceDll) {
-    Copy-Item -LiteralPath $sourceDll (Join-Path $binDir $dllName) -Force
-    Write-Host "  Bundled $dllName"
   }
 }
 

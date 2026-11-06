@@ -64,7 +64,7 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 - Library entry: `apps/core/src/lib.rs`
 - **Two-process split**: `NexUIProcess.exe` owns the overlay, hotkeys, tray, and search over the indexer's published snapshot. `NexIndexerProcess.exe` owns discovery, SQLite writes, file/app watchers, and Tantivy. There is no in-process indexing fallback.
 - **One binary per package on purpose**: a build script's Windows resource is linked into all of its package's binaries and inherited by dependent packages, so sharing a package would give every process the same `FileDescription` (Task Manager name).
-- **Windows-only modules**: `runtime_loop`, `everything`, `runtime_overlay_rows`
+- **Windows-only modules**: `runtime_loop`, `runtime_overlay_rows`
 - Tests in `apps/core/src/runtime.rs:tests` and `apps/core/tests/`, `tests/perf/`, plus process-isolation e2e in `apps/indexer/tests/`
 
 ## Process Model & Privilege Boundaries

@@ -16,7 +16,7 @@ For the latest plans and roadmap, see the [Plans](./plans/) directory.
 
 - Global hotkey (`Ctrl+Space` by default)
 - Fuzzy search with usage-based ranking
-- Native MFT/walkdir discovery; the Everything SDK is a legacy opt-in
+- Native MFT/walkdir discovery
 - Clipboard history
 - Plugin SDK (preview)
 - WebView2 overlay with animations

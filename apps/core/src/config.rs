@@ -98,12 +98,11 @@ impl SearchMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryBackend {
     #[default]
     Auto,
-    Everything,
     Walkdir,
 }
 
@@ -112,7 +111,10 @@ impl DiscoveryBackend {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "auto" => Some(Self::Auto),
-            "everything" | "everything64" | "everything32" => Some(Self::Everything),
+            "everything" | "everything64" | "everything32" => {
+                warn_everything_backend_removed();
+                Some(Self::Auto)
+            }
             "walkdir" | "walk" => Some(Self::Walkdir),
             _ => None,
         }
@@ -121,10 +123,27 @@ impl DiscoveryBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Everything => "everything",
             Self::Walkdir => "walkdir",
         }
     }
+}
+
+/// Existing configs may still say `everything`; keep them loading as `auto`.
+impl<'de> Deserialize<'de> for DiscoveryBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&raw, &["auto", "walkdir"]))
+    }
+}
+
+fn warn_everything_backend_removed() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        crate::logging::warn(
+            "[nex] file_discovery_backend=everything is no longer supported; using \"auto\" (native discovery)",
+        );
+    });
 }
 
 #[cfg(test)]
@@ -179,29 +198,16 @@ mod discovery_backend_tests {
     fn parse_known_values() {
         assert_eq!(DiscoveryBackend::parse("auto"), Some(DiscoveryBackend::Auto));
         assert_eq!(
-            DiscoveryBackend::parse("everything"),
-            Some(DiscoveryBackend::Everything)
-        );
-        assert_eq!(
-            DiscoveryBackend::parse("EVERYTHING"),
-            Some(DiscoveryBackend::Everything)
-        );
-        assert_eq!(
             DiscoveryBackend::parse("walkdir"),
             Some(DiscoveryBackend::Walkdir)
         );
     }
 
     #[test]
-    fn parse_accepts_dll_aliases() {
-        assert_eq!(
-            DiscoveryBackend::parse("everything64"),
-            Some(DiscoveryBackend::Everything)
-        );
-        assert_eq!(
-            DiscoveryBackend::parse("everything32"),
-            Some(DiscoveryBackend::Everything)
-        );
+    fn removed_everything_values_map_to_auto() {
+        for value in ["everything", "EVERYTHING", "everything64", "everything32"] {
+            assert_eq!(DiscoveryBackend::parse(value), Some(DiscoveryBackend::Auto));
+        }
     }
 
     #[test]
@@ -212,11 +218,7 @@ mod discovery_backend_tests {
 
     #[test]
     fn as_str_round_trip() {
-        for v in [
-            DiscoveryBackend::Auto,
-            DiscoveryBackend::Everything,
-            DiscoveryBackend::Walkdir,
-        ] {
+        for v in [DiscoveryBackend::Auto, DiscoveryBackend::Walkdir] {
             assert_eq!(DiscoveryBackend::parse(v.as_str()), Some(v));
         }
     }
@@ -1030,11 +1032,9 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("\n\n");
 
     text.push_str("# File/folder discovery backend for filesystem enumeration.\n");
-    text.push_str("# Options: \"auto\" (default) | \"everything\" | \"walkdir\"\n");
+    text.push_str("# Options: \"auto\" (default) | \"walkdir\"\n");
     text.push_str("# - auto: native discovery; MFT for NTFS roots when the item cap allows,\n");
-    text.push_str("#   walkdir otherwise. Never uses Everything.\n");
-    text.push_str("# - everything: deprecated opt-in; requires Everything and falls back\n");
-    text.push_str("#   to walkdir with a warning.\n");
+    text.push_str("#   walkdir otherwise.\n");
     text.push_str("# - walkdir: always use the built-in walkdir + ReadDirectoryChangesW pipeline.\n");
     text.push_str("file_discovery_backend = ");
     text.push_str(&json_string(cfg.file_discovery_backend.as_str()));

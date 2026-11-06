@@ -447,22 +447,12 @@ fn from_config_walkdir_backend_is_labeled_walkdir() {
     assert_eq!(provider.backend_label(), "walkdir");
 }
 
-#[cfg(target_os = "windows")]
-#[test]
-fn from_config_everything_backend_uses_walkdir_when_sdk_missing() {
-    let mut config = nex_core::config::Config::default();
-    config.file_discovery_backend = nex_core::config::DiscoveryBackend::Everything;
-    let provider = FileSystemDiscoveryProvider::from_config(&config, 5);
-    let label = provider.backend_label();
-    assert!(label == "everything" || label == "walkdir");
-}
-
 #[test]
 fn from_config_auto_backend_never_panics() {
     let config = nex_core::config::Config::default();
     let provider = FileSystemDiscoveryProvider::from_config(&config, 5);
     let label = provider.backend_label();
-    assert!(label == "everything" || label == "walkdir");
+    assert_eq!(label, "walkdir");
 }
 
 fn make_deep_tree(label: &str) -> (PathBuf, PathBuf) {

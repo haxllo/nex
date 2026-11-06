@@ -374,3 +374,41 @@ fn migration_from_v25_adds_discovery_max_depth() {
     assert!(raw.contains("discovery_max_depth = 0"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn removed_everything_discovery_backend_loads_as_auto() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_dir = std::env::temp_dir().join(format!("nex-everything-backend-{unique}"));
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    for (name, raw) in [
+        (
+            "config.toml",
+            format!(
+                "version = {}\nfile_discovery_backend = \"everything\"\n",
+                nex_core::config::CURRENT_CONFIG_VERSION
+            ),
+        ),
+        (
+            "config.json",
+            format!(
+                "{{\"version\": {}, \"file_discovery_backend\": \"everything\"}}",
+                nex_core::config::CURRENT_CONFIG_VERSION
+            ),
+        ),
+    ] {
+        let path = config_dir.join(name);
+        std::fs::write(&path, raw).unwrap();
+        let loaded = nex_core::config::load(Some(&path)).unwrap();
+        assert_eq!(
+            loaded.file_discovery_backend,
+            nex_core::config::DiscoveryBackend::Auto,
+            "{name}"
+        );
+    }
+
+    std::fs::remove_dir_all(&config_dir).unwrap();
+}

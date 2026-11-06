@@ -310,28 +310,6 @@ pub struct FileSystemDiscoveryProvider {
     max_depth: usize,
     show_files: bool,
     show_folders: bool,
-    backend: FileBackend,
-}
-
-#[cfg(target_os = "windows")]
-enum FileBackend {
-    Everything(crate::everything_bridge::EverythingBridge),
-    Walkdir,
-}
-
-#[cfg(not(target_os = "windows"))]
-enum FileBackend {
-    Walkdir,
-}
-
-impl FileBackend {
-    fn kind_label(&self) -> &'static str {
-        match self {
-            #[cfg(target_os = "windows")]
-            Self::Everything(_) => "everything",
-            Self::Walkdir => "walkdir",
-        }
-    }
 }
 
 impl FileSystemDiscoveryProvider {
@@ -352,91 +330,30 @@ impl FileSystemDiscoveryProvider {
             max_depth,
             show_files,
             show_folders,
-            backend: FileBackend::Walkdir,
         }
     }
 
     pub fn backend_label(&self) -> &'static str {
-        self.backend.kind_label()
+        "walkdir"
     }
 
     pub fn from_config(
         config: &crate::config::Config,
         max_depth: usize,
     ) -> Self {
-        let mut provider = Self::with_options(
+        #[cfg(target_os = "windows")]
+        if config.file_discovery_backend == crate::config::DiscoveryBackend::Auto {
+            crate::logging::info(
+                "[nex] file_discovery_backend=auto uses native discovery (MFT for NTFS, walkdir otherwise)",
+            );
+        }
+        Self::with_options(
             config.discovery_roots.clone(),
             max_depth,
             config.discovery_exclude_roots.clone(),
             config.show_files,
             config.show_folders,
-        );
-
-        let requested = config.file_discovery_backend;
-        provider.backend = resolve_file_backend(requested);
-        provider
-    }
-}
-
-fn resolve_file_backend(requested: crate::config::DiscoveryBackend) -> FileBackend {
-    #[cfg(target_os = "windows")]
-    {
-        let backend = match requested {
-            crate::config::DiscoveryBackend::Walkdir => FileBackend::Walkdir,
-            crate::config::DiscoveryBackend::Everything => {
-                crate::logging::warn(
-                    "[nex] file_discovery_backend=everything is deprecated; use \"auto\" for native discovery (the Everything backend will be removed in a future release)",
-                );
-                match crate::everything_bridge::EverythingBridge::detect() {
-                    Some(bridge) if bridge.is_service_running() => {
-                        FileBackend::Everything(bridge)
-                    }
-                    Some(_) => {
-                        crate::logging::warn(
-                            "[nex] file_discovery_backend=everything requested but Everything service is not running; falling back to walkdir (start Everything.exe to use the SDK backend)",
-                        );
-                        FileBackend::Walkdir
-                    }
-                    None => {
-                        crate::logging::warn(
-                            "[nex] file_discovery_backend=everything requested but Everything SDK was not detected; falling back to walkdir",
-                        );
-                        FileBackend::Walkdir
-                    }
-                }
-            }
-            crate::config::DiscoveryBackend::Auto => {
-                // Auto is native: the filesystem provider uses the NTFS MFT
-                // snapshot when the per-root cap allows and walkdir otherwise.
-                // Everything is opt-in only.
-                crate::logging::info(
-                    "[nex] file_discovery_backend=auto uses native discovery (MFT for NTFS, walkdir otherwise)",
-                );
-                FileBackend::Walkdir
-            }
-        };
-        if matches!(backend, FileBackend::Everything(_)) {
-            crate::logging::info("[nex] Everything SDK loaded; using Everything as filesystem backend");
-        }
-        backend
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = requested;
-        FileBackend::Walkdir
-    }
-}
-
-#[cfg(test)]
-mod backend_selection_tests {
-    use super::*;
-
-    #[test]
-    fn auto_uses_native_not_everything() {
-        assert!(matches!(
-            resolve_file_backend(crate::config::DiscoveryBackend::Auto),
-            FileBackend::Walkdir
-        ));
+        )
     }
 }
 
@@ -454,30 +371,16 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             return Ok(0);
         }
 
-        match &self.backend {
-            #[cfg(target_os = "windows")]
-            FileBackend::Everything(_) => {
-                // Deprecated backend; it already produces one snapshot.
-                let items = self.discover_with_progress(on_item_discovered)?;
-                let count = items.len();
-                for item in items {
-                    emit(item)?;
-                }
-                Ok(count)
-            }
-            FileBackend::Walkdir => {
-                clear_pending_states();
-                discover_filesystem_walk_into(
-                    &self.roots,
-                    &self.excluded_roots,
-                    self.max_depth,
-                    self.show_files,
-                    self.show_folders,
-                    emit,
-                    on_item_discovered,
-                )
-            }
-        }
+        clear_pending_states();
+        discover_filesystem_walk_into(
+            &self.roots,
+            &self.excluded_roots,
+            self.max_depth,
+            self.show_files,
+            self.show_folders,
+            emit,
+            on_item_discovered,
+        )
     }
 
     fn commit_pass_state(&self) {
@@ -500,50 +403,14 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             return Ok(Vec::new());
         }
 
-        match &self.backend {
-            #[cfg(target_os = "windows")]
-            FileBackend::Everything(bridge) => {
-                match discover_filesystem_everything(
-                    bridge,
-                    &self.roots,
-                    &self.excluded_roots,
-                    self.max_depth,
-                    self.show_files,
-                    self.show_folders,
-                    usize::MAX,
-                    usize::MAX,
-                ) {
-                    Ok(items) => Ok(items),
-                    Err(e) => {
-                        // If the Everything IPC call failed mid-run, the
-                        // service most likely stopped or was never running.
-                        // Retry once with walkdir so the user still gets a
-                        // populated index instead of a silent failure that
-                        // leaves the launcher searching 80K items per
-                        // keystroke.
-                        crate::logging::warn(&format!(
-                            "[nex] Everything discover failed ({e}); falling back to walkdir"
-                        ));
-                        discover_filesystem_walk(
-                            &self.roots,
-                            &self.excluded_roots,
-                            self.max_depth,
-                            self.show_files,
-                            self.show_folders,
-                            None,
-                        )
-                    }
-                }
-            }
-            FileBackend::Walkdir => discover_filesystem_walk(
-                &self.roots,
-                &self.excluded_roots,
-                self.max_depth,
-                self.show_files,
-                self.show_folders,
-                None,
-            ),
-        }
+        discover_filesystem_walk(
+            &self.roots,
+            &self.excluded_roots,
+            self.max_depth,
+            self.show_files,
+            self.show_folders,
+            None,
+        )
     }
 
     fn discover_with_progress(
@@ -554,52 +421,14 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
             return Ok(Vec::new());
         }
 
-        match &self.backend {
-            #[cfg(target_os = "windows")]
-            FileBackend::Everything(bridge) => {
-                let mut cb = on_item_discovered;
-                match discover_filesystem_everything(
-                    bridge,
-                    &self.roots,
-                    &self.excluded_roots,
-                    self.max_depth,
-                    self.show_files,
-                    self.show_folders,
-                    usize::MAX,
-                    usize::MAX,
-                ) {
-                    Ok(items) => {
-                        if let Some(ref mut cb) = cb {
-                            for _ in 0..items.len() {
-                                cb(1);
-                            }
-                        }
-                        Ok(items)
-                    }
-                    Err(e) => {
-                        crate::logging::warn(&format!(
-                            "[nex] Everything discover failed ({e}); falling back to walkdir"
-                        ));
-                        discover_filesystem_walk(
-                            &self.roots,
-                            &self.excluded_roots,
-                            self.max_depth,
-                            self.show_files,
-                            self.show_folders,
-                            cb,
-                        )
-                    }
-                }
-            }
-            FileBackend::Walkdir => discover_filesystem_walk(
-                &self.roots,
-                &self.excluded_roots,
-                self.max_depth,
-                self.show_files,
-                self.show_folders,
-                on_item_discovered,
-            ),
-        }
+        discover_filesystem_walk(
+            &self.roots,
+            &self.excluded_roots,
+            self.max_depth,
+            self.show_files,
+            self.show_folders,
+            on_item_discovered,
+        )
     }
 
     fn change_stamp(&self) -> Option<String> {
@@ -619,32 +448,6 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
         stamp.push_str(if self.show_folders { "true" } else { "false" });
         Some(stamp)
     }
-}
-
-#[cfg(target_os = "windows")]
-fn discover_filesystem_everything(
-    bridge: &crate::everything_bridge::EverythingBridge,
-    roots: &[PathBuf],
-    excluded_roots: &[PathBuf],
-    max_depth: usize,
-    show_files: bool,
-    show_folders: bool,
-    max_items_total: usize,
-    max_items_per_root: usize,
-) -> Result<Vec<SearchItem>, ProviderError> {
-    let exclusion_policy = DiscoveryExclusionPolicy::new(excluded_roots);
-    let total_budget = max_items_total.max(1);
-    let per_root_budget = max_items_per_root.max(1).min(total_budget);
-
-    bridge.discover(
-        roots,
-        &exclusion_policy,
-        max_depth,
-        show_files,
-        show_folders,
-        total_budget,
-        per_root_budget,
-    )
 }
 
 /// Streams walk results to the caller; callers check the budgets before pushing.

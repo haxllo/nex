@@ -16,8 +16,6 @@ pub mod control_panel;
 pub mod core_service;
 pub mod discovery;
 #[cfg(target_os = "windows")]
-pub(crate) mod everything_bridge;
-#[cfg(target_os = "windows")]
 pub(crate) mod file_watcher;
 #[cfg(target_os = "windows")]
 pub(crate) mod file_watcher_consumer;

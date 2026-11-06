@@ -19,7 +19,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 
 - **Keyboard-first** — Press the Win key to summon Nex from anywhere — replaces the Start menu
 - **Fuzzy search** — Tantivy-powered full-text search across apps, files, and folders
-- **Native discovery** — MFT/walkdir file discovery; the Everything SDK remains as a legacy opt-in
+- **Native discovery** — MFT (NTFS) / walkdir file discovery
 - **Calculator** — Inline arithmetic evaluation in the search bar
 - **Clipboard history** — Recently copied items at your fingertips
 - **Actions & plugins** — Custom commands, web searches, and extensible plugin SDK
@@ -97,7 +97,6 @@ nex/
 │   │   ├── overlay/     # WebView2 UI (tao + wry)
 │   │   ├── search.rs    # Query DSL
 │   │   ├── tantivy_search.rs # Full-text engine
-│   │   ├── everything_bridge.rs # Everything SDK
 │   │   ├── calculator.rs
 │   │   ├── clipboard_history.rs
 │   │   ├── plugin_sdk.rs

@@ -710,19 +710,25 @@ impl RuntimeWorker {
             log_info("[nex] hotkey re-registration already in progress, skipping");
             return;
         }
-        if let Ok(mut guard) = self.hotkey_listener.lock() {
-            *guard = None;
-        }
+        // Dropped on the reconfig thread: Drop runs a blocking taskkill,
+        // which stalled the worker when it ran here.
+        let old_listener = self
+            .hotkey_listener
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
         let new_hotkey = new_hotkey.to_string();
         let event_tx = self.event_tx.clone();
         let lh = self.hotkey_listener.clone();
         std::thread::Builder::new()
             .name("nex-hotkey-reconfig".into())
             .spawn(move || {
+                drop(old_listener);
                 // Stop the scheduled task and kill the helper process so the
                 // new start() can write config and re-launch a clean helper.
                 let _ = std::process::Command::new("schtasks")
                     .args(["/end", "/tn", "NexHelperV2"])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .output();
                 let _ = std::process::Command::new("taskkill")
                     .args(["/F", "/IM", "NexHelper.exe"])
@@ -1492,10 +1498,13 @@ impl RuntimeWorker {
             };
             if needs_restart {
                 log_warn("[nex] hotkey listener thread died; attempting restart");
-                // Drop the dead listener.
-                if let Ok(mut guard) = self.hotkey_listener.lock() {
-                    *guard = None;
-                }
+                // Taken here, dropped on the recover thread: its Drop runs
+                // a blocking taskkill.
+                let dead_listener = self
+                    .hotkey_listener
+                    .lock()
+                    .ok()
+                    .and_then(|mut guard| guard.take());
                 // Spawn recovery on a separate thread so the runtime
                 // worker never blocks — same pattern as config-change
                 // re-registration.
@@ -1505,8 +1514,10 @@ impl RuntimeWorker {
                 std::thread::Builder::new()
                     .name("nex-hotkey-recover".into())
                     .spawn(move || {
+                        drop(dead_listener);
                         let _ = std::process::Command::new("schtasks")
                             .args(["/end", "/tn", "NexHelperV2"])
+                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
                             .output();
                         let _ = std::process::Command::new("taskkill")
                             .args(["/F", "/IM", "NexHelper.exe"])

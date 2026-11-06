@@ -96,9 +96,9 @@ static SUPPRESS_FOCUS_ESCAPE: AtomicBool = AtomicBool::new(false);
 static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// True once the elevated helper's pipe reader is active. The in-process
-/// hook keeps running (as a warm backup that never fired anyway) but its
-/// dispatch is gated so the helper and the hook can never double-toggle.
+/// True once the elevated helper's pipe reader is active. The helper only
+/// detects bare-Win hotkeys (`detect = target_is_win` in its config), so local
+/// detection defers to it only through [`helper_owns_detection`].
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Real time of the last toggle any detection path accepted, plus the
@@ -118,8 +118,9 @@ static HOTKEY_CLOCK: OnceLock<Instant> = OnceLock::new();
 /// - the helper's pipe is the ONLY path that sees elevated foreground
 ///   windows (UIPI blocks both raw input and the Medium-IL hook there).
 ///
-/// The raw path and the hook both defer to the helper once it is live
-/// (`helper_active()`), so one press normally has exactly one owner. This
+/// The raw path and the hook both defer to the helper while it owns
+/// detection (`helper_owns_detection()`: live AND bare-Win hotkey), so one
+/// press normally has exactly one owner. This
 /// send-site window stays as the backstop for the cases where they still
 /// overlap.
 ///
@@ -513,6 +514,20 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
+    // Recording a hotkey in Settings while the configured hotkey is not Win:
+    // nothing below holds the mask for this press, so a bare Win tap would
+    // open Start. Raw input (the recorder) can observe keys but not block them.
+    if !ctx.target_is_win && !injected && (vk == VK_LWIN || vk == VK_RWIN) {
+        if is_keydown && crate::overlay::host::RECORDING_HOTKEY.load(Ordering::SeqCst) {
+            mask_hold();
+        } else if is_keyup && MASK_HELD.load(Ordering::SeqCst) {
+            // Checked by mask state, not RECORDING_HOTKEY: a chord commit
+            // (Win+E) ends recording before Win comes back up.
+            mask_release();
+            invalidate_start_gesture();
+        }
+    }
+
     // --- Win press bookkeeping, shared with the raw-input sink ---
     //
     // Real keys only, and only when the hotkey is Win. The press is tracked
@@ -606,19 +621,20 @@ unsafe extern "system" fn keyboard_hook_proc(
         });
 
         if mods_ok && extra_free {
-            if HELPER_ACTIVE.load(Ordering::SeqCst) {
-                // Helper owns detection now — do not fire; still pass through.
-                return unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
-                        std::ptr::null_mut(), n_code, w_param, l_param)
-                };
-            }
+            // No helper gate here: the helper is spawned with detection off for
+            // non-Win hotkeys, so deferring to it left only RegisterHotKeyW,
+            // which refuses combos another app (e.g. an IME) already holds.
             if ctx.target_is_win {
                 // Unreachable: the guard above requires a non-Win target.
                 return unsafe {
                     windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(
                         std::ptr::null_mut(), n_code, w_param, l_param)
                 };
+            }
+            if ctx.required_mods.iter().any(|&m| m == VK_LWIN || m == VK_RWIN) {
+                // The eaten key never reaches the shell, so the held Win
+                // would still open Start on key-up.
+                invalidate_start_gesture();
             }
             let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
             return 1;
@@ -927,7 +943,7 @@ impl HotkeyListener {
                 }
                 let tid = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = thread_id_for_thread.set(tid);
-                let _ = HOOK_THREAD_ID.set(tid);
+                HOOK_THREAD_ID.store(tid, Ordering::SeqCst);
                 let _ = ready_tx.send(Ok(()));
 
                 // Register system-level hotkey fallback via RegisterHotKeyW.
@@ -1108,6 +1124,8 @@ impl HotkeyListener {
                     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id); }
                 }
                 unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook_id); }
+                // A successor listener may already own the slot; leave it.
+                let _ = HOOK_THREAD_ID.compare_exchange(tid, 0, Ordering::SeqCst, Ordering::SeqCst);
                 if !should_exit_for_thread.load(Ordering::SeqCst) {
                     logging::warn("[nex] hotkey message loop exited unexpectedly");
                 }
@@ -1548,10 +1566,17 @@ fn create_overlay_event() -> String {
     name
 }
 
-/// Whether the elevated helper currently owns detection (and
-/// activation). Gates the single-activation path in host.rs.
+/// Whether the elevated helper is connected. Gates the single-activation
+/// path in host.rs (the helper owns foreground for every hotkey).
 pub(crate) fn helper_active() -> bool {
     HELPER_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Whether the helper is connected AND detecting. It is spawned with
+/// `detect = target_is_win`, so for any other hotkey local detection must
+/// keep firing even while the helper is live.
+pub(crate) fn helper_owns_detection() -> bool {
+    HELPER_ACTIVE.load(Ordering::SeqCst) && is_win_key_hotkey()
 }
 
 /// Signal the elevated helper that the overlay is now visible.  Called
@@ -1569,10 +1594,10 @@ pub(crate) fn signal_overlay_ready() {
 
 static CONFIG_CHANGED_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 
-/// Cached thread id of the in-process hook thread (owns the
-/// RegisterHotKeyW fallback registration). Set once the hook thread is
-/// running; used to request a live fallback re-registration.
-pub(crate) static HOOK_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+/// Thread id of the live in-process hook thread (owns the RegisterHotKeyW
+/// fallback registration), 0 when none. Rewritten by every listener start:
+/// a set-once value kept pointing at the first, dead thread after a restart.
+pub(crate) static HOOK_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 const WM_NEX_REREGISTER: u32 = 0x8000 + 0x4E47;
 
@@ -1580,8 +1605,9 @@ const WM_NEX_REREGISTER: u32 = 0x8000 + 0x4E47;
 /// HOOK_CTX. No-op if the hook thread isn't running.
 pub(crate) fn request_fallback_reregister() {
     use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
-    if let Some(tid) = HOOK_THREAD_ID.get() {
-        let ok = unsafe { PostThreadMessageW(*tid, WM_NEX_REREGISTER, 0, 0) };
+    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+    if tid != 0 {
+        let ok = unsafe { PostThreadMessageW(tid, WM_NEX_REREGISTER, 0, 0) };
         logging::info(&format!(
             "[nex::debug] fallback re-register posted to tid={tid}: ok={ok}"
         ));

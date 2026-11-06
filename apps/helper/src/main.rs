@@ -1627,8 +1627,19 @@ fn main() {
             // (Event is auto-reset, so it returns to nonsignaled automatically.)
             debug_log("overlay-ready event received, calling set_overlay_foreground");
             let seq = FG_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-            set_overlay_foreground(seq);
-            debug_log("set_overlay_foreground returned");
+            // Off this thread: it pumps the global LL hooks, and the verify
+            // loop's sleeps (up to 600 ms) stalled every keystroke and mouse
+            // move system-wide. A newer request supersedes via FG_SEQ.
+            let spawned = std::thread::Builder::new()
+                .name("nex-helper-activate".into())
+                .spawn(move || {
+                    set_overlay_foreground(seq);
+                    debug_log("set_overlay_foreground returned");
+                });
+            if spawned.is_err() {
+                set_overlay_foreground(seq);
+                debug_log("set_overlay_foreground returned (inline)");
+            }
         }
         // WAIT_OBJECT_0 + 1 = nex process handle signaled (nex exited)
         if nex_handle_valid && wait_result == WAIT_OBJECT_0 + 1 {

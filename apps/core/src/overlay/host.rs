@@ -3981,11 +3981,10 @@ unsafe extern "system" fn instance_signal_subclass(
                         // hook which runs first), so we check the
                         // configured hotkey here. Overlaps the hook and
                         // the RegisterHotKeyW fallback: send through
-                        // send_hotkey_event, never directly. With the
-                        // helper live it owns the decision (its own
-                        // RegisterHotKey/hook), so this copy stays out of
-                        // the way exactly like the hook's does.
-                        if !crate::overlay::hotkey::helper_active()
+                        // send_hotkey_event, never directly. Defers only
+                        // while the helper actually detects (bare-Win
+                        // hotkey), exactly like the hook.
+                        if !crate::overlay::hotkey::helper_owns_detection()
                             && crate::overlay::hotkey::check_raw_input_hotkey(vk)
                         {
                             crate::runtime::log_info(&format!(
@@ -4048,6 +4047,15 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
     }
     let is_modifier = matches!(vk, 0xA0..=0xA5 | 0x10 | 0x11 | 0x12 | 0x5B | 0x5C);
     if is_win {
+        // Backup for the hook's Start guard (see keyboard_hook_proc); both
+        // calls are idempotent. A Win hotkey already has its own guard.
+        if !crate::overlay::hotkey::is_win_key_hotkey() {
+            if is_break {
+                crate::overlay::hotkey::mask_release();
+            } else {
+                crate::overlay::hotkey::mask_hold();
+            }
+        }
         //Commit bare "Win" on keyup only if no other jey is joined it.
         if is_break && !RECORD_WIN_CHORD.load(Ordering::SeqCst) {
             RECORDING_HOTKEY.store(false, Ordering::SeqCst);

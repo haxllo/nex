@@ -48,7 +48,6 @@ pub(crate) struct StatusDiagnosticsSnapshot {
     pub(crate) last_provider_line: Option<String>,
     pub(crate) last_provider_freshness_line: Option<String>,
     pub(crate) last_stale_prune_line: Option<String>,
-    pub(crate) last_cache_compaction_line: Option<String>,
     pub(crate) last_icon_cache_line: Option<String>,
     pub(crate) last_overlay_tuning_line: Option<String>,
     pub(crate) last_memory_snapshot_line: Option<String>,
@@ -183,7 +182,6 @@ pub(crate) fn parse_status_diagnostics_snapshot(
     let last_provider_line = latest_line_with_token(content, "index_provider name=");
     let last_provider_freshness_line = latest_line_with_token(content, "provider_freshness ");
     let last_stale_prune_line = latest_line_with_token(content, "stale_prune ");
-    let last_cache_compaction_line = latest_line_with_token(content, "cache_compaction ");
     let last_icon_cache_line = latest_line_with_token(content, "overlay_icon_cache reason=");
     let last_overlay_tuning_line = latest_line_with_token(content, "overlay_tuning ");
     let last_memory_snapshot_line = latest_line_with_token(content, "memory_snapshot reason=");
@@ -202,7 +200,6 @@ pub(crate) fn parse_status_diagnostics_snapshot(
         && last_provider_line.is_none()
         && last_provider_freshness_line.is_none()
         && last_stale_prune_line.is_none()
-        && last_cache_compaction_line.is_none()
         && last_icon_cache_line.is_none()
         && last_overlay_tuning_line.is_none()
         && last_memory_snapshot_line.is_none()
@@ -225,7 +222,6 @@ pub(crate) fn parse_status_diagnostics_snapshot(
         last_provider_line,
         last_provider_freshness_line,
         last_stale_prune_line,
-        last_cache_compaction_line,
         last_icon_cache_line,
         last_overlay_tuning_line,
         last_memory_snapshot_line,
@@ -293,10 +289,6 @@ pub(crate) fn build_status_diagnostics_json(
         .last_stale_prune_line
         .as_ref()
         .and_then(|line| parse_key_value_tokens(line));
-    let cache_compaction = snapshot
-        .last_cache_compaction_line
-        .as_ref()
-        .and_then(|line| parse_key_value_tokens(line));
     let icon_cache = snapshot
         .last_icon_cache_line
         .as_ref()
@@ -343,7 +335,6 @@ pub(crate) fn build_status_diagnostics_json(
         "provider": provider,
         "provider_freshness": provider_freshness,
         "stale_prune": stale_prune,
-        "cache_compaction": cache_compaction,
         "icon_cache": icon_cache,
         "overlay_tuning": overlay_tuning,
         "memory_snapshot": memory_snapshot,
@@ -363,7 +354,6 @@ pub(crate) fn build_status_diagnostics_json(
             "provider_line": snapshot.last_provider_line,
             "provider_freshness_line": snapshot.last_provider_freshness_line,
             "stale_prune_line": snapshot.last_stale_prune_line,
-            "cache_compaction_line": snapshot.last_cache_compaction_line,
             "icon_cache_line": snapshot.last_icon_cache_line,
             "overlay_tuning_line": snapshot.last_overlay_tuning_line,
             "memory_snapshot_line": snapshot.last_memory_snapshot_line,

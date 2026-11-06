@@ -442,7 +442,7 @@ pub fn list_item_ids_under_path(db: &Connection, folder_path: &str) -> Result<Ve
 }
 
 /// Substring recall over file/folder rows: every whitespace-separated term
-/// must appear in the title or path. Used when Tantivy and the compacted
+/// must appear in the title or path. Used when Tantivy and the bounded
 /// in-memory cache cannot produce enough candidates, so any indexed row
 /// stays reachable.
 ///

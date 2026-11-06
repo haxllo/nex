@@ -135,7 +135,7 @@ fn new_download_appears_in_search_via_watcher() {
 }
 
 #[test]
-fn large_root_stays_searchable_beyond_cache_cap() {
+fn large_root_stays_searchable() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("profile");
     let bulk = root.join("bulk");
@@ -143,17 +143,13 @@ fn large_root_stays_searchable_beyond_cache_cap() {
     for i in 0..1200 {
         std::fs::write(bulk.join(format!("report-{i:05}.txt")), b"x").unwrap();
     }
-    // Sorts after the bulk files, so ID-ordered cache compaction drops it.
     let late_dir = root.join("zz-late");
     std::fs::create_dir_all(&late_dir).unwrap();
     let needle = late_dir.join("final-message.txt");
     std::fs::write(&needle, b"x").unwrap();
 
-    let mut cfg = root_config(tmp.path(), &root);
-    cfg.index_max_items_per_query_seed = 250;
-    let service = indexed_service(cfg);
+    let service = indexed_service(root_config(tmp.path(), &root));
 
-    assert!(service.cached_items_len() < 1200, "cache should be compacted");
     assert!(found(&service, "message", &needle));
     assert!(found(&service, "report-01199", &bulk.join("report-01199.txt")));
 }

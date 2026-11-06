@@ -298,7 +298,7 @@ Both apply exclusion policies (well-known dirs like `node_modules`, `.git`, `app
 2. **Background refresh**: Temporary `CoreService` runs `rebuild_index_incremental_with_report()` on a spawned thread. Results are applied when the runtime worker acquires the service write lock.
 3. **File watchers**: After the first cache is applied, per-root `ReadDirectoryChangesW` watchers start. Events are debounced (200 ms), deduplicated, and applied to the live index.
 4. **Stale pruner**: Every 15 s, 16 cached items are checked for staleness. Entries pointing to deleted files are removed.
-5. **Cache compaction**: On every `refresh_cache_from_store()`, the in-memory cache is compacted: file/folder items beyond `effective_file_seed_cap` are dropped, constrained by `active_memory_target_mb`.
+5. **Bounded cache and store recall**: Production services keep only a hot set in memory (apps plus the most-used rows, `UI_CACHE_MAX_ITEMS`). The UI process has no Tantivy index; it asks the indexer for candidates (`search_seed` IPC, 500 ms budget). If that fails or times out, `append_store_recall` tops results up from SQLite (FTS5 title trigram index, `LIKE` scan until the backfill finishes), so files outside the hot set stay reachable. `index_max_items_per_query_seed` caps the Tantivy candidates per query; it does not bound the cache.
 
 ---
 

@@ -114,9 +114,6 @@ pub(crate) fn command_status() -> Result<(), RuntimeError> {
             if let Some(line) = snapshot.last_stale_prune_line {
                 log_info(&format!("[nex] status last_stale_prune {line}"));
             }
-            if let Some(line) = snapshot.last_cache_compaction_line {
-                log_info(&format!("[nex] status last_cache_compaction {line}"));
-            }
             if let Some(line) = snapshot.last_icon_cache_line {
                 log_info(&format!("[nex] status last_icon_cache {line}"));
             }

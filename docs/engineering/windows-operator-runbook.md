@@ -132,7 +132,7 @@ Notes:
 - You can keep inline comments in this file (`// ...`).
 - Most users only need to edit `hotkey`.
 - `launch_at_startup`, `max_results`, `discovery_roots`, and `discovery_exclude_roots` are optional tuning.
-- `index_max_items_per_query_seed` tunes the per-query file/folder candidate budget.
+- `index_max_items_per_query_seed` caps the Tantivy candidates fetched per file/folder query.
 
 ## Live Config Apply Matrix
 

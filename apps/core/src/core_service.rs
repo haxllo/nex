@@ -141,12 +141,9 @@ pub struct CoreService {
     /// Store row count seen by the previous drift check; drift is only
     /// repaired once the store count is stable (indexing not mid-flight).
     last_drift_store_count: Mutex<Option<u64>>,
-    /// False once compaction dropped file/folder rows from `cached_items`;
-    /// search then also recalls from SQLite so dropped rows stay reachable.
+    /// False while `cached_items` may omit store rows (bounded hot cache, or
+    /// the UI before its initial load); search then also recalls from SQLite.
     cache_complete: AtomicBool,
-    /// True when this service keeps every store row in `cached_items` (the
-    /// indexer's publishing mode) and must not compact on refresh.
-    keep_all_items: bool,
     /// True when the resident cache is the bounded hot set rather than every
     /// store row (the indexer and the UI after CIQ-78 Phase 3).
     hot_cache: bool,
@@ -158,6 +155,9 @@ pub struct CoreService {
     stale_pruner_started: AtomicBool,
     stale_pruner_stop: Arc<AtomicBool>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
+    /// Counters for the running full discovery pass, reported over IPC so
+    /// the UI can show the indexing progress window.
+    full_pass: crate::indexing_progress::FullPassProgress,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
     personalization_cache: Mutex<PersonalizationCache>,
@@ -382,21 +382,24 @@ impl CoreService {
     pub fn new(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache(config, db, true)
+        Self::with_loaded_cache_mode(config, db, true, true, false)
     }
 
+    /// Full keep-all cache over `db` with Tantivy enabled. Production uses the
+    /// bounded `new_indexer`/`new_ui_client*` constructors instead; this one
+    /// serves tests and tools that want every row in memory.
     pub fn with_connection(config: Config, db: Connection) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
-        Self::with_loaded_cache(config, db, true)
+        Self::with_loaded_cache_mode(config, db, true, true, false)
     }
 
     /// Indexer-process service: owns the index and publishes the full item set
-    /// over IPC. The cache keeps every row (no compaction) so snapshots are
-    /// served from memory instead of scanning SQLite on every poll.
+    /// over IPC. The cache holds only the hot set; `all_items_snapshot` reads
+    /// the rest from SQLite.
     pub fn new_indexer(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache_mode(config, db, true, false, true, true)
+        Self::with_loaded_cache_mode(config, db, true, true, true)
     }
 
     /// UI-process service that starts empty: the runtime loads the store on a
@@ -405,7 +408,7 @@ impl CoreService {
     pub fn new_ui_client_lazy(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        Self::with_loaded_cache_mode(config, db, false, false, false, true)
+        Self::with_loaded_cache_mode(config, db, false, false, true)
     }
 
     /// UI-process service: reads the store for launch/personalization state,
@@ -414,20 +417,13 @@ impl CoreService {
     pub fn new_ui_client(config: Config) -> Result<Self, ServiceError> {
         validate(&config).map_err(ServiceError::Config)?;
         let db = index_store::open_from_config(&config)?;
-        // Keep every store row: the UI must be able to find files that cache
-        // compaction would otherwise evict.
-        Self::with_loaded_cache_mode(config, db, false, false, true, true)
-    }
-
-    fn with_loaded_cache(config: Config, db: Connection, enable_tantivy: bool) -> Result<Self, ServiceError> {
-        Self::with_loaded_cache_mode(config, db, enable_tantivy, true, true, false)
+        Self::with_loaded_cache_mode(config, db, false, true, true)
     }
 
     fn with_loaded_cache_mode(
         config: Config,
         db: Connection,
         enable_tantivy: bool,
-        compact: bool,
         load_items: bool,
         hot_cache: bool,
     ) -> Result<Self, ServiceError> {
@@ -462,22 +458,13 @@ impl CoreService {
         } else {
             None
         };
-        // Compact now rather than on the first refresh: an uncompacted cache
-        // makes every cache-scan search walk the whole store.
-        let cache_complete = load_items
-            && !hot_cache
-            && (!compact || cache_compaction_summary(&all_items, &config).dropped_total == 0);
-        let cached = if compact {
-            compact_cached_items(&all_items, &config)
-        } else {
-            all_items
-        };
+        let cache_complete = load_items && !hot_cache;
 
         Ok(Self {
             config: RwLock::new(config),
             db: Mutex::new(db),
             providers: RwLock::new(Vec::new()),
-            cached_items: RwLock::new(cached),
+            cached_items: RwLock::new(all_items),
             cached_app_items: RwLock::new(cached_apps),
             search_index: RwLock::new(None),
             cache_revision: AtomicU64::new(0),
@@ -488,7 +475,6 @@ impl CoreService {
             tantivy_needs_heal: AtomicBool::new(false),
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
-            keep_all_items: !compact && !hot_cache,
             hot_cache,
             ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
@@ -496,6 +482,7 @@ impl CoreService {
             stale_pruner_started: AtomicBool::new(false),
             stale_pruner_stop: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(None),
+            full_pass: crate::indexing_progress::FullPassProgress::default(),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
             personalization_cache: Mutex::new(PersonalizationCache::new()),
@@ -777,10 +764,14 @@ impl CoreService {
         Ok(ranked)
     }
 
-    /// Top up `ranked` with file/folder rows straight from SQLite. Only
-    /// needed when compaction dropped rows from the in-memory cache (or
-    /// Tantivy missed, e.g. mid-name substrings): without it those rows are
-    /// indexed but unreachable.
+    /// Top up `ranked` with file/folder rows straight from SQLite (FTS5
+    /// title trigram index, with a `LIKE` scan while the backfill runs).
+    ///
+    /// This is the bounded-cache path: the UI process keeps only a hot set
+    /// (`UI_CACHE_MAX_ITEMS`) and owns no Tantivy index, so when the
+    /// indexer's seed search is unavailable or times out, recall from the
+    /// store is how it reaches files outside that set. Skipped when the
+    /// cache already holds every row.
     fn append_store_recall(
         &self,
         ranked: &mut Vec<SearchItem>,
@@ -911,18 +902,14 @@ impl CoreService {
         Ok(self.cached_len())
     }
 
-    /// Full store contents, uncompacted. The indexer serves this to the UI so
-    /// search can reach rows that cache compaction evicted.
-    ///
-    /// Served from the cache when it holds every row (the indexer keeps the
-    /// uncompacted set): a poll costs no SQLite scan. Compacting services fall
-    /// back to a direct read.
     /// Bounded first-sync snapshot read from SQLite, without cloning the
     /// indexer's full cache.
     pub fn hot_snapshot_items(&self) -> Result<Vec<SearchItem>, ServiceError> {
         Ok(index_store::list_hot_items(&*self.db(), UI_CACHE_MAX_ITEMS)?)
     }
 
+    /// Full store contents. Served from the cache when it holds every row;
+    /// bounded (hot) caches read SQLite directly.
     pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
         if self.cache_complete.load(Ordering::SeqCst) {
             return Ok(self.cached_items_snapshot());
@@ -1172,6 +1159,7 @@ impl CoreService {
         };
         let mut cumulative_weight: u32 = 0;
         let config_snapshot = self.config_snapshot();
+        let mut full_pass = crate::indexing_progress::FullPassScope::new(&self.full_pass);
 
         for provider in providers_guard.iter() {
             if provider_name.is_some_and(|name| provider.provider_name() != name) {
@@ -1325,6 +1313,7 @@ impl CoreService {
                     );
                 }
             };
+            full_pass.start();
             index_store::scan_begin(&*self.db())?;
             let mut discovered_count = 0_usize;
             let mut upserted = 0_usize;
@@ -1335,6 +1324,7 @@ impl CoreService {
                 let mut sink =
                     |mut item: SearchItem| -> Result<(), crate::discovery::ProviderError> {
                         discovered_count += 1;
+                        self.full_pass.add_discovered(1);
                         // One PK lookup per discovered item replaces the full
                         // store map: usage merge and change detection use the
                         // stored row.
@@ -1378,6 +1368,7 @@ impl CoreService {
                             pending_upserts.clear();
                             index_store::scan_mark(&*self.db(), &pending_seen)
                                 .map_err(|e| crate::discovery::ProviderError::new(e.to_string()))?;
+                            self.full_pass.add_indexed(pending_seen.len() as u64);
                             pending_seen.clear();
                         }
                         Ok(())
@@ -1390,6 +1381,7 @@ impl CoreService {
                 self.record_publish(&pending_upserts, &[]);
             }
             index_store::scan_mark(&*self.db(), &pending_seen)?;
+            self.full_pass.add_indexed(pending_seen.len() as u64);
 
             if let Some(ref pct) = progress_pct {
                 pct.store(
@@ -2152,6 +2144,12 @@ impl CoreService {
     /// Current index generation. Bumped on every mutation of the item set
     /// (cache refresh, upsert, delete, index sync, prune), so readers can
     /// detect that the underlying data changed between two observations.
+    /// Counters of the running full discovery pass, or `None` when no full
+    /// pass is in flight (idle, or only deltas/watcher batches).
+    pub fn full_pass_progress(&self) -> Option<crate::indexing_progress::FullPassSnapshot> {
+        self.full_pass.snapshot()
+    }
+
     pub fn search_generation(&self) -> u64 {
         self.search_generation.load(Ordering::SeqCst)
     }
@@ -2358,53 +2356,10 @@ impl CoreService {
             self.cache_complete.store(false, Ordering::SeqCst);
             (hot, apps)
         } else {
-            let config_snapshot = self.config_snapshot();
-            let latest_full = index_store::list_items(&*self.db())?;
-            let latest_apps = collect_app_items(&latest_full);
-            let latest = if self.ui_client {
-                let bounded = bounded_ui_items(&latest_full);
-                self.cache_complete
-                    .store(bounded.len() == latest_full.len(), Ordering::SeqCst);
-                bounded
-            } else if self.keep_all_items {
-                // Indexer publishing mode: the IPC snapshot must contain the whole
-                // store, so compaction would only force a SQLite scan per poll.
-                self.cache_complete.store(true, Ordering::SeqCst);
-                latest_full
-            } else {
-                let compact_started = std::time::Instant::now();
-                let summary = cache_compaction_summary(&latest_full, &config_snapshot);
-                let compacted = compact_cached_items(&latest_full, &config_snapshot);
-                self.cache_complete
-                    .store(summary.dropped_total == 0, Ordering::SeqCst);
-                let compact_elapsed_ms = compact_started.elapsed().as_millis();
-                if summary.dropped_total > 0 || compact_elapsed_ms > 100 {
-                    if compact_elapsed_ms > 100 {
-                        crate::logging::info(&format!(
-                            "[nex] cache_compaction input_total={} retained={} dropped={} elapsed_ms={}",
-                            summary.input_total,
-                            summary.retained_total,
-                            summary.dropped_total,
-                            compact_elapsed_ms,
-                        ));
-                    } else {
-                        crate::logging::info(&format!(
-                            "[nex] cache_compaction input_total={} retained={} dropped={} retained_apps={} retained_file_folders={} retained_other={} effective_file_seed_cap={} broad_root_mode={} active_memory_target_mb={}",
-                            summary.input_total,
-                            summary.retained_total,
-                            summary.dropped_total,
-                            summary.retained_apps,
-                            summary.retained_file_folders,
-                            summary.retained_other,
-                            summary.effective_file_seed_cap,
-                            summary.broad_root_mode,
-                            summary.active_memory_target_mb
-                        ));
-                    }
-                }
-                compacted
-            };
-            (latest, latest_apps)
+            let latest = index_store::list_items(&*self.db())?;
+            let apps = collect_app_items(&latest);
+            self.cache_complete.store(true, Ordering::SeqCst);
+            (latest, apps)
         };
         let mut items_guard = match self.cached_items.write() {
             Ok(guard) => guard,
@@ -2893,198 +2848,10 @@ pub(crate) fn bounded_ui_items(items: &[SearchItem]) -> Vec<SearchItem> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CacheCompactionSummary {
-    input_total: usize,
-    retained_total: usize,
-    dropped_total: usize,
-    retained_apps: usize,
-    retained_file_folders: usize,
-    retained_other: usize,
-    effective_file_seed_cap: usize,
-    broad_root_mode: bool,
-    active_memory_target_mb: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProviderFreshnessStatus {
     last_scan_age_secs: i64,
     reconcile_interval_secs: i64,
     has_stamp: bool,
-}
-
-fn compact_cached_items(items: &[SearchItem], cfg: &Config) -> Vec<SearchItem> {
-    cache_compaction_summary(items, cfg).retain_items(items).0
-}
-
-fn cache_compaction_summary(items: &[SearchItem], cfg: &Config) -> CacheCompactionSummary {
-    let effective_file_seed_cap = effective_file_folder_cache_cap(cfg);
-    let broad_root_mode = broad_root_discovery_enabled(cfg);
-    let (retained_total, retained_apps, retained_file_folders, retained_other) =
-        retained_cache_counts(items, effective_file_seed_cap);
-
-    CacheCompactionSummary {
-        input_total: items.len(),
-        retained_total,
-        dropped_total: items.len().saturating_sub(retained_total),
-        retained_apps,
-        retained_file_folders,
-        retained_other,
-        effective_file_seed_cap,
-        broad_root_mode,
-        active_memory_target_mb: cfg.active_memory_target_mb,
-    }
-}
-
-impl CacheCompactionSummary {
-    fn retain_items(&self, items: &[SearchItem]) -> (Vec<SearchItem>, usize) {
-        let mut out = Vec::with_capacity(items.len().min(self.effective_file_seed_cap + 2048));
-        let mut folders: Vec<&SearchItem> = Vec::new();
-        let mut files: Vec<&SearchItem> = Vec::new();
-        let mut file_or_folder_count = 0_usize;
-
-        // DB listing is ORDER BY id, which sorts every "file:..." before
-        // every "folder:..." — a plain first-N pass would retain files
-        // only and starve the cache of folders entirely. Retain all
-        // folders first (they are far fewer), then fill the remaining
-        // slots with files, so cache-only fallback searches still
-        // surface folder results.
-        for item in items {
-            if is_file_or_folder_kind(item.kind.as_str()) {
-                if item.kind.eq_ignore_ascii_case("folder") {
-                    folders.push(item);
-                } else {
-                    files.push(item);
-                }
-                continue;
-            }
-            out.push(item.clone());
-        }
-
-        for folder in folders {
-            if file_or_folder_count >= self.effective_file_seed_cap {
-                break;
-            }
-            file_or_folder_count += 1;
-            out.push(folder.clone());
-        }
-        for file in files {
-            if file_or_folder_count >= self.effective_file_seed_cap {
-                break;
-            }
-            file_or_folder_count += 1;
-            out.push(file.clone());
-        }
-
-        (out, file_or_folder_count)
-    }
-}
-
-fn retained_cache_counts(
-    items: &[SearchItem],
-    effective_file_seed_cap: usize,
-) -> (usize, usize, usize, usize) {
-    let mut retained_total = 0_usize;
-    let mut retained_apps = 0_usize;
-    let mut retained_file_folders = 0_usize;
-    let mut retained_other = 0_usize;
-
-    // Mirrors retain_items: folders retained first, files fill the rest.
-    let folder_count = items
-        .iter()
-        .filter(|i| {
-            is_file_or_folder_kind(i.kind.as_str())
-                && i.kind.eq_ignore_ascii_case("folder")
-        })
-        .count();
-    let folder_retained = folder_count.min(effective_file_seed_cap);
-    let file_retained =
-        effective_file_seed_cap.saturating_sub(folder_retained);
-
-    for item in items {
-        if is_file_or_folder_kind(item.kind.as_str()) {
-            if item.kind.eq_ignore_ascii_case("folder") {
-                if retained_file_folders < folder_retained {
-                    retained_file_folders += 1;
-                } else {
-                    continue;
-                }
-            } else if retained_file_folders >= folder_retained + file_retained {
-                continue;
-            } else {
-                retained_file_folders += 1;
-            }
-        } else if item.kind.eq_ignore_ascii_case("app") {
-            retained_apps += 1;
-        } else {
-            retained_other += 1;
-        }
-        retained_total += 1;
-    }
-
-    (
-        retained_total,
-        retained_apps,
-        retained_file_folders,
-        retained_other,
-    )
-}
-
-fn effective_file_folder_cache_cap(cfg: &Config) -> usize {
-    let base_cap = (cfg.index_max_items_per_query_seed as usize).max(250);
-    if !broad_root_discovery_enabled(cfg) {
-        return base_cap;
-    }
-
-    // SearchItem is roughly 200–500 bytes on disk; size the seed cap to fit
-    // ~25% of the active memory target (leaving headroom for Tantivy,
-    // the icon cache, and rank buffers). The previous formula used 8 items
-    // per MB, which silently capped a 72MB target to 576 items even when
-    // the user explicitly raised index_max_items_per_query_seed to 5000+.
-    let memory_target_bytes =
-        (cfg.active_memory_target_mb as usize).saturating_mul(1024 * 1024);
-    let budget_bytes = memory_target_bytes / 4;
-    let approx_items = budget_bytes / 400;
-    let memory_scaled_cap = approx_items.clamp(250, base_cap);
-    base_cap.min(memory_scaled_cap.max(250))
-}
-
-fn broad_root_discovery_enabled(cfg: &Config) -> bool {
-    if !(cfg.show_files || cfg.show_folders) {
-        return false;
-    }
-    cfg.discovery_roots
-        .iter()
-        .any(|root| is_broad_discovery_root(root))
-}
-
-fn is_broad_discovery_root(path: &Path) -> bool {
-    let raw = path.to_string_lossy().trim().replace('/', "\\");
-    if raw.is_empty() {
-        return false;
-    }
-    if raw == "\\" || raw == "/" {
-        return true;
-    }
-    if raw.len() == 2 {
-        let bytes = raw.as_bytes();
-        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-            return true;
-        }
-    }
-    if raw.len() == 3 {
-        let bytes = raw.as_bytes();
-        if bytes[1] == b':'
-            && bytes[0].is_ascii_alphabetic()
-            && (bytes[2] == b'\\' || bytes[2] == b'/')
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_file_or_folder_kind(kind: &str) -> bool {
-    kind.eq_ignore_ascii_case("file") || kind.eq_ignore_ascii_case("folder")
 }
 
 fn should_use_app_cache(filter: &SearchFilter) -> bool {
@@ -3335,15 +3102,11 @@ fn self_measure_memory() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        broad_root_discovery_enabled, cache_compaction_summary, compact_cached_items,
-        effective_file_folder_cache_cap, CoreService,
-    };
+    use super::CoreService;
     use crate::config::{Config, SearchMode};
     use crate::index_store::{self, open_memory};
     use crate::model::SearchItem;
     use crate::search::SearchFilter;
-    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3391,6 +3154,71 @@ mod tests {
         let mut config = Config::default();
         config.index_db_path = dir.join("index.sqlite3");
         config
+    }
+
+    #[test]
+    fn hot_cache_recalls_rows_outside_the_hot_set_from_store() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut config = Config::default();
+        config.index_db_path = dir.path().join("index.sqlite3");
+
+        let file = |name: &str, use_count: u32| {
+            let path = format!("C:\\recall\\{name}");
+            let mut item = SearchItem::new(
+                &format!("file:{}", path.to_ascii_lowercase()),
+                "file",
+                name,
+                &path,
+            );
+            item.use_count = use_count;
+            item
+        };
+        let needle = file("quarterly-message.txt", 0);
+        let needle_folder = SearchItem::new(
+            "folder:c:\\recall\\archive-message",
+            "folder",
+            "archive-message",
+            "C:\\recall\\archive-message",
+        );
+        {
+            let db = index_store::open_file(&config.index_db_path).expect("store");
+            let mut items: Vec<SearchItem> = (0..super::UI_CACHE_MAX_ITEMS + 50)
+                .map(|i| file(&format!("notes-{i:05}.txt"), 1))
+                .collect();
+            items.push(needle.clone());
+            items.push(needle_folder.clone());
+            index_store::upsert_items(&db, &items).expect("seed store");
+        }
+
+        let service = CoreService::new_ui_client(config).expect("service");
+        assert_eq!(service.cached_items_len(), super::UI_CACHE_MAX_ITEMS);
+        assert!(!service.cache_is_complete());
+        let cached = service.cached_items_snapshot();
+        assert!(cached.iter().all(|i| i.id != needle.id && i.id != needle_folder.id));
+
+        // Mid-name term: outside the hot set and not a prefix match.
+        let results = service.search("message", 20).expect("search");
+        assert!(results.iter().any(|r| r.id == needle.id));
+
+        let folders = service
+            .search_with_filter(
+                "archive",
+                20,
+                &SearchFilter {
+                    mode: SearchMode::Folders,
+                    ..Default::default()
+                },
+            )
+            .expect("folder search");
+        assert!(folders.iter().any(|r| r.id == needle_folder.id));
+        assert!(folders.iter().all(|r| r.kind == "folder"));
+
+        // The path does not exist, so launch fails on the path rather than
+        // with ItemNotFound from a cache-only lookup.
+        let err = service
+            .launch(super::LaunchTarget::Id(&needle.id))
+            .unwrap_err();
+        assert!(!matches!(err, super::ServiceError::ItemNotFound(_)));
     }
 
     #[test]
@@ -3709,15 +3537,6 @@ mod tests {
     }
 
     #[test]
-    fn broad_root_mode_detects_drive_roots() {
-        let mut cfg = Config::default();
-        cfg.show_files = true;
-        cfg.show_folders = true;
-        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
-        assert!(broad_root_discovery_enabled(&cfg));
-    }
-
-    #[test]
     fn bounded_ui_items_keeps_apps_and_most_used() {
         let mut items: Vec<SearchItem> = (0..5)
             .map(|index| {
@@ -3807,100 +3626,5 @@ mod tests {
         let (_generation, items) = service.cached_snapshot();
         assert_eq!(items.len(), expected);
         assert!(items.iter().any(|item| item.id == "swap-1"));
-    }
-
-    #[test]
-    fn broad_root_mode_ignores_default_profile_roots() {
-        let cfg = Config::default();
-        assert!(!broad_root_discovery_enabled(&cfg));
-    }
-
-    #[test]
-    fn broad_root_mode_honors_explicit_seed_cap() {
-        let mut cfg = Config::default();
-        cfg.show_files = true;
-        cfg.show_folders = true;
-        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
-        cfg.index_max_items_per_query_seed = 5_000;
-        cfg.active_memory_target_mb = 72;
-
-        // 72MB target with 5000 seed cap: the user explicitly raised the cap
-        // and 72MB can comfortably hold thousands of SearchItem rows, so the
-        // cap should track the user's setting rather than the old 8-items/MB
-        // heuristic (which silently clamped this exact configuration to 576).
-        assert_eq!(effective_file_folder_cache_cap(&cfg), 5_000);
-    }
-
-    #[test]
-    fn broad_root_mode_scales_down_for_tight_memory_target() {
-        let mut cfg = Config::default();
-        cfg.show_files = true;
-        cfg.show_folders = true;
-        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
-        cfg.index_max_items_per_query_seed = 50_000;
-        cfg.active_memory_target_mb = 20;
-
-        // 20MB / 4 = 5MB budget / 400 bytes per item ≈ 13,107, clamped to
-        // [250, 50_000], so the cap is the floor for the user-set seed cap.
-        let cap = effective_file_folder_cache_cap(&cfg);
-        assert!(cap >= 250, "cap should never drop below 250: {cap}");
-        assert!(cap <= 50_000, "cap should not exceed user setting: {cap}");
-    }
-
-    #[test]
-    fn broad_root_mode_never_drops_below_minimum_floor() {
-        let mut cfg = Config::default();
-        cfg.show_files = true;
-        cfg.show_folders = true;
-        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
-        cfg.index_max_items_per_query_seed = 250;
-        cfg.active_memory_target_mb = 20;
-
-        assert_eq!(effective_file_folder_cache_cap(&cfg), 250);
-    }
-
-    #[test]
-    fn cache_compaction_keeps_apps_but_tightens_files_for_broad_roots() {
-        let mut cfg = Config::default();
-        cfg.show_files = true;
-        cfg.show_folders = true;
-        cfg.discovery_roots = vec![PathBuf::from(r"C:\")];
-        cfg.index_max_items_per_query_seed = 5_000;
-        cfg.active_memory_target_mb = 72;
-
-        let mut items = Vec::new();
-        for idx in 0..20 {
-            items.push(SearchItem::new(
-                &format!("app-{idx}"),
-                "app",
-                &format!("App {idx}"),
-                &format!(r"C:\Apps\App{idx}.lnk"),
-            ));
-        }
-        for idx in 0..700 {
-            items.push(SearchItem::new(
-                &format!("file-{idx}"),
-                "file",
-                &format!("File {idx}"),
-                &format!(r"C:\Data\File{idx}.txt"),
-            ));
-        }
-
-        let summary = cache_compaction_summary(&items, &cfg);
-        let retained = compact_cached_items(&items, &cfg);
-
-        assert!(summary.broad_root_mode);
-        assert_eq!(summary.retained_apps, 20);
-        assert_eq!(summary.effective_file_seed_cap, 5_000);
-        assert_eq!(summary.retained_file_folders, 700);
-        assert_eq!(summary.retained_total, 720);
-        assert_eq!(retained.len(), 720);
-        assert_eq!(
-            retained
-                .iter()
-                .filter(|item| item.kind.eq_ignore_ascii_case("app"))
-                .count(),
-            20
-        );
     }
 }

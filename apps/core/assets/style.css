@@ -14,6 +14,21 @@
   /* Width of the detail pane; the body divider anchors to it. */
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
+  /* Shared scale: every surface draws from these so radii, motion and
+     focus feel identical across search, menus, media and chat. */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 12px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 100ms;
+  --dur: 160ms;
+  --dur-slow: 240ms;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  --shadow-pop: 0 0 0 1px var(--border-strong), 0 12px 32px -8px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.18);
+
   /* dark palette */
   --bg: #1E1E1E;
   --bg-opaque: #1E1E1E;
@@ -27,15 +42,19 @@
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --text: #f4f4f6;
-  --text-dim: #c3c9d2;
-  --text-faint: #aeb6c2;
-  --sel: rgba(255, 255, 255, 0.07);
-  --sel-border: rgba(255, 255, 255, 0.08);
-  --hover: rgba(255, 255, 255, 0.12);
+  --text: #f1f2f4;
+  --text-dim: #b6bac1;
+  --text-faint: #8b9099;
+  /* State layers: hover < selected < pressed, so the keyboard selection
+     always out-ranks the pointer. */
+  --hover: rgba(255, 255, 255, 0.05);
+  --sel: rgba(255, 255, 255, 0.085);
+  --sel-border: rgba(255, 255, 255, 0.06);
+  --pressed: rgba(255, 255, 255, 0.11);
+  --track: rgba(255, 255, 255, 0.12);
   --accent: #6ea8fe;
-  --divider: rgba(255, 255, 255, 0.06);
-  --kbd-bg: rgba(255, 255, 255, 0.08);
+  --divider: rgba(255, 255, 255, 0.07);
+  --kbd-bg: rgba(255, 255, 255, 0.06);
   --kbd-pill-bg: transparent;
   --kbd-cap-bg: rgba(255, 255, 255, 0.10);
   --kbd-cap-border: rgba(0, 0, 0, 0.35);
@@ -57,15 +76,17 @@ html[data-theme="light"] {
   --panel-glint: rgba(255, 255, 255, 0.25);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
-  --text: #16161a;
-  --text-dim: #4b515c;
-  --text-faint: #68717e;
+  --text: #18191c;
+  --text-dim: #4f545c;
+  --text-faint: #737983;
+  --hover: rgba(0, 0, 0, 0.035);
   --sel: rgba(0, 0, 0, 0.06);
-  --sel-border: rgba(0, 0, 0, 0.06);
-  --hover: rgba(0, 0, 0, 0.11);
+  --sel-border: rgba(0, 0, 0, 0.05);
+  --pressed: rgba(0, 0, 0, 0.09);
+  --track: rgba(0, 0, 0, 0.1);
   --accent: #2f6bff;
   --divider: rgba(0, 0, 0, 0.07);
-  --kbd-bg: rgba(0, 0, 0, 0.06);
+  --kbd-bg: rgba(0, 0, 0, 0.045);
   --kbd-pill-bg: transparent;
   --kbd-cap-bg: #FFFFFF;
   --kbd-cap-border: rgba(0, 0, 0, 0.15);
@@ -76,6 +97,7 @@ html[data-theme="light"] {
   --sleep: #8b5cf6;
   --restart: #16a34a;
   --shutdown: #dc2626;
+  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 12px 32px -8px rgba(15, 23, 42, 0.22), 0 2px 6px rgba(15, 23, 42, 0.06);
 }
 
 html[data-native-material="acrylic"] {
@@ -106,6 +128,21 @@ html[data-theme="light"][data-native-material="acrylic"] {
   user-select: none;
 }
 
+/* Form controls do not inherit the page font by default: without this the
+   power tiles, pills and menu items fall back to the UA face. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+:where(button, [role="tab"], [role="option"]):focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
 html,
 body {
   width: 100%;
@@ -113,9 +150,10 @@ body {
   background-color: transparent;
   font-family: var(--font);
   font-weight: 400;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
   color: var(--text);
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
@@ -155,11 +193,13 @@ body {
 
 #search-icon {
   flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
   fill: none;
   stroke: var(--text-faint);
   stroke-width: 2;
   stroke-linecap: round;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur) var(--ease);
 }
 
 #query-wrap {
@@ -181,7 +221,7 @@ body {
   white-space: pre;
   /* Identical to #query::placeholder so the suffix reads as one
      continuous hint (same color, size, weight, family). */
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-size: 21px;
   font-family: inherit;
   /* 400, not 300: probe proved 300-weight 21px renders grayscale in
@@ -215,12 +255,14 @@ body {
      subpixel text on composited layers, so translateY here grayscales
      the query permanently. position+top shifts identically. */
   top: -1px;
+  text-overflow: ellipsis;
+  caret-color: var(--accent);
   -webkit-user-select: text;
   user-select: text;
 }
 
 #query::placeholder {
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-weight: 400;
 }
 
@@ -274,14 +316,14 @@ html.compact-view #quick-launch-wrap:not([hidden]) {
   width: 36px;
   height: 36px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
   cursor: pointer;
-  transition: background 120ms ease, scale 120ms ease;
+  transition: background-color var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease);
 }
 #quick-launch-pins button:hover,
 #quick-launch-pins button:focus-visible {
-  background: var(--kbd-bg);
+  background: var(--sel);
 }
 #quick-launch-pins button:active {
   scale: 0.96;
@@ -349,7 +391,7 @@ html.compact-view #quick-launch-wrap:not([hidden]) {
 #divider {
   height: 1px;
   background: var(--divider);
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
 
 #body {
@@ -371,7 +413,7 @@ html.bare #footer {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px 10px 8px;
+  padding: 0 10px 6px;
 }
 .tab {
   appearance: none;
@@ -379,22 +421,27 @@ html.bare #footer {
   background: transparent;
   color: var(--text-faint);
   font: inherit;
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .tab:hover {
-  color: var(--text);
-  background: var(--kbd-bg);
+  color: var(--text-dim);
+  background: var(--hover);
 }
+/* Raised chip: reads as a control, not as another selected row. */
 .tab.active {
   color: var(--text);
-  background: var(--sel);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .tab:focus-visible {
-  outline: 1px solid var(--border-strong);
+  outline: none;
+  box-shadow: var(--ring);
 }
 .tab-end {
   margin-left: auto;
@@ -410,10 +457,10 @@ html.bare #footer {
 #body-cols {
   display: flex;
   align-items: stretch;
-  /* Fixed expanded height: six 46px rows. More results scroll inside the
+  /* Fixed expanded height: six 44px rows. More results scroll inside the
      list instead of growing the panel, so the window never resizes while
      typing. */
-  height: 288px;
+  height: 276px;
 }
 /* Grid and bento views size themselves. */
 #body.no-preview #body-cols {
@@ -491,7 +538,7 @@ html.bare #footer {
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 46px;
+  height: 44px;
   padding: 0 12px;
   border-radius: var(--row-radius);
   cursor: pointer;
@@ -519,7 +566,48 @@ html.bare #footer {
 }
 .row.selected::before {
   background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
   opacity: 1;
+}
+/* Enter hint on the keyboard selection. Pointer users already see the
+   path hint and pin control there, so it yields on hover. */
+.row.selected::after {
+  content: "\21B5";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  margin-top: -9px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+}
+.row.selected:hover::after,
+.grid-view .row.selected::after,
+#list.bento-view .row.selected::after {
+  display: none;
+}
+/* A visible pinned marker owns the trailing slot: the chip sits left of it. */
+.row.selected:has(.pin-icon.pinned, .add-icon.pinned)::after {
+  right: 40px;
+}
+.row:not(:has(.add-icon, .pin-icon)) .text {
+  padding-right: 28px;
+}
+.row.selected:has(.pin-icon.pinned, .add-icon.pinned) .text {
+  padding-right: 28px;
+}
+.grid-view .row:not(:has(.add-icon, .pin-icon)) .text {
+  padding-right: 0;
 }
 /* Blur-behind is glass-only: over opaque panels it only tints flat
    fill, while the filter layer grayscales hovered/selected text. */
@@ -591,7 +679,9 @@ html[data-native-material="acrylic"] .row.selected::before {
   #panel.media-open #media-view {
     animation: none;
   }
-#power-menu {
+#power-menu,
+#context-menu,
+.nex-tip {
   animation: none;
 }
 .power-panel {
@@ -617,7 +707,7 @@ html[data-native-material="acrylic"] .row.selected::before {
    so content-driven heights made rows vary: square vs tall). 112px =
    18 padding + 36 icon + 6 gap + 31 title + 1 gap + 12 subtitle. */
 .grid-view .row.row-grid {
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   border: 1px solid transparent;
   /* Fixed height: 18 padding + 36 icon + 6 gap + 31 two-line title. */
   height: 96px;
@@ -634,7 +724,7 @@ html[data-native-material="acrylic"] .row.selected::before {
   flex-direction: row;
   align-items: center;
   gap: 12px;
-  height: 46px;
+  height: 44px;
   padding: 0 12px;
   min-height: 0;
 }
@@ -755,7 +845,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 .row .subtitle {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -799,9 +889,15 @@ html[data-theme="light"] img.icon.glyph {
 .grid-view .row.calculator {
   height: 64px;
 }
+.row.calculator .title {
+  font-size: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .grid-view .row.calculator .title {
   font-size: 21px;
   font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 .grid-view .row.calculator .subtitle {
   font-size: 12px;
@@ -887,20 +983,22 @@ html[data-theme="light"] img.icon.glyph {
 /* Toast notification */
 /* section header */
 .section {
-  padding: 6px 12px 6px;
-  font-size: 10px;
+  padding: 10px 12px 5px;
+  font-size: 11.5px;
   font-weight: 500;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
   color: var(--text-faint);
+}
+.section:first-child {
+  padding-top: 2px;
 }
 
 /* status / empty */
 #status {
-  padding: 18px var(--pad-x) 22px;
+  padding: 22px var(--pad-x) 26px;
   text-align: center;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-faint);
+  text-wrap: balance;
 }
 /* Nothing in this tab: the status owns the whole column so it lands in
    the middle instead of under an empty stretched list. */
@@ -921,12 +1019,54 @@ html[data-theme="light"] img.icon.glyph {
   position: relative;
   display: flex;
   align-items: center;
-  height: 46px;
+  height: 40px;
   margin-top: 0;
   padding: 0 var(--pad-x);
   border-top: 1px solid var(--divider);
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-faint);
+}
+/* Keyboard hints, right-aligned beside the actions trigger. They fade
+   while the action list is expanded over them. */
+#footer-hints {
+  position: absolute;
+  right: calc(var(--pad-x) + 36px);
+  top: 50%;
+  margin-top: -10px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: opacity var(--dur) var(--ease);
+}
+#footer-hints .hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#footer-hints kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+#footer-hints kbd + kbd {
+  margin-left: -3px;
+}
+#footer:has(#footer-actions.open) #footer-hints,
+#footer:has(#footer-actions:focus-within) #footer-hints {
+  opacity: 0;
 }
 /* Brand mark, footer left. It is a watermark, not a control: color comes
    from the active theme's text token, so light/dark/glass-light/glass-dark
@@ -966,7 +1106,7 @@ html.glass-native .footer-mark {
   max-width: 0;
   opacity: 0;
   overflow: hidden;
-  transition: max-width 0.18s ease, opacity 0.14s ease;
+  transition: max-width var(--dur-slow) var(--ease), opacity var(--dur) var(--ease);
 }
 #footer-actions.open .footer-action-list,
 #footer-actions:focus-within .footer-action-list {
@@ -982,11 +1122,11 @@ html.glass-native .footer-mark {
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .footer-icon-btn svg {
   width: 15px;
@@ -1002,8 +1142,8 @@ html.glass-native .footer-mark {
   background: color-mix(in srgb, var(--bg-opaque) 70%, var(--text) 30%);
 }
 .footer-icon-btn:focus-visible {
-  outline: 1px solid var(--border-strong);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: var(--ring);
 }
 /* Frosted materials: the chip follows the panel instead of painting an
    opaque block on top of it. */
@@ -1047,20 +1187,22 @@ html.compact-view #power-panel-top {
 #power-btn-top {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: none;
-  border-radius: 0;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  transition: color 120ms ease, transform 120ms ease;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 #power-btn-top:hover,
 #power-btn-top.open {
   color: var(--text);
-  background: transparent;
-  transform: translateY(-1px);
+  background: var(--hover);
+}
+#power-btn-top:active {
+  background: var(--pressed);
 }
 
 /* ── media view ────────────────────────────────────────── */
@@ -1105,8 +1247,8 @@ html.compact-view #power-panel-top {
 }
 
 #media-dots button {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   padding: 0;
   border: none;
   border-radius: 50%;
@@ -1138,10 +1280,10 @@ html.compact-view #power-panel-top {
   width: 148px;
   height: 148px;
   flex: 0 0 auto;
-  border-radius: 14px;
+  border-radius: var(--r-xl);
   object-fit: cover;
   background: var(--icon-bg);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px var(--sel-border), 0 10px 28px -10px rgba(0, 0, 0, 0.55);
 }
 
 #media-art[src=""],
@@ -1164,11 +1306,9 @@ html.compact-view #power-panel-top {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin-bottom: 7px;
-  font-size: 10px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
   font-weight: 500;
-  letter-spacing: 0.7px;
-  text-transform: uppercase;
   color: var(--text-faint);
 }
 .media-eq {
@@ -1202,8 +1342,9 @@ html.compact-view #power-panel-top {
 }
 
 .media-title {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.25;
   max-width: 100%;
   overflow: hidden;
@@ -1226,7 +1367,7 @@ html.compact-view #power-panel-top {
   width: 100%;
   height: 4px;
   border-radius: 2px;
-  background: var(--hover);
+  background: var(--track);
   overflow: visible;
   margin-top: 2px;
   cursor: pointer;
@@ -1317,8 +1458,8 @@ html.compact-view #power-panel-top {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  margin-top: 4px;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 .media-controls button {
@@ -1331,15 +1472,30 @@ html.compact-view #power-panel-top {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
 .media-controls button:hover {
-  background: var(--hover);
+  background: var(--sel);
 }
 
 .media-controls button:active {
-  background: var(--sel);
+  background: var(--pressed);
+}
+
+/* Play/pause is the primary control: solid, inverse of the surface. */
+.media-controls #media-toggle {
+  width: 40px;
+  height: 40px;
+  background: var(--text);
+  color: var(--bg-opaque);
+}
+.media-controls #media-toggle:hover {
+  background: var(--text);
+  opacity: 0.88;
+}
+.media-controls #media-toggle:active {
+  opacity: 0.76;
 }
 
 .media-controls button:focus {
@@ -1354,7 +1510,7 @@ html.compact-view #power-panel-top {
   gap: 6px;
   margin-left: 2px;
   padding-left: 10px;
-  border-left: 1px solid var(--hover);
+  border-left: 1px solid var(--divider);
 }
 
 .media-volume-inline.hidden {
@@ -1372,15 +1528,15 @@ html.compact-view #power-panel-top {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
 .media-volume-inline button:hover {
-  background: var(--hover);
+  background: var(--sel);
 }
 
 .media-volume-inline button:active {
-  background: var(--sel);
+  background: var(--pressed);
 }
 
 .media-volume-inline button:focus {
@@ -1404,7 +1560,7 @@ html.compact-view #power-panel-top {
   border-radius: 2px;
   background: linear-gradient(to right,
     var(--accent) 0%, var(--accent) var(--vol, 100%),
-    var(--hover) var(--vol, 100%), var(--hover) 100%);
+    var(--track) var(--vol, 100%), var(--track) 100%);
 }
 
 #media-volume-slider::-webkit-slider-thumb {
@@ -1444,15 +1600,17 @@ html.compact-view #power-panel-top {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  height: 26px;
+  padding: 0 10px 0 8px;
   border: none;
-  border-radius: 4px;
-  background: rgba(74, 222, 128, 0.15);
-  color: #4ade80;
-  font-size: 11px;
+  border-radius: var(--r-md);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text);
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 200ms ease;
+  transition: background-color var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
 /* The id rules below beat the UA [hidden] rule, so the attribute alone never
@@ -1465,56 +1623,40 @@ html.compact-view #power-panel-top {
 
 #update-btn:hover,
 #whats-new-btn:hover {
-  background: rgba(74, 222, 128, 0.25);
+  background: var(--sel);
 }
 
 #update-btn:active,
 #whats-new-btn:active {
-  transform: scale(0.98);
+  scale: 0.97;
 }
 
 #update-btn:disabled {
   cursor: wait;
-  opacity: 0.7;
+  opacity: 0.6;
 }
 
 #update-btn svg,
 #whats-new-btn svg {
   display: block;
   flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+/* Colour lives in the glyph only: green for an available update, accent
+   for the post-update notes. */
+#update-btn svg {
+  color: var(--restart);
+}
+
+#whats-new-btn svg {
+  color: var(--accent);
 }
 
 #update-btn span,
 #whats-new-btn span {
   white-space: nowrap;
-}
-
-html[data-theme="light"] #update-btn,
-html[data-theme="light"] #whats-new-btn {
-  background: rgba(22, 163, 74, 0.15);
-  color: #16a34a;
-}
-
-html[data-theme="light"] #update-btn:hover,
-html[data-theme="light"] #whats-new-btn:hover {
-  background: rgba(22, 163, 74, 0.25);
-}
-
-/* Post-update entry point: own pill in the accent palette so it can
-   sit next to Update instead of hijacking it. */
-#whats-new-btn {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
-}
-
-#whats-new-btn:hover {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-}
-
-html[data-theme="light"] #whats-new-btn,
-html[data-theme="light"] #whats-new-btn:hover {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
 }
 
 /* ── what's new view ─────────────────────────────────────── */
@@ -1567,23 +1709,23 @@ html[data-theme="light"] #whats-new-btn:hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 48px;
-  padding: 4px var(--pad-x) 5px;
+  min-height: 52px;
+  padding: 4px 12px 5px 10px;
   border-bottom: 1px solid var(--divider);
 }
 
 .chat-icon-button {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   display: inline-grid;
   place-items: center;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease);
 }
 
 .chat-icon-button:hover,
@@ -1592,9 +1734,9 @@ html[data-theme="light"] #whats-new-btn:hover {
   color: var(--text);
 }
 
-.chat-icon-button:active { transform: scale(0.96); }
+.chat-icon-button:active { scale: 0.96; background: var(--pressed); }
 .chat-icon-button:disabled { opacity: .45; cursor: default; }
-.chat-icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.chat-icon-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .chat-icon-button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 
 .chat-title-wrap { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -1707,7 +1849,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-empty-title { font-size: 19px; line-height: 24px; font-weight: 550; letter-spacing: -0.035em; text-wrap: balance; }
 .chat-empty-copy { max-width: 400px; margin: 7px auto 0; color: var(--text-faint); font-size: 12px; line-height: 18px; text-wrap: pretty; }
 .chat-suggestions { display: flex; justify-content: center; flex-wrap: wrap; gap: 7px; margin-top: 21px; }
-.chat-suggestions button { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 11px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text-dim); font: 11px var(--font); cursor: pointer; }
+.chat-suggestions button { min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: transparent; color: var(--text-dim); font: 12px var(--font); cursor: pointer; transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
 .chat-suggestions button:hover { background: var(--hover); color: var(--text); }
 .chat-suggestions button span { color: var(--text-faint); }
 
@@ -1750,8 +1892,9 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-table th { color: var(--text-dim); font-weight: 600; }
 
 /* Delayed hover hints: label plus optional kbd shortcut chip. */
-.nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: 6px; background: color-mix(in srgb, var(--bg-opaque) 92%, transparent); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0,0,0,.22); color: var(--text); font-size: 11px; line-height: 1.3; pointer-events: none; }
-.nex-tip .kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 3px; background: var(--kbd-cap-bg); border: 1px solid var(--kbd-cap-border); font-size: 10px; font-weight: 500; line-height: 1; color: var(--text); }
+.nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--bg-opaque) 96%, transparent); border: 0; box-shadow: var(--shadow-pop); color: var(--text); font-size: 11.5px; line-height: 1.3; pointer-events: none; animation: nexTipIn 120ms var(--ease-out); }
+@keyframes nexTipIn { from { opacity: 0; } }
+.nex-tip .kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--r-xs); background: var(--kbd-bg); border: 0; box-shadow: inset 0 0 0 1px var(--sel-border); font-size: 10px; font-weight: 500; line-height: 1; color: var(--text); }
 
 .chat-live-status { min-height: 16px; max-width: 680px; margin: 6px auto 0; color: var(--text-faint); font-size: 10px; }
 .chat-live-status:empty { display: none; }
@@ -1767,11 +1910,11 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-context-chip:hover button, .chat-context-chip:focus-within button { opacity: 1; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; margin: 0; padding: 4px 10px 4px 8px; border: 0; border-top: 1px solid var(--divider); border-radius: 0; background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; margin: 0 10px 10px; padding: 3px 6px 3px 6px; border: 1px solid var(--border); border-radius: var(--r-xl); background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
 /* Composer blur is glass-only: the filter layer grayscales the input text. */
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }
-.chat-composer-shell:focus-within { border-color: var(--border-strong); box-shadow: 0 7px 20px rgba(0,0,0,.07); }
+.chat-composer-shell:focus-within { border-color: var(--border-strong); box-shadow: none; }
 #chat-input { min-width: 0; max-height: 112px; min-height: 27px; display: block; resize: none; overflow-y: auto; margin: auto 0; padding: 10px 8px 10px 1px; border: 0; outline: 0; background: transparent; color: var(--text); font: 12px/20px var(--font); scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 #chat-input::-webkit-scrollbar { width: 8px; }
 #chat-input::-webkit-scrollbar-track { background: transparent; }
@@ -1779,9 +1922,9 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 #chat-input::placeholder { color: var(--text-faint); }
 .chat-composer-tools { display: flex; flex: 0 0 auto; align-items: center; align-self: center; gap: 3px; }
 .chat-composer-footer { max-width: 680px; min-height: 16px; display: flex; align-items: center; gap: 12px; margin: 3px auto 0; }
-.chat-send-button { width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer; transition: opacity 120ms ease, transform 120ms ease; }
-.chat-send-button:disabled { opacity: .42; cursor: default; }
-.chat-send-button:not(:disabled):active { transform: scale(0.96); }
+.chat-send-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: var(--r-md); background: var(--accent); color: #fff; cursor: pointer; transition: opacity var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease); }
+.chat-send-button:disabled { opacity: 1; background: var(--kbd-bg); color: var(--text-faint); cursor: default; }
+.chat-send-button:not(:disabled):active { scale: 0.96; }
 .chat-send-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .chat-stop-icon { display: none; }
 #chat-view.is-streaming .chat-send-button { background: transparent; color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--border-strong); }
@@ -1855,10 +1998,8 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 
 .whats-new-eyebrow {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--accent);
 }
 
@@ -1971,17 +2112,17 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 
 #whats-new-dismiss {
   align-self: flex-end;
-  min-width: 64px;
+  min-width: 72px;
   min-height: 28px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: var(--accent);
   color: #fff;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  transition: transform 120ms ease, filter 120ms ease;
+  transition: scale var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
 }
 
 #whats-new-dismiss:hover {
@@ -1989,12 +2130,12 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 
 #whats-new-dismiss:active {
-  transform: scale(0.96);
+  scale: 0.97;
 }
 
 #whats-new-dismiss:focus-visible {
-  outline: 2px solid var(--text);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: var(--ring);
 }
 
 /* ── power panel (circle row) ─────────────────────────────── */
@@ -2026,6 +2167,7 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 .power-row:has(.pcircle[data-power="back"]) {
   grid-template-columns: 40px repeat(5, 1fr);
+  align-items: start;
 }
 
 .power-confirm .power-row {
@@ -2045,13 +2187,14 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   max-width: 96px;
   padding: 10px 4px 12px;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--r-xl);
   background: transparent;
   color: var(--c);
   cursor: pointer;
   opacity: 0;
   box-shadow: none;
-  animation: nexPowerRise 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transition: background-color var(--dur-fast) var(--ease);
+  animation: nexPowerRise 220ms var(--ease-out) forwards;
 }
 .power-panel .pcircle:nth-child(1) { animation-delay: 20ms; }
 .power-panel .pcircle:nth-child(2) { animation-delay: 40ms; }
@@ -2066,7 +2209,11 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   padding: 11px;
   border: 1px solid transparent;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--c) 9%, transparent);
+  /* Neutral disc: the action colour stays in the glyph so five hues do
+     not compete as filled shapes. */
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+  transition: background-color var(--dur) var(--ease);
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
@@ -2075,37 +2222,39 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 .power-panel .pcircle span {
   margin-top: 1px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--text-dim);
-  letter-spacing: 0.1px;
   white-space: nowrap;
 }
 .power-panel .pcircle:hover {
   background: var(--hover);
   box-shadow: none;
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
+}
+.power-panel .pcircle:hover span {
+  color: var(--text);
 }
 .power-panel .pcircle:hover svg {
   background: color-mix(in srgb, var(--c) 14%, transparent);
 }
 .power-panel .pcircle:active {
-  background: var(--sel);
+  background: var(--pressed);
 }
 .power-panel .pcircle:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--text) 35%, transparent);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: var(--ring);
 }
 .power-panel .pcircle[data-power="back"] {
   --c: var(--text-faint);
   width: 34px;
   max-width: 34px;
   height: 34px;
+  /* Centre on the 46px discs (10px tile padding + 23px radius). */
+  margin-top: 16px;
   padding: 0;
   gap: 0;
   border: 1px solid transparent;
-  border-radius: 50%;
+  border-radius: var(--r-md);
   background: transparent;
   color: var(--text-faint);
 }
@@ -2114,6 +2263,7 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   height: 34px;
   padding: 7px;
   background: transparent;
+  box-shadow: none;
 }
 .power-panel .pcircle[data-power="back"] span {
   display: none;
@@ -2142,8 +2292,9 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 }
 .power-confirm .confirm-title {
   padding-bottom: 16px;
-  font-size: 11px;
-  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
   text-align: center;
   white-space: nowrap;
 }
@@ -2151,16 +2302,26 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 /* ── context menu (right-click on rows) ──────────────────── */
 #context-menu {
   position: fixed;
-  min-width: 180px;
-  padding: 5px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-opaque) 92%, transparent);
+  min-width: 196px;
+  padding: 4px;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--bg-opaque) 94%, transparent);
   border: none;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22), inset 0 0 0 1px var(--border-strong);
+  box-shadow: var(--shadow-pop);
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   z-index: 9999;
   outline: none;
+  transform-origin: top left;
+  animation: nexMenuIn 140ms var(--ease-out);
+}
+/* No fill-mode: once finished the menu leaves the compositor, so its
+   text keeps subpixel AA. */
+@keyframes nexMenuIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
 }
 /* Glass keeps the frosted material; opaque modes stay flat for crisp text. */
 html[data-native-material="acrylic"] #context-menu {
@@ -2171,30 +2332,36 @@ html[data-native-material="acrylic"] #context-menu {
 #context-menu button {
   display: block;
   width: 100%;
-  min-height: 30px;
-  padding: 6px 9px;
+  min-height: 28px;
+  padding: 0 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--text);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
   text-align: left;
 }
 #context-menu button:hover {
-  background: var(--hover);
-}
-#context-menu button:active {
   background: var(--sel);
 }
+#context-menu button:active {
+  background: var(--pressed);
+}
 #context-menu button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--text) 35%, transparent);
-  outline-offset: -2px;
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+#context-menu button[data-action="uninstall"] {
+  color: var(--shutdown);
+}
+#context-menu button[data-action="uninstall"]:hover {
+  background: color-mix(in srgb, var(--shutdown) 12%, transparent);
 }
 #context-menu hr {
   height: 1px;
-  margin: 5px 6px;
+  margin: 4px 6px;
   border: none;
   background: var(--divider);
 }
@@ -2218,14 +2385,15 @@ html[data-native-material="acrylic"] #context-menu {
   flex-direction: column;
   height: auto;
   padding: 0;
-  border-radius: 12px;
+  border-radius: var(--r-xl);
   overflow: hidden;
-  background: var(--sel);
-  transition: background 100ms ease;
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--sel-border);
+  transition: background-color var(--dur-fast) var(--ease);
 }
 
 #list.bento-view .row:hover {
-  background: var(--hover);
+  background: var(--sel);
 }
 
 /* Bento tile sizes — asymmetric layout */
@@ -2342,13 +2510,15 @@ html.glass-native.glass-light {
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #16161a;
-  --text-dim: #4b515c;
-  --text-faint: #68717e;
-  --sel: rgba(0, 0, 0, 0.06);
+  --text-dim: #464c56;
+  --text-faint: #5f6772;
+  --hover: rgba(0, 0, 0, 0.045);
+  --sel: rgba(0, 0, 0, 0.075);
   --sel-border: rgba(0, 0, 0, 0.06);
-  --hover: rgba(0, 0, 0, 0.11);
-  --divider: rgba(0, 0, 0, 0.07);
-  --kbd-bg: rgba(0, 0, 0, 0.06);
+  --pressed: rgba(0, 0, 0, 0.11);
+  --track: rgba(0, 0, 0, 0.12);
+  --divider: rgba(0, 0, 0, 0.08);
+  --kbd-bg: rgba(0, 0, 0, 0.055);
   --kbd-cap-bg: #ffffff;
   --kbd-cap-border: rgba(0, 0, 0, 0.15);
   --icon-bg: rgba(0, 0, 0, 0.05);
@@ -2368,12 +2538,14 @@ html.glass-native.glass-dark {
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #f4f4f6;
-  --text-dim: #c3c9d2;
-  --text-faint: #aeb6c2;
-  --sel: rgba(255, 255, 255, 0.07);
+  --text-dim: #c6cbd3;
+  --text-faint: #a5acb7;
+  --hover: rgba(255, 255, 255, 0.07);
+  --sel: rgba(255, 255, 255, 0.11);
   --sel-border: rgba(255, 255, 255, 0.08);
-  --hover: rgba(255, 255, 255, 0.12);
-  --divider: rgba(255, 255, 255, 0.06);
+  --pressed: rgba(255, 255, 255, 0.15);
+  --track: rgba(255, 255, 255, 0.16);
+  --divider: rgba(255, 255, 255, 0.08);
   --kbd-bg: rgba(255, 255, 255, 0.08);
   --kbd-cap-bg: rgba(255, 255, 255, 0.1);
   --kbd-cap-border: rgba(0, 0, 0, 0.35);

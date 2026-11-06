@@ -63,7 +63,7 @@ pub(crate) fn apply(base: &Config, raw: &str) -> Result<Config, String> {
     let cfg_obj = body.cfg;
     let mut cfg = base.clone();
     if let Some(hotkey) = cfg_obj.hotkey.as_deref() {
-        cfg.hotkey = crate::settings::validate_hotkey(hotkey)
+        cfg.hotkey = crate::settings::validate_new_hotkey(hotkey)
             .map_err(|e| format!("invalid hotkey: {e}"))?;
     }
     if let Some(v) = cfg_obj.grid_view {

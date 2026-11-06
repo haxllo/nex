@@ -1644,6 +1644,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::CloseSettings => {
+                    // The raw-input sink is global: an armed recorder would
+                    // take the next keystroke in any app as the new hotkey.
+                    RECORDING_HOTKEY.store(false, Ordering::SeqCst);
                     if let Some((w, _)) = &settings_ui {
                         animate_window_close(w.hwnd() as HWND);
                         let _ = w.set_visible(false);
@@ -1747,6 +1750,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     *last_settings_snapshot.lock().unwrap() = Some(snapshot.clone());
                     if let Some((w, _)) = &settings_ui {
                         //Already open just raise it
+                        w.set_minimized(false);
                         let _ = w.set_visible(true);
                         let _ = w.set_focus();
                     } else {
@@ -1793,6 +1797,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                         };
                                     }
                                     Ok(SettingsMessage::RecordHotkey(_)) => {
+                                        // Stale chord flag from an earlier
+                                        // recording would block a bare Win.
+                                        RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
                                         RECORDING_HOTKEY.store(true, Ordering::SeqCst);
                                         // Raw input already swallows the keys;
                                         // keep Start shut by holding the mask
@@ -1828,6 +1835,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                         use windows_sys::Win32::UI::WindowsAndMessaging::{
                                             ShowWindow, SW_MINIMIZE,
                                         };
+                                        RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                                        // A minimized Settings must not keep
+                                        // the hotkey suppressed.
+                                        let _ = save_tx.send(OverlayEvent::SettingsClosed);
                                         if let Ok(slot) = settings_hwnd_for_ipc.lock() {
                                             if let Some(h) = *slot {
                                                 unsafe {
@@ -3927,7 +3938,10 @@ unsafe extern "system" fn instance_signal_subclass(
                     // Native hotkey recording for the settings page:
                     // swallow keys and translate them while armed.
                     if RECORDING_HOTKEY.load(Ordering::SeqCst) {
-                        return unsafe { handle_recording_key(vk, flags, ctx) };
+                        unsafe { handle_recording_key(vk, flags, ctx) };
+                        // WM_INPUT must still reach DefWindowProc so the
+                        // raw-input data is cleaned up.
+                        return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
                     }
                     // Win hotkey detection lives HERE (raw input receives
                     // keys globally; it does NOT reach elevated foreground
@@ -4037,7 +4051,8 @@ unsafe fn install_instance_signal_subclass(hwnd: HWND, event_tx: &Sender<Overlay
 
 /// While RECORDING_HOTKEY is armed, translate raw keyboard events into a
 /// canonical hotkey string and report via OverlayEvent::HotkeyRecorded.
-/// Every event is swallowed (returns 0) — nothing leaks to the OS.
+/// Raw input only observes: keys still reach the OS (Start is held shut by
+/// the menu mask, see keyboard_hook_proc).
 unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> LRESULT {
     let is_break = (flags & RI_KEY_BREAK) != 0;
     //ESC cancels recording, any other key is a candidate.

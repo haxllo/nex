@@ -17,6 +17,29 @@ fn validates_win_modifier_hotkey() {
 }
 
 #[test]
+fn letter_f_is_a_key_not_a_function_key() {
+    assert_eq!(
+        nex_core::settings::validate_hotkey("Ctrl+Shift+F").unwrap(),
+        "Ctrl+Shift+F"
+    );
+    assert_eq!(nex_core::settings::validate_hotkey("Ctrl+F13").unwrap(), "Ctrl+F13");
+    assert!(nex_core::settings::validate_hotkey("Ctrl+F25").is_err());
+}
+
+#[test]
+fn new_hotkey_rejects_bare_typing_keys() {
+    assert!(nex_core::settings::validate_new_hotkey("Space").is_err());
+    assert!(nex_core::settings::validate_new_hotkey("A").is_err());
+    assert!(nex_core::settings::validate_new_hotkey("Ctrl+Win").is_err());
+    assert_eq!(nex_core::settings::validate_new_hotkey("Win").unwrap(), "Win");
+    assert_eq!(nex_core::settings::validate_new_hotkey("F9").unwrap(), "F9");
+    assert_eq!(
+        nex_core::settings::validate_new_hotkey("ctrl+space").unwrap(),
+        "Ctrl+Space"
+    );
+}
+
+#[test]
 fn validates_max_results_range() {
     assert!(nex_core::settings::validate_max_results(5).is_ok());
     assert!(nex_core::settings::validate_max_results(100).is_ok());

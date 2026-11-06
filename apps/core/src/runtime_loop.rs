@@ -698,6 +698,15 @@ impl RuntimeWorker {
     fn reregister_hotkey_listener(&mut self, new_hotkey: &str) {
         // Gate: only one re-registration at a time — drop old listener
         // inside the gate so we don't lose it if another is in progress.
+        // Validate with the listener's parser first: tearing down the working
+        // listener for a binding it cannot start left no hotkey at all.
+        if let Err(error) = crate::overlay::hotkey::validate_binding(new_hotkey) {
+            log_warn(&format!(
+                "[nex] hotkey '{new_hotkey}' not applied, keeping current listener: {error}"
+            ));
+            self.overlay.set_status_text("Could not apply that hotkey");
+            return;
+        }
         if RE_REGISTERING
             .compare_exchange(
                 false,
@@ -1731,7 +1740,10 @@ impl RuntimeWorker {
         match event {
             OverlayEvent::Hotkey(_) => {
                 if self.settings_open {
-                    return; // Settings owns the moment — don't summon the launcher over it
+                    // Settings owns the moment. Still end the Win press, or
+                    // the focus-escape guard it armed stays set.
+                    crate::overlay::hotkey::finish_bare_win_press();
+                    return;
                 }
                 // Duplicate detections of one press are dropped at the
                 // source (`hotkey::send_hotkey_event`). Do NOT reintroduce

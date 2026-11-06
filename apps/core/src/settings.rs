@@ -49,6 +49,29 @@ pub fn validate_hotkey(input: &str) -> Result<String, String> {
     Ok(canonical)
 }
 
+/// Stricter check for a hotkey the user is saving now. Kept separate from
+/// `validate_hotkey` so existing configs keep loading.
+pub fn validate_new_hotkey(input: &str) -> Result<String, String> {
+    let canonical = validate_hotkey(input)?;
+    let parts: Vec<&str> = canonical.split('+').collect();
+    let key = parts.last().copied().unwrap_or_default();
+    if parts.len() == 1 && key != "Win" && !is_function_key(key) {
+        // The hook eats the target key system-wide, so a bare letter, digit
+        // or Space would stop it from typing anywhere.
+        return Err("Add Ctrl, Alt, Shift or Win to this key.".to_string());
+    }
+    if parts.len() > 1 && key == "Win" {
+        return Err("Win can be used alone or as a modifier, not as the last key.".to_string());
+    }
+    Ok(canonical)
+}
+
+fn is_function_key(key: &str) -> bool {
+    key.len() > 1
+        && key.starts_with('F')
+        && key[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn validate_max_results(value: u16) -> Result<(), String> {
     if (5..=100).contains(&value) {
         Ok(())
@@ -97,7 +120,11 @@ fn normalize_key(input: &str) -> Result<String, String> {
         return Ok("Win".to_string());
     }
 
-    if let Some(number) = upper.strip_prefix('F') {
+    // Only "F<digits>" is a function key; a bare "F" is the letter.
+    if let Some(number) = upper
+        .strip_prefix('F')
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
         if let Ok(parsed) = number.parse::<u8>() {
             if (1..=24).contains(&parsed) {
                 return Ok(format!("F{parsed}"));

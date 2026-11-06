@@ -586,6 +586,26 @@ document.addEventListener("keydown", (e) => {
   e.stopPropagation();
 });
 
+function cancelRecording() {
+  if (!recording) return;
+  recording = false;
+  hkbox.classList.remove("recording");
+  window.chrome.webview.postMessage(JSON.stringify({ t: "cancelRecord" }));
+  hkHint.textContent = HINT_IDLE;
+  showHotkey();
+}
+
+// The native recorder listens globally, so stop it once Settings loses focus
+// for good. Delayed: a key press can bounce focus for a moment.
+window.addEventListener("blur", () => {
+  setTimeout(() => {
+    if (!document.hasFocus()) cancelRecording();
+  }, 400);
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) cancelRecording();
+});
+
 window.hotkeyRecorded = function (combo) {
   recording = false;
   hkbox.classList.remove("recording");

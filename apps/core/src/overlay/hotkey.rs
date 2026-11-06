@@ -2057,18 +2057,28 @@ fn modifier_vks_from_names(names: &[String]) -> Result<Vec<u32>, String> {
 }
 
 fn vk_from_key(key: &str) -> Result<u32, String> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_SPACE,
-    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_F1, VK_SPACE};
     let upper = key.to_ascii_uppercase();
+    // F1..F24 are contiguous VKs; settings accepts all 24.
+    let function_key = upper
+        .strip_prefix('F')
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<u32>().ok())
+        .filter(|n| (1..=24).contains(n));
     Ok(match upper.as_str() {
         "WIN" | "META" | "SUPER" => VK_LWIN, "SPACE" => VK_SPACE as u32,
-        "F1" => VK_F1 as u32, "F2" => VK_F2 as u32, "F3" => VK_F3 as u32, "F4" => VK_F4 as u32,
-        "F5" => VK_F5 as u32, "F6" => VK_F6 as u32, "F7" => VK_F7 as u32, "F8" => VK_F8 as u32,
-        "F9" => VK_F9 as u32, "F10" => VK_F10 as u32, "F11" => VK_F11 as u32, "F12" => VK_F12 as u32,
+        _ if function_key.is_some() => VK_F1 as u32 + function_key.unwrap_or(1) - 1,
         _ if upper.len() == 1 => upper.as_bytes()[0] as u32,
         _ => return Err(format!("unsupported key: {key}")),
     })
+}
+
+/// Check a binding with the listener's own parser, before tearing anything
+/// down for it.
+pub(crate) fn validate_binding(hotkey_str: &str) -> Result<(), String> {
+    let parsed = parse_hotkey(hotkey_str)?;
+    modifier_vks_from_names(&parsed.modifiers)?;
+    vk_from_key(&parsed.key).map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2202,6 +2212,12 @@ mod tests {
     #[test] fn vk_space() { assert_eq!(vk_from_key("Space").unwrap(), windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SPACE as u32); }
     #[test] fn vk_f5() { assert_eq!(vk_from_key("F5").unwrap(), windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F5 as u32); }
     #[test] fn vk_single_letter() { assert_eq!(vk_from_key("A").unwrap(), b'A' as u32); }
+    #[test] fn vk_f_keys_cover_f1_to_f24() {
+        assert_eq!(vk_from_key("F1").unwrap(), 0x70);
+        assert_eq!(vk_from_key("F24").unwrap(), 0x87);
+        assert_eq!(vk_from_key("F").unwrap(), b'F' as u32);
+        assert!(vk_from_key("F25").is_err());
+    }
     #[test] fn vk_win_key() { assert_eq!(vk_from_key("Win").unwrap(), VK_LWIN); }
     #[test] fn modifier_vks() { let mods = modifier_vks_from_names(&["Ctrl".into(), "Shift".into()]).unwrap(); assert_eq!(mods, vec![VK_CTRL, VK_SHIFT]); }
     #[test] fn dispatch_win_goes_hook() { assert_eq!(dispatch_for(0x20, true, true, false), DispatchReason::WinCombo); }

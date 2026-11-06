@@ -79,7 +79,7 @@ impl NativeOverlayShell {
         // old poll delay, never a stall.
         let (prefetch_notify_tx, prefetch_notify_for_thread) =
             crossbeam_channel::bounded::<()>(1);
-        let icon_cache = Arc::new(IconCache::default());
+        let icon_cache = Arc::new(IconCache::default().with_default_disk_cache());
         let icon_cache_for_thread = icon_cache.clone();
         let prefetch_work_for_thread = prefetch_work.clone();
         // Hoisted above the prefetch thread spawn so the thread can
@@ -610,6 +610,12 @@ impl NativeOverlayShell {
 
     pub fn trim_runtime_memory(&self) {
         let _ = self.inner.icon_cache.trim_unused();
+    }
+
+    /// Drop decoded icons from memory and disk; the next result set
+    /// re-extracts them. Returns `(memory_entries, disk_entries)`.
+    pub fn clear_icon_cache(&self) -> (usize, usize) {
+        self.inner.icon_cache.clear_all()
     }
 
     pub fn show_placeholder_hint(&self, message: &str) {

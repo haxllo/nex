@@ -2,6 +2,12 @@
 //!
 //! Each entry is keyed by file path and stores PNG-encoded bytes
 //! (decoded from `.ico` or `.png` on first access). No Iced dependency.
+//!
+//! A memory miss consults the optional [`IconDiskCache`] before shell
+//! extraction. Disk entries are validated against a [`Fingerprint`] of the
+//! source (size + mtime, `.lnk` target, package install directory), and
+//! memory entries are re-validated by the prefetch thread, so an icon whose
+//! source changed is re-extracted rather than shown stale.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -10,6 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+
+use crate::overlay::icon_disk_cache::{Fingerprint, IconDiskCache};
 
 #[cfg(test)]
 use crate::overlay::model::OverlayRow;
@@ -27,6 +35,12 @@ const TARGET_ICON_SIZE: u32 = 128;
 const EXTRACT_ICON_SIZE: i32 = 256;
 
 const ICON_NORMALIZATION_VERSION: u8 = 3;
+/// How long a memory entry is trusted before the prefetch thread re-stats
+/// its source. Keeps per-keystroke prefetch from re-reading every `.lnk`.
+const REVALIDATE_INTERVAL: Duration = Duration::from_secs(2);
+/// Disk budget per in-memory entry, so the disk tier scales with the
+/// memory target (clamped by `IconDiskCache` to 8–32 MiB).
+const DISK_BYTES_PER_MEMORY_ENTRY: u64 = 64 * 1024;
 
 static PACKAGE_DIR_CACHE: OnceLock<Mutex<HashMap<String, Vec<PathBuf>>>> = OnceLock::new();
 
@@ -36,10 +50,19 @@ fn cache_key(path: &str) -> PathBuf {
 
 pub struct IconCache {
     inner: Mutex<Inner>,
+    disk: Option<IconDiskCache>,
+}
+
+struct Entry {
+    bytes: Arc<Vec<u8>>,
+    /// Source state at decode time; `None` for sources that cannot be
+    /// fingerprinted (settings glyphs, virtual shell items).
+    fingerprint: Option<Fingerprint>,
+    verified_at: Instant,
 }
 
 struct Inner {
-    png: LruCache<PathBuf, Arc<Vec<u8>>>,
+    png: LruCache<PathBuf, Entry>,
     /// `data:` URIs derived from the PNGs above, keyed identically. The
     /// host pushes a state snapshot on every show and keystroke, and it
     /// used to re-encode every visible icon each time; the URI is stable
@@ -85,7 +108,24 @@ impl IconCache {
                 max_entries,
                 idle_trim: Duration::from_millis(idle_trim_ms as u64),
             }),
+            disk: None,
         }
+    }
+
+    /// Back the memory LRU with the persistent store under the app data
+    /// directory (`icon-cache/v<normalization version>`).
+    pub(crate) fn with_default_disk_cache(self) -> Self {
+        self.with_disk_cache_at(&crate::config::stable_app_data_dir().join("icon-cache"))
+    }
+
+    fn with_disk_cache_at(mut self, root: &std::path::Path) -> Self {
+        let max_entries = self.inner.lock().map(|i| i.max_entries.get()).unwrap_or(DEFAULT_MAX_ENTRIES);
+        self.disk = Some(IconDiskCache::new(
+            root,
+            &format!("v{ICON_NORMALIZATION_VERSION}"),
+            disk_budget_for(max_entries),
+        ));
+        self
     }
 
     /// Decode `path` (.ico/.png) and return PNG-encoded bytes for the
@@ -95,22 +135,81 @@ impl IconCache {
         if path.is_empty() {
             return None;
         }
-        let source = PathBuf::from(path);
         let key = cache_key(path);
         if let Ok(mut inner) = self.inner.lock() {
-            let bytes = inner.png.get(&key).cloned();
+            let bytes = inner.png.get(&key).map(|e| e.bytes.clone());
             if bytes.is_some() {
                 inner.touch(key);
                 return bytes;
             }
         }
-        let bytes = Arc::new(decode_png(&source)?);
+        // Fingerprint before decoding: if the source changes mid-decode the
+        // stored fingerprint is the old one, so the next lookup re-extracts.
+        let fingerprint = source_fingerprint(path);
+        let from_disk = match (&self.disk, fingerprint) {
+            (Some(disk), Some(fp)) => disk.load(path, fp),
+            _ => None,
+        };
+        let bytes = match from_disk {
+            Some(bytes) => bytes,
+            None => {
+                let bytes = decode_png(&PathBuf::from(path))?;
+                if let (Some(disk), Some(fp)) = (&self.disk, fingerprint) {
+                    disk.store(path, fp, &bytes);
+                }
+                bytes
+            }
+        };
+        let bytes = Arc::new(bytes);
         if let Ok(mut inner) = self.inner.lock() {
-            inner.png.put(key.clone(), bytes.clone());
+            inner.png.put(
+                key.clone(),
+                Entry {
+                    bytes: bytes.clone(),
+                    fingerprint,
+                    verified_at: Instant::now(),
+                },
+            );
+            inner.uri.remove(&key);
             inner.touch(key);
             inner.clean_orphans();
         }
         Some(bytes)
+    }
+
+    /// True when a memory entry for `path` exists and its source has not
+    /// changed since it was decoded. A changed (or deleted) source evicts
+    /// the entry so the caller re-decodes; the disk entry is rejected by
+    /// its fingerprint on that same path. Runs on the prefetch thread.
+    pub(crate) fn has_fresh(&self, path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        let key = cache_key(path);
+        let recorded = {
+            let Ok(mut inner) = self.inner.lock() else { return false };
+            let Some(entry) = inner.png.get(&key) else { return false };
+            match entry.fingerprint {
+                Some(fp) if entry.verified_at.elapsed() >= REVALIDATE_INTERVAL => fp,
+                _ => {
+                    inner.touch(key);
+                    return true;
+                }
+            }
+        };
+        let current = source_fingerprint(path);
+        let Ok(mut inner) = self.inner.lock() else { return false };
+        if current == Some(recorded) {
+            if let Some(entry) = inner.png.get_mut(&key) {
+                entry.verified_at = Instant::now();
+            }
+            inner.touch(key);
+            return true;
+        }
+        inner.png.pop(&key);
+        inner.uri.remove(&key);
+        inner.last_touch.remove(&key);
+        false
     }
 
     /// Same as `png_bytes` but never blocks — returns `None` if the
@@ -121,7 +220,7 @@ impl IconCache {
         }
         let key = cache_key(path);
         let mut inner = self.inner.lock().ok()?;
-        let bytes = inner.png.get(&key).cloned()?;
+        let bytes = inner.png.get(&key).map(|e| e.bytes.clone())?;
         inner.touch(key);
         Some(bytes)
     }
@@ -190,6 +289,16 @@ impl IconCache {
         }
     }
 
+    /// Drop memory and disk tiers. Safe while the prefetch thread runs:
+    /// in-flight lookups just miss and re-extract. Returns
+    /// `(memory_entries, disk_entries)` removed.
+    pub(crate) fn clear_all(&self) -> (usize, usize) {
+        let memory = self.len();
+        self.clear();
+        let disk = self.disk.as_ref().map(IconDiskCache::clear).unwrap_or(0);
+        (memory, disk)
+    }
+
     /// Warm-release that keeps the `keep` most-recently-used entries
     /// (top hits / Quick Launch repaint instantly) and drops the rest.
     /// Bounded: at most `keep` PNGs (~4 KiB each) survive idle.
@@ -230,6 +339,10 @@ impl IconCache {
             inner.png.resize(new_max);
             inner.clean_orphans();
         }
+        drop(inner);
+        if let Some(disk) = &self.disk {
+            disk.set_max_bytes(disk_budget_for(new_max.get()));
+        }
     }
 
     /// Compute icon cache capacity from the configured memory target.
@@ -238,6 +351,59 @@ impl IconCache {
         let budget = (target_mb as usize).saturating_mul(1024 * 1024) / 10;
         (budget / 4096).max(32).min(512)
     }
+}
+
+fn disk_budget_for(max_entries: usize) -> u64 {
+    (max_entries as u64).saturating_mul(DISK_BYTES_PER_MEMORY_ENTRY)
+}
+
+/// Fingerprint of everything on disk that decides `path`'s icon, or `None`
+/// when that cannot be determined cheaply (such icons stay memory-only).
+///
+/// * plain files: size + mtime;
+/// * `.lnk`: the shortcut plus its resolved local target;
+/// * `.msc`: the console plus `mmc.exe`, which supplies the icon;
+/// * `shell:AppsFolder\<family>!App`: the installed package directories
+///   (versioned names, so an app update changes them) and their manifests.
+fn source_fingerprint(path: &str) -> Option<Fingerprint> {
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("ms-settings:") {
+        return None;
+    }
+    let base = Fingerprint::new()
+        .mix(&[ICON_NORMALIZATION_VERSION])
+        .mix(path.as_bytes());
+    if lower.starts_with("shell:") {
+        #[cfg(target_os = "windows")]
+        if let Some(family) = package_family(path) {
+            let dirs = resolve_package_dirs(&family);
+            if dirs.is_empty() {
+                return None;
+            }
+            let mut fp = base;
+            for dir in &dirs {
+                fp = fp
+                    .mix(dir.as_os_str().as_encoded_bytes())
+                    .mix_optional(&dir.join("AppxManifest.xml"));
+            }
+            return Some(fp);
+        }
+        return None;
+    }
+    let mut fp = base.mix_existing(std::path::Path::new(path))?;
+    #[cfg(target_os = "windows")]
+    if lower.ends_with(".lnk") {
+        if let Some(target) = resolve_lnk_target(path) {
+            fp = fp
+                .mix(target.as_bytes())
+                .mix_optional(std::path::Path::new(&target));
+        }
+    }
+    if lower.ends_with(".msc") {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        fp = fp.mix_optional(&PathBuf::from(format!("{windir}\\System32\\mmc.exe")));
+    }
+    Some(fp)
 }
 
 /// Encode PNG bytes as a `data:image/png;base64,...` URI for inline
@@ -1466,7 +1632,7 @@ fn unique_cold_icon_paths(paths: &[String], cache: &IconCache) -> Vec<(usize, St
     for (index, path) in paths.iter().enumerate() {
         if !path.is_empty()
             && seen.insert(path.clone())
-            && cache.png_bytes_cached(path).is_none()
+            && !cache.has_fresh(path)
         {
             cold.push((index, path.clone()));
         }
@@ -1648,6 +1814,63 @@ mod tests {
         let second = cache.data_uri_cached(&key).expect("uri");
         assert!(Arc::ptr_eq(&first, &second), "second call re-encoded");
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn write_test_png(path: &std::path::Path, rgb: [u8; 3]) -> Vec<u8> {
+        let png = rgba_to_png(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([rgb[0], rgb[1], rgb[2], 255]),
+        ))
+        .expect("png encode");
+        std::fs::write(path, &png).expect("write test png");
+        png
+    }
+
+    #[test]
+    fn memory_miss_is_served_from_disk_when_source_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("icon.png");
+        write_test_png(&source, [1, 2, 3]);
+        let key = source.to_string_lossy().to_string();
+        let fp = source_fingerprint(&key).expect("plain files fingerprint");
+
+        // Plant a recognizable entry: a hit must return it untouched.
+        let marker = rgba_to_png(image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255])))
+            .unwrap();
+        let cache = IconCache::new(4, 60_000).with_disk_cache_at(&dir.path().join("cache"));
+        cache.disk.as_ref().unwrap().store(&key, fp, &marker);
+        assert_eq!(cache.png_bytes(&key).unwrap().as_slice(), marker.as_slice());
+
+        // A fresh process (empty memory tier) reuses the persisted decode.
+        let restarted = IconCache::new(4, 60_000).with_disk_cache_at(&dir.path().join("cache"));
+        assert!(restarted.png_bytes_cached(&key).is_none());
+        assert_eq!(restarted.png_bytes(&key).unwrap().as_slice(), marker.as_slice());
+    }
+
+    #[test]
+    fn changed_source_is_re_extracted_not_served_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("icon.png");
+        write_test_png(&source, [1, 2, 3]);
+        let key = source.to_string_lossy().to_string();
+        let cache = IconCache::new(4, 60_000).with_disk_cache_at(&dir.path().join("cache"));
+        let first = cache.png_bytes(&key).unwrap();
+        assert!(cache.has_fresh(&key));
+
+        write_test_png(&source, [200, 100, 50]);
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
+        file.set_modified(std::time::SystemTime::now() + Duration::from_secs(10))
+            .unwrap();
+        // Age the memory entry past the revalidation window.
+        if let Ok(mut inner) = cache.inner.lock() {
+            let entry = inner.png.get_mut(&cache_key(&key)).unwrap();
+            entry.verified_at = Instant::now() - REVALIDATE_INTERVAL - Duration::from_millis(1);
+        }
+        assert!(!cache.has_fresh(&key), "changed source must evict");
+        assert!(cache.png_bytes_cached(&key).is_none());
+        let second = cache.png_bytes(&key).unwrap();
+        assert_ne!(first, second, "disk entry for the old source rejected");
     }
 
     #[test]

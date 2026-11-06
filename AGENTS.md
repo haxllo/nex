@@ -128,11 +128,14 @@ control. No GDI/GDI+/D2D — all rendering is HTML/CSS/JS.
 - State pushed to JS via `ICoreWebView2::PostWebMessageAsJson` (fire-and-forget,
   non-blocking). No synchronous `evaluate_script` on the critical path.
 - Icons decoded to PNG, embedded as base64 data URIs in the state snapshot
-  (`overlay/icons.rs`). LRU cache keyed by file path.
+  (`overlay/icons.rs`). LRU cache keyed by file path, backed by a bounded
+  disk cache (`overlay/icon_disk_cache.rs`, `%APPDATA%\Nex\icon-cache\v<N>`)
+  validated by source size/mtime fingerprints. "Clear Icon Cache" action
+  empties both tiers.
 - Window positioning, DPI handling, acrylic backdrop in `overlay/host.rs`.
 - Hotkey listener on dedicated thread (`overlay/hotkey.rs`). System tray icon
   with context menu (`overlay/tray.rs`).
-- Single warm-release timer thread (crossbeam channel, re-arm on Hide); clears icon cache only — WebView stays warm.
+- Single warm-release timer thread (crossbeam channel, re-arm on Hide); trims the in-memory icon cache only (disk tier kept) — WebView stays warm.
 - Theme detection: Windows registry `AppsUseLightTheme` (`overlay/platform.rs`).
 - Indexing progress window (`overlay/indexing_progress.rs`): a second, non-activating window in the overlay event loop, shown bottom-right only during large full discovery passes. The indexer reports `full_pass` counts in its `sync` response; `indexing_progress::ProgressWindowGate` decides show/update/finish.
 - Mica backdrop via `DWMWA_SYSTEMBACKDROP_TYPE` planned but not yet implemented.

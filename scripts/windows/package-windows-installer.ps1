@@ -89,10 +89,6 @@ if (-not (Test-Path (Join-Path $stageDir "bin/NexUIProcess.exe"))) {
   throw "Missing staged executable at '$stageDir/bin/NexUIProcess.exe'."
 }
 
-if (-not (Test-Path (Join-Path $stageDir "bin/Nex.exe"))) {
-  throw "Missing staged migration shim at '$stageDir/bin/Nex.exe'. Re-run package-windows-artifact.ps1."
-}
-
 New-Item -ItemType Directory -Force -Path $outputRootAbs | Out-Null
 & $InnoCompiler "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DSetupIconPath=$setupIconPath" "/O$outputRootAbs" $issPath
 if ($LASTEXITCODE -ne 0) {

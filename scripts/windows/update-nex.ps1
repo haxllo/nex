@@ -182,7 +182,6 @@ function Get-RuntimeExecutableCandidates {
 
   return @(
     (Join-Path $Root "bin\NexUIProcess.exe"),
-    (Join-Path $Root "bin\Nex.exe"),
     (Join-Path $Root "bin\NexHelper.exe"),
     (Join-Path $Root "bin\nex-core.exe"),
     (Join-Path $Root "bin\swiftfind-core.exe")
@@ -223,14 +222,13 @@ function Test-IsUnderProgramFiles([string]$Path) {
 function Get-RunningInstallRoot {
   # The installed updater lives at <install_root>\scripts\update-nex.ps1,
   # so its own directory reveals which scope copy is actually running.
-  # Returns $null for repo/dev runs (scripts\windows\... has no bin\Nex.exe).
+  # Returns $null for repo/dev runs (scripts\windows\... has no bin\NexUIProcess.exe).
   $dir = $PSScriptRoot
   if (-not $dir) {
     return $null
   }
   $parent = Split-Path -Parent $dir
-  if ($parent -and ((Test-Path -LiteralPath (Join-Path $parent "bin\NexUIProcess.exe")) -or
-                    (Test-Path -LiteralPath (Join-Path $parent "bin\Nex.exe")))) {
+  if ($parent -and (Test-Path -LiteralPath (Join-Path $parent "bin\NexUIProcess.exe"))) {
     return $parent
   }
   return $null
@@ -254,8 +252,7 @@ function Get-RegistryInstallLocation {
   if ($candidate.Length -eq 0) {
     return $null
   }
-  if (-not ((Test-Path -LiteralPath (Join-Path $candidate "bin\NexUIProcess.exe")) -or
-            (Test-Path -LiteralPath (Join-Path $candidate "bin\Nex.exe")))) {
+  if (-not (Test-Path -LiteralPath (Join-Path $candidate "bin\NexUIProcess.exe"))) {
     return $null
   }
   return $candidate
@@ -370,7 +367,7 @@ $script:UpdateLogPath = $null
 
 function Write-UpdateLog {
   param([string]$Message, [string]$Color)
-  # Progress output must never be fatal: once Nex.exe is stopped, stdout
+  # Progress output must never be fatal: once NexUIProcess.exe is stopped, stdout
   # may have no reader, and a throwing Write-Host would skip rollback.
   if ($script:UpdateLogPath) {
     try { Add-Content -LiteralPath $script:UpdateLogPath -Value $Message -ErrorAction SilentlyContinue } catch {}
@@ -399,10 +396,10 @@ function Stop-Runtime {
     Start-Sleep -Milliseconds 400
   }
 
-  # Do not use taskkill /T here: the updater is a child of Nex.exe when launched
+  # Do not use taskkill /T here: the updater is a child of NexUIProcess.exe when launched
   # from the update button, so terminating the whole process tree would kill
   # the updater before it can install or restart the new version.
-  foreach ($imageName in @("Nex.exe", "NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+  foreach ($imageName in @("NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
     cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
   }
 
@@ -410,11 +407,11 @@ function Stop-Runtime {
   # Aborting here is safe (nothing moved yet); proceeding with a live
   # process holding files is what bricks the install with no rollback.
   for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    $remaining = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+    $remaining = @(Get-Process -Name "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
     if ($remaining.Count -eq 0) { break }
     Start-Sleep -Milliseconds 500
   }
-  $remaining = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
+  $remaining = @(Get-Process -Name "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core" -ErrorAction SilentlyContinue)
   if ($remaining.Count -gt 0) {
     throw "Could not stop running processes: $($remaining.Name -join ', '). Aborting update before touching the install."
   }
@@ -583,7 +580,7 @@ function Write-PreMoveDiagnostics {
   # the update they observe.
   param([string]$Root)
   try {
-    $procs = @(Get-Process -Name "Nex", "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core", "msedgewebview2" -ErrorAction SilentlyContinue |
+    $procs = @(Get-Process -Name "NexUIProcess", "NexIndexerProcess", "NexHelper", "nex-core", "swiftfind-core", "msedgewebview2" -ErrorAction SilentlyContinue |
       ForEach-Object { "$($_.ProcessName) [pid $($_.Id)]" })
     Write-UpdateLog "Processes at backup time: $(if ($procs.Count) { $procs -join ', ' } else { '(none of Nex/NexHelper/msedgewebview2)' })"
   }
@@ -670,8 +667,7 @@ $needsElevation = $installInfo.NeedsElevation
 # unavoidable exactly once for this cleanup.
 $legacyOrphan = $false
 foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-  if ($programFiles -and ((Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\NexUIProcess.exe')) -or
-                          (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\Nex.exe')))) {
+  if ($programFiles -and (Test-Path -LiteralPath (Join-Path $programFiles 'Nex\bin\NexUIProcess.exe'))) {
     $legacyOrphan = $true
     break
   }

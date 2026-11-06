@@ -49,18 +49,11 @@ LicenseFile=..\..\LICENSE
 Source: "{#StageDir}\bin\NexUIProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexIndexerProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexHelper.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-; One-release migration shim: pre-isolation installs (< 2.38.0) ship an
-; updater that restarts bin\Nex.exe after installing. Only updater-driven
-; upgrades need it; a later release drops it (the 2.38.0 updater already
-; prefers NexUIProcess.exe). [InstallDelete] removes the old real Nex.exe
-; before this file is written.
-Source: "{#StageDir}\bin\Nex.exe"; DestDir: "{app}\bin"; Flags: ignoreversion; Check: IsUpdaterRun
 Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [InstallDelete]
-Type: files; Name: "{app}\bin\Nex.exe"
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
 ; Legacy-orphan removal lives in [Code] RemoveLegacyOrphan (called from
@@ -121,11 +114,6 @@ end;
 function ShouldLaunchNexAfterInstall(): Boolean;
 begin
   Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) = 0;
-end;
-
-function IsUpdaterRun(): Boolean;
-begin
-  Result := Pos('/NEXUPDATER', Uppercase(GetCmdTail())) > 0;
 end;
 
 procedure RemoveLegacyOrphan(); forward;
@@ -455,8 +443,6 @@ end;
 procedure StopNexRuntime();
 begin
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\NexUIProcess.exe'));
-  // Pre-isolation installs still run Nex.exe as the runtime.
-  StopRuntimeByExecutable(ExpandConstant('{app}\bin\Nex.exe'));
   // Process-isolation indexer: no `--quit` of its own, and the UI is gone by
   // now, so terminate it by image name before files are replaced.
   ForceStopRuntimeByPath(ExpandConstant('{app}\bin\NexIndexerProcess.exe'));

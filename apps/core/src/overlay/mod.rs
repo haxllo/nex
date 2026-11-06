@@ -25,6 +25,8 @@
 #[cfg(target_os = "windows")]
 pub(crate) mod host;
 #[cfg(target_os = "windows")]
+pub(crate) mod indexing_progress;
+#[cfg(target_os = "windows")]
 pub(crate) mod file_picker;
 #[cfg(target_os = "windows")]
 pub(crate) mod ipc;

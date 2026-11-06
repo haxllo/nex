@@ -158,6 +158,9 @@ pub struct CoreService {
     stale_pruner_started: AtomicBool,
     stale_pruner_stop: Arc<AtomicBool>,
     pub(crate) progress: Mutex<Option<Arc<AtomicU32>>>,
+    /// Counters for the running full discovery pass, reported over IPC so
+    /// the UI can show the indexing progress window.
+    full_pass: crate::indexing_progress::FullPassProgress,
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
     personalization_cache: Mutex<PersonalizationCache>,
@@ -496,6 +499,7 @@ impl CoreService {
             stale_pruner_started: AtomicBool::new(false),
             stale_pruner_stop: Arc::new(AtomicBool::new(false)),
             progress: Mutex::new(None),
+            full_pass: crate::indexing_progress::FullPassProgress::default(),
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
             personalization_cache: Mutex::new(PersonalizationCache::new()),
@@ -1172,6 +1176,7 @@ impl CoreService {
         };
         let mut cumulative_weight: u32 = 0;
         let config_snapshot = self.config_snapshot();
+        let mut full_pass = crate::indexing_progress::FullPassScope::new(&self.full_pass);
 
         for provider in providers_guard.iter() {
             if provider_name.is_some_and(|name| provider.provider_name() != name) {
@@ -1325,6 +1330,7 @@ impl CoreService {
                     );
                 }
             };
+            full_pass.start();
             index_store::scan_begin(&*self.db())?;
             let mut discovered_count = 0_usize;
             let mut upserted = 0_usize;
@@ -1335,6 +1341,7 @@ impl CoreService {
                 let mut sink =
                     |mut item: SearchItem| -> Result<(), crate::discovery::ProviderError> {
                         discovered_count += 1;
+                        self.full_pass.add_discovered(1);
                         // One PK lookup per discovered item replaces the full
                         // store map: usage merge and change detection use the
                         // stored row.
@@ -1378,6 +1385,7 @@ impl CoreService {
                             pending_upserts.clear();
                             index_store::scan_mark(&*self.db(), &pending_seen)
                                 .map_err(|e| crate::discovery::ProviderError::new(e.to_string()))?;
+                            self.full_pass.add_indexed(pending_seen.len() as u64);
                             pending_seen.clear();
                         }
                         Ok(())
@@ -1390,6 +1398,7 @@ impl CoreService {
                 self.record_publish(&pending_upserts, &[]);
             }
             index_store::scan_mark(&*self.db(), &pending_seen)?;
+            self.full_pass.add_indexed(pending_seen.len() as u64);
 
             if let Some(ref pct) = progress_pct {
                 pct.store(
@@ -2152,6 +2161,12 @@ impl CoreService {
     /// Current index generation. Bumped on every mutation of the item set
     /// (cache refresh, upsert, delete, index sync, prune), so readers can
     /// detect that the underlying data changed between two observations.
+    /// Counters of the running full discovery pass, or `None` when no full
+    /// pass is in flight (idle, or only deltas/watcher batches).
+    pub fn full_pass_progress(&self) -> Option<crate::indexing_progress::FullPassSnapshot> {
+        self.full_pass.snapshot()
+    }
+
     pub fn search_generation(&self) -> u64 {
         self.search_generation.load(Ordering::SeqCst)
     }

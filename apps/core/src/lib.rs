@@ -9,6 +9,7 @@ pub mod clipboard_history;
 #[cfg(target_os = "windows")]
 pub(crate) mod codex_auth;
 pub mod config;
+pub mod config_watch;
 #[cfg(target_os = "windows")]
 pub(crate) mod console_signal;
 pub mod contract;
@@ -28,7 +29,10 @@ pub mod logging;
 #[cfg(target_os = "windows")]
 pub(crate) mod media;
 #[cfg(target_os = "windows")]
+pub(crate) mod mft_channel;
+#[cfg(target_os = "windows")]
 pub(crate) mod mft_discovery;
+pub(crate) mod mft_protocol;
 pub mod model;
 #[cfg(target_os = "windows")]
 pub(crate) mod overlay;

@@ -1,13 +1,11 @@
-//! Client for the helper's NTFS MFT snapshot pipes (`\\.\pipe\NexMft-<letter>`).
-//!
-//! The helper streams FRN/parent pairs; this module rebuilds paths and keeps
-//! entries under a configured root. Only Windows builds call into it.
+//! Client for the helper's NTFS MFT snapshots: the persistent command channel
+//! (`mft_channel`) with the legacy per-volume pipes (`\\.\pipe\NexMft-<letter>`)
+//! as fallback. Only Windows builds call into it.
 
 #![cfg(target_os = "windows")]
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
 use std::os::windows::io::FromRawHandle;
 use std::path::{Path, PathBuf};
 
@@ -20,26 +18,14 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 
-const HEADER_LEN: usize = 32;
-const RECORD_PREFIX_LEN: usize = 36;
-const PROTOCOL_VERSION: u16 = 3;
-const DELTA_MODE: u8 = 1;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const ROOT_RECORD_NUMBER: u64 = 5;
 const FRN_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 const MAX_PARENT_DEPTH: usize = 256;
+const ERROR_SEM_TIMEOUT: u32 = 121;
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct MftRecord {
-    pub frn: u64,
-    pub parent: u64,
-    pub attributes: u32,
-    pub reason: u32,
-    pub name: String,
-    /// Helper-resolved full path (delta mode only).
-    pub path: Option<String>,
-}
+pub(crate) use crate::mft_protocol::{MftRecord, SnapshotMeta};
+use crate::mft_protocol::{RequestKind, read_snapshot};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -51,12 +37,31 @@ pub(crate) struct Snapshot {
     pub records: Vec<MftRecord>,
 }
 
-pub(crate) struct SnapshotMeta {
-    pub delta: bool,
-    pub journal_id: u64,
-    pub start_usn: i64,
-    pub next_usn: i64,
-    pub records: usize,
+/// What the caller asks the helper for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SnapshotRequest {
+    Full,
+    Delta { journal_id: u64, start_usn: i64 },
+}
+
+#[derive(Debug)]
+pub(crate) enum FetchError {
+    /// Neither a command-channel connection nor a legacy pipe is available:
+    /// the elevated helper is not up (yet). Retrying later can succeed.
+    HelperNotReady(String),
+    /// The helper refused the saved journal position (id mismatch, truncated).
+    JournalInvalid(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HelperNotReady(message)
+            | Self::JournalInvalid(message)
+            | Self::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -107,35 +112,101 @@ pub(crate) fn is_fixed_volume(letter: char) -> bool {
     unsafe { GetDriveTypeW(root.as_ptr()) == 3 }
 }
 
-/// Wait for the helper's pipe, then stream one snapshot into `on_record`.
-pub(crate) fn read_snapshot_into<F>(
+fn legacy_pipe_name(letter: char) -> Vec<u16> {
+    wide(&format!("\\\\.\\pipe\\NexMft-{letter}"))
+}
+
+/// Non-blocking probe for the helper's legacy per-volume pipe: present and
+/// free, or present and busy serving another client.
+fn legacy_pipe_exists(letter: char) -> bool {
+    let name = legacy_pipe_name(letter);
+    if unsafe { WaitNamedPipeW(name.as_ptr(), 1) } != 0 {
+        return true;
+    }
+    let error = unsafe { GetLastError() };
+    error == ERROR_SEM_TIMEOUT
+}
+
+/// True when the helper can serve `letters` now: attached to the command
+/// channel, or exposing a legacy snapshot pipe.
+pub(crate) fn helper_is_up(letters: &[char]) -> bool {
+    crate::mft_channel::is_connected() || letters.iter().any(|&letter| legacy_pipe_exists(letter))
+}
+
+/// Stream one snapshot into `on_record`, waiting up to `wait_ms` for the helper.
+///
+/// A helper attached to the command channel is preferred; otherwise the
+/// request-file + per-volume pipe path serves helpers that predate the channel.
+pub(crate) fn stream_snapshot_into<F>(
     letter: char,
-    timeout_ms: u32,
-    mut on_record: F,
-) -> Result<SnapshotMeta, String>
+    request: SnapshotRequest,
+    wait_ms: u32,
+    on_record: F,
+) -> Result<SnapshotMeta, FetchError>
 where
     F: FnMut(&MftRecord) -> Result<(), String>,
 {
     use std::time::{Duration, Instant};
 
-    let pipe_name = format!("\\\\.\\pipe\\NexMft-{letter}");
-    let name = wide(&pipe_name);
+    crate::mft_channel::ensure_started();
+    let name = legacy_pipe_name(letter);
     // WaitNamedPipeW only waits for a free instance of an existing pipe; the
-    // helper creates the name asynchronously after the UI starts, so poll for
-    // both cases until the deadline.
-    let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms.max(1)));
-    let mut last_error = 0u32;
+    // helper creates its endpoints asynchronously after the UI starts, so poll
+    // for both transports until the deadline.
+    let deadline = Instant::now() + Duration::from_millis(u64::from(wait_ms.max(1)));
     loop {
-        if unsafe { WaitNamedPipeW(name.as_ptr(), 200) } != 0 {
-            break;
+        if crate::mft_channel::is_connected() {
+            let kind = match request {
+                SnapshotRequest::Full => RequestKind::Full,
+                SnapshotRequest::Delta {
+                    journal_id,
+                    start_usn,
+                } => RequestKind::Delta {
+                    journal_id,
+                    start_usn,
+                },
+            };
+            return match crate::mft_channel::request_snapshot(letter, kind, on_record) {
+                Ok(meta) => Ok(meta),
+                Err(crate::mft_channel::ChannelError::NotConnected(message)) => {
+                    Err(FetchError::HelperNotReady(message))
+                }
+                Err(crate::mft_channel::ChannelError::Stream(error)) if error.journal_invalid => {
+                    Err(FetchError::JournalInvalid(error.to_string()))
+                }
+                Err(crate::mft_channel::ChannelError::Stream(error)) => {
+                    Err(FetchError::Failed(error.to_string()))
+                }
+            };
         }
-        last_error = unsafe { GetLastError() };
+        if unsafe { WaitNamedPipeW(name.as_ptr(), 200) } != 0 {
+            return stream_legacy(letter, request, &name, on_record);
+        }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "pipe not ready (waited {timeout_ms} ms, last err {last_error})"
-            ));
+            let last_error = unsafe { GetLastError() };
+            return Err(FetchError::HelperNotReady(format!(
+                "no command channel connection and legacy pipe not ready (waited {wait_ms} ms, last err {last_error})"
+            )));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn stream_legacy<F>(
+    letter: char,
+    request: SnapshotRequest,
+    name: &[u16],
+    on_record: F,
+) -> Result<SnapshotMeta, FetchError>
+where
+    F: FnMut(&MftRecord) -> Result<(), String>,
+{
+    match request {
+        SnapshotRequest::Full => write_full_request(letter),
+        SnapshotRequest::Delta {
+            journal_id,
+            start_usn,
+        } => write_delta_request(letter, journal_id, start_usn),
     }
     let handle: HANDLE = unsafe {
         CreateFileW(
@@ -149,89 +220,35 @@ where
         )
     };
     if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-        return Err(format!("open pipe failed: {}", unsafe { GetLastError() }));
+        return Err(FetchError::Failed(format!("open pipe failed: {}", unsafe {
+            GetLastError()
+        })));
     }
     let mut file = unsafe { File::from_raw_handle(handle as *mut _) };
-
-    let mut header = [0u8; HEADER_LEN];
-    file.read_exact(&mut header)
-        .map_err(|e| format!("read header: {e}"))?;
-    if &header[0..4] != b"NXMF" {
-        return Err("snapshot header mismatch".to_string());
-    }
-    let version = u16::from_le_bytes([header[4], header[5]]);
-    if version != PROTOCOL_VERSION {
-        return Err(format!("snapshot version {version} unsupported"));
-    }
-    let delta = header[7] == DELTA_MODE;
-    let journal_id = u64::from_le_bytes(header[8..16].try_into().unwrap());
-    let start_usn = i64::from_le_bytes(header[16..24].try_into().unwrap());
-    let mut next_usn = i64::from_le_bytes(header[24..32].try_into().unwrap());
-
-    let mut record_count = 0usize;
-    let mut prefix = [0u8; RECORD_PREFIX_LEN];
-    loop {
-        match file.read_exact(&mut prefix) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(format!("read record: {error}")),
-        }
-        let frn = u64::from_le_bytes(prefix[0..8].try_into().unwrap());
-        let parent = u64::from_le_bytes(prefix[8..16].try_into().unwrap());
-        let attributes = u32::from_le_bytes(prefix[16..20].try_into().unwrap());
-        let reason = u32::from_le_bytes(prefix[28..32].try_into().unwrap());
-        let name_len = u16::from_le_bytes([prefix[32], prefix[33]]) as usize;
-        let path_len = u16::from_le_bytes([prefix[34], prefix[35]]) as usize;
-        if frn == 0 && name_len == 0 && path_len == 0 && reason == u32::MAX {
-            // Trailer: final journal position.
-            let mut tail = [0u8; 8];
-            file.read_exact(&mut tail)
-                .map_err(|e| format!("read trailer: {e}"))?;
-            next_usn = i64::from_le_bytes(tail);
-            break;
-        }
-        let mut name_bytes = vec![0u8; name_len];
-        file.read_exact(&mut name_bytes)
-            .map_err(|e| format!("read name: {e}"))?;
-        let mut path_bytes = vec![0u8; path_len];
-        file.read_exact(&mut path_bytes)
-            .map_err(|e| format!("read path: {e}"))?;
-        let name = String::from_utf8_lossy(&name_bytes).into_owned();
-        if name.is_empty() {
-            continue;
-        }
-        let record = MftRecord {
-            frn,
-            parent,
-            attributes,
-            reason,
-            name,
-            path: if path_len > 0 {
-                Some(String::from_utf8_lossy(&path_bytes).into_owned())
-            } else {
-                None
-            },
-        };
-        record_count += 1;
-        on_record(&record)?;
-    }
-
-    Ok(SnapshotMeta {
-        delta,
-        journal_id,
-        start_usn,
-        next_usn,
-        records: record_count,
-    })
+    read_snapshot(&mut file, on_record).map_err(|error| FetchError::Failed(error.to_string()))
 }
 
-/// Collect a whole snapshot; used by the delta path and the tests.
-pub(crate) fn fetch_snapshot(letter: char, timeout_ms: u32) -> Result<Snapshot, String> {
+/// Collect a delta snapshot; the legacy path answers a stale position with a
+/// full stream, which the caller detects through `Snapshot::delta`.
+pub(crate) fn fetch_delta(
+    letter: char,
+    journal_id: u64,
+    start_usn: i64,
+    wait_ms: u32,
+) -> Result<Snapshot, FetchError> {
     let mut records = Vec::new();
-    let meta = read_snapshot_into(letter, timeout_ms, |record| {
-        records.push(record.clone());
-        Ok(())
-    })?;
+    let meta = stream_snapshot_into(
+        letter,
+        SnapshotRequest::Delta {
+            journal_id,
+            start_usn,
+        },
+        wait_ms,
+        |record| {
+            records.push(record.clone());
+            Ok(())
+        },
+    )?;
     Ok(Snapshot {
         delta: meta.delta,
         journal_id: meta.journal_id,

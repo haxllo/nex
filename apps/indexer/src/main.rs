@@ -123,7 +123,11 @@ fn run_index_cycle(
     indexing: &AtomicBool,
     stdio_enabled: bool,
 ) -> Option<IndexRefreshReport> {
+    // Before the service lock and the indexing flag: a late-starting elevated
+    // helper must not stall IPC reads or watcher writes while we wait for it.
+    nex_core::discovery::defer_until_helper_ready();
     indexing.store(true, Ordering::Release);
+    ipc::notify_sync_waiters();
     // Low CPU *and* I/O priority for the scan/sync: the UI keeps the desktop
     // responsive during login even while the first pass reads a cold disk.
     enter_background_priority();
@@ -133,6 +137,7 @@ fn run_index_cycle(
     };
     leave_background_priority();
     indexing.store(false, Ordering::Release);
+    ipc::notify_sync_waiters();
 
     match outcome {
         Ok(report) => {
@@ -175,15 +180,22 @@ fn start_watchers(service: &Arc<RwLock<CoreService>>) {
 fn maintenance_loop(
     service: Arc<RwLock<CoreService>>,
     indexing: Arc<AtomicBool>,
-    config: nex_core::config::Config,
+    mut config: nex_core::config::Config,
     config_path: Option<std::path::PathBuf>,
     stdio_enabled: bool,
     parent_pid: Option<u32>,
 ) {
+    // The watcher wakes the loop within ~100 ms of an edit; the periodic
+    // mtime check below remains as the safety net.
+    let (config_wake, config_woken) = std::sync::mpsc::channel::<()>();
+    nex_core::config_watch::spawn(&config.config_path, move || {
+        let _ = config_wake.send(());
+    });
     let mut last_modified = config_file_modified(&config.config_path);
     let mut last_reconcile = Instant::now();
     loop {
-        std::thread::sleep(CONFIG_POLL_INTERVAL);
+        let _ = config_woken.recv_timeout(CONFIG_POLL_INTERVAL);
+        while config_woken.try_recv().is_ok() {}
 
         // Orphan guard: without a UI process there is nobody to serve, and a
         // lingering indexer would hold the SQLite/Tantivy files open.
@@ -196,6 +208,27 @@ fn maintenance_loop(
         if modified != last_modified {
             last_modified = modified;
             match nex_core::config::load(config_path.as_deref()) {
+                Ok(reloaded) if !nex_core::config::discovery_settings_changed(&config, &reloaded) => {
+                    // Query-time settings (e.g. the seed cap) take effect on
+                    // the next query; no watcher restart or index cycle.
+                    let applied = {
+                        let service_guard =
+                            service.read().unwrap_or_else(|error| error.into_inner());
+                        service_guard.apply_runtime_config(&reloaded)
+                    };
+                    match applied {
+                        Ok(()) => {
+                            nex_core::logging::info(&format!(
+                                "[nex-indexer] config changed; runtime settings applied without reindex index_seed_cap={}",
+                                reloaded.index_max_items_per_query_seed
+                            ));
+                            config = reloaded;
+                        }
+                        Err(error) => nex_core::logging::warn(&format!(
+                            "[nex-indexer] config apply failed: {error}"
+                        )),
+                    }
+                }
                 Ok(reloaded) => {
                     nex_core::logging::info("[nex-indexer] config changed; reloading index");
                     // Take the watcher handles while holding the read guard,
@@ -209,6 +242,7 @@ fn maintenance_loop(
                     };
                     match reconfigured {
                         Ok(watchers) => {
+                            config = reloaded;
                             drop(watchers);
                             run_index_cycle(&service, &indexing, stdio_enabled);
                             start_watchers(&service);

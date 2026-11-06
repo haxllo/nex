@@ -304,10 +304,21 @@ pub(crate) fn run_windows_runtime(
     );
 
     let max_results = runtime_config.max_results as usize;
+    let config_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let dirty = Arc::clone(&config_dirty);
+        let wake = event_tx.clone();
+        crate::config_watch::spawn(runtime_config.config_path.as_path(), move || {
+            dirty.store(true, std::sync::atomic::Ordering::Release);
+            // Tick wakes the event loop, which runs the reload check.
+            let _ = wake.send(OverlayEvent::Tick);
+        });
+    }
     let config_watcher = RuntimeConfigWatcher {
         path: runtime_config.config_path.clone(),
         last_checked: Instant::now(),
         last_modified: config_file_modified_time(runtime_config.config_path.as_path()),
+        dirty: config_dirty,
     };
 
     // Build the WebView host. The tao event loop runs on the main

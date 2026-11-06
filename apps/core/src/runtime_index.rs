@@ -16,7 +16,24 @@ use crate::overlay::NativeOverlayShell;
 #[cfg(target_os = "windows")]
 const QUEUED_DISCOVERY_REINDEX_DEBOUNCE_MS: u64 = 1200;
 #[cfg(target_os = "windows")]
-const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the indexer may park a `sync` while idle. A missed wake-up is
+/// recovered when it elapses.
+#[cfg(target_os = "windows")]
+const SYNC_LONG_POLL: Duration = Duration::from_secs(25);
+/// Shorter wait during a full pass so the progress window keeps moving.
+#[cfg(target_os = "windows")]
+const SYNC_LONG_POLL_FULL_PASS: Duration = Duration::from_millis(750);
+/// Poll cadence when the indexer answers early (old indexer without
+/// `wait_ms`, unreachable, or a delta that could not be applied).
+#[cfg(target_os = "windows")]
+const SYNC_FALLBACK_POLL: Duration = Duration::from_secs(2);
+/// Coalesces back-to-back deltas after one was applied.
+#[cfg(target_os = "windows")]
+const SYNC_APPLY_PAUSE: Duration = Duration::from_millis(100);
+
+/// Safety net only: config edits arrive via `config_watch`; the mtime check
+/// covers a missed directory event.
+const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "windows")]
 #[derive(Debug)]
@@ -24,6 +41,8 @@ pub(crate) struct RuntimeConfigWatcher {
     pub(crate) path: std::path::PathBuf,
     pub(crate) last_checked: Instant,
     pub(crate) last_modified: Option<SystemTime>,
+    /// Set by the directory watcher; forces a check ahead of the slow poll.
+    pub(crate) dirty: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "windows")]
@@ -72,7 +91,17 @@ fn start_ui_snapshot_sync(
         let mut last_generation = 0_u64;
         let mut last_instance = 0_u64;
         loop {
-            let applied_generation = match sync_indexer_snapshot(last_generation, last_instance) {
+            let full_pass_active = crate::indexing_progress::latest_indexer_progress()
+                .full_pass
+                .is_some();
+            let wait = if full_pass_active {
+                SYNC_LONG_POLL_FULL_PASS
+            } else {
+                SYNC_LONG_POLL
+            };
+            let poll_started = Instant::now();
+            let applied_generation = match sync_indexer_snapshot(last_generation, last_instance, wait)
+            {
                 SnapshotSync::Unchanged => None,
                 SnapshotSync::Unreachable => {
                     crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
@@ -125,16 +154,23 @@ fn start_ui_snapshot_sync(
                 last_generation = generation;
                 last_instance = instance;
             }
-            // Poll faster during a full pass so the progress window moves.
-            let poll = if crate::indexing_progress::latest_indexer_progress()
-                .full_pass
-                .is_some()
-            {
-                Duration::from_millis(750)
+            // A long-poll that returned well before its wait means the
+            // indexer did not park (old build, unreachable, failed apply):
+            // fall back to interval polling instead of spinning.
+            let pause = if applied_generation.is_some() {
+                SYNC_APPLY_PAUSE
+            } else if poll_started.elapsed() < wait / 2 {
+                if full_pass_active {
+                    SYNC_LONG_POLL_FULL_PASS
+                } else {
+                    SYNC_FALLBACK_POLL
+                }
             } else {
-                Duration::from_secs(2)
+                Duration::ZERO
             };
-            std::thread::sleep(poll);
+            if !pause.is_zero() {
+                std::thread::sleep(pause);
+            }
         }
     });
 
@@ -164,20 +200,29 @@ enum SnapshotSync {
     Unreachable,
 }
 
-/// One request per poll: the indexer reports whether the changelog moved and
+/// One long-poll per call: the indexer reports whether the changelog moved and
 /// ships items only when it did. The instance id distinguishes an indexer
 /// restart from a sequence gap.
 #[cfg(target_os = "windows")]
-fn sync_indexer_snapshot(known_generation: u64, known_instance: u64) -> SnapshotSync {
-    use crate::ipc::{ipc_call, items_from_values, IpcRequest, INDEXER_ADDR};
+fn sync_indexer_snapshot(
+    known_generation: u64,
+    known_instance: u64,
+    wait: Duration,
+) -> SnapshotSync {
+    use crate::ipc::{ipc_call_with_timeout, items_from_values, IpcRequest, INDEXER_ADDR};
     use serde_json::{json, Value};
 
-    let response = match ipc_call(
+    let response = match ipc_call_with_timeout(
         INDEXER_ADDR,
         &IpcRequest::new(
             "sync",
-            json!({ "generation": known_generation, "instance": known_instance }),
+            json!({
+                "generation": known_generation,
+                "instance": known_instance,
+                "wait_ms": wait.as_millis() as u64,
+            }),
         ),
+        wait + Duration::from_secs(15),
     ) {
         Ok(response) if response.ok => response,
         _ => {
@@ -441,7 +486,9 @@ pub(crate) fn maybe_apply_runtime_config_reload(
     watcher: &mut RuntimeConfigWatcher,
     background_index_refresh: &mut BackgroundIndexRefresh,
 ) -> bool {
-    if watcher.last_checked.elapsed() < CONFIG_RELOAD_POLL_INTERVAL {
+    if !watcher.dirty.swap(false, Ordering::AcqRel)
+        && watcher.last_checked.elapsed() < CONFIG_RELOAD_POLL_INTERVAL
+    {
         return false;
     }
     watcher.last_checked = Instant::now();
@@ -456,12 +503,8 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             let previous = runtime_config.clone();
             let hotkey_changed = next_config.hotkey != previous.hotkey;
             let index_db_path_changed = next_config.index_db_path != previous.index_db_path;
-            let discovery_config_changed = next_config.discovery_roots != previous.discovery_roots
-                || next_config.discovery_exclude_roots != previous.discovery_exclude_roots
-                || next_config.show_files != previous.show_files
-                || next_config.show_folders != previous.show_folders
-                || next_config.index_max_items_per_query_seed
-                    != previous.index_max_items_per_query_seed;
+            let discovery_config_changed =
+                config::discovery_settings_changed(&previous, &next_config);
             let mut discovery_reindex_queued = false;
             *runtime_config = next_config;
             *max_results = runtime_config.max_results as usize;
@@ -491,7 +534,13 @@ pub(crate) fn maybe_apply_runtime_config_reload(
             if index_db_path_changed {
                 log_warn("[nex] config index_db_path changed; restart required to apply");
             }
-            if discovery_config_changed {
+            if !discovery_config_changed {
+                if let Err(error) = service.apply_runtime_config(runtime_config) {
+                    log_warn(&format!(
+                        "[nex] runtime config apply failed after config reload: {error}"
+                    ));
+                }
+            } else {
                 if let Err(error) = service.reconfigure_runtime_providers(runtime_config) {
                     log_warn(&format!(
                         "[nex] provider reconfigure failed after config reload: {error}"

@@ -539,6 +539,14 @@ impl CoreService {
         })
     }
 
+    /// Apply a config change that does not touch discovery (query limits and
+    /// the like): no provider rebuild, no watcher restart, no reindex.
+    pub fn apply_runtime_config(&self, cfg: &Config) -> Result<(), ServiceError> {
+        validate(cfg).map_err(ServiceError::Config)?;
+        self.replace_runtime_config(cfg.clone());
+        Ok(())
+    }
+
     fn replace_providers(&self, providers: Vec<Box<dyn DiscoveryProvider>>) {
         match self.providers.write() {
             Ok(mut guard) => *guard = providers,
@@ -1498,6 +1506,10 @@ impl CoreService {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         log.record(upserts, deleted);
+        drop(log);
+        if !upserts.is_empty() || !deleted.is_empty() {
+            crate::ipc::notify_sync_waiters();
+        }
     }
 
     /// Consume the mutations since `known` for one publishing client.
@@ -2139,6 +2151,7 @@ impl CoreService {
 
     fn bump_search_generation(&self) {
         self.search_generation.fetch_add(1, Ordering::SeqCst);
+        crate::ipc::notify_sync_waiters();
     }
 
     /// Current index generation. Bumped on every mutation of the item set

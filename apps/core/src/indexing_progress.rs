@@ -67,10 +67,12 @@ impl FullPassProgress {
         self.indexed.store(0, Ordering::Relaxed);
         *self.started_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         self.active.store(true, Ordering::Release);
+        crate::ipc::notify_sync_waiters();
     }
 
     fn end(&self) {
         self.active.store(false, Ordering::Release);
+        crate::ipc::notify_sync_waiters();
     }
 
     pub fn add_discovered(&self, count: u64) {

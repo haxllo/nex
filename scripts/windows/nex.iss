@@ -54,6 +54,9 @@ Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion re
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
 [InstallDelete]
+; Legacy binaries from older releases: never shipped now, always removed.
+; bin\Nex.exe is the 2.38.0-2.39.0 updater shim left by earlier updates.
+Type: files; Name: "{app}\bin\Nex.exe"
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
 ; Legacy-orphan removal lives in [Code] RemoveLegacyOrphan (called from
@@ -447,6 +450,7 @@ begin
   // now, so terminate it by image name before files are replaced.
   ForceStopRuntimeByPath(ExpandConstant('{app}\bin\NexIndexerProcess.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\NexHelper.exe'));
+  StopRuntimeByExecutable(ExpandConstant('{app}\bin\Nex.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\nex-core.exe'));
   StopRuntimeByExecutable(ExpandConstant('{app}\bin\swiftfind-core.exe'));
 end;

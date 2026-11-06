@@ -371,6 +371,7 @@ pub(crate) fn run_windows_runtime(
         last_applied_generation: 0,
         last_cache_generation: 0,
         search_session: OverlaySearchSession::default(),
+        progress_window_gate: crate::indexing_progress::ProgressWindowGate::default(),
         config_generation: 0,
         hotkey_issue_status,
         event_rx,
@@ -565,6 +566,7 @@ struct RuntimeWorker {
     /// visible query is re-run so results do not wait for another keystroke.
     last_cache_generation: u64,
     search_session: OverlaySearchSession,
+    progress_window_gate: crate::indexing_progress::ProgressWindowGate,
     hotkey_issue_status: Option<String>,
     event_rx: crossbeam_channel::Receiver<OverlayEvent>,
     is_running: Arc<AtomicBool>,
@@ -2170,6 +2172,10 @@ impl RuntimeWorker {
                 self.overlay.focus_search_input();
             }
             OverlayEvent::Tick => {
+                let action = self
+                    .progress_window_gate
+                    .observe(crate::indexing_progress::latest_indexer_progress());
+                self.overlay.set_indexing_progress(action);
                 // Periodic background tasks
                 // Updates are checked on startup only, not periodically
                 static MEDIA_REFRESH_TICKS: AtomicU64 = AtomicU64::new(0);

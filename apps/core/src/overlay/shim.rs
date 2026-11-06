@@ -435,6 +435,13 @@ impl NativeOverlayShell {
         let _ = self.inner.media_notify_tx.try_send(());
     }
 
+    /// Forward a progress-window decision to the host (CIQ-79).
+    pub fn set_indexing_progress(&self, action: crate::indexing_progress::ProgressWindowAction) {
+        if action != crate::indexing_progress::ProgressWindowAction::None {
+            self.post(UiCommand::IndexingProgress(action));
+        }
+    }
+
     pub fn set_status_text(&self, message: &str) {
         self.with_state(|s| s.status_text = message.to_string());
         self.post(UiCommand::ApplyStatus);

@@ -288,6 +288,11 @@ pub(crate) enum UiCommand {
     FocusReassert,
     /// Close (hide) the settings window via tao API.
     CloseSettings,
+    /// Drive the indexing progress window (CIQ-79).
+    IndexingProgress(crate::indexing_progress::ProgressWindowAction),
+    /// Delayed close after the completed state; ignored if a newer pass
+    /// reopened the window since (generation mismatch).
+    CloseIndexingProgress(u64),
 }
 
 /// Everything [`run`] needs. Built by the runtime before it hands the
@@ -417,6 +422,8 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         }
     };
     let mut settings_ui: Option<(tao::window::Window, wry::WebView)> = None;
+    let mut progress_window: Option<super::indexing_progress::ProgressWindow> = None;
+    let mut progress_window_gen: u64 = 0;
     let mut settings_window_id: Option<tao::window::WindowId> = None;
     let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1650,6 +1657,63 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(
                             0,
                         );
+                    }
+                }
+                UiCommand::IndexingProgress(action) => {
+                    use crate::indexing_progress::ProgressWindowAction;
+                    match action {
+                        ProgressWindowAction::None => {}
+                        ProgressWindowAction::Show(progress) => {
+                            progress_window_gen = progress_window_gen.wrapping_add(1);
+                            if progress_window.is_none() {
+                                match super::indexing_progress::ProgressWindow::build(target) {
+                                    Ok(window) => progress_window = Some(window),
+                                    Err(error) => crate::logging::warn(&format!(
+                                        "[nex] indexing progress window unavailable: {error}"
+                                    )),
+                                }
+                            }
+                            if let Some(window) = &progress_window {
+                                window.show(progress);
+                                crate::logging::info(&format!(
+                                    "[nex] indexing_progress_window shown discovered={} elapsed_ms={}",
+                                    progress.discovered, progress.elapsed_ms
+                                ));
+                            }
+                        }
+                        ProgressWindowAction::Update(progress) => {
+                            if let Some(window) = &progress_window {
+                                window.update(progress);
+                            }
+                        }
+                        ProgressWindowAction::Finish(progress) => {
+                            if let Some(window) = &progress_window {
+                                window.finish(progress);
+                                crate::logging::info(&format!(
+                                    "[nex] indexing_progress_window finished discovered={} elapsed_ms={}",
+                                    progress.discovered, progress.elapsed_ms
+                                ));
+                                let generation = progress_window_gen;
+                                let proxy = proxy.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(Duration::from_millis(2_000));
+                                    let _ = proxy
+                                        .send_event(UiCommand::CloseIndexingProgress(generation));
+                                });
+                            }
+                        }
+                        ProgressWindowAction::Close => {
+                            if let Some(window) = &progress_window {
+                                window.hide();
+                            }
+                        }
+                    }
+                }
+                UiCommand::CloseIndexingProgress(generation) => {
+                    if generation == progress_window_gen {
+                        if let Some(window) = &progress_window {
+                            window.hide();
+                        }
                     }
                 }
                 UiCommand::SettingsIndexingStatus { json } => {

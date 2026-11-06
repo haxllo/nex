@@ -24,6 +24,7 @@ pub(crate) mod file_watcher_consumer;
 pub mod hotkey;
 pub mod hotkey_runtime;
 pub mod index_store;
+pub mod indexing_progress;
 pub mod ipc;
 pub mod logging;
 #[cfg(target_os = "windows")]

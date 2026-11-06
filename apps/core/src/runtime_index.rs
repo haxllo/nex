@@ -125,7 +125,16 @@ fn start_ui_snapshot_sync(
                 last_generation = generation;
                 last_instance = instance;
             }
-            std::thread::sleep(Duration::from_secs(2));
+            // Poll faster during a full pass so the progress window moves.
+            let poll = if crate::indexing_progress::latest_indexer_progress()
+                .full_pass
+                .is_some()
+            {
+                Duration::from_millis(750)
+            } else {
+                Duration::from_secs(2)
+            };
+            std::thread::sleep(poll);
         }
     });
 
@@ -171,11 +180,27 @@ fn sync_indexer_snapshot(known_generation: u64, known_instance: u64) -> Snapshot
         ),
     ) {
         Ok(response) if response.ok => response,
-        _ => return SnapshotSync::Unreachable,
+        _ => {
+            crate::indexing_progress::publish_indexer_progress(
+                crate::indexing_progress::IndexerProgressReport {
+                    reachable: false,
+                    full_pass: None,
+                },
+            );
+            return SnapshotSync::Unreachable;
+        }
     };
     let Some(result) = response.result else {
         return SnapshotSync::Unchanged;
     };
+    crate::indexing_progress::publish_indexer_progress(
+        crate::indexing_progress::IndexerProgressReport {
+            reachable: true,
+            full_pass: result
+                .get("full_pass")
+                .and_then(crate::indexing_progress::FullPassSnapshot::from_json),
+        },
+    );
     if result
         .get("indexing")
         .and_then(Value::as_bool)

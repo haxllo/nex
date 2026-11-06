@@ -234,69 +234,83 @@ fn dispatch(
         // and ships the item set only when it did. Mirrors the old
         // status+snapshot pair so the caller does not open two connections.
         "sync" => {
-            let known = request
-                .params
-                .get("generation")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let client_instance = request
-                .params
-                .get("instance")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let service = service.read().unwrap_or_else(|e| e.into_inner());
-            let indexing = indexing.load(Ordering::Acquire);
-            // While a rebuild runs the cache is mid-refresh: echo the caller's
-            // generation so it does not advance past an item set it never saw.
-            if indexing {
-                return IpcResponse::ok(json!({
-                    "generation": known,
-                    "changed": false,
-                    "indexing": true,
-                }));
-            }
+            // Reported on every sync, not only during the startup cycle:
+            // watcher resyncs and config reloads run full passes too.
+            let full_pass = service
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .full_pass_progress();
+            let mut response = (|| -> IpcResponse {
+                let known = request
+                    .params
+                    .get("generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let client_instance = request
+                    .params
+                    .get("instance")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let service = service.read().unwrap_or_else(|e| e.into_inner());
+                let indexing = indexing.load(Ordering::Acquire);
+                // While a rebuild runs the cache is mid-refresh: echo the caller's
+                // generation so it does not advance past an item set it never saw.
+                if indexing {
+                    return IpcResponse::ok(json!({
+                        "generation": known,
+                        "changed": false,
+                        "indexing": true,
+                    }));
+                }
 
-            match service.publish_outcome(known, client_instance) {
-                crate::core_service::PublishOutcome::Unchanged {
-                    generation,
-                    instance,
-                } => IpcResponse::ok(json!({
-                    "generation": generation,
-                    "instance": instance,
-                    "changed": false,
-                    "indexing": false,
-                })),
-                crate::core_service::PublishOutcome::Delta {
-                    generation,
-                    instance,
-                    upserts,
-                    deleted,
-                } => IpcResponse::ok(json!({
-                    "generation": generation,
-                    "instance": instance,
-                    "changed": true,
-                    "indexing": false,
-                    "delta": {
-                        "upserts": items_to_values(&upserts),
-                        "deleted": deleted,
-                    },
-                })),
-                crate::core_service::PublishOutcome::Snapshot {
-                    generation,
-                    instance,
-                } => match service.hot_snapshot_items() {
-                    Ok(items) => IpcResponse::ok(json!({
+                match service.publish_outcome(known, client_instance) {
+                    crate::core_service::PublishOutcome::Unchanged {
+                        generation,
+                        instance,
+                    } => IpcResponse::ok(json!({
+                        "generation": generation,
+                        "instance": instance,
+                        "changed": false,
+                        "indexing": false,
+                    })),
+                    crate::core_service::PublishOutcome::Delta {
+                        generation,
+                        instance,
+                        upserts,
+                        deleted,
+                    } => IpcResponse::ok(json!({
                         "generation": generation,
                         "instance": instance,
                         "changed": true,
                         "indexing": false,
-                        "items": items_to_values(&items),
+                        "delta": {
+                            "upserts": items_to_values(&upserts),
+                            "deleted": deleted,
+                        },
                     })),
-                    Err(error) => {
-                        IpcResponse::error(format!("snapshot failed: {error}"))
-                    }
-                },
+                    crate::core_service::PublishOutcome::Snapshot {
+                        generation,
+                        instance,
+                    } => match service.hot_snapshot_items() {
+                        Ok(items) => IpcResponse::ok(json!({
+                            "generation": generation,
+                            "instance": instance,
+                            "changed": true,
+                            "indexing": false,
+                            "items": items_to_values(&items),
+                        })),
+                        Err(error) => {
+                            IpcResponse::error(format!("snapshot failed: {error}"))
+                        }
+                    },
+                }
+            })();
+            if let (Some(progress), Some(Value::Object(result))) =
+                (full_pass, response.result.as_mut())
+            {
+                result.insert("full_pass".to_string(), progress.to_json());
             }
+            response
         }
         // Writes the UI must not perform itself: the indexer owns the store.
         "record_launch" => {

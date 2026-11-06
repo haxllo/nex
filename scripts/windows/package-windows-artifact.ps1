@@ -69,7 +69,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "docs") | Out-Nul
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "scripts") | Out-Null
 
 $workspaceManifest = Join-Path $repoRoot "Cargo.toml"
-cargo build --manifest-path $workspaceManifest --release --quiet --bin NexUIProcess --bin NexIndexerProcess --bin Nex
+cargo build --manifest-path $workspaceManifest --release --quiet --bin NexUIProcess --bin NexIndexerProcess
 if ($LASTEXITCODE -ne 0) { throw "Failed to build Nex (exit code $LASTEXITCODE)." }
 cargo build --manifest-path $workspaceManifest -p nex-helper --release --quiet
 if ($LASTEXITCODE -ne 0) { throw "Failed to build NexHelper (exit code $LASTEXITCODE)." }
@@ -303,14 +303,3 @@ $manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $manifestPath
 Write-Host "Created artifact: $zipPath" -ForegroundColor Green
 Write-Host "Created manifest: $manifestPath" -ForegroundColor Green
 Write-Host "Staging dir retained: $stageDir" -ForegroundColor Green
-
-# Migration shim for pre-process-isolation installs: their updater restarts
-# bin\Nex.exe after installing. The installer needs it; the portable zip does
-# not, so it is staged after the zip and manifest are produced. The next
-# release stops shipping it (the 2.38.0 updater prefers NexUIProcess.exe).
-$shimExe = Join-Path $targetRoot "release/Nex.exe"
-if (-not (Test-Path $shimExe)) {
-  throw "Expected migration shim not found at $shimExe"
-}
-Copy-Item $shimExe (Join-Path $stageDir "bin/Nex.exe") -Force
-Write-Host "Staged migration shim: bin/Nex.exe" -ForegroundColor Green

@@ -10,7 +10,6 @@
   const $ = (id) => document.getElementById(id);
   const input = $("query");
   const list = $("list");
-  const resultsCol = $("results-col");
   const statusEl = $("status");
   const panel = $("panel");
   const searchIcon = $("search-icon");
@@ -406,37 +405,9 @@
     li.className = "section";
     li.dataset.key = key;
     li.textContent = r.title;
-    return li;
-  }
-
-  // Status-only result set: a centered state instead of a label stranded at
-  // the top-left of an otherwise empty panel. Hints are opt-in per message —
-  // transient statuses (indexing, errors) must not get search advice.
-  const STATUS_HINTS = {
-    "No results": "Try another spelling, or search for files and folders.",
-    "No command matches": "Try a different command.",
-    "Start typing to search": "Search apps, files, folders and commands.",
-  };
-  function buildStatus(key, r) {
-    const li = document.createElement("li");
-    li.className = "empty-state";
-    li.dataset.key = key;
-    const glyph = document.createElement("div");
-    glyph.className = "empty-glyph";
-    glyph.setAttribute("aria-hidden", "true");
-    glyph.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
-      '<circle cx="11" cy="11" r="7"/><path d="M20.5 20.5 16 16"/><path d="M8.6 8.6l4.8 4.8M13.4 8.6l-4.8 4.8"/></svg>';
-    const title = document.createElement("div");
-    title.className = "empty-title";
-    title.textContent = r.title || "";
-    li.append(glyph, title);
-    const hint = Object.hasOwn(STATUS_HINTS, r.title) ? STATUS_HINTS[r.title] : "";
-    if (hint) {
-      const el = document.createElement("div");
-      el.className = "empty-hint";
-      el.textContent = hint;
-      li.append(el);
+    if (r.role === "status") {
+      li.style.textTransform = "none";
+      li.style.color = "var(--text-faint)";
     }
     return li;
   }
@@ -614,20 +585,6 @@
     // would otherwise re-animate on every keystroke.
     list.classList.toggle("no-anim", !animating);
 
-    // A query with no local hits is not an empty result set: the runtime
-    // injects the "Search Web for …" provider action, so the only rows are
-    // that action plus the synthetic "Show all apps" entry. Say so on the
-    // bucket label instead of leaving a lone row under "Actions".
-    const hasLocalMatch = rows.some(
-      (r) =>
-        r.role !== "header" &&
-        r.role !== "status" &&
-        r.role !== "show_all_apps" &&
-        r.commandKind !== "web" &&
-        r.commandKind !== "url"
-    );
-    const noLocalMatches = !hasLocalMatch && rows.some((r) => r.commandKind === "web");
-
     // Index live nodes by key so unchanged rows are reused in place —
     // no teardown, no image re-decode, no entrance re-animation.
     const live = new Map();
@@ -638,23 +595,10 @@
 
     const usedKeys = new Set();
     const liByIndex = [];
-    let noticePending = noLocalMatches;
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const key = rowKey(r);
       const isSection = r.role === "header" || r.role === "status";
-      if (noLocalMatches && r.role === "header" && r.title === "Actions") {
-        // The notice takes this label's place: the bucket holds nothing else.
-        liByIndex[i] = null;
-        continue;
-      }
-      if (noticePending && !isSection) {
-        noticePending = false;
-        const note = document.createElement("li");
-        note.className = "section empty-note";
-        note.textContent = "No local matches";
-        frag.appendChild(note);
-      }
       let li = null;
       if (!usedKeys.has(key)) {
         li = live.get(key) || null;
@@ -678,9 +622,7 @@
       } else {
         // New row.
         usedKeys.add(key);
-        if (r.role === "status") {
-          li = buildStatus(key, r);
-        } else if (isSection) {
+        if (isSection) {
           li = buildSection(key, r);
         } else {
           const delay = (animating && r.role !== "status" && r.role !== "quick_launch")
@@ -789,9 +731,6 @@
     // Idle state: the expanded shell stays visible (tabs + list), so the
     // class only marks "nothing to list" for spacing.
     bodyEl.classList.toggle("idle", !hasRows && !hasStatusRows);
-    // Status-only result set: the centered state owns the panel and the tab
-    // row (which filters nothing) steps aside.
-    bodyEl.classList.toggle("state-only", !hasRows && hasStatusRows);
     // Every row filtered out by the tab: the status line is the only
     // content, so let it own the column instead of sitting under an
     // empty stretched list.
@@ -827,18 +766,7 @@
     // Menu tied to a hidden area must close (its trigger vanished).
     if (!hasRows) topPower.closeMenu();
 
-    updateListFade();
     measure();
-  }
-
-  // Scroll affordance: the fold fade only exists while content is actually
-  // clipped on that side. Painted overlays, not a mask — a masked text layer
-  // loses subpixel AA (same rule as the query input).
-  function updateListFade() {
-    const up = list.scrollTop > 1;
-    const down = list.scrollTop + list.clientHeight < list.scrollHeight - 1;
-    resultsCol.classList.toggle("fade-up", up);
-    resultsCol.classList.toggle("fade-down", down);
   }
 
   function renderQuickLaunchPins() {
@@ -4428,7 +4356,6 @@
   let scrollFadeTimer = null;
   function armScrollFade() {
     list.classList.remove("scroll-idle");
-    updateListFade();
     clearTimeout(scrollFadeTimer);
     scrollFadeTimer = setTimeout(() => {
       list.classList.add("scroll-idle");

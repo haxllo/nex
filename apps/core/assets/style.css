@@ -28,10 +28,6 @@
   --dur-slow: 240ms;
   --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
   --shadow-pop: 0 0 0 1px var(--border-strong), 0 12px 32px -8px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.18);
-  /* Top hairline: the panel's own edge where DWM does not draw one. */
-  --panel-top-edge: rgba(255, 255, 255, 0.07);
-  /* Fold fade: must match whatever paints behind the list. */
-  --list-fade: #1e1e1e;
 
   /* dark palette */
   --bg: #1E1E1E;
@@ -52,9 +48,9 @@
   /* State layers: hover < selected < pressed, so the keyboard selection
      always out-ranks the pointer. */
   --hover: rgba(255, 255, 255, 0.05);
-  --sel: rgba(255, 255, 255, 0.10);
-  --sel-border: rgba(255, 255, 255, 0.08);
-  --pressed: rgba(255, 255, 255, 0.145);
+  --sel: rgba(255, 255, 255, 0.085);
+  --sel-border: rgba(255, 255, 255, 0.06);
+  --pressed: rgba(255, 255, 255, 0.11);
   --track: rgba(255, 255, 255, 0.12);
   --accent: #6ea8fe;
   --divider: rgba(255, 255, 255, 0.07);
@@ -96,8 +92,6 @@ html[data-theme="light"] {
   --kbd-cap-border: rgba(0, 0, 0, 0.15);
   --icon-bg: rgba(0, 0, 0, 0.05);
   --text-select: rgba(0, 0, 0, 0.18);
-  --panel-top-edge: rgba(0, 0, 0, 0.05);
-  --list-fade: #ffffff;
   --lock: #2f6bff;
   --logout: #d97706;
   --sleep: #8b5cf6;
@@ -114,11 +108,6 @@ html[data-native-material="acrylic"] {
   --panel-sheen: rgba(255, 255, 255, 0.075);
   --panel-reflection: rgba(255, 255, 255, 0.035);
   --panel-bottom-edge: rgba(0, 0, 0, 0.3);
-  /* Frosted veil, not a solid fill: the fade reuses the panel's own tint so
-     it darkens the fold by the same amount the panel does — anything heavier
-     reads as a smudge over the live desktop behind the glass. */
-  --list-fade: rgba(17, 20, 27, 0.12);
-  --panel-top-edge: rgba(255, 255, 255, 0.10);
 }
 
 html[data-theme="light"][data-native-material="acrylic"] {
@@ -129,7 +118,6 @@ html[data-theme="light"][data-native-material="acrylic"] {
   --panel-sheen: rgba(255, 255, 255, 0.22);
   --panel-reflection: rgba(255, 255, 255, 0.12);
   --panel-bottom-edge: rgba(55, 72, 101, 0.14);
-  --list-fade: rgba(248, 250, 253, 0.2);
 }
 
 * {
@@ -183,7 +171,6 @@ body {
   /*border: 1px solid var(--panel-edge);*/
   border-radius: var(--radius);
   box-shadow:
-    inset 0 1px 0 var(--panel-top-edge),
     0 12px 40px rgba(0, 0, 0, 0.36);
   clip-path: inset(-32px round var(--radius));
   /* Contain children (power panel) so their corners round with the
@@ -201,9 +188,7 @@ body {
   align-items: center;
   gap: 12px;
   height: 60px;
-  /* 19px starts the icon on the same column as a row icon (6px list
-     padding + 12px row padding + 1px border). */
-  padding: 0 var(--pad-x) 0 19px;
+  padding: 0 var(--pad-x);
 }
 
 #search-icon {
@@ -223,9 +208,6 @@ body {
   min-width: 0;
   display: flex;
   align-items: center;
-  /* 4px on top of the row gap puts the query on the row-title column
-     (x=55 at 760px) instead of 7px short of it. */
-  margin-left: 4px;
 }
 
 #completion {
@@ -451,11 +433,11 @@ html.bare #footer {
   color: var(--text-dim);
   background: var(--hover);
 }
-/* Active tab reads as a state, not as another selected row: the row
-   selection is the loudest thing in the panel. */
+/* Raised chip: reads as a control, not as another selected row. */
 .tab.active {
   color: var(--text);
-  background: var(--sel);
+  background: var(--kbd-bg);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 .tab:focus-visible {
   outline: none;
@@ -484,49 +466,12 @@ html.bare #footer {
 #body.no-preview #body-cols {
   height: auto;
 }
-/* Nothing to filter: the tab row is not drawn, but keeps its slot so the
-   panel is exactly as tall as it was with tabs — no window resize on the
-   keystroke that empties the list. */
-#body.state-only #tabs {
-  visibility: hidden;
-}
 #results-col {
-  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-}
-
-/* Fold affordance: the list height is fixed so the window never resizes
-   while typing, which means a row can land exactly on the edge. These
-   painted gradients say "there is more" and fade out when the clip is
-   gone. Never a mask: masking the text layer kills its subpixel AA
-   (same rule as #query). */
-#results-col::before,
-#results-col::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 16px;
-  z-index: 2;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur) var(--ease);
-}
-#results-col::before {
-  top: 0;
-  background: linear-gradient(to bottom, var(--list-fade), transparent);
-}
-#results-col::after {
-  bottom: 0;
-  background: linear-gradient(to top, var(--list-fade), transparent);
-}
-#results-col.fade-up::before,
-#results-col.fade-down::after {
-  opacity: 1;
 }
 /* Expanded list fills the fixed column and scrolls past six rows. */
 #list {
@@ -611,8 +556,6 @@ html.bare #footer {
   background: var(--hover);
   opacity: 0;
   pointer-events: none;
-  /* Short, symmetric: a slow ease turns pointer travel into trails. */
-  transition: opacity 90ms var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 .row > * {
   position: relative;
@@ -733,15 +676,8 @@ html[data-native-material="acrylic"] .row.selected::before {
 @media (prefers-reduced-motion: reduce) {
   .row,
   .section,
-  .empty-state,
   #panel.media-open #media-view {
     animation: none;
-  }
-  /* The hover layer and the fold fade are feedback, not motion. */
-  .row::before,
-  #results-col::before,
-  #results-col::after {
-    transition: none;
   }
 #power-menu,
 #context-menu,
@@ -1047,70 +983,13 @@ html[data-theme="light"] img.icon.glyph {
 /* Toast notification */
 /* section header */
 .section {
-  /* Left padding puts the label on the row-title column (6px list +
-     49px = x55), so capitals line up with the titles below them. */
-  padding: 12px 12px 4px 49px;
+  padding: 10px 12px 5px;
   font-size: 11.5px;
   font-weight: 500;
   color: var(--text-faint);
 }
 .section:first-child {
   padding-top: 2px;
-}
-/* Grid tiles are their own column: headers stay flush left there. */
-.grid-view .section {
-  padding-left: 12px;
-}
-/* No-local-match notice: sits where the Actions bucket label would be, above
-   the provider's web-search row, so the panel names the state instead of
-   presenting a lone row as a result set. */
-.empty-note {
-  color: var(--text-dim);
-}
-
-/* Status-only result set: a centered state instead of a label stranded
-   at the top-left of an empty column. Transient statuses (indexing,
-   errors) reuse the shell without the hint line. */
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 100%;
-  min-height: 208px;
-  padding: 0 32px;
-  text-align: center;
-  animation: nexRowIn 150ms ease-out backwards;
-}
-.grid-view .empty-state {
-  grid-column: 1 / -1;
-}
-.empty-glyph {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  margin-bottom: 8px;
-  border-radius: 50%;
-  background: var(--icon-bg);
-  color: var(--text-faint);
-}
-.empty-glyph svg {
-  width: 16px;
-  height: 16px;
-}
-.empty-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-dim);
-}
-.empty-hint {
-  max-width: 300px;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--text-faint);
-  text-wrap: balance;
 }
 
 /* status / empty */
@@ -2743,15 +2622,6 @@ html.bg-black #panel::after {
 
 html.bg-white #panel::after {
   border-color: rgba(0, 0, 0, 0.16);
-}
-
-/* The fold fade must paint the panel's actual colour, not the theme's. */
-html.bg-black {
-  --list-fade: #000000;
-}
-
-html.bg-white {
-  --list-fade: #ffffff;
 }
 
 /* DWM owns the outline when it also owns the opaque window corners. */

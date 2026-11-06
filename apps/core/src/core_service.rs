@@ -14,7 +14,7 @@ use crate::tantivy_search::{TantivyIndex, TantivyOpenError};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
@@ -603,6 +603,23 @@ impl CoreService {
                 let mut guard = poisoned.into_inner();
                 *guard = next;
             }
+        }
+    }
+}
+
+/// Take `lock` for writing without parking as a waiting writer.
+///
+/// A blocked `write()` makes every later `read()` wait too (the std lock is
+/// writer-preferring), so a watcher batch queued behind the rebuild's
+/// minutes-long read guard stalled all IPC searches and syncs until the
+/// rebuild finished. Polling `try_write` lets readers keep flowing meanwhile.
+pub fn write_without_blocking_readers<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    loop {
+        match lock.try_write() {
+            Ok(guard) => return guard,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(POLL_INTERVAL),
         }
     }
 }
@@ -3459,6 +3476,40 @@ mod tests {
     use crate::search::SearchFilter;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn polling_writer_lets_new_readers_in_while_it_waits() {
+        use std::sync::{mpsc, Arc, RwLock};
+        use std::time::Duration;
+
+        let lock = Arc::new(RwLock::new(0_u32));
+        // Stands in for the rebuild's long-lived read guard.
+        let rebuild_guard = lock.read().unwrap();
+
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let writer_lock = Arc::clone(&lock);
+        let writer = std::thread::spawn(move || {
+            let mut guard = super::write_without_blocking_readers(&writer_lock);
+            *guard += 1;
+            acquired_tx.send(()).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(acquired_rx.try_recv().is_err(), "writer must wait for the reader");
+
+        // An IPC search arriving now must not queue behind the waiting writer.
+        let reader_lock = Arc::clone(&lock);
+        let reader_got_in = std::thread::spawn(move || reader_lock.try_read().is_ok())
+            .join()
+            .unwrap();
+        assert!(reader_got_in);
+
+        drop(rebuild_guard);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer acquires once the reader leaves");
+        writer.join().unwrap();
+        assert_eq!(*lock.read().unwrap(), 1);
+    }
 
     /// Config whose Tantivy directory is unique per test, so parallel tests
     /// never share an `IndexWriter` on the same directory.

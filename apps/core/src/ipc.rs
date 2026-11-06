@@ -405,9 +405,17 @@ fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Re
 }
 
 pub fn ipc_call(addr: &str, request: &IpcRequest) -> Result<IpcResponse, String> {
+    ipc_call_with_timeout(addr, request, Duration::from_secs(60))
+}
+
+fn ipc_call_with_timeout(
+    addr: &str,
+    request: &IpcRequest,
+    read_timeout: Duration,
+) -> Result<IpcResponse, String> {
     let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|e| e.to_string())?;
     let encoded = serde_json::to_string(request).map_err(|e| e.to_string())?;
     writeln!(stream, "{encoded}").map_err(|e| e.to_string())?;
@@ -418,6 +426,11 @@ pub fn ipc_call(addr: &str, request: &IpcRequest) -> Result<IpcResponse, String>
     serde_json::from_str(line.trim()).map_err(|e| e.to_string())
 }
 
+/// Keystroke budget for the indexer seed query. A busy indexer (rebuild at
+/// background priority) must not stall typing; on timeout the caller ranks
+/// its local cache instead.
+pub const SEARCH_SEED_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Ask the indexer for Tantivy candidates. The UI re-ranks them with its own
 /// filter and personalization; an IPC failure or an empty index lets the
 /// caller fall back to the local cache.
@@ -426,9 +439,10 @@ pub fn search_seed(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchItem>, String> {
-    let response = ipc_call(
+    let response = ipc_call_with_timeout(
         addr,
         &IpcRequest::new("search_seed", json!({ "query": query, "limit": limit })),
+        SEARCH_SEED_TIMEOUT,
     )?;
     if !response.ok {
         return Err(response

@@ -2935,6 +2935,9 @@ fn apply_query_change(
 }
 
 #[cfg(target_os = "windows")]
+const SEARCH_BUSY_STATUS: &str = "Indexing is busy - showing previous results";
+
+#[cfg(target_os = "windows")]
 fn apply_search_results(
     search_worker: &SearchWorker,
     overlay: &NativeOverlayShell,
@@ -2970,6 +2973,16 @@ fn apply_search_results(
     .is_some();
 
     if let Some(error) = result.error {
+        // Keep the last list instead of blanking the overlay mid-typing; the
+        // next keystroke or item-set change re-runs the query.
+        if !current_results.is_empty() {
+            log_warn(&format!(
+                "[nex] search_error_kept_previous_results error={error}"
+            ));
+            overlay.set_status_text(SEARCH_BUSY_STATUS);
+            *last_applied_generation = result.generation;
+            return;
+        }
         current_results.clear();
         current_rows.clear();
         *selected_index = 0;
@@ -2979,6 +2992,8 @@ fn apply_search_results(
         *last_applied_generation = result.generation;
         return;
     }
+
+    overlay.clear_status_text_if(SEARCH_BUSY_STATUS);
 
     let mut results = result.results;
     crate::runtime_overlay_rows::dedupe_overlay_results(&mut results);

@@ -440,6 +440,21 @@ impl NativeOverlayShell {
         self.post(UiCommand::ApplyStatus);
     }
 
+    /// Clear the status line only while it still shows `message`, so a
+    /// transient hint never wipes a newer, unrelated status.
+    pub fn clear_status_text_if(&self, message: &str) {
+        let mut cleared = false;
+        self.with_state(|s| {
+            if s.status_text == message {
+                s.status_text.clear();
+                cleared = true;
+            }
+        });
+        if cleared {
+            self.post(UiCommand::ApplyStatus);
+        }
+    }
+
     /// Set status text AND re-push the full state so the page re-renders
     /// (used when the status accompanies a visible UI change, e.g. pin
     /// toggles the bookmark icon on app rows).

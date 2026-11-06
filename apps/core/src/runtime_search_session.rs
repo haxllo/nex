@@ -119,6 +119,7 @@ pub(crate) fn search_overlay_results_with_session(
     let mut merged = Vec::new();
     let indexed_started = Instant::now();
     let mut indexed_cache_hit = false;
+    let mut seed_is_partial = false;
     let prefix_cache_eligible = is_prefix_cache_eligible_query(parsed_query, short_query_app_bias);
     let indexed_seed_items = if let Some(cache) =
         session.indexed_prefix_cache.as_ref().filter(|cache| {
@@ -144,9 +145,14 @@ pub(crate) fn search_overlay_results_with_session(
         };
         match remote {
             Ok(items) if !items.is_empty() => items,
-            _ => service
-                .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
-                .map_err(|error| format!("indexed search failed: {error}"))?,
+            _ => {
+                // The UI cache holds only the hot set; caching this seed would
+                // keep later keystrokes off the indexer once it answers again.
+                seed_is_partial = service.is_ui_client();
+                service
+                    .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
+                    .map_err(|error| format!("indexed search failed: {error}"))?
+            }
         }
     };
     let indexed_ms = indexed_started.elapsed().as_millis();
@@ -155,7 +161,10 @@ pub(crate) fn search_overlay_results_with_session(
     }
     let indexed_count = indexed_seed_items.len();
     merged.extend(indexed_seed_items.iter().take(candidate_limit).cloned());
-    if prefix_cache_eligible && normalized_query.len() >= INDEXED_PREFIX_CACHE_MIN_QUERY_LEN {
+    if prefix_cache_eligible
+        && !seed_is_partial
+        && normalized_query.len() >= INDEXED_PREFIX_CACHE_MIN_QUERY_LEN
+    {
         session.indexed_prefix_cache = Some(IndexedPrefixCache {
             normalized_query: normalized_query.clone(),
             indexed_filter: indexed_filter.clone(),

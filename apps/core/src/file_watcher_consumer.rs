@@ -516,10 +516,9 @@ fn flush_pending(
     let mut deleted = 0usize;
     let mut upserted = 0usize;
     {
-        let guard = match service.write() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // Polling acquire: a parked writer would block IPC searches behind
+        // a running rebuild's read guard.
+        let guard = crate::core_service::write_without_blocking_readers(service);
         // Without folder rows we cannot tell a folder delete from a file
         // delete, so every removal must check for descendants.
         let folders_indexed = guard.config_snapshot().show_folders;

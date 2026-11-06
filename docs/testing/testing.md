@@ -80,7 +80,6 @@ Found in `#[cfg(test)] mod tests { ... }` blocks throughout `apps/core/src/`. Ea
 | `clipboard_history` | `src/clipboard_history.rs` | Clipboard history storage and retrieval |
 | `config` | `src/config.rs` | Default values, validation, file loading |
 | `core_service` | `src/core_service.rs` | Core service CRUD and search orchestration |
-| `everything_bridge` | `src/everything_bridge.rs` | Everything SDK IPC protocol |
 | `file_watcher` | `src/file_watcher.rs` | File system change detection |
 | `file_watcher_consumer` | `src/file_watcher_consumer.rs` | File event processing queue |
 | `logging` | `src/logging.rs` | Log initialization and format |
@@ -206,7 +205,7 @@ No coverage thresholds are configured. The project does not use `tarpaulin`, `gr
 
 ## Known Limitations
 
-- **Windows-only modules** (`runtime_loop.rs`, `everything_bridge.rs`, `runtime_overlay_rows.rs`) have limited test coverage because their functionality depends on OS APIs. The Everything bridge tests validate IPC protocol parsing with mock data but do not require an Everything installation.
+- **Windows-only modules** (`runtime_loop.rs`, `runtime_overlay_rows.rs`) have limited test coverage because their functionality depends on OS APIs.
 - **Smoke test guard**: `windows_runtime_smoke_test` skips silently when `NEX_WINDOWS_RUNTIME_SMOKE` is not set. CI sets it globally, so local run failures may go unnoticed if the env var is missing.
 - **Performance test variability**: The 15ms P95 budget in `warm_query_p95_under_15ms` is calibrated for `windows-latest` GitHub runners. Local machines with different hardware may see flaky results near the threshold.
 - **Single-threaded test execution**: `cargo test -p nex` runs tests in parallel by default. Performance-sensitive tests may need `--test-threads=1` for stable timing.

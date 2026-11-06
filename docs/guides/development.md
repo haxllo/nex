@@ -176,7 +176,6 @@ nex/
 │       │   ├── overlay_state.rs # Overlay state machine
 │       │   ├── runtime_*.rs     # Runtime sub-components (actions, commands, diagnostics, etc.)
 │       │   ├── console_signal.rs        # Windows-only console handler
-│       │   ├── everything_bridge.rs     # Windows-only Everything SDK bridge
 │       │   ├── file_watcher*.rs         # Windows-only file watching
 │       │   ├── runtime_loop.rs          # Windows-only message pump
 │       │   ├── runtime_overlay_rows.rs  # Windows-only result rendering
@@ -238,7 +237,6 @@ Modules marked `#[cfg(target_os = "windows")]` in `lib.rs`:
 | `overlay` | WebView2 overlay (tao + wry window, hotkey, tray, icons, indexing progress) |
 | `runtime_loop` | Windows message pump for background runtime |
 | `runtime_overlay_rows` | Overlay result rendering logic |
-| `everything_bridge` | Legacy Everything SDK opt-in (native discovery is the default) |
 | `file_watcher` | NTFS file change notifications |
 | `file_watcher_consumer` | File change event consumer |
 | `console_signal` | Console event handler |

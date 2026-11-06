@@ -36,7 +36,7 @@ All settings, their defaults, valid ranges, and descriptions:
 | `clipboard_enabled` | `bool` | `false` | — | Enable clipboard history provider. |
 | `clipboard_retention_minutes` | `u32` | `480` | `5..43200` | Clipboard entry retention in minutes (default 8 hours). |
 | `clipboard_exclude_sensitive_patterns` | `string[]` | `["password", "passcode", "otp", "token", "secret", "apikey", "api_key"]` | — | Substring patterns that prevent clipboard capture. |
-| `file_discovery_backend` | `string` | `"auto"` | `auto`, `everything`, `walkdir` | File/folder discovery backend. `auto`: native discovery (MFT for NTFS when the cap allows, walkdir otherwise); `everything` is a deprecated opt-in. |
+| `file_discovery_backend` | `string` | `"auto"` | `auto`, `walkdir` | File/folder discovery backend. `auto`: native discovery (MFT for NTFS when the cap allows, walkdir otherwise). A legacy `everything` value loads as `auto`. |
 | `plugins_enabled` | `bool` | `true` | — | Enable plugin SDK. |
 | `plugins_safe_mode` | `bool` | `true` | — | Prevent plugin command execution when `true`. |
 | `plugin_paths` | `string[]` | `["%APPDATA%\\Nex\\plugins"]` | — | Directories scanned for plugins. |
@@ -74,8 +74,7 @@ These fields are managed by Nex and written into the saved config:
 
 | Value | Description |
 |---|---|
-| `auto` | Native discovery: MFT snapshot for NTFS roots when the per-root cap allows, walkdir + `ReadDirectoryChangesW` otherwise. Never selects Everything. |
-| `everything` | Deprecated opt-in. Requires the Everything service (`Everything64.dll`/`Everything32.dll`); falls back to walkdir with a warning. |
+| `auto` | Native discovery: MFT snapshot for NTFS roots when the per-root cap allows, walkdir + `ReadDirectoryChangesW` otherwise. |
 | `walkdir` | Always use built-in walkdir + `ReadDirectoryChangesW`. |
 
 ### Web Search Provider Values

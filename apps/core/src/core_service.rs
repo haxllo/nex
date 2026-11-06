@@ -679,8 +679,8 @@ impl CoreService {
 
         // Path 1: indexed search (Tantivy) returns pre-ranked candidates
         // directly. The index is only populated when background indexing has
-        // finished successfully. When the index is empty (e.g., Everything
-        // service was down during indexing) we fall back to scanning the
+        // finished successfully. When the index is empty (e.g., discovery
+        // failed during indexing) we fall back to scanning the
         // in-memory cache snapshot. Tantivy gives snapshot isolation via
         // per-query reader reload; the cache fallback below is stamped with
         // the live generation so mixed-generation merges stay detectable.

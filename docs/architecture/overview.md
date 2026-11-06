@@ -42,8 +42,7 @@ Nex is a keyboard-first Windows launcher (analogous to Raycast or Flow) written 
 │  │  │  Discovery Providers                               │    │     │
 │  │  │  ┌──────────────────┐  ┌──────────────────────┐    │    │     │
 │  │  │  │ Start Menu Apps  │  │ File System          │    │    │     │
-│  │  │  │                 │  │ (Walkdir / Everything│    │    │     │
-│  │  │  │                 │  │  SDK IPC)            │    │    │     │
+│  │  │  │                 │  │ (MFT / Walkdir)      │    │    │     │
 │  │  │  └──────────────────┘  └──────────────────────┘    │    │     │
 │  │  └──────────────────────────────────────────────────┘    │     │
 │  │                                                          │     │
@@ -55,10 +54,10 @@ Nex is a keyboard-first Windows launcher (analogous to Raycast or Flow) written 
 │  │  └─────────────────┘ └──────────────┘ └───────────────┘ │     │
 │  └─────────────────────────────────────────────────────────┘     │
 │                                                                  │
-│  ┌────────────────┐   ┌──────────────────┐                       │
-│  │ Everything     │   │ File System      │                       │
-│  │ Service (IPC)  │   │ (NTFS, drives)   │                       │
-│  └────────────────┘   └──────────────────┘                       │
+│  ┌──────────────────┐                                            │
+│  │ File System      │                                            │
+│  │ (NTFS, drives)   │                                            │
+│  └──────────────────┘                                            │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -110,7 +109,6 @@ The crate is a single Rust workspace member (`apps/core`), edition 2021, targeti
 | Module | Path | Purpose |
 |--------|------|---------|
 | `discovery` | `src/discovery.rs` | `DiscoveryProvider` trait, `StartMenuAppDiscoveryProvider`, `FileSystemDiscoveryProvider` (walkdir), exclusion policies |
-| `everything_bridge` | `src/everything_bridge.rs` | Voidtools Everything SDK FFI bridge (dynamic library load, IPC for file discovery) |
 | `file_watcher` | `src/file_watcher.rs` | `ReadDirectoryChangesW` per-root watcher, debouncing, event emission |
 | `file_watcher_consumer` | `src/file_watcher_consumer.rs` | `FileWatcherHandle`: translates `WatcherEvent` into live index upsert/delete |
 
@@ -251,7 +249,6 @@ Main Thread — tao event loop
 - **CoreService** is wrapped in `Arc<RwLock<CoreService>>`. The search worker acquires a `try_write()` lock — if the background indexer holds the write lock, the search tick is skipped and retried on the next event.
 - **`CoreService` internal caches** (`cached_items`, `cached_app_items`, `config`) use individual `RwLock`s so the search path reads without blocking index writes.
 - **Tantivy** uses `Mutex<IndexWriter>` for writes; the `IndexReader` is cloned per query (cheap, wait-free).
-- **Everything SDK** uses a process-global `Mutex<()>` (`SDK_LOCK`) because the SDK stores query state in global variables.
 - **Warm-release timer** posts a `UiCommand::Teardown(generation)` via the event loop proxy; the actual WebView drop happens on the main thread.
 - **Icon cache** uses `Mutex<Inner>` — no lock contention because it's accessed only during overlay state push (serialized by the runtime worker).
 
@@ -262,7 +259,7 @@ Main Thread — tao event loop
 - **Format**: TOML (primary), with JSON/JSON5 backward compatibility.
 - **Location**: `%APPDATA%\Nex\config.toml`
 - **Version**: `CURRENT_CONFIG_VERSION = 16` with automatic migration in `apply_migrations()`.
-- **Key settings**: hotkey, launch_at_startup, max_results, discovery_roots, file_discovery_backend (Auto/Everything/Walkdir), search_mode_default, game_mode_enabled, ui_warm_release_ms, active_memory_target_mb.
+- **Key settings**: hotkey, launch_at_startup, max_results, discovery_roots, file_discovery_backend (Auto/Walkdir), search_mode_default, game_mode_enabled, ui_warm_release_ms, active_memory_target_mb.
 - **Template**: Written by `write_user_template_toml()` on first launch.
 
 ---
@@ -288,7 +285,6 @@ The overlay uses a **WS_POPUP** window hosting a **WebView2** control via `tao +
 1. **StartMenuAppDiscoveryProvider**: Enumerates Windows Start Menu shortcuts (`shell:AppsFolder`, `%ProgramData%\Microsoft\Windows\Start Menu`, `%AppData%\Microsoft\Windows\Start Menu`).
 2. **FileSystemDiscoveryProvider**: Walks configured `discovery_roots` using:
    - **Native (default)**: MFT snapshot for NTFS roots when the per-root cap allows, walkdir + `ReadDirectoryChangesW` otherwise.
-   - **Everything SDK** (legacy opt-in): Queries the Voidtools Everything service; deprecated.
 
 Both apply exclusion policies (well-known dirs like `node_modules`, `.git`, `appdata`, system dirs).
 

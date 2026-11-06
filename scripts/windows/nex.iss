@@ -49,7 +49,6 @@ LicenseFile=..\..\LICENSE
 Source: "{#StageDir}\bin\NexUIProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexIndexerProcess.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\bin\NexHelper.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#StageDir}\bin\Everything64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#StageDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
 
@@ -59,6 +58,7 @@ Source: "{#StageDir}\scripts\update-nex.ps1"; DestDir: "{app}\scripts"; Flags: i
 Type: files; Name: "{app}\bin\Nex.exe"
 Type: files; Name: "{app}\bin\nex-core.exe"
 Type: files; Name: "{app}\bin\swiftfind-core.exe"
+Type: files; Name: "{app}\bin\Everything64.dll"
 ; Legacy-orphan removal lives in [Code] RemoveLegacyOrphan (called from
 ; CurStepChanged) so the hybrid-key check provably runs before deletion.
 

@@ -19,12 +19,6 @@ $targetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
   [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
 }
 
-# ---------------------------------------------------------------------------
-# Everything SDK download URL
-# ---------------------------------------------------------------------------
-$EverythingSdkUrl = "https://www.voidtools.com/Everything-SDK.zip"
-$EverythingDllName = "Everything64.dll"
-
 function Resolve-VersionFromCargo {
   $cargoToml = Join-Path $PSScriptRoot "..\..\apps\core\Cargo.toml"
   if (-not (Test-Path $cargoToml)) {
@@ -139,85 +133,6 @@ if (-not (Test-Path $helperExe)) {
 }
 Copy-Item $helperExe (Join-Path $stageDir "bin/NexHelper.exe") -Force
 
-# -----------------------------------------------------------------------
-# Download and bundle Everything SDK DLL
-# -----------------------------------------------------------------------
-$everythingDllDir = Join-Path $stageDir "bin"
-$everythingDllPath = Join-Path $everythingDllDir $EverythingDllName
-$everythingDllBundled = $false
-try {
-  Write-Host "Downloading Everything SDK from $EverythingSdkUrl ..." -ForegroundColor Yellow
-  $sdkZip = Join-Path $env:TEMP "Everything-SDK.zip"
-  # Ensure TLS 1.2 for older Windows PowerShell versions
-  if (-not [Net.ServicePointManager]::SecurityProtocol.ToString().Contains('Tls12')) {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  }
-  Invoke-WebRequest -Uri $EverythingSdkUrl -OutFile $sdkZip -UseBasicParsing -ErrorAction Stop
-  # Try multiple extraction methods for PowerShell version compatibility
-  $extracted = $false
-  # Method 1: .NET ZipFile (PS 5.0+ with Add-Type)
-  if (-not $extracted) {
-    try {
-      Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-      $zip = [System.IO.Compression.ZipFile]::OpenRead($sdkZip)
-      $entry = $zip.Entries | Where-Object { $_.Name -eq $EverythingDllName } | Select-Object -First 1
-      if ($entry) {
-        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $everythingDllPath, $true)
-        $extracted = $true
-      }
-      $zip.Dispose()
-    } catch {
-      Write-Host "Method 1 (ZipFile) failed, trying fallback..." -ForegroundColor DarkGray
-    }
-  }
-  # Method 2: Expand-Archive (PS 5.0+)
-  if (-not $extracted) {
-    try {
-      $extractDir = Join-Path $env:TEMP "everything-sdk-extract"
-      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-      Expand-Archive -Path $sdkZip -DestinationPath $extractDir -ErrorAction Stop
-      $dllPath = Get-ChildItem -Recurse -Path $extractDir -Filter $EverythingDllName | Select-Object -First 1
-      if ($dllPath) {
-        Copy-Item $dllPath.FullName $everythingDllPath -Force
-        $extracted = $true
-      }
-      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-    } catch {
-      Write-Host "Method 2 (Expand-Archive) failed, trying fallback..." -ForegroundColor DarkGray
-    }
-  }
-  # Method 3: Shell.Application COM (legacy PS)
-  if (-not $extracted) {
-    try {
-      $extractDir = Join-Path $env:TEMP "everything-sdk-extract"
-      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-      New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-      $shell = New-Object -ComObject Shell.Application
-      $zipObj = $shell.NameSpace($sdkZip)
-      $dest = $shell.NameSpace($extractDir)
-      $dest.CopyHere($zipObj.Items(), 0x14)
-      $dllPath = Get-ChildItem -Recurse -Path $extractDir -Filter $EverythingDllName | Select-Object -First 1
-      if ($dllPath) {
-        Copy-Item $dllPath.FullName $everythingDllPath -Force
-        $extracted = $true
-      }
-      Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-    } catch {
-      Write-Host "Method 3 (Shell.Application) failed." -ForegroundColor DarkGray
-    }
-  }
-  if ($extracted) {
-    Write-Host "Bundled $EverythingDllName next to NexUIProcess.exe" -ForegroundColor Green
-    $everythingDllBundled = $true
-  } else {
-    Write-Host "WARNING: Could not extract $EverythingDllName from Everything-SDK.zip" -ForegroundColor Yellow
-  }
-  Remove-Item $sdkZip -Force -ErrorAction SilentlyContinue
-}
-catch {
-  Write-Host "WARNING: Failed to download Everything SDK: $_" -ForegroundColor Yellow
-  Write-Host "Nex will still work but Everything search will be unavailable until the DLL is placed manually." -ForegroundColor Yellow
-}
 if (Test-Path "apps/assets/nex.svg") {
   Copy-Item "apps/assets/nex.svg" (Join-Path $stageDir "assets/nex.svg") -Force
 }

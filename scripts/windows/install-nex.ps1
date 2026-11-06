@@ -137,7 +137,7 @@ foreach ($candidate in @(
   }
 }
 cmd /c "schtasks /end /tn NexHelperV2 >NUL 2>&1" | Out-Null
-foreach ($imageName in @("NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "nex-core.exe", "swiftfind-core.exe")) {
+foreach ($imageName in @("NexUIProcess.exe", "NexIndexerProcess.exe", "NexHelper.exe", "Nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
   cmd /c "taskkill /IM $imageName /F >NUL 2>&1" | Out-Null
 }
 Start-Sleep -Milliseconds 400
@@ -162,7 +162,8 @@ else {
   Write-Host "  WARNING: NexIndexerProcess.exe not found; the UI will run without indexing." -ForegroundColor Yellow
 }
 
-foreach ($legacyName in @("nex-core.exe", "swiftfind-core.exe")) {
+# Leftovers from older releases (Nex.exe is the 2.38.0-2.39.0 updater shim).
+foreach ($legacyName in @("Nex.exe", "nex-core.exe", "swiftfind-core.exe")) {
   $legacyPath = Join-Path $binDir $legacyName
   if (Test-Path -LiteralPath $legacyPath) {
     Remove-Item -LiteralPath $legacyPath -Force

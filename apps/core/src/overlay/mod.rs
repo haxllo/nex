@@ -13,6 +13,8 @@
 //!                    `ShimState`, `Theme`.
 //!   * [`icons`]   — LRU PNG-byte cache for the `nexasset://icon/…`
 //!                    custom protocol.
+//!   * [`icon_disk_cache`] — bounded, fingerprint-validated PNG store
+//!                    behind the icon LRU (survives restarts).
 //!   * [`shim`]    — `NativeOverlayShell` imperative API the runtime
 //!                    speaks; forwards setters to the host via
 //!                    `UiCommand` events.
@@ -34,6 +36,8 @@ pub(crate) mod ipc;
 pub(crate) mod hotkey;
 #[cfg(target_os = "windows")]
 pub(crate) mod icons;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod icon_disk_cache;
 #[cfg(target_os = "windows")]
 pub(crate) mod model;
 #[cfg(target_os = "windows")]

@@ -8,6 +8,7 @@ pub const ACTION_CLIPBOARD_HISTORY_ID: &str = "__nex_action_clipboard_history__"
 pub const ACTION_OPEN_CONFIG_ID: &str = "__nex_action_open_config__";
 
 pub const ACTION_CHECK_UPDATES_ID: &str = "__nex_action_check_updates__";
+pub const ACTION_CLEAR_ICON_CACHE_ID: &str = "__nex_action_clear_icon_cache__";
 pub const ACTION_WEB_SEARCH_PREFIX: &str = "__nex_action_web_search__:";
 pub const ACTION_CREATE_FOLDER_PREFIX: &str = "__nex_action_create_folder__:";
 pub const ACTION_CREATE_FILE_PREFIX: &str = "__nex_action_create_file__:";
@@ -51,6 +52,12 @@ pub fn built_in_actions() -> &'static [BuiltInAction] {
             title: "Check Updates",
             subtitle: "Run the stable Windows updater",
             keywords: &["update", "upgrade", "stable", "install latest"],
+        },
+        BuiltInAction {
+            id: ACTION_CLEAR_ICON_CACHE_ID,
+            title: "Clear Icon Cache",
+            subtitle: "Re-extract app icons on next search",
+            keywords: &["icon", "icons", "cache", "clear", "refresh icons"],
         },
     ]
 }
@@ -397,7 +404,8 @@ fn url_encode_component(input: &str) -> String {
 mod tests {
     use super::{
         dynamic_provider_open_url_action, search_actions, search_actions_with_mode,
-        ACTION_CHECK_UPDATES_ID, ACTION_OPEN_LOGS_ID, ACTION_WEB_SEARCH_PREFIX,
+        ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_ICON_CACHE_ID, ACTION_OPEN_LOGS_ID,
+        ACTION_WEB_SEARCH_PREFIX,
     };
     use crate::config::{Config, WebSearchProvider};
 
@@ -465,5 +473,13 @@ mod tests {
         assert!(actions
             .iter()
             .any(|action| action.id == ACTION_CHECK_UPDATES_ID));
+    }
+
+    #[test]
+    fn built_in_actions_include_clear_icon_cache() {
+        let actions = search_actions("icon cache", 10);
+        assert!(actions
+            .iter()
+            .any(|action| action.id == ACTION_CLEAR_ICON_CACHE_ID));
     }
 }

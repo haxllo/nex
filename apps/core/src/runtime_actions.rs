@@ -2,7 +2,7 @@
 use std::os::windows::process::CommandExt;
 
 use crate::action_registry::{
-    ACTION_CHECK_UPDATES_ID, ACTION_CLIPBOARD_HISTORY_ID, ACTION_LOCK_ID,
+    ACTION_CHECK_UPDATES_ID, ACTION_CLEAR_ICON_CACHE_ID, ACTION_CLIPBOARD_HISTORY_ID, ACTION_LOCK_ID,
     ACTION_OPEN_CONFIG_ID, ACTION_OPEN_LOGS_ID, ACTION_RESTART_ID, ACTION_SHUTDOWN_ID,
     ACTION_SIGN_OUT_ID, ACTION_SLEEP_ID, ACTION_CREATE_FILE_PREFIX, ACTION_CREATE_FOLDER_PREFIX,
     ACTION_OPEN_URL_PREFIX, ACTION_WEB_SEARCH_PREFIX,
@@ -230,6 +230,17 @@ pub(crate) fn execute_action_selection(
         ACTION_CHECK_UPDATES_ID => crate::runtime_process::launch_stable_updater()
             .map(|_| true)
             .map_err(|error| format!("check for updates failed: {error}")),
+        ACTION_CLEAR_ICON_CACHE_ID => {
+            let (memory, disk) = overlay.clear_icon_cache();
+            log_info(&format!(
+                "[nex] icon cache cleared memory_entries={memory} disk_entries={disk}"
+            ));
+            crate::runtime_overlay_rows::set_status_row_overlay_state(
+                overlay,
+                "Icon cache cleared — icons re-extract on next search",
+            );
+            Ok(false)
+        }
         #[cfg(target_os = "windows")]
         ACTION_LOCK_ID => power_actions::lock()
             .map(|_| true)

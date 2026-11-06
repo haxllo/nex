@@ -151,6 +151,9 @@ pub trait DiscoveryProvider: Send + Sync {
     fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
         None
     }
+    /// Called after a full pass's writes and prune completed. Providers that
+    /// track a change-journal position persist it here, never earlier.
+    fn commit_pass_state(&self) {}
     fn change_stamp(&self) -> Option<String> {
         None
     }
@@ -462,16 +465,23 @@ impl DiscoveryProvider for FileSystemDiscoveryProvider {
                 }
                 Ok(count)
             }
-            FileBackend::Walkdir => discover_filesystem_walk_into(
-                &self.roots,
-                &self.excluded_roots,
-                self.max_depth,
-                self.show_files,
-                self.show_folders,
-                emit,
-                on_item_discovered,
-            ),
+            FileBackend::Walkdir => {
+                clear_pending_states();
+                discover_filesystem_walk_into(
+                    &self.roots,
+                    &self.excluded_roots,
+                    self.max_depth,
+                    self.show_files,
+                    self.show_folders,
+                    emit,
+                    on_item_discovered,
+                )
+            }
         }
+    }
+
+    fn commit_pass_state(&self) {
+        commit_pending_states();
     }
 
     fn take_incremental(&self) -> Option<Result<IncrementalUpdate, ProviderError>> {
@@ -936,8 +946,11 @@ fn try_mft_root(
             return false;
         }
     };
+    // The journal position is committed by `commit_pass_state` only after the
+    // pass's writes and prune landed; advancing it here would let an
+    // interrupted pass leave a position the index never caught up to.
     if !meta.delta {
-        crate::mft_discovery::write_processed_state(letter, meta.journal_id, meta.next_usn);
+        record_pending_state(letter, meta.journal_id, meta.next_usn);
     }
 
     crate::logging::info(&format!(
@@ -970,6 +983,92 @@ fn path_under_root(path: &Path, root: &Path) -> bool {
         return true;
     }
     matches!(path.as_bytes().get(root.len()), Some(b'\\') | Some(b'/'))
+}
+
+/// How the delta pass treats one NTFS volume given its saved journal position.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum DeltaVolumePlan {
+    Delta,
+    FullPass,
+    SkipNoJournal,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn plan_delta_volume(has_saved_position: bool, full_pass_tried: bool) -> DeltaVolumePlan {
+    match (has_saved_position, full_pass_tried) {
+        (true, _) => DeltaVolumePlan::Delta,
+        (false, false) => DeltaVolumePlan::FullPass,
+        (false, true) => DeltaVolumePlan::SkipNoJournal,
+    }
+}
+
+/// Keep the earliest position per journal: roots on one volume snapshot at
+/// different times, and the oldest snapshot bounds what the pass observed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn merge_pending_state(
+    existing: Option<(u64, i64)>,
+    journal_id: u64,
+    next_usn: i64,
+) -> (u64, i64) {
+    match existing {
+        Some((id, usn)) if id == journal_id => (id, usn.min(next_usn)),
+        _ => (journal_id, next_usn),
+    }
+}
+
+#[cfg(target_os = "windows")]
+static PENDING_STATES: std::sync::Mutex<std::collections::BTreeMap<char, (u64, i64)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+#[cfg(target_os = "windows")]
+static FULL_PASS_TRIED: std::sync::Mutex<std::collections::BTreeSet<char>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+#[cfg(target_os = "windows")]
+fn record_pending_state(letter: char, journal_id: u64, next_usn: i64) {
+    if let Ok(mut guard) = PENDING_STATES.lock() {
+        let merged = merge_pending_state(guard.get(&letter).copied(), journal_id, next_usn);
+        guard.insert(letter, merged);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clear_pending_states() {
+    if let Ok(mut guard) = PENDING_STATES.lock() {
+        guard.clear();
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_pending_states() {}
+
+#[cfg(target_os = "windows")]
+fn commit_pending_states() {
+    let pending = match PENDING_STATES.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(_) => return,
+    };
+    for (letter, (journal_id, next_usn)) in pending {
+        crate::mft_discovery::write_processed_state(letter, journal_id, next_usn);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn commit_pending_states() {}
+
+#[cfg(target_os = "windows")]
+fn full_pass_tried(letter: char) -> bool {
+    FULL_PASS_TRIED
+        .lock()
+        .map(|guard| guard.contains(&letter))
+        .unwrap_or(true)
+}
+
+#[cfg(target_os = "windows")]
+fn mark_full_pass_tried(letter: char) {
+    if let Ok(mut guard) = FULL_PASS_TRIED.lock() {
+        guard.insert(letter);
+    }
 }
 
 /// USN delta pass. `None` means a full pass is required: no saved journal
@@ -1028,15 +1127,32 @@ fn mft_incremental(
     let started = std::time::Instant::now();
 
     for (letter, roots) in roots_by_volume {
-        let Some((journal_id, start_usn)) = mft_discovery::read_processed_state(letter) else {
-            // A volume with no saved position (a new root, or a volume whose
-            // USN journal is disabled) cannot produce a delta. The full pass
-            // after a root-set change has already indexed it, and the file
-            // watchers keep it current; skipping it must not force a full
-            // pass for every provider cycle.
-            crate::logging::info(&format!(
-                "[nex] discovery_delta volume={letter} skip=no_saved_position"
-            ));
+        let saved = mft_discovery::read_processed_state(letter);
+        match plan_delta_volume(saved.is_some(), full_pass_tried(letter)) {
+            DeltaVolumePlan::Delta => {}
+            DeltaVolumePlan::FullPass => {
+                // No usable position (state lost, or the earlier pass fell
+                // back to a walk): the index may never have seen this volume
+                // through the journal, so one full pass must record it.
+                mark_full_pass_tried(letter);
+                crate::logging::info(&format!(
+                    "[nex] discovery_delta volume={letter} skip=no_saved_position; running a full pass"
+                ));
+                return Some(Err(ProviderError::new(
+                    "MFT saved position missing; running a full pass",
+                )));
+            }
+            DeltaVolumePlan::SkipNoJournal => {
+                // Already tried this run and still no position (journal
+                // disabled / helper cannot open it): the watchers cover it and
+                // a full pass per cycle would only repeat the same walk.
+                crate::logging::info(&format!(
+                    "[nex] discovery_delta volume={letter} skip=no_journal"
+                ));
+                continue;
+            }
+        };
+        let Some((journal_id, start_usn)) = saved else {
             continue;
         };
         mft_discovery::write_delta_request(letter, journal_id, start_usn);
@@ -2626,6 +2742,23 @@ fn is_excluded_windows_kits_shortcut_reference(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_position_forces_one_full_pass_then_skips() {
+        assert_eq!(plan_delta_volume(true, false), DeltaVolumePlan::Delta);
+        assert_eq!(plan_delta_volume(true, true), DeltaVolumePlan::Delta);
+        assert_eq!(plan_delta_volume(false, false), DeltaVolumePlan::FullPass);
+        assert_eq!(plan_delta_volume(false, true), DeltaVolumePlan::SkipNoJournal);
+    }
+
+    #[test]
+    fn pending_state_keeps_earliest_position_per_journal() {
+        assert_eq!(merge_pending_state(None, 7, 500), (7, 500));
+        assert_eq!(merge_pending_state(Some((7, 500)), 7, 900), (7, 500));
+        assert_eq!(merge_pending_state(Some((7, 900)), 7, 500), (7, 500));
+        // A recreated journal invalidates the older position.
+        assert_eq!(merge_pending_state(Some((7, 500)), 8, 100), (8, 100));
+    }
 
     #[test]
     fn entry_exclusion_matches_stat_based_exclusion() {

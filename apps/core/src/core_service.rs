@@ -1202,6 +1202,11 @@ impl CoreService {
                     &provider_name,
                     provider_stamp.as_deref(),
                 )?;
+            if force_provider_refresh {
+                crate::logging::info(&format!(
+                    "[nex] discovery_pass provider={provider_name} reason=provider_stamp_changed; full pass"
+                ));
+            }
             let incremental = if force_provider_refresh {
                 None
             } else {
@@ -1242,6 +1247,10 @@ impl CoreService {
                         }
                         upserted_total += upserted;
                         removed_total += removed;
+                        crate::logging::info(&format!(
+                            "[nex] discovery_pass provider={provider_name} mode=delta upserted={upserted} removed={removed} elapsed_ms={}",
+                            started.elapsed().as_millis()
+                        ));
                         provider_reports.push(ProviderRefreshReport {
                             provider: provider_name.clone(),
                             discovered: upserted + removed,
@@ -1406,8 +1415,14 @@ impl CoreService {
                 self.record_publish(&[], chunk);
             }
             index_store::scan_end(&*self.db())?;
+            provider.commit_pass_state();
 
             removed_total += removable_ids.len();
+            crate::logging::info(&format!(
+                "[nex] discovery_pass provider={provider_name} mode=full discovered={discovered_count} upserted={upserted} removed={} elapsed_ms={}",
+                removable_ids.len(),
+                started.elapsed().as_millis()
+            ));
             provider_reports.push(ProviderRefreshReport {
                 provider: provider_name.clone(),
                 discovered: discovered_count,

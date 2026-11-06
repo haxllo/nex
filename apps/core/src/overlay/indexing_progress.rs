@@ -34,14 +34,15 @@ const PROGRESS_PAGE: &str = r#"<!DOCTYPE html>
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Nex Indexing</title>
 <style>
-:root{--bg:rgba(22,22,25,0.62);--text:#f4f4f6;--muted:rgba(244,244,246,0.62);--bar-bg:rgba(255,255,255,0.08);--bar-fg:#6ea8fe;--border:rgba(255,255,255,0.09)}
+:root{--bg:rgba(18,18,18,0.86);--text:#ededed;--muted:#888888;--bar-bg:rgba(255,255,255,0.08);--bar-fg:#ededed;--border:rgba(255,255,255,0.09)}
+@media (prefers-color-scheme:light){:root{--bg:rgba(250,250,250,0.9);--text:#171717;--muted:#737373;--bar-bg:rgba(0,0,0,0.08);--bar-fg:#171717;--border:rgba(0,0,0,0.09)}}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:transparent;font-family:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;user-select:none;cursor:default}
+html,body{background:transparent;font-family:"Inter","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;user-select:none;cursor:default}
 body{height:100vh}
 #panel{width:100%;height:100%;background:var(--bg);border:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;gap:10px;padding:16px 20px}
-#label{font-size:14px}
-#track{height:6px;background:var(--bar-bg);border-radius:3px;overflow:hidden;position:relative}
-#bar{position:absolute;top:0;bottom:0;width:35%;background:var(--bar-fg);border-radius:3px;animation:slide 1.4s ease-in-out infinite}
+#label{font-size:13px;font-weight:600}
+#track{height:4px;background:var(--bar-bg);border-radius:2px;overflow:hidden;position:relative}
+#bar{position:absolute;top:0;bottom:0;width:35%;background:var(--bar-fg);border-radius:2px;animation:slide 1.4s ease-in-out infinite}
 @keyframes slide{0%{left:-35%}100%{left:100%}}
 .done #bar{animation:none;left:0;width:100%}
 #detail{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}

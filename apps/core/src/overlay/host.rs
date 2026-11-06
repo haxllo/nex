@@ -179,6 +179,12 @@ const INDEX_HTML: &str = include_str!("../../assets/index.html");
 pub(crate) const STYLE_CSS: &str = include_str!("../../assets/style.css");
 const APP_JS: &str = include_str!("../../assets/app.js");
 const MEDIA_CLOCK_JS: &str = include_str!("../../assets/media_clock.js");
+
+/// Opaque WebView surfaces. Must equal `--bg-opaque` in style.css (dark and
+/// light palettes) so the native surface and the painted panel never differ
+/// at the rounded corners.
+const OPAQUE_DARK_RGBA: (u8, u8, u8, u8) = (0x12, 0x12, 0x12, 255);
+const OPAQUE_LIGHT_RGBA: (u8, u8, u8, u8) = (0xfa, 0xfa, 0xfa, 255);
 const DISABLE_NATIVE_CONTEXT_MENU: &str = r#"
 document.addEventListener('contextmenu', function (event) {
   event.preventDefault();
@@ -2120,8 +2126,8 @@ fn build_webview(
         .lock()
         .ok()
         .and_then(|s| match s.panel_background {
-            crate::config::PanelBackground::Black => Some((0, 0, 0, 255)),
-            crate::config::PanelBackground::White => Some((255, 255, 255, 255)),
+            crate::config::PanelBackground::Black => Some(OPAQUE_DARK_RGBA),
+            crate::config::PanelBackground::White => Some(OPAQUE_LIGHT_RGBA),
             crate::config::PanelBackground::Glass => None,
         });
     // The acrylic CSS override (transparent panel-surface) must also stay
@@ -2799,8 +2805,8 @@ fn sync_webview_background(
         return;
     }
     let color: wry::RGBA = match mode {
-        crate::config::PanelBackground::Black => (0, 0, 0, 255),
-        crate::config::PanelBackground::White => (255, 255, 255, 255),
+        crate::config::PanelBackground::Black => OPAQUE_DARK_RGBA,
+        crate::config::PanelBackground::White => OPAQUE_LIGHT_RGBA,
         crate::config::PanelBackground::Glass => (0, 0, 0, 0),
     };
     match wv.set_background_color(color) {

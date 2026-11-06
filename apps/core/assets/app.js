@@ -225,7 +225,7 @@
   function folderIcon() { return FOLDER_ICON; }
   // "Show all apps" entry icon — apps grid with a plus, neutral gray.
   const SHOW_ALL_APPS_ICON = "data:image/svg+xml," + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#8a8a93" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>`
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#888888" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>`
   );
   // Transparent 1px GIF — cold-cache icon slot. Avoids flashing a wrong
   // placeholder glyph; patchIcons() pops the real icon in when decoded.
@@ -296,7 +296,7 @@
   // ── toast notification ────────────────────────────────────
   // ── pin/unpin icons ────────────────────────────────────────
   const pinIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
-  const pinIconPinnedSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="var(--accent)" stroke="none"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
+  const pinIconPinnedSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="var(--text-faint)" stroke="none"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
   const addIconSvg = `<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--text-faint)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3L5 15L9 11L13 15L13 3Z"/></svg>`;
 
   function createPinIcon(item, index) {
@@ -911,7 +911,6 @@
       list.removeAttribute("aria-activedescendant");
     }
     if (scroll) scrollToSelected();
-    renderPreview();
     if (selected >= 0) post("select", selected);
   }
 
@@ -3392,10 +3391,9 @@
         document.documentElement.classList.toggle("opaque-dwm-frame", state.opaqueDwmFrame);
       }
 
-      // System accent (DWM AccentColor) → CSS var; falls back to theme palette.
-      if (state.accent) {
-        document.documentElement.style.setProperty("--accent", state.accent);
-      }
+      // The Windows accent (state.accent) is not applied: the palette is
+      // monochrome and --accent is its strongest neutral, paired with
+      // --accent-fg. A saturated system colour would break that pairing.
 
       // Toggle grid/list layout based on Rust config
       if (typeof state.gridView === "boolean") {

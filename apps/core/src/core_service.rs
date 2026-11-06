@@ -6,7 +6,6 @@ use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse}
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
-use crate::hot_prefix::{prefetch_queries, HotPrefixCache, HOT_PREFIX_RESULT_LIMIT};
 use crate::index_store::{self, StoreError};
 use crate::model::SearchItem;
 use crate::search::SearchFilter;
@@ -162,14 +161,8 @@ pub struct CoreService {
     compaction_write_count: Mutex<u32>,
     last_compaction_time: Mutex<Option<Instant>>,
     personalization_cache: Mutex<PersonalizationCache>,
-    /// Pre-computed ranked results for single-character first keystrokes.
-    /// See `crate::hot_prefix`.
-    hot_prefix_cache: Mutex<HotPrefixCache>,
-    /// Bumped on every mutation of the item set. A hot-prefix entry is only
-    /// served when its stored generation matches this value.
+    /// Bumped on every mutation of the item set.
     search_generation: AtomicU64,
-    /// Guards against scheduling more than one pre-fetch build at a time.
-    hot_prefix_prefetch_in_flight: AtomicBool,
     /// Epoch seconds of the last recent-documents recency refresh.
     recent_docs_last_scan: AtomicU64,
     /// Peak memory during last indexing cycle (in bytes).
@@ -506,10 +499,8 @@ impl CoreService {
             compaction_write_count: Mutex::new(0),
             last_compaction_time: Mutex::new(None),
             personalization_cache: Mutex::new(PersonalizationCache::new()),
-            hot_prefix_cache: Mutex::new(HotPrefixCache::default()),
             // Starts at 1 so an empty cache (generation 0) never validates.
             search_generation: AtomicU64::new(1),
-            hot_prefix_prefetch_in_flight: AtomicBool::new(false),
             recent_docs_last_scan: AtomicU64::new(0),
             last_indexing_peak_memory: Mutex::new(None),
             indexing_cycle_count: AtomicU64::new(0),
@@ -633,7 +624,7 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.search_with_filter_internal(query, limit, filter, true, true)
+        self.search_with_filter_internal(query, limit, filter, true)
     }
 
     pub fn search_with_filter_uncapped(
@@ -642,18 +633,7 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.search_with_filter_internal(query, limit, filter, false, true)
-    }
-
-    /// Search without consulting the hot-prefix cache. Used by the pre-fetch
-    /// builder itself so it always computes from the live item set.
-    fn search_with_filter_no_hot_cache(
-        &self,
-        query: &str,
-        limit: usize,
-        filter: &SearchFilter,
-    ) -> Result<Vec<SearchItem>, ServiceError> {
-        self.search_with_filter_internal(query, limit, filter, false, false)
+        self.search_with_filter_internal(query, limit, filter, false)
     }
 
     fn search_with_filter_internal(
@@ -662,7 +642,6 @@ impl CoreService {
         limit: usize,
         filter: &SearchFilter,
         clamp_to_config_max: bool,
-        allow_hot_cache: bool,
     ) -> Result<Vec<SearchItem>, ServiceError> {
         let config_snapshot = self.config_snapshot();
 
@@ -677,15 +656,6 @@ impl CoreService {
         } else {
             limit
         };
-
-        // Hot-prefix pre-fetch: a single-character query with the default
-        // filter is exactly what `prefetch_hot_prefixes` pre-computed, so
-        // serve it straight from memory and skip the whole ranking pass.
-        if allow_hot_cache {
-            if let Some(cached) = self.hot_prefix_lookup(query, filter, effective_limit) {
-                return Ok(cached);
-            }
-        }
 
         if should_use_app_cache(filter) {
             // Read a consistent (generation, items) snapshot with a bounded
@@ -2143,13 +2113,8 @@ impl CoreService {
         self.index_warmer.warm_in_background(index_dir);
     }
 
-    /// Invalidate the hot-prefix cache. Called on every mutation of the item
-    /// set so a pre-fetched entry can never outlive its source data.
     fn bump_search_generation(&self) {
         self.search_generation.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut guard) = self.hot_prefix_cache.lock() {
-            guard.clear();
-        }
     }
 
     /// Current index generation. Bumped on every mutation of the item set
@@ -2182,117 +2147,6 @@ impl CoreService {
             Err(poisoned) => poisoned.into_inner(),
         };
         (generation, guard.clone())
-    }
-
-    /// Filter shape the pre-fetcher covers: the default "All" search with
-    /// files and folders enabled and no extra constraints. Anything else is
-    /// served by the normal path.
-    fn hot_prefix_filter_supported(filter: &SearchFilter) -> bool {
-        filter.mode == SearchMode::All
-            && filter.extension_filter.is_none()
-            && filter.include_files
-            && filter.include_folders
-            && filter.include_groups.is_empty()
-            && filter.exclude_terms.is_empty()
-            && filter.modified_within.is_none()
-            && filter.created_within.is_none()
-    }
-
-    /// Serve a single-character query from the pre-fetched cache when the
-    /// cached generation still matches the live item set.
-    fn hot_prefix_lookup(
-        &self,
-        query: &str,
-        filter: &SearchFilter,
-        limit: usize,
-    ) -> Option<Vec<SearchItem>> {
-        if limit == 0 || !Self::hot_prefix_filter_supported(filter) {
-            return None;
-        }
-        let normalized = crate::model::normalize_for_search(query);
-        if normalized.chars().count() != 1 {
-            return None;
-        }
-        let generation = self.search_generation.load(Ordering::SeqCst);
-        let guard = self.hot_prefix_cache.lock().ok()?;
-        let hits = guard.lookup(&normalized, generation)?;
-        let mut results = hits.to_vec();
-        results.truncate(limit);
-        Some(results)
-    }
-
-    /// Whether a pre-fetch build is worth scheduling: no build in flight and
-    /// the cache does not already match the live generation.
-    pub(crate) fn hot_prefix_prefetch_needed(&self) -> bool {
-        if self
-            .hot_prefix_prefetch_in_flight
-            .load(Ordering::SeqCst)
-        {
-            return false;
-        }
-        let generation = self.search_generation.load(Ordering::SeqCst);
-        match self.hot_prefix_cache.lock() {
-            Ok(guard) => !guard.is_current(generation),
-            Err(_) => false,
-        }
-    }
-
-    /// Pre-compute ranked results for every possible first keystroke.
-    ///
-    /// Intended to run off the interactive path. On-demand results and
-    /// pre-fetched results come from the same ranking code, so a cache hit is
-    /// indistinguishable from a fresh computation.
-    pub(crate) fn prefetch_hot_prefixes(&self) {
-        if self
-            .hot_prefix_prefetch_in_flight
-            .swap(true, Ordering::SeqCst)
-        {
-            return;
-        }
-
-        // Only pre-fetch when the indexed path can answer quickly. Without a
-        // populated index each prefix would fall back to a full scan of the
-        // in-memory cache, which is exactly the cost we are trying to hide.
-        let index_ready = self
-            .tantivy_index
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
-            .map(|docs| docs > 0)
-            .unwrap_or(false);
-        if !index_ready {
-            self.hot_prefix_prefetch_in_flight
-                .store(false, Ordering::SeqCst);
-            return;
-        }
-
-        let generation = self.search_generation.load(Ordering::SeqCst);
-        let filter = SearchFilter::default();
-        let mut entries = HashMap::new();
-        for query in prefetch_queries() {
-            // Abandon the build if the item set changed under us; publishing
-            // a half-stale snapshot would be worse than no cache at all.
-            if self.search_generation.load(Ordering::SeqCst) != generation {
-                self.hot_prefix_prefetch_in_flight
-                    .store(false, Ordering::SeqCst);
-                return;
-            }
-            if let Ok(results) =
-                self.search_with_filter_no_hot_cache(&query, HOT_PREFIX_RESULT_LIMIT, &filter)
-            {
-                if !results.is_empty() {
-                    entries.insert(query, results);
-                }
-            }
-        }
-
-        if self.search_generation.load(Ordering::SeqCst) == generation {
-            if let Ok(mut guard) = self.hot_prefix_cache.lock() {
-                guard.replace(generation, entries);
-            }
-        }
-        self.hot_prefix_prefetch_in_flight
-            .store(false, Ordering::SeqCst);
     }
 
     /// Claim the right to run one recency refresh, at most once per
@@ -3471,75 +3325,6 @@ mod tests {
         let mut config = Config::default();
         config.index_db_path = dir.join("index.sqlite3");
         config
-    }
-
-    fn tantivy_docs(service: &CoreService) -> u64 {
-        service
-            .tantivy_index
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().and_then(|idx| idx.num_docs().ok()))
-            .unwrap_or(0)
-    }
-
-    #[test]
-    fn hot_prefix_prefetch_matches_on_demand_results() {
-        let service = CoreService::with_connection(isolated_config("equivalence"), open_memory().unwrap())
-            .expect("service should initialize");
-        for (id, title) in [
-            ("app-figma", "Figma"),
-            ("app-firefox", "Firefox"),
-            ("app-terminal", "Terminal"),
-            ("file-fuzzy", "fuzzy notes"),
-        ] {
-            service
-                .upsert_item(&SearchItem::new(id, "app", title, &format!("C:\\{id}.exe")))
-                .expect("item should upsert");
-        }
-
-        let cold = service.search("f", 10).expect("search should succeed");
-        assert!(!cold.is_empty());
-
-        service.prefetch_hot_prefixes();
-
-        if tantivy_docs(&service) > 0 {
-            assert!(
-                !service.hot_prefix_prefetch_needed(),
-                "cache must be current after a successful build"
-            );
-        }
-
-        let hot = service.search("f", 10).expect("search should succeed");
-        let cold_ids: Vec<&str> = cold.iter().map(|item| item.id.as_str()).collect();
-        let hot_ids: Vec<&str> = hot.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(
-            cold_ids, hot_ids,
-            "pre-fetched results must be identical to on-demand ranking"
-        );
-    }
-
-    #[test]
-    fn hot_prefix_cache_invalidates_on_item_mutation() {
-        let service = CoreService::with_connection(isolated_config("invalidate"), open_memory().unwrap())
-            .expect("service should initialize");
-        service
-            .upsert_item(&SearchItem::new("app-zed", "app", "Zed", "C:\\zed.exe"))
-            .expect("item should upsert");
-        service.prefetch_hot_prefixes();
-
-        service
-            .upsert_item(&SearchItem::new("app-zulu", "app", "Zulu", "C:\\zulu.exe"))
-            .expect("item should upsert");
-
-        assert!(
-            service.hot_prefix_prefetch_needed(),
-            "a mutation must invalidate the pre-fetch cache"
-        );
-        let results = service.search("z", 10).expect("search should succeed");
-        assert!(
-            results.iter().any(|item| item.id == "app-zulu"),
-            "newly added item must be visible immediately"
-        );
     }
 
     #[test]

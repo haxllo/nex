@@ -71,7 +71,6 @@ fn start_ui_snapshot_sync(
     std::thread::spawn(move || {
         let mut last_generation = 0_u64;
         let mut last_instance = 0_u64;
-        let mut first_apply = true;
         loop {
             let applied_generation = match sync_indexer_snapshot(last_generation, last_instance) {
                 SnapshotSync::Unchanged => None,
@@ -98,7 +97,7 @@ fn start_ui_snapshot_sync(
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
                         }
                     }
-                    applied.then_some((generation, instance, true))
+                    applied.then_some((generation, instance))
                 }
                 SnapshotSync::Delta(generation, instance, upserts, deleted) => {
                     let upserts_n = upserts.len();
@@ -112,7 +111,7 @@ fn start_ui_snapshot_sync(
                                 log_info(&format!(
                                     "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation} instance={instance}"
                                 ));
-                                outcome = Some((generation, instance, changed));
+                                outcome = Some((generation, instance));
                                 break;
                             }
                             Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -122,18 +121,9 @@ fn start_ui_snapshot_sync(
                 }
             };
 
-            if let Some((generation, instance, changed)) = applied_generation {
+            if let Some((generation, instance)) = applied_generation {
                 last_generation = generation;
                 last_instance = instance;
-                // A changed item set invalidates the prefix cache. Re-warm it
-                // off-thread: the first apply covers startup, later ones only
-                // while the overlay is visible, so hidden idle churn is free.
-                if changed
-                    && (first_apply || crate::overlay::hotkey::is_overlay_visible())
-                {
-                    crate::runtime_loop::spawn_hot_prefix_prefetch(&service);
-                }
-                first_apply = false;
             }
             std::thread::sleep(Duration::from_secs(2));
         }

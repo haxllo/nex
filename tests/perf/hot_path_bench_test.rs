@@ -9,6 +9,7 @@
 use std::time::Instant;
 
 use nex_core::model::SearchItem;
+use nex_core::search::{search_with_filter_with_boosts_indexed, SearchFilter, SearchIndex};
 use nex_core::search::search;
 
 fn percentile(samples: &mut [f64], pct: f64) -> f64 {
@@ -89,19 +90,30 @@ fn report_hot_path_latency_by_query_shape() {
         println!("  {label:<32} p50={p50:>8.3}ms  p95={p95:>8.3}ms");
     }
 
-    // Reference point for the predictive pre-fetch cache: once a
-    // single-character result set is pre-computed, serving it is a clone of
-    // the cached rows rather than a ranking pass over the whole corpus.
-    let cached = search(&items, "d", 64);
-    assert!(!cached.is_empty());
-    let (cache_p50, cache_p95) = measure(ITERATIONS, || {
-        let served: Vec<SearchItem> = cached.clone();
-        std::hint::black_box(served.len());
-    });
-    println!(
-        "  {:<32} p50={cache_p50:>8.3}ms  p95={cache_p95:>8.3}ms  (pre-fetch cache hit, 64 rows)",
-        "single-char served from cache"
-    );
+    // First keystroke through the postings index, the way the cache fallback
+    // ranks it. No result pre-computation exists any more, so this is the
+    // number the first keystroke actually pays.
+    let index = SearchIndex::build(&items);
+    let filter = SearchFilter::default();
+    let mut first_keystroke_p50 = 0.0_f64;
+    for query in ["d", "e", "1"] {
+        let (p50, p95) = measure(ITERATIONS, || {
+            let ranked = search_with_filter_with_boosts_indexed(
+                &items,
+                Some(&index),
+                query,
+                64,
+                &filter,
+                None,
+            );
+            std::hint::black_box(ranked.len());
+        });
+        first_keystroke_p50 = first_keystroke_p50.max(p50);
+        println!(
+            "  {:<32} p50={p50:>8.3}ms  p95={p95:>8.3}ms",
+            format!("first keystroke '{query}' (indexed)")
+        );
+    }
     println!("=====================================================\n");
 
     // The presence-mask reject is the concrete guarantee: queries whose
@@ -110,5 +122,13 @@ fn report_hot_path_latency_by_query_shape() {
     assert!(
         worst_full_scan <= 25.0,
         "presence-mask reject regressed: worst p95 {worst_full_scan:.3}ms (ceiling 25ms)"
+    );
+
+    // Gate on the median: p95 of a 40-sample debug run is dominated by
+    // scheduler stalls. ~40ms measured; the ceiling only catches a real
+    // regression (e.g. losing the postings index) on slow CI.
+    assert!(
+        first_keystroke_p50 <= 150.0,
+        "first-keystroke latency regressed: worst p50 {first_keystroke_p50:.3}ms (ceiling 150ms)"
     );
 }

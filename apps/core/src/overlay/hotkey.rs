@@ -239,12 +239,6 @@ pub(crate) fn set_overlay_visible(visible: bool) {
     OVERLAY_VISIBLE.store(visible, Ordering::SeqCst);
 }
 
-/// True while the overlay panel is on screen. Used to decide whether
-/// background work (e.g. hot-prefix warming) is worth doing now.
-pub(crate) fn is_overlay_visible() -> bool {
-    OVERLAY_VISIBLE.load(Ordering::SeqCst)
-}
-
 pub(crate) fn set_overlay_hwnd(hwnd: isize) {
     OVERLAY_HWND.store(hwnd, Ordering::SeqCst);
 }

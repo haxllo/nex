@@ -93,19 +93,15 @@ pub(crate) fn run_windows_runtime(
     let service = Arc::new(RwLock::new(service));
 
     // The service starts empty so the hotkey is ready immediately. Fill the
-    // search cache off-thread, then warm the single-character prefix cache —
-    // paying either cost on the user's first keystroke is what made startup
-    // feel slow. Quick Launch reads SQLite directly and is unaffected.
+    // search cache off-thread — paying that cost on the user's first keystroke
+    // is what made startup feel slow. Quick Launch reads SQLite directly and is unaffected.
     {
         let service = Arc::clone(&service);
         let _ = std::thread::Builder::new()
             .name("nex-store-load".into())
             .spawn(move || match service.read() {
                 Ok(guard) => match guard.reload_cache_from_store() {
-                    Ok(count) => {
-                        log_info(&format!("[nex] startup cache loaded items={count}"));
-                        spawn_hot_prefix_prefetch(&service);
-                    }
+                    Ok(count) => log_info(&format!("[nex] startup cache loaded items={count}")),
                     Err(error) => {
                         log_warn(&format!("[nex] startup cache load failed: {error}"));
                     }
@@ -480,31 +476,6 @@ pub(crate) fn run_windows_runtime(
     log_info("[nex] shutdown: complete, process exiting");
 
     host_result.map_err(RuntimeError::Overlay)
-}
-
-/// Schedule the predictive hot-prefix pre-fetch on a background thread.
-///
-/// Only runs when the cache is stale and no build is already in flight, so a
-/// long-lived session pays the cost once per item-set generation. Keeping it
-/// off the event-loop thread means showing and typing in the overlay never
-/// waits on it.
-pub(crate) fn spawn_hot_prefix_prefetch(service: &Arc<RwLock<CoreService>>) {
-    let needed = match service.try_read() {
-        Ok(guard) => guard.hot_prefix_prefetch_needed(),
-        Err(_) => false,
-    };
-    if !needed {
-        return;
-    }
-
-    let service = Arc::clone(service);
-    let _ = std::thread::Builder::new()
-        .name("nex-hot-prefix-prefetch".into())
-        .spawn(move || {
-            if let Ok(guard) = service.read() {
-                guard.prefetch_hot_prefixes();
-            }
-        });
 }
 
 /// Opens an http(s) URL in the default browser. Anything else is ignored.
@@ -1807,10 +1778,6 @@ impl RuntimeWorker {
                             Ok(guard) => guard.warm_search_cache(),
                             Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
                         }
-                        // Predictive pre-fetch: compute the single-character
-                        // result sets now, off the interactive path, so the
-                        // user's first keystroke is a cache hit.
-                        spawn_hot_prefix_prefetch(&self.service);
                         spawn_recent_documents_refresh(&self.service);
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
@@ -1878,7 +1845,6 @@ impl RuntimeWorker {
                 if let Ok(guard) = self.service.try_read() {
                     guard.warm_search_cache();
                 }
-                spawn_hot_prefix_prefetch(&self.service);
                 spawn_recent_documents_refresh(&self.service);
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 if self.overlay.query_text().trim().is_empty() {

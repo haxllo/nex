@@ -101,10 +101,19 @@ pub(crate) fn reset_win_press_state() {
 /// only the first make event of a press toggles; auto-repeat makes while the
 /// combo is held used to flicker the overlay open and shut.
 static TARGET_HELD: AtomicBool = AtomicBool::new(false);
+static TARGET_LAST_MAKE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Longer than the slowest keyboard repeat delay (1 s). A key-up routed to
+/// an elevated window is invisible here, so TARGET_HELD can stay set; a make
+/// arriving after this gap is a new press, not a repeat.
+const TARGET_REPEAT_GAP_MS: u64 = 1_500;
 
 /// True only for the first make event of a press.
 pub(crate) fn note_target_down() -> bool {
-    !TARGET_HELD.swap(true, Ordering::SeqCst)
+    let now = HOTKEY_CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64;
+    let prev = TARGET_LAST_MAKE_MS.swap(now, Ordering::SeqCst);
+    let held = TARGET_HELD.swap(true, Ordering::SeqCst);
+    !held || now.saturating_sub(prev) > TARGET_REPEAT_GAP_MS
 }
 
 /// Break event for `vk`; ends the press when it is the configured target.
@@ -2253,6 +2262,12 @@ mod tests {
         assert!(!note_target_down());        // auto-repeat
         TARGET_HELD.store(false, Ordering::SeqCst); // key-up
         assert!(note_target_down());         // next press
+        // Key-up never seen (went to an elevated window): a late make is a
+        // new press, not a repeat.
+        TARGET_LAST_MAKE_MS.store(0, Ordering::SeqCst);
+        HOTKEY_CLOCK.get_or_init(Instant::now);
+        std::thread::sleep(Duration::from_millis(TARGET_REPEAT_GAP_MS + 50));
+        assert!(note_target_down());
         reset_win_press_state();
     }
     #[test] fn chord_press_never_fires() {

@@ -42,10 +42,10 @@ All settings, their defaults, valid ranges, and descriptions:
 | `plugin_paths` | `string[]` | `["%APPDATA%\\Nex\\plugins"]` | — | Directories scanned for plugins. |
 | `game_mode_enabled` | `bool` | `false` | — | Suppress the hotkey while a fullscreen/game app is active. |
 | `idle_cache_trim_ms` | `u32` | `900` | `100..10000` | Cache trim delay after overlay hide (ms). |
-| `active_memory_target_mb` | `u16` | `72` | `20..512` | Active memory target in MB. |
+| `active_memory_target_mb` | `u16` | `72` | `20..512` | Memory target in MB. Sizes the overlay icon cache; does not bound the item cache. |
 | `ui_warm_release_ms` | `u32` | `5000` | `500..600000` | How long (ms) the WebView stays resident after hide before teardown. |
 | `discovery_max_depth` | `u32` | `0` | `0..256` | Maximum folder depth walked below each discovery root. `0` = unlimited. |
-| `index_max_items_per_query_seed` | `u32` | `5000` | `250..200000` | Runtime candidate budget for per-query file/folder retrieval. |
+| `index_max_items_per_query_seed` | `u32` | `5000` | `250..200000` | Maximum Tantivy candidates fetched per file/folder query (a floor of 250 applies at runtime). Does not bound the item cache or reindexing. |
 | `discovery_roots` | `string[]` | `["C:\\Users\\<user>"]` | — | Folders scanned for local file/folder discovery. |
 | `discovery_exclude_roots` | `string[]` | `["%USERPROFILE%\\AppData\\Local\\Temp", "%USERPROFILE%\\AppData\\Local\\Microsoft\\Windows\\INetCache"]` | — | Folders excluded from file discovery. |
 

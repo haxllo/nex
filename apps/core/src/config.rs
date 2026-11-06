@@ -1115,7 +1115,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("idle_cache_trim_ms = ");
     text.push_str(&cfg.idle_cache_trim_ms.to_string());
     text.push('\n');
-    text.push_str("# active memory target in MB (valid range: 20..512)\n");
+    text.push_str("# memory target in MB; sizes the overlay icon cache (valid range: 20..512)\n");
     text.push_str("active_memory_target_mb = ");
     text.push_str(&cfg.active_memory_target_mb.to_string());
     text.push('\n');
@@ -1123,7 +1123,7 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     text.push_str("ui_warm_release_ms = ");
     text.push_str(&cfg.ui_warm_release_ms.to_string());
     text.push('\n');
-    text.push_str("# Runtime candidate budget for per-query file/folder retrieval\n");
+    text.push_str("# max Tantivy candidates fetched per file/folder query (valid range: 250..200000)\n");
     text.push_str("index_max_items_per_query_seed = ");
     text.push_str(&cfg.index_max_items_per_query_seed.to_string());
     text.push('\n');

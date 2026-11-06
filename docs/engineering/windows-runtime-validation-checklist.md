@@ -25,21 +25,13 @@ Expected:
 
 1. Structured status output
 - Run: `cargo run -p nex -- --status-json`
-- Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.cache_compaction`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
+- Expected: valid JSON with `runtime_state`, `diagnostics.startup_lifecycle`, `diagnostics.startup_indexing`, `diagnostics.memory_snapshot`, `diagnostics.icon_cache`, `diagnostics.config_reload`, and `query_latency`.
 - Expected: `diagnostics.startup_lifecycle` includes:
   - `overlay_ready`
   - `hotkey_ready`
   - `indexing_started`
   - `indexing_completed`
   - `cache_applied`
-- Expected: `diagnostics.cache_compaction` exposes:
-  - `input_total`
-  - `retained`
-  - `dropped`
-  - `retained_apps`
-  - `retained_file_folders`
-  - `effective_file_seed_cap`
-  - `broad_root_mode`
 - Expected: `diagnostics.provider_freshness` exposes:
   - `name`
   - `skipped`
@@ -55,7 +47,7 @@ Expected:
 2. Baseline profile harness
 - Run: `scripts/windows/profile-memory-and-icons.ps1`
 - Expected: script updates config for `C:\` profiling, starts runtime, prints `--status-json`, and dumps recent `query_profile`/`memory_snapshot` lines.
-- Expected: recent log output contains `startup_phase`, `cache_compaction`, `provider_freshness`, and `stale_prune` markers.
+- Expected: recent log output contains `startup_phase`, `provider_freshness`, and `stale_prune` markers.
 
 3. Memory envelope with broad discovery root
 - Set `discovery_roots = ["C:\\"]` and keep:
@@ -63,9 +55,8 @@ Expected:
 - `windows_search_fallback_filesystem = true`
 - `index_max_items_per_query_seed` at its default unless testing overrides.
 - Exercise launcher with short and medium queries for at least 2 minutes.
-- Expected: active working set tracks close to `active_memory_target_mb`; idle trims occur after hide.
-- Expected: `cache_compaction` shows `broad_root_mode = true` and a smaller `effective_file_seed_cap` than the configured `index_max_items_per_query_seed`.
-- Expected: app results remain complete even when file/folder cache compaction is active.
+- Expected: idle trims occur after hide; the icon cache stays sized by `active_memory_target_mb`.
+- Expected: app results remain complete, and files outside the UI's bounded hot cache are still found (via the indexer, or SQLite recall if it is unavailable).
 - Expected: `provider_freshness` shows low `last_scan_age_secs` after a fresh reindex and `has_stamp = true` for incremental providers.
 
 4. Live config apply (no restart for discovery/search tuning)

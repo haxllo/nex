@@ -1562,7 +1562,7 @@
         menu.classList.add("hidden");
         const isShutdown = action === "shutdown";
         title.textContent = isShutdown ? "Shut down now?" : "Restart now?";
-        yes.querySelector("span").textContent = isShutdown ? "Shut Down" : "Restart";
+        yes.querySelector("span").textContent = isShutdown ? "Shut down" : "Restart";
         confirm.classList.remove("hidden");
         measure();
         return;
@@ -3309,6 +3309,7 @@
       if (state.media && typeof state.media === "object" && !Array.isArray(state.rows)) {
         mediaState = state.media;
         renderMedia();
+        syncFooterTabHint();
         return;
       }
 
@@ -4076,6 +4077,12 @@
 
   function kickMediaFrame() {
     if (mediaOpen && !mediaRaf) mediaRaf = requestAnimationFrame(mediaFrame);
+  }
+
+  // Tab opens Media first when a session is live, otherwise Chat.
+  const footerHintTab = $("footer-hint-tab");
+  function syncFooterTabHint() {
+    footerHintTab.textContent = mediaState && mediaState.active ? "Media" : "Chat";
   }
 
   function renderMedia() {

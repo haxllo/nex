@@ -129,6 +129,51 @@ function closeAllDropdowns(except) {
   });
 }
 
+function positionDropdownPopup(root) {
+  const trigger = root.querySelector(".dd-trigger");
+  const popup = root.querySelector(".dd-popup");
+  if (!trigger || !popup) return;
+
+  const rect = trigger.getBoundingClientRect();
+  const viewportWidth = document.documentElement.clientWidth;
+  const viewportHeight = document.documentElement.clientHeight;
+  const margin = 8;
+  const gap = 6;
+  if (rect.bottom < 0 || rect.top > viewportHeight) {
+    root.classList.remove("open");
+    return;
+  }
+
+  const maxWidth = Math.max(0, Math.min(240, viewportWidth - margin * 2));
+  const popupWidth = Math.min(Math.max(rect.width, 160), maxWidth);
+  popup.style.minWidth = popupWidth + "px";
+  popup.style.maxWidth = maxWidth + "px";
+  popup.style.maxHeight = "280px";
+  const popupRect = popup.getBoundingClientRect();
+  const spaceBelow = viewportHeight - rect.bottom - gap - margin;
+  const spaceAbove = rect.top - gap - margin;
+  const placeAbove = popupRect.height > spaceBelow && spaceAbove > spaceBelow;
+  const availableHeight = Math.max(0, Math.min(280, placeAbove ? spaceAbove : spaceBelow));
+  popup.style.maxHeight = availableHeight + "px";
+
+  const height = Math.min(popupRect.height, availableHeight);
+  const left = Math.max(
+    margin,
+    Math.min(rect.right - popupRect.width, viewportWidth - popupRect.width - margin)
+  );
+  const requestedTop = placeAbove ? rect.top - gap - height : rect.bottom + gap;
+  const top = Math.max(margin, Math.min(requestedTop, viewportHeight - height - margin));
+  popup.style.left = Math.round(left) + "px";
+  popup.style.top = Math.round(top) + "px";
+}
+
+function repositionOpenDropdowns() {
+  document.querySelectorAll(".dropdown.open").forEach(positionDropdownPopup);
+}
+
+window.addEventListener("scroll", repositionOpenDropdowns, true);
+window.addEventListener("resize", repositionOpenDropdowns);
+
 function initDropdown(root) {
   const hidden = root.querySelector('input[type="hidden"]');
   const trigger = root.querySelector(".dd-trigger");
@@ -167,12 +212,9 @@ function initDropdown(root) {
   function open() {
     closeAllDropdowns(root);
     root.classList.add("open");
-    // Position popup under the trigger (fixed positioning escapes overflow:hidden ancestors)
-    const r = trigger.getBoundingClientRect();
-    const popupWidth = Math.max(r.width, 160);
-    popup.style.left = Math.round(r.right - popupWidth) + "px";
-    popup.style.top = Math.round(r.bottom + 6) + "px";
-    popup.style.minWidth = popupWidth + "px";
+    // Fixed positioning escapes overflow:hidden ancestors; refresh its
+    // viewport position on scroll and resize so it follows the trigger.
+    positionDropdownPopup(root);
     // Highlight currently selected item
     const items = popup.querySelectorAll(".dd-item");
     const curIdx = Array.from(items).findIndex((it) => it.dataset.value === hidden.value);

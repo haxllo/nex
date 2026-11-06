@@ -45,6 +45,8 @@
     --knob-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
     --kbd-bg: rgba(255, 255, 255, 0.06);
     --kbd-border: rgba(255, 255, 255, 0.08);
+    --hk-cap-bg: #2a2a2a;
+    --hk-cap-border: #1f1f1f;
     --menu-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.09);
     --dialog-shadow: 0 20px 56px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.09);
     --card-shadow: none;
@@ -94,6 +96,8 @@
     --knob-shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
     --kbd-bg: rgba(0, 0, 0, 0.04);
     --kbd-border: rgba(0, 0, 0, 0.08);
+    --hk-cap-bg: #f4f4f4;
+    --hk-cap-border: #c8c8c8;
     --menu-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.14), 0 0 0 1px rgba(0, 0, 0, 0.08);
     --dialog-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.08);
     --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
@@ -486,37 +490,64 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    min-width: 64px;
-    padding: 0 5px;
+    gap: 5px;
+    height: 28px;
+    min-height: 28px;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transition: filter 0.15s ease;
     cursor: pointer;
   }
-  .hkbox:hover { background: var(--ctl-hover); border-color: var(--ctl-border-hover); }
-  .hkbox:active { background: var(--ctl-active); }
-  .hkbox:focus-visible { border-color: transparent; box-shadow: 0 0 0 2px var(--ring); }
-  .hkbox.recording {
-    background: var(--accent-tint);
+  .hkbox:hover { filter: brightness(1.06); }
+  .hkbox:active { background: transparent; }
+  .hkbox:active .hk-cap:not(.empty) {
+    transform: translateY(1px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 1px 0 rgba(0, 0, 0, 0.36),
+      0 1px 2px rgba(0, 0, 0, 0.2);
+  }
+  .hkbox:focus-visible {
+    outline: none;
     border-color: transparent;
-    box-shadow: 0 0 0 1px var(--accent);
+    box-shadow: 0 0 0 2px var(--page), 0 0 0 4px var(--ring);
+  }
+  .hkbox.recording {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
   }
   .hk-cap {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     min-width: 20px;
-    height: 20px;
+    flex: 0 0 auto;
+    height: 22px;
     padding: 0 6px;
+    border: 1px solid var(--hk-cap-border);
     border-radius: 4px;
-    background: var(--kbd-bg);
-    box-shadow: inset 0 0 0 1px var(--kbd-border);
+    background: var(--hk-cap-bg);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 2px 0 rgba(0, 0, 0, 0.42),
+      0 3px 5px rgba(0, 0, 0, 0.24);
     color: var(--fg);
-    font-size: 11.5px;
-    font-weight: 500;
+    font-size: 11px;
+    font-weight: 600;
     line-height: 20px;
+    letter-spacing: 0.01em;
+    transition: transform 0.06s ease, box-shadow 0.06s ease;
   }
-  .hk-cap.win svg { width: 10px; height: 10px; fill: currentColor; display: block; }
+  .hk-cap + .hk-cap { margin-left: 0; }
+  .hk-cap.win svg { width: 11px; height: 11px; fill: currentColor; display: block; }
   .hk-cap.empty {
-    min-width: 28px;
+    min-width: 14px;
+    border-color: transparent;
     background: transparent;
     box-shadow: none;
     color: var(--fg-faint);

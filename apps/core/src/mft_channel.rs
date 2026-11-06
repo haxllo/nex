@@ -139,12 +139,23 @@ fn accept_loop(state: &ChannelState) {
             }
         }
         let file = unsafe { File::from_raw_handle(handle as *mut _) };
-        // A newer connection replaces the old one; a request still running on
-        // the old handle fails on its own once that helper is gone.
-        if let Ok(mut slot) = state.connection.lock() {
-            *slot = Some(Arc::new(file));
+        // Keep a live connection: replacing it made two helpers evict each
+        // other in a tight reconnect loop. A newcomer is only adopted once the
+        // current helper's end has closed (it retries with backoff).
+        let adopted = match state.connection.lock() {
+            Ok(mut slot) => {
+                if slot.as_ref().is_some_and(|current| peer_open(current)) {
+                    false
+                } else {
+                    *slot = Some(Arc::new(file));
+                    true
+                }
+            }
+            Err(_) => false,
+        };
+        if adopted {
+            crate::logging::info("[nex] mft command channel connected");
         }
-        crate::logging::info("[nex] mft command channel connected");
     }
 }
 

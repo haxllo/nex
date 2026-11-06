@@ -724,15 +724,11 @@ impl RuntimeWorker {
             .name("nex-hotkey-reconfig".into())
             .spawn(move || {
                 drop(old_listener);
-                // Stop the scheduled task and kill the helper process so the
-                // new start() can write config and re-launch a clean helper.
+                // End the helper through the scheduler: taskkill from this
+                // Medium-IL process is denied against the High-IL helper.
                 let _ = std::process::Command::new("schtasks")
                     .args(["/end", "/tn", "NexHelperV2"])
                     .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                    .output();
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/IM", "NexHelper.exe"])
-                    .creation_flags(0x08000000)
                     .output();
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 match HotkeyListener::start(&new_hotkey, event_tx) {
@@ -1496,6 +1492,17 @@ impl RuntimeWorker {
                 },
                 Err(_) => false,
             };
+            // Same gate as reregister_hotkey_listener: two concurrent
+            // restarts would each drop the other's listener.
+            let needs_restart = needs_restart
+                && RE_REGISTERING
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok();
             if needs_restart {
                 log_warn("[nex] hotkey listener thread died; attempting restart");
                 // Taken here, dropped on the recover thread: its Drop runs
@@ -1519,13 +1526,10 @@ impl RuntimeWorker {
                             .args(["/end", "/tn", "NexHelperV2"])
                             .creation_flags(0x08000000) // CREATE_NO_WINDOW
                             .output();
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/IM", "NexHelper.exe"])
-                            .creation_flags(0x08000000)
-                            .output();
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
                             log_info("[nex] skipping hotkey listener restart: quit in progress");
+                            RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         match HotkeyListener::start(&recovery_hotkey, recovery_etx) {
@@ -1541,7 +1545,9 @@ impl RuntimeWorker {
                                 ));
                             }
                         }
+                        RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
                     })
+                    .map_err(|_| RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst))
                     .ok();
             }
         }

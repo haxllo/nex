@@ -3986,6 +3986,8 @@ unsafe extern "system" fn instance_signal_subclass(
                         // hotkey), exactly like the hook.
                         if !crate::overlay::hotkey::helper_owns_detection()
                             && crate::overlay::hotkey::check_raw_input_hotkey(vk)
+                            // First make only: auto-repeat must not re-toggle.
+                            && crate::overlay::hotkey::note_target_down()
                         {
                             crate::runtime::log_info(&format!(
                                 "[nex::debug] WM_INPUT hotkey vk={} sending toggle",
@@ -3993,6 +3995,8 @@ unsafe extern "system" fn instance_signal_subclass(
                             ));
                             let _ = crate::overlay::hotkey::send_hotkey_event(&ctx.event_tx, 1);
                         }
+                    } else if !is_win {
+                        crate::overlay::hotkey::note_key_up(vk as u32);
                     }
                 }
             }

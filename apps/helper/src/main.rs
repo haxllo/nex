@@ -885,7 +885,9 @@ fn create_named_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
             PIPE_ACCESS_OUTBOUND,
             PIPE_TYPE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            0,
+            // Buffered: with a zero-size buffer every write waited for nex to
+            // read it, stalling the thread that pumps the global LL hooks.
+            64 * 1024,
             0,
             0,
             std::ptr::null_mut(),
@@ -983,23 +985,59 @@ fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String
 /// The helper has no console (windows_subsystem = "windows"), so file logging
 /// is the only way to observe failures. Lines also fan out to the log pipe
 /// (when nex connected) so they land in nex's own log.
+///
+/// Never blocks the caller: lines are queued to a writer thread. The main
+/// thread pumps the helper's global LL hooks, and file/pipe I/O there (behind
+/// a mutex the MFT thread also held) stalled mouse and keyboard system-wide.
 pub(crate) fn debug_log(msg: &str) {
+    let _ = log_sender().send(LogMsg::Line(msg.to_string()));
+}
+
+/// Drain queued log lines before the process exits (bounded wait).
+fn flush_log() {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    if log_sender().send(LogMsg::Flush(ack_tx)).is_ok() {
+        let _ = ack_rx.recv_timeout(std::time::Duration::from_millis(250));
+    }
+}
+
+enum LogMsg {
+    Line(String),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+fn log_sender() -> &'static std::sync::mpsc::Sender<LogMsg> {
+    static TX: OnceLock<std::sync::mpsc::Sender<LogMsg>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<LogMsg>();
+        let _ = std::thread::Builder::new()
+            .name("NexHelper-log-writer".into())
+            .spawn(move || log_writer(rx));
+        tx
+    })
+}
+
+fn log_writer(rx: std::sync::mpsc::Receiver<LogMsg>) {
+    use std::io::Write;
     let path = std::env::temp_dir().join("NexHelper-debug.log");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
-        let _ = f.flush();
-    }
-    if let Ok(mut slot) = LOG_PIPE.lock() {
-        if let Some(pipe) = slot.as_mut() {
-            use std::io::Write;
-            if writeln!(pipe, "{msg}").is_err() {
-                *slot = None; // reader gone; file log continues
-            } else {
-                let _ = pipe.flush();
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+    let pid = std::process::id();
+    for item in rx {
+        let msg = match item {
+            LogMsg::Line(msg) => msg,
+            LogMsg::Flush(ack) => {
+                let _ = ack.send(());
+                continue;
+            }
+        };
+        if let Some(f) = file.as_mut() {
+            let _ = writeln!(f, "[{pid}] {msg}");
+        }
+        if let Ok(mut slot) = LOG_PIPE.lock() {
+            if let Some(pipe) = slot.as_mut() {
+                if writeln!(pipe, "{msg}").is_err() {
+                    *slot = None; // reader gone; file log continues
+                }
             }
         }
     }
@@ -1293,6 +1331,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("NexHelper: {e}");
+            flush_log();
             std::process::exit(1);
         }
     };
@@ -1321,6 +1360,7 @@ fn main() {
         };
         if h.is_null() || h as isize == -1 {
             debug_log("watchdog: OpenProcess failed, exiting helper");
+            flush_log();
             std::process::exit(0);
         }
         unsafe {
@@ -1328,6 +1368,7 @@ fn main() {
         }
         debug_log("watchdog: nex exited, helper shutting down");
         release_mask();
+        flush_log();
         std::process::exit(0);
     });
 
@@ -1349,6 +1390,7 @@ fn main() {
         Err(e) => {
             debug_log(&format!("create_named_pipe failed: {e}"));
             eprintln!("NexHelper: {e}");
+            flush_log();
             std::process::exit(1);
         }
     };
@@ -1358,6 +1400,7 @@ fn main() {
     if let Err(e) = wait_for_client(&pipe) {
         debug_log(&format!("wait_for_client failed: {e}"));
         eprintln!("NexHelper: {e}");
+        flush_log();
         std::process::exit(1);
     }
     debug_log("client connected");
@@ -1393,6 +1436,7 @@ fn main() {
         };
         debug_log(&format!("SetWindowsHookExW failed: err={err}"));
         eprintln!("NexHelper: SetWindowsHookExW failed");
+        flush_log();
         std::process::exit(1);
     }
 
@@ -1476,7 +1520,12 @@ fn main() {
                     *fallback_id = register_fallback(cfg);
                 }
             }
-            Err(e) => debug_log(&format!("reload failed: {e}")),
+            Err(e) => {
+                // Remember the bytes anyway: retrying the same broken file
+                // every 250 ms only repeats this line.
+                *last_applied = bytes;
+                debug_log(&format!("reload failed: {e}"));
+            }
         }
     }
 
@@ -1545,6 +1594,7 @@ fn main() {
         let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         debug_log(&format!("OpenEventW failed: event='{}' err={err}", ctx.event_name));
         eprintln!("NexHelper: OpenEventW failed (event='{}')", ctx.event_name);
+        flush_log();
         std::process::exit(1);
     }
     debug_log("OpenEventW succeeded");
@@ -1589,11 +1639,13 @@ fn main() {
 
     const WM_HOTKEY: u32 = 0x0312;
     let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = unsafe { std::mem::zeroed() };
-    let handles = [
-        overlay_ready_event,
-        if nex_handle_valid { nex_handle } else { std::ptr::null_mut() },
-        config_event.0 as PipeHandle,
-    ];
+    // Valid handles only: a null slot inside the waited range makes
+    // MsgWaitForMultipleObjects fail, which ended the helper loop.
+    let handles = if nex_handle_valid {
+        [overlay_ready_event, nex_handle, config_event.0 as PipeHandle]
+    } else {
+        [overlay_ready_event, config_event.0 as PipeHandle, std::ptr::null_mut()]
+    };
     let n_handles: u32 = if nex_handle_valid { 3 } else { 2 };
     // Bounded wait: the config file is stat'd every iteration, so a missed
     // doorbell signal still converges within this interval.
@@ -1601,6 +1653,8 @@ fn main() {
     let mut last_config_mtime: Option<std::time::SystemTime> =
         std::fs::metadata(&config_file_path).ok().and_then(|m| m.modified().ok());
     let mut last_applied_config: Vec<u8> = Vec::new();
+    const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
+    let mut last_heartbeat = std::time::Instant::now();
 
     loop {
 
@@ -1734,6 +1788,17 @@ fn main() {
                 break; // nex.exe disconnected
             }
         }
+
+        // Heartbeat: nex closes this pipe when it replaces or drops its
+        // listener, and this write is how a superseded helper notices and
+        // exits instead of lingering with its hooks installed.
+        if last_heartbeat.elapsed() >= HEARTBEAT {
+            last_heartbeat = std::time::Instant::now();
+            if pipe.write_all(b"PING\n").is_err() {
+                debug_log("heartbeat failed: nex closed the pipe, exiting");
+                break;
+            }
+        }
     }
 
     // Cleanup
@@ -1755,6 +1820,7 @@ fn main() {
             );
         }
     }
+    flush_log();
 }
 
 #[cfg(test)]

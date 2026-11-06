@@ -183,10 +183,19 @@ pub(crate) fn spawn_command_client(ui_pid: u32) {
             loop {
                 match connect_command_pipe(&pipe_name) {
                     Some(pipe) => {
-                        backoff = Duration::from_secs(1);
+                        let connected_at = std::time::Instant::now();
                         debug_log("[mft] command channel connected");
                         let reason = serve_commands(pipe);
                         debug_log(&format!("[mft] command channel closed: {reason}"));
+                        if connected_at.elapsed() >= Duration::from_secs(5) {
+                            backoff = Duration::from_secs(1);
+                            continue;
+                        }
+                        // Closed at once: the indexer keeps only the newest
+                        // client, so two helpers reconnecting without a pause
+                        // evicted each other thousands of times a second.
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(10));
                     }
                     None => {
                         std::thread::sleep(backoff);

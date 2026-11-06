@@ -42,6 +42,11 @@ struct HookContext {
 
 static HOOK_CTX: Mutex<Option<HookContext>> = Mutex::new(None);
 
+/// Configured hotkey string, kept beside HOOK_CTX (which the hook clones per
+/// keystroke, so it carries no String). A helper respawn writes this, not the
+/// value the supervisor captured at start, into helper-config.json.
+static CURRENT_HOTKEY: Mutex<String> = Mutex::new(String::new());
+
 /// One physical Win press, tracked once for every detector in this process.
 ///
 /// The hook and the raw-input sink see the same keys but not the same
@@ -89,6 +94,29 @@ pub(crate) fn finish_win_press() -> bool {
 pub(crate) fn reset_win_press_state() {
     WIN_PRESS_ACTIVE.store(false, Ordering::SeqCst);
     WIN_CHORD_SEEN.store(false, Ordering::SeqCst);
+    TARGET_HELD.store(false, Ordering::SeqCst);
+}
+
+/// Non-Win target key currently held. Shared by the hook and raw input so
+/// only the first make event of a press toggles; auto-repeat makes while the
+/// combo is held used to flicker the overlay open and shut.
+static TARGET_HELD: AtomicBool = AtomicBool::new(false);
+
+/// True only for the first make event of a press.
+pub(crate) fn note_target_down() -> bool {
+    !TARGET_HELD.swap(true, Ordering::SeqCst)
+}
+
+/// Break event for `vk`; ends the press when it is the configured target.
+pub(crate) fn note_key_up(vk: u32) {
+    let is_target = HOOK_CTX
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| !c.target_is_win && c.target_key == vk))
+        .unwrap_or(false);
+    if is_target {
+        TARGET_HELD.store(false, Ordering::SeqCst);
+    }
 }
 
 static OVERLAY_HAS_FOCUS: AtomicBool = AtomicBool::new(false);
@@ -100,6 +128,16 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// detects bare-Win hotkeys (`detect = target_is_win` in its config), so local
 /// detection defers to it only through [`helper_owns_detection`].
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Generation of the newest listener. HOOK_CTX, HELPER_ACTIVE and the other
+/// globals belong to it alone: a detached supervisor or a late Drop from an
+/// older listener used to clear HELPER_ACTIVE under the new one, which then
+/// looked dead and was restarted every few seconds.
+static LISTENER_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn is_current_listener(generation: u64) -> bool {
+    LISTENER_GEN.load(Ordering::SeqCst) == generation
+}
 
 /// Real time of the last toggle any detection path accepted, plus the
 /// clock it is measured against.
@@ -222,8 +260,11 @@ pub(crate) fn check_raw_input_hotkey(vk: u16) -> bool {
     });
     if !mods_ok { return false; }
     // No extra modifiers (that aren't the target or required) may be held.
+    // Either Win key satisfies a Win modifier, as in the hook.
+    let wants_win = ctx.required_mods.iter().any(|&m| m == VK_LWIN || m == VK_RWIN);
     ALL_MODS.iter().all(|&m| {
         if m == ctx.target_key || ctx.required_mods.contains(&m) { return true; }
+        if wants_win && (m == VK_LWIN || m == VK_RWIN) { return true; }
         !is_key_down(m)
     })
 }
@@ -491,12 +532,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     let ctx = match HOOK_CTX.lock().ok().and_then(|g| g.as_ref().cloned()) {
         Some(ctx) => ctx,
         None => {
-            if is_keydown && !injected {
-                crate::runtime::log_info(&format!(
-                    "[nex::diag] Hook proc: HOOK_CTX is None, passing vk={:?} keydown={}",
-                    vk, is_keydown,
-                ));
-            }
+            // No logging here: disk I/O inside an LL hook stalls system input.
             return unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
             };
@@ -584,6 +620,10 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
+    if is_keyup && !injected && !ctx.target_is_win && vk == ctx.target_key {
+        TARGET_HELD.store(false, Ordering::SeqCst);
+    }
+
     // Only key-down triggers matter for hotkey dispatch.
     if !is_keydown {
         return unsafe {
@@ -631,12 +671,15 @@ unsafe extern "system" fn keyboard_hook_proc(
                         std::ptr::null_mut(), n_code, w_param, l_param)
                 };
             }
-            if ctx.required_mods.iter().any(|&m| m == VK_LWIN || m == VK_RWIN) {
-                // The eaten key never reaches the shell, so the held Win
-                // would still open Start on key-up.
-                invalidate_start_gesture();
+            // Auto-repeat makes are still eaten, but only the first toggles.
+            if note_target_down() {
+                if ctx.required_mods.iter().any(|&m| m == VK_LWIN || m == VK_RWIN) {
+                    // The eaten key never reaches the shell, so the held Win
+                    // would still open Start on key-up.
+                    invalidate_start_gesture();
+                }
+                let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
             }
-            let _ = send_hotkey_event(&ctx.sender, ctx.hotkey_id);
             return 1;
         }
     }
@@ -724,12 +767,7 @@ fn emit_outside_click_if_outside(source: &str) {
         return;
     }
     if !cursor_outside_rect(cursor.x, cursor.y, rect.left, rect.top, rect.right, rect.bottom) {
-        if OVERLAY_VISIBLE.load(Ordering::SeqCst) {
-            logging::info(&format!(
-                "[nex::debug] outside click ({source}) ignored: cursor inside panel cursor=({}, {}) rect=({},{})-({},{})",
-                cursor.x, cursor.y, rect.left, rect.top, rect.right, rect.bottom
-            ));
-        }
+        // Not logged: this runs inside the WH_MOUSE_LL hook on every click.
         return;
     }
 
@@ -835,6 +873,7 @@ struct HotkeyListenerInner {
     helper: Arc<Mutex<HelperState>>,
     /// Late helper supervisor thread (detached on drop; self-exits on shutdown).
     helper_thread: Option<thread::JoinHandle<()>>,
+    generation: u64,
 }
 
 impl HotkeyListener {
@@ -864,10 +903,16 @@ impl HotkeyListener {
 
         let should_exit = Arc::new(AtomicBool::new(false));
         let thread_id: Arc<OnceLock<u32>> = Arc::new(OnceLock::new());
+        let generation = LISTENER_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        HELPER_ACTIVE.store(false, Ordering::SeqCst);
+        reset_win_press_state();
 
         start_click_away_fallback(Arc::clone(&should_exit));
 
         *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
+        if let Ok(mut current) = CURRENT_HOTKEY.lock() {
+            *current = hotkey_str.to_string();
+        }
 
         if try_helper {
             logging::info("[nex] hotkey: elevated helper setup scheduled (async)");
@@ -878,48 +923,10 @@ impl HotkeyListener {
         // --- Fallback: in-process hook thread (existing code path) ---
         let should_exit_for_thread = should_exit.clone();
         let thread_id_for_thread = thread_id.clone();
-        const WM_NEX_REREGISTER: u32 = 0x8000 + 0x4E47;
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
-        // RegisterHotKeyW / UnregisterHotKey / LoadLibraryA / GetProcAddress
-        // are not directly available in windows-sys 0.61.2's API-sets layout.
-        // Load via raw extern "system" + user32 import.
         const WM_HOTKEY: u32 = 0x0312u32;
-        const MOD_ALT: u32 = 0x0001;
-        const MOD_CONTROL: u32 = 0x0002;
-        const MOD_SHIFT: u32 = 0x0004;
-        const MOD_WIN: u32 = 0x0008;
-        type RegisterHotKeyFn = unsafe extern "system" fn(
-            hWnd: *mut core::ffi::c_void, id: i32, fsModifiers: u32, vk: u32,
-        ) -> i32;
-        type UnregisterHotKeyFn = unsafe extern "system" fn(
-            hWnd: *mut core::ffi::c_void, id: i32,
-        ) -> i32;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn LoadLibraryA(lpLibFileName: *const u8) -> *mut core::ffi::c_void;
-            fn GetProcAddress(hModule: *mut core::ffi::c_void, lpProcName: *const u8) -> *mut core::ffi::c_void;
-            fn GetModuleHandleA(lpModuleName: *const u8) -> *mut core::ffi::c_void;
-        }
-        let register_hotkey: Option<RegisterHotKeyFn> = unsafe {
-            let lib = LoadLibraryA("user32.dll\0".as_ptr());
-            if lib.is_null() { None } else {
-                let ptr = GetProcAddress(lib, "RegisterHotKeyW\0".as_ptr());
-                if ptr.is_null() { None } else {
-                    Some(std::mem::transmute::<_, RegisterHotKeyFn>(ptr))
-                }
-            }
-        };
-        let unregister_hotkey: Option<UnregisterHotKeyFn> = unsafe {
-            let lib = GetModuleHandleA("user32.dll\0".as_ptr());
-            if lib.is_null() { None } else {
-                let ptr = GetProcAddress(lib, "UnregisterHotKey\0".as_ptr());
-                if ptr.is_null() { None } else {
-                    Some(std::mem::transmute::<_, UnregisterHotKeyFn>(ptr))
-                }
-            }
-        };
 
         let thread = thread::Builder::new()
             .name("nex-hotkey-listener".into())
@@ -946,78 +953,7 @@ impl HotkeyListener {
                 HOOK_THREAD_ID.store(tid, Ordering::SeqCst);
                 let _ = ready_tx.send(Ok(()));
 
-                // Register system-level hotkey fallback via RegisterHotKeyW.
-                // Unlike WH_KEYBOARD_LL + WM_INPUT, RegisterHotKeyW delivers
-                // WM_HOTKEY to this thread's message queue regardless of
-                // foreground window or integrity level.  This ensures the
-                // hotkey works even when elevated/UWP windows (Task Manager,
-                // advanced settings) are foreground.
-                // Win combos skip it (raw-input path owns them); numpad and
-                // single-tap bindings demote to the hook with a reason.
-                const ERROR_HOTKEY_ALREADY_IN_USE: u32 = 1409;
-                let mut fallback_id: u32 = 0;
-                // Copy what we need and release HOOK_CTX immediately. The
-                // hook proc locks this same mutex on EVERY keystroke, so a
-                // guard held across the message loop below deadlocks all
-                // system input (frozen keyboard, Start menu leaking through,
-                // tray menus never opening).
-                let (target_is_win_local, target_key_local, required_mods_local) = {
-                    let g = HOOK_CTX.lock().unwrap();
-                    let c = g.as_ref().unwrap();
-                    (c.target_is_win, c.target_key, c.required_mods.clone())
-                };
-                if !target_is_win_local {
-                    let mod_map: &[(u32, u32)] = &[
-                        (0x11, 0x0002), // VK_CTRL  → MOD_CONTROL
-                        (0x12, 0x0001), // VK_ALT   → MOD_ALT
-                        (0x10, 0x0004), // VK_SHIFT → MOD_SHIFT
-                        (0x5B, 0x0008), // VK_LWIN  → MOD_WIN
-                        (0x5C, 0x0008), // VK_RWIN  → MOD_WIN
-                    ];
-                    let mut mods: u32 = 0;
-                    for &(vk, flag) in mod_map {
-                        if required_mods_local.contains(&vk) { mods |= flag; }
-                    }
-                    // Generate a unique hotkey ID that won't collide.
-                    fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                    let reason = dispatch_for(
-                        target_key_local,
-                        false,
-                        !required_mods_local.is_empty(),
-                        false,
-                    );
-                    if reason != DispatchReason::SystemHotkey {
-                        logging::info(&format!(
-                            "[nex::debug] Hook: dispatches via hook: {}",
-                            dispatch_reason_text(reason),
-                        ));
-                        fallback_id = 0;
-                    } else {
-                        let ok = match register_hotkey {
-                            Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, target_key_local as u32) },
-                            None => { logging::warn("[nex::debug] Hook: RegisterHotKeyW not available (fallback disabled)"); 0 },
-                        };
-                        if ok == 0 {
-                            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                            if err == ERROR_HOTKEY_ALREADY_IN_USE {
-                                logging::warn("[nex::debug] Hook: RegisterHotKey refused (already in use): demoted to hook");
-                            } else {
-                                logging::warn(&format!(
-                                    "[nex::debug] Hook: RegisterHotKeyW failed err={} (fallback disabled)",
-                                    err,
-                                ));
-                            }
-                            fallback_id = 0;
-                        } else {
-                            logging::info("[nex::debug] Hook: RegisterHotKeyW fallback active");
-                        }
-                    }
-                } else {
-                    logging::info(&format!(
-                        "[nex::debug] Hook: dispatches via hook: {}",
-                        dispatch_reason_text(DispatchReason::WinCombo),
-                    ));
-                }
+                let mut fallback_id = swap_system_fallback(tid, 0, "startup");
 
                 let mut msg: MSG = unsafe { std::mem::zeroed() };
                 let mut msg_count: u64 = 0;
@@ -1038,64 +974,7 @@ impl HotkeyListener {
                     // before WM_QUIT, and the global HOOK_CTX may have been
                     // overwritten by a new listener by now.
                     if msg.message == WM_NEX_REREGISTER {
-                        // Live hotkey update: swap the RegisterHotKeyW
-                        // fallback to the freshly synced HOOK_CTX. Brief lock
-                        // on this thread is fine — it's not the input path.
-                        logging::info("[nex::debug] Hook: live re-register requested");
-                        let g = HOOK_CTX.lock().unwrap();
-                        if let Some(ctx) = g.as_ref() {
-                            if fallback_id != 0 {
-                                if let Some(f) = unregister_hotkey {
-                                    unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
-                                }
-                                fallback_id = 0;
-                            }
-                            if !ctx.target_is_win {
-                                let mod_map: &[(u32, u32)] = &[
-                                    (0x11, 0x0002), (0x12, 0x0001),
-                                    (0x10, 0x0004), (0x5B, 0x0008), (0x5C, 0x0008),
-                                ];
-                                let mut mods: u32 = 0;
-                                for &(vk, flag) in mod_map {
-                                    if ctx.required_mods.contains(&vk) { mods |= flag; }
-                                }
-                                fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
-                                let reason = dispatch_for(
-                                    ctx.target_key,
-                                    false,
-                                    !ctx.required_mods.is_empty(),
-                                    false,
-                                );
-                                if reason != DispatchReason::SystemHotkey {
-                                    logging::info(&format!(
-                                        "[nex::debug] Hook: live dispatches via hook: {}",
-                                        dispatch_reason_text(reason),
-                                    ));
-                                    fallback_id = 0;
-                                } else {
-                                    let ok = match register_hotkey {
-                                        Some(f) => unsafe { f(std::ptr::null_mut(), fallback_id as i32, mods, ctx.target_key as u32) },
-                                        None => 0,
-                                    };
-                                    if ok == 0 {
-                                        let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                                        if err == ERROR_HOTKEY_ALREADY_IN_USE {
-                                            logging::warn("[nex::debug] Hook: live RegisterHotKey refused (already in use): demoted to hook");
-                                        } else {
-                                            logging::warn("[nex::debug] Hook: live re-register FAILED");
-                                        }
-                                        fallback_id = 0;
-                                    }
-                                    else { logging::info("[nex::debug] Hook: live fallback re-registered OK"); }
-                                }
-                            } else {
-                                logging::info(&format!(
-                                    "[nex::debug] Hook: live dispatches via hook: {}",
-                                    dispatch_reason_text(DispatchReason::WinCombo),
-                                ));
-                            }
-                        }
-                        drop(g);
+                        fallback_id = swap_system_fallback(tid, fallback_id, "live");
                         continue;
                     }
                     if msg.message == WM_HOTKEY && fallback_id != 0 && !should_exit_for_thread.load(Ordering::SeqCst) {
@@ -1115,11 +994,7 @@ impl HotkeyListener {
                         logging::info(&format!("[nex::debug] Hook: heartbeat {} msgs processed", msg_count));
                     }
                 }
-                if fallback_id != 0 {
-                    if let Some(f) = unregister_hotkey {
-                        unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
-                    }
-                }
+                swap_system_fallback_off(fallback_id);
                 if !mouse_hook_id.is_null() {
                     unsafe { windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id); }
                 }
@@ -1179,6 +1054,7 @@ impl HotkeyListener {
                         event_tx_h,
                         helper_h,
                         should_exit_h,
+                        generation,
                     );
                 })
                 .map_err(|e| format!("failed to spawn helper supervisor: {e}"))?
@@ -1193,6 +1069,7 @@ impl HotkeyListener {
             thread_id,
             helper,
             helper_thread,
+            generation,
         }) })
     }
 
@@ -1208,16 +1085,11 @@ impl HotkeyListener {
     pub(crate) fn is_alive(&self) -> bool {
         match &self.inner {
             Some(inner) => {
-                if let Ok(st) = inner.helper.lock() {
-                    if st.active {
-                        // Helper mode: the supervisor thread reads the pipe
-                        // and reconnects on its own; HELPER_ACTIVE is the
-                        // liveness signal for the detection path.
-                        return !inner.should_exit.load(Ordering::SeqCst)
-                            && HELPER_ACTIVE.load(Ordering::SeqCst);
-                    }
-                }
-                // Hook mode (helper pending or skipped): thread_id is set
+                // Only the hook thread decides. The helper is supervised and
+                // reconnected by its own thread; treating a helper pipe drop
+                // as listener death restarted everything (helper kill, hook
+                // reinstall) in a loop, killing the hotkey for seconds.
+                // thread_id is set
                 // before the message pump starts. If it's not set yet the
                 // thread is still in early startup — treat as alive.
                 if inner.thread_id.get().is_none() {
@@ -1235,32 +1107,27 @@ impl Drop for HotkeyListener {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.should_exit.store(true, Ordering::SeqCst);
-            // Clear the global hook context BEFORE signalling threads
-            // so the hook proc immediately becomes a no-op — no stale
-            // hotkey events can fire from the dying listener.
-            if let Ok(mut hook_ctx) = HOOK_CTX.lock() {
-                *hook_ctx = None;
+            // Globals belong to the newest listener; a newer one may already
+            // be running when this one is dropped.
+            if is_current_listener(inner.generation) {
+                // Clear the hook context BEFORE signalling threads so the hook
+                // proc immediately becomes a no-op.
+                if let Ok(mut hook_ctx) = HOOK_CTX.lock() {
+                    *hook_ctx = None;
+                }
+                CTRL_DOWN.store(false, Ordering::SeqCst);
+                ALT_DOWN.store(false, Ordering::SeqCst);
+                SHIFT_DOWN.store(false, Ordering::SeqCst);
+                reset_win_press_state();
+                SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
+                HELPER_ACTIVE.store(false, Ordering::SeqCst);
             }
-            CTRL_DOWN.store(false, Ordering::SeqCst);
-            ALT_DOWN.store(false, Ordering::SeqCst);
-            SHIFT_DOWN.store(false, Ordering::SeqCst);
-            reset_win_press_state();
-            SUPPRESS_FOCUS_ESCAPE.store(false, Ordering::SeqCst);
-            HELPER_ACTIVE.store(false, Ordering::SeqCst);
 
-            // Helper mode (installed or in-flight): terminate the helper
-            // process, then drop (detach) the pipe reader thread.
-            //
-            // The pipe reader blocks on BufReader::lines() reading from
-            // the named pipe.  Terminating the helper closes its pipe
-            // end, making the next read fail -> the reader loop breaks
-            // and the thread exits on its own.
-            //
-            // For direct-spawn mode (helper_process_handle != 0) we use
-            // TerminateProcess.  For scheduled-task mode the handle is 0
-            // (no direct process ownership), so we kill by process name —
-            // safe because nex is single-instance so killing any
-            // NexHelper.exe belongs to us.
+            // The supervisor's pipe reader sees should_exit on the helper's
+            // next heartbeat and closes the pipe; the helper exits when its
+            // heartbeat write then fails. A scheduled-task helper (handle 0)
+            // cannot be killed from here anyway: taskkill from Medium IL is
+            // denied against the High-IL process.
             let handle = inner
                 .helper
                 .lock()
@@ -1288,8 +1155,8 @@ impl Drop for HotkeyListener {
     }
 }
 
-/// Terminate the helper: TerminateProcess when we own a direct handle,
-/// taskkill by name for scheduled-task mode (handle == 0).
+/// Terminate a directly spawned helper. Scheduled-task helpers (handle 0)
+/// exit on their own once their detection pipe closes.
 fn kill_helper_process(handle: isize) {
     if handle != 0 {
         logging::info("[nex] shutdown: terminating helper process");
@@ -1298,12 +1165,6 @@ fn kill_helper_process(handle: isize) {
             windows_sys::Win32::System::Threading::TerminateProcess(h, 1);
             windows_sys::Win32::Foundation::CloseHandle(h);
         }
-    } else {
-        logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", "NexHelper.exe"])
-            .creation_flags(0x08000000)
-            .output();
     }
 }
 
@@ -1321,6 +1182,7 @@ fn run_helper_supervisor(
     event_tx: Sender<OverlayEvent>,
     helper: Arc<Mutex<HelperState>>,
     should_exit: Arc<AtomicBool>,
+    generation: u64,
 ) {
     const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -1338,6 +1200,19 @@ fn run_helper_supervisor(
         }
         reconnect = true;
 
+        // Live updates may have changed the binding since this thread started.
+        let (target_key, target_is_win, required_mods) = HOOK_CTX
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| (c.target_key, c.target_is_win, c.required_mods.clone())))
+            .unwrap_or((target_key, target_is_win, required_mods.clone()));
+        let hotkey = CURRENT_HOTKEY
+            .lock()
+            .ok()
+            .map(|h| h.clone())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| hotkey.clone());
+
         match spawn_and_connect_helper(target_key, target_is_win, &required_mods, &hotkey) {
             Ok((helper_handle, pipe_file)) => {
                 if should_exit.load(Ordering::SeqCst) {
@@ -1345,6 +1220,9 @@ fn run_helper_supervisor(
                     return;
                 }
                 backoff = INITIAL_BACKOFF;
+                if !is_current_listener(generation) {
+                    return;
+                }
                 HELPER_ACTIVE.store(true, Ordering::SeqCst);
                 if let Ok(mut st) = helper.lock() {
                     st.active = true;
@@ -1353,10 +1231,12 @@ fn run_helper_supervisor(
                 logging::info("[nex] hotkey: using elevated helper for detection");
                 connect_helper_aux_pipes();
 
-                read_helper_pipe(pipe_file, &event_tx);
+                read_helper_pipe(pipe_file, &event_tx, &should_exit);
 
-                HELPER_ACTIVE.store(false, Ordering::SeqCst);
-                set_suppress_focus_escape(false);
+                if is_current_listener(generation) {
+                    HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                    set_suppress_focus_escape(false);
+                }
                 if let Ok(mut st) = helper.lock() {
                     st.active = false;
                 }
@@ -1390,10 +1270,20 @@ fn run_helper_supervisor(
 }
 
 /// Consume the detection pipe until the helper goes away.
-fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
+/// Returns on helper EOF, or on the first line after `should_exit` is set;
+/// the helper's 1 s `PING` heartbeat bounds that wait. Dropping the pipe here
+/// is what makes an orphaned helper exit.
+fn read_helper_pipe(
+    pipe_file: std::fs::File,
+    event_tx: &Sender<OverlayEvent>,
+    should_exit: &AtomicBool,
+) {
     use std::io::BufRead;
     let reader = std::io::BufReader::new(pipe_file);
     for line in reader.lines() {
+        if should_exit.load(Ordering::SeqCst) {
+            break;
+        }
         match line {
             Ok(l) if l == "HOTKEY" => {
                 logging::info("[nex] pipe: HOTKEY received from helper");
@@ -1521,10 +1411,12 @@ fn start_helper_cmd_server() {
 }
 
 /// Clear a helper left over from a previous connection before reconnecting.
+/// Ends it through the Task Scheduler service: taskkill from this Medium-IL
+/// process is denied against the High-IL helper.
 fn kill_stale_helper() {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "NexHelper.exe"])
-        .creation_flags(0x08000000)
+    let _ = std::process::Command::new("schtasks")
+        .args(["/end", "/tn", SCHTASK_NAME])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output();
 }
 
@@ -1552,8 +1444,7 @@ static OVERLAY_READY_EVENT: std::sync::Mutex<isize> = std::sync::Mutex::new(0);
 /// helper so the event exists when the helper tries to open it.
 fn create_overlay_event() -> String {
     use windows_sys::Win32::System::Threading::CreateEventW;
-    let pid = std::process::id();
-    let name = format!("Global\\nex-overlay-ready-{pid}");
+    let name = overlay_event_name();
     let wide = to_wide(&name);
     // bManualReset=0 (auto-reset), bInitialState=0 (not signaled).
     // Auto-reset means MsgWaitForMultipleObjects in the helper will
@@ -1623,8 +1514,7 @@ pub(crate) fn request_fallback_reregister() {
 /// object. Mirrors [`create_overlay_event`].
 fn create_config_event() -> String {
     use windows_sys::Win32::System::Threading::CreateEventW;
-    let pid = std::process::id();
-    let name = format!("Global\\nex-hotkey-config-{pid}");
+    let name = config_event_name();
     let wide = to_wide(&name);
     let handle = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, wide.as_ptr()) };
     if let Ok(mut guard) = CONFIG_CHANGED_EVENT.lock() {
@@ -1651,18 +1541,15 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
             return false;
         }
     };
-    let target_is_win = parsed.key.eq_ignore_ascii_case("win");
-    let target_key = if target_is_win {
-        VK_LWIN
-    } else {
-        match vk_from_key(&parsed.key) {
-            Ok(vk) => vk,
-            Err(e) => {
-                logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
-                return false;
-            }
+    // Same rule as start_internal, so "Meta"/"Super" agree with "Win".
+    let target_key = match vk_from_key(&parsed.key) {
+        Ok(vk) => vk,
+        Err(e) => {
+            logging::warn(&format!("[nex] live hotkey update '{hotkey_str}': {e}"));
+            return false;
         }
     };
+    let target_is_win = target_key == VK_LWIN;
     let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
         Ok(m) => m,
         Err(e) => {
@@ -1671,28 +1558,20 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
         }
     };
 
-    // nex owns ALL hotkey detection now (raw input for Win, WM_INPUT
-    // chord check + RegisterHotKeyW fallback for combos). The running
-    // helper keeps its OLD combo registered — harmless: its events are
-    // deduped by the 50ms debounce and it never touches the new combo.
-    // So a live update is purely local: sync HOOK_CTX + transient state.
-    //
-    // BUT when target_is_win changes (Win ↔ non-Win), the helper's
-    // detect_enabled flag changes too — it must be killed and restarted
-    // with fresh config.  Return false to trigger full re-registration.
-    let old_is_win = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.target_is_win)).unwrap_or(false);
-    if old_is_win != target_is_win {
-        logging::info(&format!(
-            "[nex] live hotkey update: target_is_win changed ({old_is_win} → {target_is_win}), full re-register needed"
-        ));
-        return false;
-    }
+    // Win <-> non-Win needs no helper restart: the helper re-reads `detect`
+    // and `target_is_win` from helper-config.json on the doorbell below.
+    // Restarting it (schtasks /end, taskkill, respawn) froze input and left
+    // orphaned helpers fighting over the MFT channel.
+    let was_win = is_win_key_hotkey();
     if let Ok(mut guard) = HOOK_CTX.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.target_key = target_key;
             ctx.target_is_win = target_is_win;
             ctx.required_mods = required_mods.clone();
         }
+    }
+    if let Ok(mut current) = CURRENT_HOTKEY.lock() {
+        *current = hotkey_str.to_string();
     }
     // Drop transient key state so a half-finished press of the previous
     // hotkey can't swallow the first press of the new one.
@@ -1708,10 +1587,50 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     // whether the hotkey is a Win combo, and it was registered under the
     // previous hotkey's state.
     crate::overlay::host::rearm_raw_input_sink();
+    if was_win && !target_is_win {
+        // A Win press in flight may still hold the mask.
+        mask_release();
+    }
+    if let Err(error) = write_helper_config(
+        &helper_config_path(),
+        target_key,
+        target_is_win,
+        &required_mods,
+        hotkey_str,
+        &overlay_event_name(),
+        &helper_pipe_name(),
+        &config_event_name(),
+    ) {
+        logging::warn(&format!("[nex] live hotkey update: {error}"));
+    }
+    ring_config_doorbell();
     logging::info(&format!(
-        "[nex] live hotkey update applied locally: '{hotkey_str}'"
+        "[nex] live hotkey update applied: '{hotkey_str}' (helper reloads config)"
     ));
     true
+}
+
+/// Wake the helper so it re-reads helper-config.json now; its mtime poll
+/// (250 ms) is the backstop.
+fn ring_config_doorbell() {
+    let handle = CONFIG_CHANGED_EVENT.lock().map(|g| *g).unwrap_or(0);
+    if handle != 0 {
+        unsafe {
+            windows_sys::Win32::System::Threading::SetEvent(handle as *mut core::ffi::c_void);
+        }
+    }
+}
+
+fn overlay_event_name() -> String {
+    format!("Global\\nex-overlay-ready-{}", std::process::id())
+}
+
+fn config_event_name() -> String {
+    format!("Global\\nex-hotkey-config-{}", std::process::id())
+}
+
+fn helper_pipe_name() -> String {
+    format!(r"\\.\pipe\nex-hotkey\{}", std::process::id())
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,7 +1655,7 @@ fn spawn_and_connect_helper(
     //    EVENT_MODIFY_STATE due to UIPI write-up restriction.
     let event_name = create_overlay_event();
     let config_event_name = create_config_event();
-    let pipe_name = format!(r"\\.\pipe\nex-hotkey\{}", std::process::id());
+    let pipe_name = helper_pipe_name();
 
     // 2. Write JSON config for the helper (includes event name)
     let config_path = helper_config_path();
@@ -2176,6 +2095,73 @@ fn is_numpad_vk(vk: u32) -> bool {
     (0x60..=0x6F).contains(&vk)
 }
 
+/// RegisterHotKey id for the hook thread's fallback. Must stay below 0xC000
+/// (the application range); ids are scoped to the registering thread.
+const SYSTEM_HOTKEY_ID: u32 = 0x4E45;
+
+/// Point the RegisterHotKey fallback at the current HOOK_CTX. Runs on the hook
+/// thread, because WM_HOTKEY is posted to the registering thread. Returns the
+/// registered id, or 0 when the hook alone serves this binding.
+fn swap_system_fallback(tid: u32, current: u32, phase: &str) -> u32 {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT,
+    };
+    const ERROR_HOTKEY_ALREADY_IN_USE: u32 = 1409;
+
+    swap_system_fallback_off(current);
+    // Snapshot and release: the hook proc locks HOOK_CTX on every keystroke.
+    let snapshot = HOOK_CTX
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|c| (c.target_key, c.target_is_win, c.required_mods.clone())));
+    let Some((target_key, target_is_win, required_mods)) = snapshot else {
+        return 0;
+    };
+    let has_win_mod = required_mods.iter().any(|m| *m == VK_LWIN || *m == VK_RWIN);
+    let reason = dispatch_for(target_key, target_is_win || has_win_mod, !required_mods.is_empty(), false);
+    if reason != DispatchReason::SystemHotkey {
+        logging::info(&format!(
+            "[nex::debug] Hook: {phase} dispatches via hook: {}",
+            dispatch_reason_text(reason),
+        ));
+        return 0;
+    }
+    // NOREPEAT: a held combo must not re-toggle on auto-repeat.
+    let mut mods = MOD_NOREPEAT;
+    for &m in &required_mods {
+        mods |= match m {
+            VK_CTRL => MOD_CONTROL,
+            VK_ALT => MOD_ALT,
+            VK_SHIFT => MOD_SHIFT,
+            _ => 0,
+        };
+    }
+    let ok = unsafe { RegisterHotKey(std::ptr::null_mut(), SYSTEM_HOTKEY_ID as i32, mods, target_key) };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_HOTKEY_ALREADY_IN_USE {
+            logging::warn(&format!(
+                "[nex::debug] Hook: {phase} RegisterHotKey refused (already in use): {}",
+                dispatch_reason_text(DispatchReason::RefusedDemoted),
+            ));
+        } else {
+            logging::warn(&format!("[nex::debug] Hook: {phase} RegisterHotKey failed err={err}"));
+        }
+        return 0;
+    }
+    logging::info(&format!("[nex::debug] Hook: {phase} RegisterHotKey fallback active tid={tid}"));
+    SYSTEM_HOTKEY_ID
+}
+
+fn swap_system_fallback_off(id: u32) {
+    if id != 0 {
+        unsafe {
+            windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), id as i32);
+        }
+    }
+}
+
 /// Decide dispatch for one binding. Pure: same inputs, same answer.
 fn dispatch_for(vk: u32, has_win_mod: bool, has_any_mod: bool, refused: bool) -> DispatchReason {
     if refused {
@@ -2243,6 +2229,15 @@ mod tests {
         note_win_press_start();              // key auto-repeat / second detector
         assert!(finish_win_press());
         assert!(!finish_win_press());        // other detector's key-up
+    }
+    // Auto-repeat makes while the combo is held must not re-toggle.
+    #[test] fn target_press_fires_once_until_released() {
+        reset_win_press_state();
+        assert!(note_target_down());         // first make
+        assert!(!note_target_down());        // auto-repeat
+        TARGET_HELD.store(false, Ordering::SeqCst); // key-up
+        assert!(note_target_down());         // next press
+        reset_win_press_state();
     }
     #[test] fn chord_press_never_fires() {
         reset_win_press_state();

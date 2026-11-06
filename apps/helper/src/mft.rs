@@ -5,18 +5,20 @@
 //! `NexIndexerProcess` connects to a read-only byte pipe and receives either a
 //! full MFT snapshot or USN deltas, with paths resolved helper-side.
 //!
-//! Pipe protocol v2 (byte stream):
-//!   header: b"NXMF" | version u16 (2) | letter u8 | mode u8 (0 full, 1 delta) |
-//!           journal_id u64 | start_usn i64 | next_usn i64
-//!   record: frn u64 | parent_frn u64 | attributes u32 | timestamp i64 |
-//!           reason u32 | name_len u16 | path_len u16 | utf8 name | utf8 path
-//!   trailer: frn=0, name_len=0, path_len=0, reason=u32::MAX, then next_usn i64
+//! Two transports carry the same snapshot byte stream (format and framing live
+//! in `mft_protocol`, shared with the indexer):
 //!
-//! Delta requests come from `%APPDATA%\Nex\mft-<letter>.req`:
-//!   journal_id=<u64>\nstart_usn=<i64>\n   (or "full")
-//! When missing/invalid the server streams a full snapshot. Delta records carry
-//! the resolved full path; full records carry the name only and the indexer
-//! rebuilds paths from parent references.
+//! * Command channel (preferred): the indexer creates `NexMftCmd\<ui pid>` and
+//!   this helper connects as its client, keeping one connection per helper
+//!   session. Each request names the volume and mode; the answer is streamed
+//!   back as request-id-tagged frames on the same duplex connection.
+//! * Legacy pipes (rollout fallback for indexers that predate the channel): one
+//!   read-only pipe per volume, `\\.\pipe\NexMft-<letter>`. The request comes
+//!   from `%APPDATA%\Nex\mft-<letter>.req` (`journal_id=<u64>\nstart_usn=<i64>`
+//!   or `full`); a missing or stale request streams a full snapshot.
+//!
+//! Delta records carry the resolved full path; full snapshots resolve paths
+//! here too, so the indexer filters records to its roots without a parent map.
 
 use std::ffi::c_void;
 use std::io::Write;
@@ -32,6 +34,9 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW};
 
 use crate::debug_log;
+use crate::mft_protocol::{
+    self, CommandRequest, FrameWriter, JOURNAL_INVALID_PREFIX, RequestKind,
+};
 
 const FSCTL_QUERY_USN_JOURNAL: u32 = 0x0009_00f4;
 const FSCTL_ENUM_USN_DATA: u32 = 0x0009_00b3;
@@ -40,6 +45,7 @@ const ERROR_HANDLE_EOF: u32 = 38;
 const ERROR_PIPE_CONNECTED: u32 = 535;
 const DRIVE_FIXED: u32 = 3;
 const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -52,15 +58,9 @@ const PIPE_ACCESS_OUTBOUND: u32 = 0x0000_0002;
 const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
 const PIPE_READMODE_BYTE: u32 = 0x0000_0000;
 const PIPE_WAIT: u32 = 0x0000_0000;
-const HEADER_MAGIC: &[u8; 4] = b"NXMF";
-const PROTOCOL_VERSION: u16 = 3;
-const HEADER_LEN: usize = 32;
-const RECORD_PREFIX_LEN: usize = 36;
 const ENUM_BUFFER_BYTES: usize = 1 << 20;
 const ROOT_RECORD_NUMBER: u64 = 5;
 const FRN_RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-const DELTA_MODE: u8 = 1;
-const FULL_MODE: u8 = 0;
 
 #[repr(C)]
 struct MftEnumDataV0 {
@@ -170,6 +170,103 @@ pub(crate) fn spawn_snapshot_servers() {
     }
 }
 
+/// Keep one connection to the indexer's command channel for the whole helper
+/// session, reconnecting with backoff when the indexer restarts. The indexer
+/// owns the pipe (UIPI blocks Medium IL from writing a High-IL pipe); this
+/// side only connects, reads requests and writes framed responses.
+pub(crate) fn spawn_command_client(ui_pid: u32) {
+    let _ = std::thread::Builder::new()
+        .name("NexMft-cmd".into())
+        .spawn(move || {
+            let pipe_name = mft_protocol::command_pipe_name(ui_pid);
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match connect_command_pipe(&pipe_name) {
+                    Some(pipe) => {
+                        backoff = Duration::from_secs(1);
+                        debug_log("[mft] command channel connected");
+                        let reason = serve_commands(pipe);
+                        debug_log(&format!("[mft] command channel closed: {reason}"));
+                    }
+                    None => {
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(Duration::from_secs(10));
+                    }
+                }
+            }
+        });
+}
+
+fn connect_command_pipe(pipe_name: &str) -> Option<std::fs::File> {
+    let name = wide(pipe_name);
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return None;
+    }
+    Some(unsafe { std::fs::File::from_raw_handle(handle as *mut _) })
+}
+
+/// Answer requests one at a time until the connection breaks.
+fn serve_commands(pipe: std::fs::File) -> String {
+    let mut reader = std::io::BufReader::new(&pipe);
+    loop {
+        let request = match CommandRequest::read_from(&mut reader) {
+            Ok(Some(request)) => request,
+            Ok(None) => return "indexer disconnected".to_string(),
+            Err(error) => return format!("read request: {error}"),
+        };
+        let stream_request = match request.kind {
+            RequestKind::Full => None,
+            RequestKind::Delta {
+                journal_id,
+                start_usn,
+            } => Some(Request {
+                journal_id,
+                start_usn,
+            }),
+        };
+        let mut writer = FrameWriter::new(&pipe, request.id);
+        let outcome = stream_volume(request.letter, stream_request, true, &mut writer);
+        match outcome {
+            Ok(stats) => {
+                if let Err(error) = writer.finish() {
+                    return format!("write response: {error}");
+                }
+                debug_log(&format!(
+                    "[mft] {}: request={} mode={} records={} skipped={} bytes={} elapsed_ms={}",
+                    request.letter,
+                    request.id,
+                    if stats.delta { "delta" } else { "full" },
+                    stats.records,
+                    stats.skipped,
+                    stats.bytes,
+                    stats.elapsed_ms
+                ));
+            }
+            Err(message) => {
+                debug_log(&format!(
+                    "[mft] {}: request={} failed: {message}",
+                    request.letter, request.id
+                ));
+                let (code, text) = mft_protocol::error_code_for(&message);
+                if let Err(error) = writer.fail(code, text) {
+                    return format!("write error frame: {error}");
+                }
+            }
+        }
+    }
+}
+
 fn serve_volume(letter: char) {
     let pipe_name = format!("\\\\.\\pipe\\NexMft-{letter}");
     loop {
@@ -185,7 +282,7 @@ fn serve_one_client(pipe_name: &str, letter: char) -> Result<(), String> {
     wait_for_client(&pipe)?;
     let request = read_request(letter);
     let mut writer = std::io::BufWriter::with_capacity(256 * 1024, pipe);
-    let stats = stream_volume(letter, request, &mut writer)?;
+    let stats = stream_volume(letter, request, false, &mut writer)?;
     writer.flush().map_err(|e| format!("flush: {e}"))?;
     debug_log(&format!(
         "[mft] {letter}: mode={} records={} skipped={} bytes={} elapsed_ms={}",
@@ -278,9 +375,12 @@ struct StreamStats {
     elapsed_ms: u128,
 }
 
+/// `strict_delta`: refuse a stale delta request instead of answering with a
+/// full snapshot (the command channel reports it as a journal-invalid error).
 fn stream_volume(
     letter: char,
     request: Option<Request>,
+    strict_delta: bool,
     writer: &mut impl Write,
 ) -> Result<StreamStats, String> {
     let started = Instant::now();
@@ -312,23 +412,18 @@ fn stream_volume(
                 && request.start_usn <= journal.next_usn
         });
 
-        let mut header = [0u8; HEADER_LEN];
-        header[0..4].copy_from_slice(HEADER_MAGIC);
-        header[4..6].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-        header[6] = letter as u8;
-        header[7] = if delta_request.is_some() {
-            DELTA_MODE
-        } else {
-            FULL_MODE
-        };
-        header[8..16].copy_from_slice(&journal.usn_journal_id.to_le_bytes());
-        header[16..24].copy_from_slice(
-            &delta_request
-                .map(|request| request.start_usn)
-                .unwrap_or(0)
-                .to_le_bytes(),
+        if strict_delta && request.is_some() && delta_request.is_none() {
+            return Err(format!(
+                "{JOURNAL_INVALID_PREFIX}saved position does not match the volume journal"
+            ));
+        }
+        let header = mft_protocol::encode_header(
+            letter,
+            delta_request.is_some(),
+            journal.usn_journal_id,
+            delta_request.map(|request| request.start_usn).unwrap_or(0),
+            journal.next_usn,
         );
-        header[24..32].copy_from_slice(&journal.next_usn.to_le_bytes());
         writer.write_all(&header).map_err(|e| format!("write header: {e}"))?;
 
         let mut stats = StreamStats {
@@ -651,38 +746,23 @@ fn write_record(
     path: Option<&str>,
     stats: &mut StreamStats,
 ) -> Result<(), String> {
-    let name_bytes = name.as_bytes();
-    let path_bytes = path.unwrap_or("").as_bytes();
-    if name_bytes.len() > u16::MAX as usize || path_bytes.len() > u16::MAX as usize {
+    let path = path.unwrap_or("");
+    if name.len() > u16::MAX as usize || path.len() > u16::MAX as usize {
         stats.skipped += 1;
         return Ok(());
     }
-    let mut prefix = [0u8; RECORD_PREFIX_LEN];
-    prefix[0..8].copy_from_slice(&frn.to_le_bytes());
-    prefix[8..16].copy_from_slice(&parent.to_le_bytes());
-    prefix[16..20].copy_from_slice(&attributes.to_le_bytes());
-    prefix[20..28].copy_from_slice(&timestamp.to_le_bytes());
-    prefix[28..32].copy_from_slice(&reason.to_le_bytes());
-    prefix[32..34].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-    prefix[34..36].copy_from_slice(&(path_bytes.len() as u16).to_le_bytes());
-    writer
-        .write_all(&prefix)
-        .and_then(|_| writer.write_all(name_bytes))
-        .and_then(|_| writer.write_all(path_bytes))
-        .map_err(|e| format!("write record: {e}"))?;
+    let written = mft_protocol::write_record(
+        writer, frn, parent, attributes, timestamp, reason, name, path,
+    )
+    .map_err(|e| format!("write record: {e}"))?;
     stats.records += 1;
-    stats.bytes += (RECORD_PREFIX_LEN + name_bytes.len() + path_bytes.len()) as u64;
+    stats.bytes += written as u64;
     Ok(())
 }
 
 fn write_trailer(writer: &mut impl Write, next_usn: i64, stats: &mut StreamStats) -> Result<(), String> {
-    let mut prefix = [0u8; RECORD_PREFIX_LEN];
-    prefix[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
-    writer
-        .write_all(&prefix)
-        .and_then(|_| writer.write_all(&next_usn.to_le_bytes()))
-        .map_err(|e| format!("write trailer: {e}"))?;
-    stats.bytes += (RECORD_PREFIX_LEN + 8) as u64;
+    stats.bytes += mft_protocol::write_trailer(writer, next_usn)
+        .map_err(|e| format!("write trailer: {e}"))? as u64;
     Ok(())
 }
 

@@ -1136,6 +1136,18 @@ fn write_user_template_toml(cfg: &Config, path: &Path) -> Result<(), ConfigError
     Ok(())
 }
 
+/// True when a config change alters what discovery or the watchers read, so
+/// providers must be rebuilt and the index refreshed. Query-time limits such
+/// as `index_max_items_per_query_seed` are deliberately excluded.
+pub fn discovery_settings_changed(previous: &Config, next: &Config) -> bool {
+    previous.discovery_roots != next.discovery_roots
+        || previous.discovery_exclude_roots != next.discovery_exclude_roots
+        || previous.show_files != next.show_files
+        || previous.show_folders != next.show_folders
+        || previous.discovery_max_depth != next.discovery_max_depth
+        || previous.file_discovery_backend != next.file_discovery_backend
+}
+
 pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.max_results < 5 || cfg.max_results > 100 {
         return Err(format!(
@@ -1931,4 +1943,34 @@ fn rewrite_managed_paths_to_current_app_dir(cfg: &mut Config) -> bool {
 fn rebase_managed_path(path: &Path, from_root: &Path, to_root: &Path) -> Option<PathBuf> {
     let relative = path.strip_prefix(from_root).ok()?;
     Some(to_root.join(relative))
+}
+
+#[cfg(test)]
+mod discovery_settings_changed_tests {
+    use super::*;
+
+    #[test]
+    fn seed_limit_alone_is_not_a_discovery_change() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.index_max_items_per_query_seed = previous.index_max_items_per_query_seed + 500;
+        next.max_results = previous.max_results + 1;
+        assert!(!discovery_settings_changed(&previous, &next));
+    }
+
+    #[test]
+    fn discovery_inputs_are_discovery_changes() {
+        let previous = Config::default();
+        let mut next = previous.clone();
+        next.show_files = !previous.show_files;
+        assert!(discovery_settings_changed(&previous, &next));
+
+        let mut next = previous.clone();
+        next.discovery_exclude_roots.push(PathBuf::from("C:\\skip"));
+        assert!(discovery_settings_changed(&previous, &next));
+
+        let mut next = previous.clone();
+        next.discovery_max_depth += 1;
+        assert!(discovery_settings_changed(&previous, &next));
+    }
 }

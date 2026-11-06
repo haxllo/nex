@@ -21,6 +21,9 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 mod mft;
+// Wire format shared with the indexer; the helper cannot depend on the core crate.
+#[path = "../../core/src/mft_protocol.rs"]
+mod mft_protocol;
 
 // ---------------------------------------------------------------------------
 // Static state shared with hook proc
@@ -1334,6 +1337,9 @@ fn main() {
     // MFT snapshot servers for fixed NTFS volumes: the indexer reads them to
     // avoid cold directory walks. No-op when no volume qualifies.
     mft::spawn_snapshot_servers();
+    // Persistent command channel to the indexer; legacy pipes above stay up
+    // for indexers that predate it.
+    mft::spawn_command_client(watch_pid);
 
     debug_log(&format!("creating named pipe: {pipe_path}"));
 

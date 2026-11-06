@@ -503,19 +503,25 @@ fn discover_filesystem_walk_into<'a, 'b>(
         on_item_discovered,
     };
 
-    for root in roots {
+    // One snapshot per NTFS volume serves every root on it.
+    #[cfg(target_os = "windows")]
+    let mft_handled = if mft_backend_enabled() {
+        try_mft_volumes(
+            roots,
+            &exclusion_policy,
+            show_files,
+            show_folders,
+            max_depth,
+            &mut sink,
+            &mut skipped_due_exclusion,
+        )
+    } else {
+        vec![false; roots.len()]
+    };
+
+    for (index, root) in roots.iter().enumerate() {
         #[cfg(target_os = "windows")]
-        if mft_backend_enabled()
-            && try_mft_root(
-                root,
-                &exclusion_policy,
-                show_files,
-                show_folders,
-                max_depth,
-                &mut sink,
-                &mut skipped_due_exclusion,
-            )
-        {
+        if mft_handled[index] {
             continue;
         }
         if !root.exists() {
@@ -642,13 +648,62 @@ fn mft_backend_enabled() -> bool {
     }
 }
 
-/// Try one NTFS volume snapshot for a root. Returns true when the snapshot was
-/// available and the root was handled (even with zero matches), so the caller
-/// must not walk a volume that was fully enumerated.
+/// Take one snapshot per NTFS volume for the roots that live on it. The
+/// returned flags mark roots that were fully enumerated, so the caller must not
+/// walk them; unmarked roots (non-NTFS, helper unavailable) fall back to walking.
+#[cfg(target_os = "windows")]
+fn try_mft_volumes(
+    roots: &[PathBuf],
+    exclusion_policy: &DiscoveryExclusionPolicy,
+    show_files: bool,
+    show_folders: bool,
+    max_depth: usize,
+    sink: &mut WalkSink<'_, '_>,
+    skipped_due_exclusion: &mut usize,
+) -> Vec<bool> {
+    use std::collections::BTreeMap;
+
+    let mut handled = vec![false; roots.len()];
+    let mut by_volume: BTreeMap<char, Vec<usize>> = BTreeMap::new();
+    for (index, root) in roots.iter().enumerate() {
+        let Some(letter) = crate::mft_discovery::root_volume_letter(root) else {
+            continue;
+        };
+        if !crate::mft_discovery::is_fixed_volume(letter)
+            || !crate::mft_discovery::is_ntfs_volume(letter)
+        {
+            continue;
+        }
+        by_volume.entry(letter).or_default().push(index);
+    }
+    for (letter, indexes) in by_volume {
+        let volume_roots: Vec<&Path> = indexes.iter().map(|&i| roots[i].as_path()).collect();
+        if try_mft_volume(
+            letter,
+            &volume_roots,
+            exclusion_policy,
+            show_files,
+            show_folders,
+            max_depth,
+            sink,
+            skipped_due_exclusion,
+        ) {
+            for index in indexes {
+                handled[index] = true;
+            }
+        }
+    }
+    handled
+}
+
+/// Stream one full NTFS volume snapshot and emit every entry that belongs to
+/// at least one of `roots`. Returns true when the snapshot was available (even
+/// with zero matches).
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
-fn try_mft_root(
-    root: &Path,
+fn try_mft_volume(
+    letter: char,
+    roots: &[&Path],
     exclusion_policy: &DiscoveryExclusionPolicy,
     show_files: bool,
     show_folders: bool,
@@ -659,18 +714,10 @@ fn try_mft_root(
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
-    let Some(letter) = crate::mft_discovery::root_volume_letter(root) else {
-        return false;
-    };
-    if !crate::mft_discovery::is_fixed_volume(letter)
-        || !crate::mft_discovery::is_ntfs_volume(letter)
-    {
-        return false;
-    }
-    // The helper starts asynchronously with the UI; give the first root time
+    // The helper starts asynchronously with the UI; give the first volume time
     // to see its pipe, then keep later attempts short. When the helper is
     // absent (portable run, no scheduled task), skip MFT for a while so the
-    // walk fallback is not delayed on every root.
+    // walk fallback is not delayed on every volume.
     static FIRST_ATTEMPT: AtomicBool = AtomicBool::new(true);
     static BACKOFF_UNTIL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     if let Ok(guard) = BACKOFF_UNTIL.lock() {
@@ -685,51 +732,40 @@ fn try_mft_root(
     };
 
     let started = Instant::now();
-    // This slice always asks for a full snapshot; the delta path lands next.
-    crate::mft_discovery::write_full_request(letter);
-
-    let root_text = root.to_string_lossy().to_ascii_lowercase();
-    let root_ends_separator = root_text.ends_with('\\') || root_text.ends_with('/');
-    let root_depth = root.components().count();
+    let matchers: Vec<MftRootMatcher<'_>> = roots.iter().map(|root| MftRootMatcher::new(root)).collect();
     let mut matched = 0usize;
     let mut kept = 0usize;
-    sink.root_added = 0;
 
-    let result = crate::mft_discovery::read_snapshot_into(letter, timeout_ms, |record| {
-        let Some(path) = record.path.as_deref() else {
-            return Ok(());
-        };
-        let lower = path.to_ascii_lowercase();
-        if lower == root_text || !lower.starts_with(&root_text) {
-            return Ok(());
-        }
-        if !root_ends_separator {
-            match lower.as_bytes().get(root_text.len()) {
-                Some(b'\\') | Some(b'/') => {}
-                _ => return Ok(()),
+    let result = crate::mft_discovery::stream_snapshot_into(
+        letter,
+        crate::mft_discovery::SnapshotRequest::Full,
+        timeout_ms,
+        |record| {
+            let Some(path) = record.path.as_deref() else {
+                return Ok(());
+            };
+            let is_dir = record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            match classify_mft_entry(path, is_dir, &matchers, max_depth, exclusion_policy) {
+                MftEntryVerdict::OutsideRoots => {}
+                MftEntryVerdict::TooDeep => matched += 1,
+                MftEntryVerdict::Excluded => {
+                    matched += 1;
+                    *skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
+                }
+                MftEntryVerdict::Keep => {
+                    matched += 1;
+                    if is_dir && show_folders {
+                        sink.push("folder", Path::new(path));
+                        kept += 1;
+                    } else if !is_dir && show_files {
+                        sink.push("file", Path::new(path));
+                        kept += 1;
+                    }
+                }
             }
-        }
-        matched += 1;
-        let path_buf = std::path::PathBuf::from(path);
-        let is_dir = record.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-        if max_depth != 0 && path_buf.components().count().saturating_sub(root_depth) > max_depth {
-            return Ok(());
-        }
-        if exclusion_policy.should_exclude_entry_under_root(&path_buf, root, is_dir) {
-            *skipped_due_exclusion = skipped_due_exclusion.saturating_add(1);
-            return Ok(());
-        }
-        if is_dir {
-            if show_folders {
-                sink.push("folder", &path_buf);
-                kept += 1;
-            }
-        } else if show_files {
-            sink.push("file", &path_buf);
-            kept += 1;
-        }
-        Ok(())
-    });
+            Ok(())
+        },
+    );
 
     let meta = match result {
         Ok(meta) => {
@@ -743,8 +779,8 @@ fn try_mft_root(
                 *guard = Some(Instant::now() + std::time::Duration::from_secs(60));
             }
             crate::logging::info(&format!(
-                "[nex] discovery_mft root={} unavailable: {error}",
-                root.display()
+                "[nex] discovery_mft volume={letter} roots={} unavailable: {error}",
+                roots.len()
             ));
             return false;
         }
@@ -757,8 +793,8 @@ fn try_mft_root(
     }
 
     crate::logging::info(&format!(
-        "[nex] discovery_mft root={} mode={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
-        root.display(),
+        "[nex] discovery_mft volume={letter} roots={} mode={} records={} matched={} kept={} depth={} elapsed_ms={} journal={} next_usn={}",
+        roots.len(),
         if meta.delta { "delta" } else { "full" },
         meta.records,
         matched,
@@ -770,6 +806,180 @@ fn try_mft_root(
     ));
     true
 }
+
+/// A configured root prepared once per volume pass for matching snapshot paths.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct MftRootMatcher<'a> {
+    root: &'a Path,
+    lower: String,
+    ends_separator: bool,
+    depth: usize,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl<'a> MftRootMatcher<'a> {
+    fn new(root: &'a Path) -> Self {
+        let lower = root.to_string_lossy().to_ascii_lowercase();
+        Self {
+            root,
+            ends_separator: lower.ends_with('\\') || lower.ends_with('/'),
+            lower,
+            depth: root.components().count(),
+        }
+    }
+
+    /// Strictly below the root: the root itself and sibling prefixes
+    /// (`C:\Users\me2` vs `C:\Users\me`) do not match.
+    fn contains(&self, lower_path: &str) -> bool {
+        if lower_path == self.lower || !lower_path.starts_with(&self.lower) {
+            return false;
+        }
+        self.ends_separator
+            || matches!(
+                lower_path.as_bytes().get(self.lower.len()),
+                Some(b'\\') | Some(b'/')
+            )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum MftEntryVerdict {
+    OutsideRoots,
+    TooDeep,
+    Excluded,
+    Keep,
+}
+
+/// Decide one snapshot entry against every root on its volume. An entry is
+/// kept once when any containing root accepts it (depth and exclusions are
+/// per root), so overlapping roots never duplicate items and the result equals
+/// the union of the per-root passes.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn classify_mft_entry(
+    path: &str,
+    is_dir: bool,
+    roots: &[MftRootMatcher<'_>],
+    max_depth: usize,
+    policy: &DiscoveryExclusionPolicy,
+) -> MftEntryVerdict {
+    let lower = path.to_ascii_lowercase();
+    let path_buf = PathBuf::from(path);
+    let path_depth = path_buf.components().count();
+    let mut contained = false;
+    let mut excluded = false;
+    for matcher in roots {
+        if !matcher.contains(&lower) {
+            continue;
+        }
+        contained = true;
+        if max_depth != 0 && path_depth.saturating_sub(matcher.depth) > max_depth {
+            continue;
+        }
+        if policy.should_exclude_entry_under_root(&path_buf, matcher.root, is_dir) {
+            excluded = true;
+            continue;
+        }
+        return MftEntryVerdict::Keep;
+    }
+    match (contained, excluded) {
+        (false, _) => MftEntryVerdict::OutsideRoots,
+        (true, true) => MftEntryVerdict::Excluded,
+        (true, false) => MftEntryVerdict::TooDeep,
+    }
+}
+
+const HELPER_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+const HELPER_WAIT_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const HELPER_WAIT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(16);
+
+/// Next pause while waiting for the elevated helper to come up: 2 s doubling to
+/// a 16 s cap, clipped to the remaining budget. `None` once the budget is spent.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn helper_wait_delay(
+    attempt: u32,
+    waited: std::time::Duration,
+    budget: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let remaining = budget.checked_sub(waited).filter(|left| !left.is_zero())?;
+    let delay = HELPER_WAIT_FIRST_DELAY
+        .saturating_mul(1u32.checked_shl(attempt).unwrap_or(u32::MAX))
+        .min(HELPER_WAIT_MAX_DELAY);
+    Some(delay.min(remaining))
+}
+
+#[cfg(target_os = "windows")]
+static HELPER_WAIT_EXHAUSTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Warm start: when a saved journal position exists but the elevated helper has
+/// not started yet (late at login), wait for it with backoff so the cycle can
+/// run the USN delta instead of falling back to a full walk. The existing
+/// index keeps serving meanwhile. Call this *before* the cycle takes the
+/// service lock. After one expired wait later calls only probe once, so a
+/// machine without a helper converges through the usual fallback.
+#[cfg(target_os = "windows")]
+pub fn defer_until_helper_ready() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    if !mft_backend_enabled() {
+        return;
+    }
+    // Listen for the helper's command channel before anything waits on it.
+    crate::mft_channel::ensure_started();
+    let letters: Vec<char> = ('A'..='Z')
+        .filter(|&letter| crate::mft_discovery::read_processed_state(letter).is_some())
+        .collect();
+    if letters.is_empty() {
+        return;
+    }
+    let budget = if HELPER_WAIT_EXHAUSTED.load(Ordering::Relaxed) {
+        Duration::ZERO
+    } else {
+        HELPER_WAIT_BUDGET
+    };
+    let started = Instant::now();
+    let mut attempt = 0u32;
+    loop {
+        if crate::mft_discovery::helper_is_up(&letters) {
+            HELPER_WAIT_EXHAUSTED.store(false, Ordering::Relaxed);
+            if attempt > 0 {
+                crate::logging::info(&format!(
+                    "[nex] discovery_delta_defer helper_ready attempts={attempt} waited_ms={}",
+                    started.elapsed().as_millis()
+                ));
+            }
+            return;
+        }
+        match helper_wait_delay(attempt, started.elapsed(), budget) {
+            Some(delay) => {
+                if attempt == 0 {
+                    crate::logging::info(&format!(
+                        "[nex] discovery_delta_defer helper_not_ready volumes={}; retrying for up to {}s",
+                        letters.len(),
+                        budget.as_secs()
+                    ));
+                }
+                std::thread::sleep(delay);
+                attempt += 1;
+            }
+            None => {
+                if !budget.is_zero() {
+                    HELPER_WAIT_EXHAUSTED.store(true, Ordering::Relaxed);
+                    crate::logging::info(&format!(
+                        "[nex] discovery_delta_defer gave_up waited_ms={}; falling back",
+                        started.elapsed().as_millis()
+                    ));
+                }
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn defer_until_helper_ready() {}
 
 const FILE_RENAME_OLD_NAME: u32 = 0x0000_0001;
 const FILE_RENAME_NEW_NAME: u32 = 0x0000_0002;
@@ -958,16 +1168,27 @@ fn mft_incremental(
         let Some((journal_id, start_usn)) = saved else {
             continue;
         };
-        mft_discovery::write_delta_request(letter, journal_id, start_usn);
-        let snapshot = match mft_discovery::fetch_snapshot(letter, timeout_ms) {
+        let snapshot = match mft_discovery::fetch_delta(letter, journal_id, start_usn, timeout_ms) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                let (reason, message) = match &error {
+                    mft_discovery::FetchError::HelperNotReady(_) => (
+                        "helper_not_ready",
+                        "MFT helper not ready; running a full pass",
+                    ),
+                    mft_discovery::FetchError::JournalInvalid(_) => (
+                        "journal_invalid",
+                        "MFT journal invalid; running a full pass",
+                    ),
+                    mft_discovery::FetchError::Failed(_) => (
+                        "stream_failed",
+                        "MFT delta stream failed; running a full pass",
+                    ),
+                };
                 crate::logging::info(&format!(
-                    "[nex] discovery_delta volume={letter} skip=pipe_unavailable: {error}"
+                    "[nex] discovery_delta volume={letter} skip={reason}: {error}"
                 ));
-                return Some(Err(ProviderError::new(
-                    "MFT delta pipe unavailable; running a full pass",
-                )));
+                return Some(Err(ProviderError::new(message)));
             }
         };
         if !snapshot.delta {
@@ -2561,6 +2782,131 @@ mod tests {
         assert_eq!(merge_pending_state(Some((7, 900)), 7, 500), (7, 500));
         // A recreated journal invalidates the older position.
         assert_eq!(merge_pending_state(Some((7, 500)), 8, 100), (8, 100));
+    }
+
+    fn matchers<'a>(roots: &'a [PathBuf]) -> Vec<MftRootMatcher<'a>> {
+        roots.iter().map(|root| MftRootMatcher::new(root)).collect()
+    }
+
+    /// One snapshot filtered against all roots must equal the union of
+    /// filtering it once per root, with overlapping roots emitting each entry once.
+    #[test]
+    fn volume_snapshot_filtering_matches_per_root_union() {
+        let entries: Vec<(&str, bool)> = vec![
+            ("/v/users/me/doc.txt", false),
+            ("/v/users/me/projects", true),
+            ("/v/users/me/projects/app", true),
+            ("/v/users/me/projects/app/main.rs", false),
+            ("/v/users/me/projects/app/build", true),
+            ("/v/users/me/projects/app/build/out.o", false),
+            ("/v/users/me/projects/app/a/b/c/deep.txt", false),
+            ("/v/users/me2/other.txt", false),
+            ("/v/users/me", true),
+            ("/v/games/save.dat", false),
+            ("/v/data/notes.md", false),
+            ("/v/data/windows", true),
+        ];
+        let roots = vec![
+            PathBuf::from("/v/users/me"),
+            PathBuf::from("/v/users/me/projects"),
+            PathBuf::from("/v/data"),
+        ];
+        let policy = DiscoveryExclusionPolicy::new(&[PathBuf::from("/v/users/me/doc.txt")]);
+
+        for max_depth in [0usize, 2, 3] {
+            let mut per_root: std::collections::BTreeSet<&str> = Default::default();
+            for root in &roots {
+                let single = [root.clone()];
+                let one = matchers(&single);
+                for (path, is_dir) in &entries {
+                    if classify_mft_entry(path, *is_dir, &one, max_depth, &policy)
+                        == MftEntryVerdict::Keep
+                    {
+                        per_root.insert(path);
+                    }
+                }
+            }
+
+            let all = matchers(&roots);
+            let mut single_pass = Vec::new();
+            for (path, is_dir) in &entries {
+                if classify_mft_entry(path, *is_dir, &all, max_depth, &policy)
+                    == MftEntryVerdict::Keep
+                {
+                    single_pass.push(*path);
+                }
+            }
+            let unique: std::collections::BTreeSet<&str> = single_pass.iter().copied().collect();
+            assert_eq!(single_pass.len(), unique.len(), "depth {max_depth}: no duplicates");
+            assert_eq!(unique, per_root, "depth {max_depth}");
+        }
+    }
+
+    #[test]
+    fn nested_roots_keep_entries_each_root_would_drop() {
+        let roots = vec![
+            PathBuf::from("/v/users/me"),
+            PathBuf::from("/v/users/me/projects"),
+        ];
+        let all = matchers(&roots);
+        let policy = DiscoveryExclusionPolicy::new(&[]);
+        // Depth 1 from `me` excludes the grandchild, but from `projects` it is depth 1.
+        assert_eq!(
+            classify_mft_entry("/v/users/me/projects/app", true, &all, 1, &policy),
+            MftEntryVerdict::Keep
+        );
+        assert_eq!(
+            classify_mft_entry("/v/users/me/other/deep/file.txt", false, &all, 1, &policy),
+            MftEntryVerdict::TooDeep
+        );
+        assert_eq!(
+            classify_mft_entry("/v/users/me2/file.txt", false, &all, 0, &policy),
+            MftEntryVerdict::OutsideRoots
+        );
+        assert_eq!(
+            classify_mft_entry("/v/users/me/projects", true, &all, 0, &policy),
+            MftEntryVerdict::Keep,
+            "a nested root is itself an entry of the outer root"
+        );
+        assert_eq!(
+            classify_mft_entry("/v/users/me/projects/app/node_modules", true, &all, 0, &policy),
+            MftEntryVerdict::Excluded
+        );
+    }
+
+    #[test]
+    fn volume_root_matches_without_extra_separator() {
+        let roots = vec![PathBuf::from("/")];
+        let all = matchers(&roots);
+        let policy = DiscoveryExclusionPolicy::new(&[]);
+        assert_eq!(
+            classify_mft_entry("/pictures", true, &all, 0, &policy),
+            MftEntryVerdict::Keep
+        );
+    }
+
+    #[test]
+    fn helper_wait_backs_off_then_stops_at_budget() {
+        use std::time::Duration;
+        let budget = Duration::from_secs(90);
+        let mut waited = Duration::ZERO;
+        let mut delays = Vec::new();
+        let mut attempt = 0;
+        while let Some(delay) = helper_wait_delay(attempt, waited, budget) {
+            delays.push(delay.as_secs());
+            waited += delay;
+            attempt += 1;
+        }
+        assert_eq!(&delays[..5], &[2, 4, 8, 16, 16]);
+        assert_eq!(waited, budget, "waits exactly the budget, never past it");
+        assert_eq!(*delays.last().unwrap(), 90 - (2 + 4 + 8 + 16 * 4));
+        assert_eq!(helper_wait_delay(0, Duration::ZERO, Duration::ZERO), None);
+        assert_eq!(helper_wait_delay(3, budget, budget), None);
+        assert_eq!(
+            helper_wait_delay(200, Duration::ZERO, budget),
+            Some(Duration::from_secs(16)),
+            "huge attempt counts must not overflow"
+        );
     }
 
     #[test]

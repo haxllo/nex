@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -233,85 +233,7 @@ fn dispatch(
         // One round trip for the UI's poll: reports whether anything changed
         // and ships the item set only when it did. Mirrors the old
         // status+snapshot pair so the caller does not open two connections.
-        "sync" => {
-            // Reported on every sync, not only during the startup cycle:
-            // watcher resyncs and config reloads run full passes too.
-            let full_pass = service
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .full_pass_progress();
-            let mut response = (|| -> IpcResponse {
-                let known = request
-                    .params
-                    .get("generation")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let client_instance = request
-                    .params
-                    .get("instance")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let service = service.read().unwrap_or_else(|e| e.into_inner());
-                let indexing = indexing.load(Ordering::Acquire);
-                // While a rebuild runs the cache is mid-refresh: echo the caller's
-                // generation so it does not advance past an item set it never saw.
-                if indexing {
-                    return IpcResponse::ok(json!({
-                        "generation": known,
-                        "changed": false,
-                        "indexing": true,
-                    }));
-                }
-
-                match service.publish_outcome(known, client_instance) {
-                    crate::core_service::PublishOutcome::Unchanged {
-                        generation,
-                        instance,
-                    } => IpcResponse::ok(json!({
-                        "generation": generation,
-                        "instance": instance,
-                        "changed": false,
-                        "indexing": false,
-                    })),
-                    crate::core_service::PublishOutcome::Delta {
-                        generation,
-                        instance,
-                        upserts,
-                        deleted,
-                    } => IpcResponse::ok(json!({
-                        "generation": generation,
-                        "instance": instance,
-                        "changed": true,
-                        "indexing": false,
-                        "delta": {
-                            "upserts": items_to_values(&upserts),
-                            "deleted": deleted,
-                        },
-                    })),
-                    crate::core_service::PublishOutcome::Snapshot {
-                        generation,
-                        instance,
-                    } => match service.hot_snapshot_items() {
-                        Ok(items) => IpcResponse::ok(json!({
-                            "generation": generation,
-                            "instance": instance,
-                            "changed": true,
-                            "indexing": false,
-                            "items": items_to_values(&items),
-                        })),
-                        Err(error) => {
-                            IpcResponse::error(format!("snapshot failed: {error}"))
-                        }
-                    },
-                }
-            })();
-            if let (Some(progress), Some(Value::Object(result))) =
-                (full_pass, response.result.as_mut())
-            {
-                result.insert("full_pass".to_string(), progress.to_json());
-            }
-            response
-        }
+        "sync" => sync_long_poll(request, service, indexing),
         // Writes the UI must not perform itself: the indexer owns the store.
         "record_launch" => {
             let id = request.params.get("id").and_then(Value::as_str).unwrap_or("");
@@ -412,6 +334,184 @@ fn dispatch(
     }
 }
 
+/// One immediate `sync` answer (the pre-long-poll behavior).
+fn sync_once(
+    request: &IpcRequest,
+    service: &Arc<RwLock<CoreService>>,
+    indexing: &AtomicBool,
+) -> IpcResponse {
+        // Reported on every sync, not only during the startup cycle:
+        // watcher resyncs and config reloads run full passes too.
+        let full_pass = service
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .full_pass_progress();
+        let mut response = (|| -> IpcResponse {
+            let known = request
+                .params
+                .get("generation")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let client_instance = request
+                .params
+                .get("instance")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let service = service.read().unwrap_or_else(|e| e.into_inner());
+            let indexing = indexing.load(Ordering::Acquire);
+            // While a rebuild runs the cache is mid-refresh: echo the caller's
+            // generation so it does not advance past an item set it never saw.
+            if indexing {
+                return IpcResponse::ok(json!({
+                    "generation": known,
+                    "changed": false,
+                    "indexing": true,
+                }));
+            }
+
+            match service.publish_outcome(known, client_instance) {
+                crate::core_service::PublishOutcome::Unchanged {
+                    generation,
+                    instance,
+                } => IpcResponse::ok(json!({
+                    "generation": generation,
+                    "instance": instance,
+                    "changed": false,
+                    "indexing": false,
+                })),
+                crate::core_service::PublishOutcome::Delta {
+                    generation,
+                    instance,
+                    upserts,
+                    deleted,
+                } => IpcResponse::ok(json!({
+                    "generation": generation,
+                    "instance": instance,
+                    "changed": true,
+                    "indexing": false,
+                    "delta": {
+                        "upserts": items_to_values(&upserts),
+                        "deleted": deleted,
+                    },
+                })),
+                crate::core_service::PublishOutcome::Snapshot {
+                    generation,
+                    instance,
+                } => match service.hot_snapshot_items() {
+                    Ok(items) => IpcResponse::ok(json!({
+                        "generation": generation,
+                        "instance": instance,
+                        "changed": true,
+                        "indexing": false,
+                        "items": items_to_values(&items),
+                    })),
+                    Err(error) => {
+                        IpcResponse::error(format!("snapshot failed: {error}"))
+                    }
+                },
+            }
+        })();
+        if let (Some(progress), Some(Value::Object(result))) =
+            (full_pass, response.result.as_mut())
+        {
+            result.insert("full_pass".to_string(), progress.to_json());
+        }
+        response
+}
+
+/// Longest a `sync` may park on the server; the caller's read timeout must
+/// exceed it.
+pub const SYNC_MAX_WAIT: Duration = Duration::from_secs(30);
+
+struct SyncNotifier {
+    epoch: Mutex<u64>,
+    changed: Condvar,
+}
+
+static SYNC_NOTIFIER: SyncNotifier = SyncNotifier {
+    epoch: Mutex::new(0),
+    changed: Condvar::new(),
+};
+
+/// Wake parked `sync` long-polls: the changelog, the indexing flag or the
+/// full-pass state moved.
+pub fn notify_sync_waiters() {
+    let mut epoch = SYNC_NOTIFIER.epoch.lock().unwrap_or_else(|e| e.into_inner());
+    *epoch = epoch.wrapping_add(1);
+    drop(epoch);
+    SYNC_NOTIFIER.changed.notify_all();
+}
+
+fn sync_epoch() -> u64 {
+    *SYNC_NOTIFIER.epoch.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Block until the epoch differs from `seen` or `deadline` passes.
+fn wait_for_sync_epoch(seen: u64, deadline: Instant) {
+    let mut epoch = SYNC_NOTIFIER.epoch.lock().unwrap_or_else(|e| e.into_inner());
+    while *epoch == seen {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        epoch = SYNC_NOTIFIER
+            .changed
+            .wait_timeout(epoch, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+fn sync_state(response: &IpcResponse) -> (bool, bool) {
+    let result = response.result.as_ref();
+    let flag = |key: &str| {
+        result
+            .and_then(|r| r.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    (flag("indexing"), result.is_some_and(|r| r.get("full_pass").is_some()))
+}
+
+/// `sync` with an optional `wait_ms`: answers at once when the changelog
+/// moved, otherwise parks until it moves, the indexing/full-pass state flips,
+/// or the wait elapses. Each connection has its own thread, so a parked
+/// long-poll never blocks other requests. A caller that omits `wait_ms` gets
+/// the plain immediate answer.
+fn sync_long_poll(
+    request: &IpcRequest,
+    service: &Arc<RwLock<CoreService>>,
+    indexing: &AtomicBool,
+) -> IpcResponse {
+    let wait = Duration::from_millis(
+        request
+            .params
+            .get("wait_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    )
+    .min(SYNC_MAX_WAIT);
+    let deadline = Instant::now() + wait;
+    let mut first_state = None;
+    loop {
+        // Read the epoch before computing so a notification that lands
+        // mid-computation is not lost.
+        let seen = sync_epoch();
+        let response = sync_once(request, service, indexing);
+        let state = sync_state(&response);
+        let changed = response
+            .result
+            .as_ref()
+            .and_then(|r| r.get("changed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let first = *first_state.get_or_insert(state);
+        if !response.ok || changed || state != first || Instant::now() >= deadline {
+            return response;
+        }
+        wait_for_sync_epoch(seen, deadline);
+    }
+}
+
 fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Result<()> {
     let encoded = serde_json::to_string(response).unwrap_or_default();
     writeln!(stream, "{encoded}")?;
@@ -422,7 +522,7 @@ pub fn ipc_call(addr: &str, request: &IpcRequest) -> Result<IpcResponse, String>
     ipc_call_with_timeout(addr, request, Duration::from_secs(60))
 }
 
-fn ipc_call_with_timeout(
+pub fn ipc_call_with_timeout(
     addr: &str,
     request: &IpcRequest,
     read_timeout: Duration,
@@ -616,5 +716,72 @@ mod tests {
         let decoded: IpcRequest =
             serde_json::from_str(r#"{"version":999,"method":"ping"}"#).unwrap();
         assert_ne!(decoded.version, PROTOCOL_VERSION);
+    }
+
+    fn memory_service() -> Arc<RwLock<CoreService>> {
+        let db = crate::index_store::open_memory().unwrap();
+        Arc::new(RwLock::new(
+            CoreService::with_connection(crate::config::Config::default(), db).unwrap(),
+        ))
+    }
+
+    fn sync_request(known: &Value, wait_ms: u64) -> IpcRequest {
+        IpcRequest::new(
+            "sync",
+            json!({
+                "generation": known["generation"],
+                "instance": known["instance"],
+                "wait_ms": wait_ms,
+            }),
+        )
+    }
+
+    fn synced_state(service: &Arc<RwLock<CoreService>>, indexing: &AtomicBool) -> Value {
+        let first = sync_once(&IpcRequest::new("sync", json!({})), service, indexing);
+        first.result.expect("sync result")
+    }
+
+    #[test]
+    fn sync_without_wait_answers_immediately() {
+        let service = memory_service();
+        let indexing = AtomicBool::new(false);
+        let known = synced_state(&service, &indexing);
+        let started = Instant::now();
+        let response = sync_long_poll(&sync_request(&known, 0), &service, &indexing);
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["changed"], false);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sync_long_poll_parks_until_timeout_when_idle() {
+        let service = memory_service();
+        let indexing = AtomicBool::new(false);
+        let known = synced_state(&service, &indexing);
+        let started = Instant::now();
+        let response = sync_long_poll(&sync_request(&known, 300), &service, &indexing);
+        assert_eq!(response.result.unwrap()["changed"], false);
+        assert!(started.elapsed() >= Duration::from_millis(280));
+    }
+
+    #[test]
+    fn sync_long_poll_wakes_when_changelog_moves() {
+        let service = memory_service();
+        let indexing = AtomicBool::new(false);
+        let known = synced_state(&service, &indexing);
+        let writer = Arc::clone(&service);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let guard = writer.read().unwrap();
+            guard
+                .upsert_item(&SearchItem::new("a", "app", "Alpha", "C:\\alpha.exe"))
+                .unwrap();
+        });
+        let started = Instant::now();
+        let response = sync_long_poll(&sync_request(&known, 20_000), &service, &indexing);
+        handle.join().unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["changed"], true);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

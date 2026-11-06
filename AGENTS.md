@@ -80,7 +80,10 @@ High-IL pipe (`Access is denied`). Therefore:
 - pipes the UI only *reads* may be created by the helper (`nex-hotkey`,
   `NexHelperLog`);
 - the command pipe the UI *writes* must be created by the UI (`NexHelperCmd`),
-  with the helper as the read-only client.
+  with the helper as the read-only client;
+- the MFT command channel (`NexMftCmd\<ui pid>`) is created by the indexer, which
+  writes requests; the helper connects as a client and streams framed snapshots
+  back (`apps/core/src/mft_protocol.rs`, shared with the helper via `#[path]`).
 Do not invert that ownership.
 
 **Low-level hooks are UIPI-gated too:** `WH_KEYBOARD_LL`/`WH_MOUSE_LL` in the

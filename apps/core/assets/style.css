@@ -586,46 +586,6 @@ html.bare #footer {
   background: var(--pressed);
   opacity: 1;
 }
-/* Enter hint on the keyboard selection. Pointer users already see the
-   path hint and pin control there, so it yields on hover. */
-.row.selected::after {
-  content: "\21B5";
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  margin-top: -9px;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  min-width: 20px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: var(--r-xs);
-  background: var(--kbd-bg);
-  box-shadow: inset 0 0 0 1px var(--sel-border);
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1;
-  pointer-events: none;
-}
-.row.selected:hover::after,
-.grid-view .row.selected::after,
-#list.bento-view .row.selected::after {
-  display: none;
-}
-/* A visible pinned marker owns the trailing slot: the chip sits left of it. */
-.row.selected:has(.pin-icon.pinned, .add-icon.pinned)::after {
-  right: 40px;
-}
-.row:not(:has(.add-icon, .pin-icon)) .text {
-  padding-right: 28px;
-}
-.row.selected:has(.pin-icon.pinned, .add-icon.pinned) .text {
-  padding-right: 28px;
-}
-.grid-view .row:not(:has(.add-icon, .pin-icon)) .text {
-  padding-right: 0;
-}
 /* Blur-behind is glass-only: over opaque panels it only tints flat
    fill, while the filter layer grayscales hovered/selected text. */
 html[data-native-material="acrylic"] .row:hover::before,
@@ -1048,8 +1008,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 /* ── footer ───────────────────────────────────────────────── */
-/* Visible in every search-mode state — the expanded panel keeps its
-   keyboard hints even when the list is empty. */
+/* Visible in every search-mode state, even when the list is empty. */
 #footer {
   position: relative;
   display: flex;
@@ -1060,48 +1019,6 @@ html[data-theme="light"] img.icon.glyph {
   border-top: 1px solid var(--divider);
   font-size: 11.5px;
   color: var(--text-faint);
-}
-/* Keyboard hints, right-aligned beside the actions trigger. They fade
-   while the action list is expanded over them. */
-#footer-hints {
-  position: absolute;
-  right: calc(var(--pad-x) + 36px);
-  top: 50%;
-  margin-top: -10px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  height: 20px;
-  white-space: nowrap;
-  pointer-events: none;
-  transition: opacity var(--dur) var(--ease);
-}
-#footer-hints .hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-#footer-hints kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border-radius: 5px;
-  background: var(--kbd-bg);
-  box-shadow: inset 0 0 0 1px var(--border), inset 0 -1px 0 var(--border);
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 10.5px;
-  font-weight: 500;
-  line-height: 1;
-}
-#footer-hints kbd + kbd {
-  margin-left: -3px;
-}
-#footer:has(#footer-actions.open) #footer-hints,
-#footer:has(#footer-actions:focus-within) #footer-hints {
-  opacity: 0;
 }
 /* Brand mark, footer left. It is a watermark, not a control: color comes
    from the active theme's text token, so light/dark/glass-light/glass-dark
@@ -1122,8 +1039,7 @@ html[data-theme="light"] img.icon.glyph {
 html.glass-native .footer-mark {
   opacity: 0.2;
 }
-/* Footer actions: a compact trigger that expands the icon list leftwards on
-   hover or keyboard focus. No dropup — the icons are the menu. */
+/* Footer actions remain visible beside the brand mark. */
 #footer-actions {
   position: absolute;
   right: var(--pad-x);
@@ -1138,15 +1054,6 @@ html.glass-native .footer-mark {
   display: flex;
   align-items: center;
   gap: 2px;
-  max-width: 0;
-  opacity: 0;
-  overflow: hidden;
-  transition: max-width var(--dur-slow) var(--ease), opacity var(--dur) var(--ease);
-}
-#footer-actions.open .footer-action-list,
-#footer-actions:focus-within .footer-action-list {
-  max-width: 96px;
-  opacity: 1;
 }
 .footer-icon-btn {
   display: inline-flex;

@@ -3308,7 +3308,6 @@
       if (state.media && typeof state.media === "object" && !Array.isArray(state.rows)) {
         mediaState = state.media;
         renderMedia();
-        syncFooterTabHint();
         return;
       }
 
@@ -3453,10 +3452,8 @@
         overlayVisible = state.overlayVisible;
       }
       if (showPush) {
-        // WebView stays warm across hides, so stale pin scroll survives —
-        // rules reset for every show.
+        // WebView stays warm across hides, so reset stale pin scroll on show.
         quickLaunchPins.scrollLeft = 0;
-        footerActions.classList.remove("open");
         requestAnimationFrame(() => { sizePinViewport(); updatePinNav(); });
       }
       if (typeof state.compactView === "boolean") {
@@ -3658,20 +3655,12 @@
   // renders the pushed state, otherwise the window appears blank.
   post("ready");
 
-  // ── footer actions (icon list expands on hover) ─────────────
+  // ── footer actions ─────────────────────────────────────────
   const footerActions = $("footer-actions");
   const FOOTER_LINKS = {
     github: "https://github.com/haxllo/nex",
     website: "https://nexapp.live",
   };
-
-  // Hover expansion is JS-managed: the WebView stays warm across hides and
-  // Chromium keeps the :hover of the hide moment (hover only re-computes on
-  // mousemove, which a hidden window never receives), so a CSS :hover rule
-  // re-shows the list expanded on every reopen without any pointer on it.
-  // Shows clear the class with the other warm-state resets.
-  footerActions.addEventListener("mouseenter", () => footerActions.classList.add("open"));
-  footerActions.addEventListener("mouseleave", () => footerActions.classList.remove("open"));
 
   footerActions.addEventListener("click", (event) => {
     const button = event.target.closest("[data-footer-action]");
@@ -4075,12 +4064,6 @@
 
   function kickMediaFrame() {
     if (mediaOpen && !mediaRaf) mediaRaf = requestAnimationFrame(mediaFrame);
-  }
-
-  // Tab opens Media first when a session is live, otherwise Chat.
-  const footerHintTab = $("footer-hint-tab");
-  function syncFooterTabHint() {
-    footerHintTab.textContent = mediaState && mediaState.active ? "Media" : "Chat";
   }
 
   function renderMedia() {

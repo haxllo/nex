@@ -11,7 +11,6 @@
   --radius: 8px;
   --row-radius: 8px;
   --pad-x: 16px;
-  /* Width of the detail pane; the body divider anchors to it. */
   --font: "InterVariable", "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   /* Shared scale: every surface draws from these so radii, motion and
@@ -23,81 +22,93 @@
   --r-xl: 12px;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --dur-fast: 100ms;
-  --dur: 160ms;
-  --dur-slow: 240ms;
-  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
-  --shadow-pop: 0 0 0 1px var(--border-strong), 0 12px 32px -8px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.18);
+  /* Short on purpose: state changes land inside one or two frames so the
+     launcher keeps up with the keyboard. */
+  --dur-fast: 80ms;
+  --dur: 140ms;
+  --dur-slow: 200ms;
+  --ring: 0 0 0 2px var(--focus);
+  --shadow-pop: 0 0 0 1px var(--border-strong), 0 16px 36px -12px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.24);
 
-  /* dark palette */
-  --bg: #1E1E1E;
-  --bg-opaque: #1E1E1E;
-  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
+  /* Graphite (dark): one neutral ramp, no hue. Depth comes from lightness
+     steps, emphasis from contrast; colour is reserved for meaning. */
+  --bg: #121212;
+  --bg-opaque: #121212;
+  --bg-raised: #1b1b1b;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.2);
   --panel-surface: var(--bg);
-  --panel-highlight: rgba(255, 255, 255, 0.12);
-  --panel-edge: rgba(255, 255, 255, 0.12);
-  --panel-glint: rgba(255, 255, 255, 0.12);
-  --panel-sheen: rgba(255, 255, 255, 0.1);
-  --panel-reflection: rgba(255, 255, 255, 0.045);
+  --panel-highlight: rgba(255, 255, 255, 0.1);
+  --panel-edge: rgba(255, 255, 255, 0.1);
+  --panel-glint: rgba(255, 255, 255, 0.06);
+  --panel-sheen: rgba(255, 255, 255, 0.08);
+  --panel-reflection: rgba(255, 255, 255, 0.03);
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --text: #f1f2f4;
-  --text-dim: #b6bac1;
-  --text-faint: #8b9099;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.13);
+  --text: #ededed;
+  --text-dim: #b0b0b0;
+  --text-faint: #888888;
   /* State layers: hover < selected < pressed, so the keyboard selection
      always out-ranks the pointer. */
-  --hover: rgba(255, 255, 255, 0.05);
+  --hover: rgba(255, 255, 255, 0.045);
   --sel: rgba(255, 255, 255, 0.085);
-  --sel-border: rgba(255, 255, 255, 0.06);
-  --pressed: rgba(255, 255, 255, 0.11);
+  --sel-border: rgba(255, 255, 255, 0.035);
+  --pressed: rgba(255, 255, 255, 0.12);
   --track: rgba(255, 255, 255, 0.12);
-  --accent: #6ea8fe;
+  /* Accent is the strongest neutral; --accent-fg is legible on it. */
+  --accent: #ededed;
+  --accent-fg: #121212;
+  --focus: rgba(255, 255, 255, 0.38);
   --divider: rgba(255, 255, 255, 0.07);
   --kbd-bg: rgba(255, 255, 255, 0.06);
   --kbd-pill-bg: transparent;
-  --kbd-cap-bg: rgba(255, 255, 255, 0.10);
+  --kbd-cap-bg: rgba(255, 255, 255, 0.08);
   --kbd-cap-border: rgba(0, 0, 0, 0.35);
   --icon-bg: rgba(255, 255, 255, 0.06);
-  --text-select: rgba(255, 255, 255, 0.28);
-  --lock: #6ea8fe;
-  --logout: #ffb454;
-  --sleep: #b07cff;
-  --restart: #4ade80;
-  --shutdown: #ff6b6b;
+  --text-select: rgba(255, 255, 255, 0.22);
+  --knob: #ffffff;
+  --live: #e5484d;
+  --lock: #8ab4f8;
+  --logout: #f2b66d;
+  --sleep: #b9a3f5;
+  --restart: #7dd3a0;
+  --shutdown: #f28b82;
 }
 
 html[data-theme="light"] {
-  --bg: #ffffff;
-  --bg-opaque: #ffffff;
-  --scrollbar-thumb: rgba(0, 0, 0, 0.28);
+  --bg: #fafafa;
+  --bg-opaque: #fafafa;
+  --bg-raised: #ffffff;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --panel-highlight: rgba(255, 255, 255, 0.65);
-  --panel-edge: rgba(0, 0, 0, 0.10);
+  --panel-edge: rgba(0, 0, 0, 0.09);
   --panel-glint: rgba(255, 255, 255, 0.25);
-  --border: rgba(0, 0, 0, 0.1);
-  --border-strong: rgba(0, 0, 0, 0.14);
-  --text: #18191c;
-  --text-dim: #4f545c;
-  --text-faint: #737983;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.12);
+  --text: #171717;
+  --text-dim: #525252;
+  --text-faint: #737373;
   --hover: rgba(0, 0, 0, 0.035);
   --sel: rgba(0, 0, 0, 0.06);
-  --sel-border: rgba(0, 0, 0, 0.05);
+  --sel-border: rgba(0, 0, 0, 0.04);
   --pressed: rgba(0, 0, 0, 0.09);
   --track: rgba(0, 0, 0, 0.1);
-  --accent: #2f6bff;
-  --divider: rgba(0, 0, 0, 0.07);
+  --accent: #171717;
+  --accent-fg: #fafafa;
+  --focus: rgba(0, 0, 0, 0.32);
+  --divider: rgba(0, 0, 0, 0.065);
   --kbd-bg: rgba(0, 0, 0, 0.045);
   --kbd-pill-bg: transparent;
-  --kbd-cap-bg: #FFFFFF;
-  --kbd-cap-border: rgba(0, 0, 0, 0.15);
-  --icon-bg: rgba(0, 0, 0, 0.05);
-  --text-select: rgba(0, 0, 0, 0.18);
-  --lock: #2f6bff;
-  --logout: #d97706;
-  --sleep: #8b5cf6;
-  --restart: #16a34a;
-  --shutdown: #dc2626;
-  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.08), 0 12px 32px -8px rgba(15, 23, 42, 0.22), 0 2px 6px rgba(15, 23, 42, 0.06);
+  --kbd-cap-bg: #ffffff;
+  --kbd-cap-border: rgba(0, 0, 0, 0.12);
+  --icon-bg: rgba(0, 0, 0, 0.045);
+  --text-select: rgba(0, 0, 0, 0.14);
+  --lock: #2f63d6;
+  --logout: #b26a00;
+  --sleep: #7650d8;
+  --restart: #1f8a4c;
+  --shutdown: #d23b3b;
+  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.07), 0 16px 36px -12px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.05);
 }
 
 html[data-native-material="acrylic"] {
@@ -197,7 +208,7 @@ body {
   height: 20px;
   fill: none;
   stroke: var(--text-faint);
-  stroke-width: 2;
+  stroke-width: 1.8;
   stroke-linecap: round;
   transition: opacity var(--dur) var(--ease);
 }
@@ -430,14 +441,17 @@ html.bare #footer {
   transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .tab:hover {
-  color: var(--text-dim);
+  color: var(--text);
   background: var(--hover);
 }
-/* Raised chip: reads as a control, not as another selected row. */
+.tab:active {
+  background: var(--pressed);
+}
+/* Filled chip without an outline: reads as a control, not as another
+   selected row, and stays quiet next to the list. */
 .tab.active {
   color: var(--text);
-  background: var(--kbd-bg);
-  box-shadow: inset 0 0 0 1px var(--border);
+  background: var(--sel);
 }
 .tab:focus-visible {
   outline: none;
@@ -489,7 +503,6 @@ html.bare #footer {
   max-height: 416px;
   overflow-y: auto;
   padding: 0 6px;
-  scroll-behavior: smooth;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
   transition: scrollbar-color 300ms ease;
@@ -545,7 +558,7 @@ html.bare #footer {
   position: relative;
   border: 1px solid transparent;
   transition: none;
-  animation: nexRowIn 150ms ease-out backwards;
+  animation: nexRowIn 110ms ease-out backwards;
 }
 .row::before {
   content: "";
@@ -567,6 +580,10 @@ html.bare #footer {
 .row.selected::before {
   background: var(--sel);
   box-shadow: inset 0 0 0 1px var(--sel-border);
+  opacity: 1;
+}
+.row:active::before {
+  background: var(--pressed);
   opacity: 1;
 }
 /* Enter hint on the keyboard selection. Pointer users already see the
@@ -669,7 +686,7 @@ html[data-native-material="acrylic"] .row.selected::before {
   }
 }
 .section {
-  animation: nexRowIn 150ms ease-out backwards;
+  animation: nexRowIn 110ms ease-out backwards;
 }
 /* Icon swaps are plain src assignments batched in one rAF — no
    opacity/scale restart, so cold icons fade in exactly once (never). */
@@ -938,7 +955,7 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 .row.quick-launch .pin-icon.pinned {
-  opacity: 0.7;
+  opacity: 0.45;
 }
 
 .row.quick-launch:hover .pin-icon.pinned {
@@ -959,11 +976,28 @@ html[data-theme="light"] img.icon.glyph {
 }
 
 .row .add-icon.pinned {
-  opacity: 0.7;
+  opacity: 0.45;
+}
+/* Pinned markers recede at rest; the active row shows them in full. */
+.row.selected :is(.add-icon, .pin-icon).pinned {
+  opacity: 1;
 }
 
 .row:hover .add-icon.pinned {
   opacity: 1;
+}
+.row:hover :is(.add-icon, .pin-icon) svg {
+  fill: var(--text-dim);
+}
+.row:hover :is(.add-icon, .pin-icon):not(.pinned) svg {
+  fill: none;
+  stroke: var(--text-dim);
+}
+.row :is(.add-icon, .pin-icon):hover svg {
+  stroke: var(--text);
+}
+.row :is(.add-icon, .pin-icon).pinned:hover svg {
+  fill: var(--text);
 }
 
 /* Grid mode: pin/add icons repositioned to absolute top-right */
@@ -983,9 +1017,10 @@ html[data-theme="light"] img.icon.glyph {
 /* Toast notification */
 /* section header */
 .section {
-  padding: 10px 12px 5px;
-  font-size: 11.5px;
-  font-weight: 500;
+  padding: 12px 12px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   color: var(--text-faint);
 }
 .section:first-child {
@@ -1052,9 +1087,9 @@ html[data-theme="light"] img.icon.glyph {
   min-width: 18px;
   height: 18px;
   padding: 0 4px;
-  border-radius: var(--r-xs);
+  border-radius: 5px;
   background: var(--kbd-bg);
-  box-shadow: inset 0 0 0 1px var(--sel-border);
+  box-shadow: inset 0 0 0 1px var(--border), inset 0 -1px 0 var(--border);
   color: var(--text-dim);
   font: inherit;
   font-size: 10.5px;
@@ -1079,7 +1114,7 @@ html[data-theme="light"] img.icon.glyph {
   width: 24px;
   height: 24px;
   color: var(--text);
-  opacity: 0.13;
+  opacity: 0.1;
   pointer-events: none;
 }
 /* Glass has no panel fill behind it, so the mark needs a touch more
@@ -1126,11 +1161,17 @@ html.glass-native .footer-mark {
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease);
 }
 .footer-icon-btn svg {
   width: 15px;
   height: 15px;
+}
+.footer-icon-btn:active,
+#power-btn-top:active,
+.media-controls button:active,
+.media-volume-inline button:active {
+  scale: 0.94;
 }
 .footer-icon-btn:hover,
 .footer-icon-btn:focus-visible {
@@ -1194,7 +1235,7 @@ html.compact-view #power-panel-top {
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease);
 }
 #power-btn-top:hover,
 #power-btn-top.open {
@@ -1397,8 +1438,8 @@ html.compact-view #power-panel-top {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  background: var(--knob);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.2), 0 1px 4px rgba(0, 0, 0, 0.4);
   transform: translate(-50%, -50%);
   opacity: 0;
   transition: opacity 120ms ease;
@@ -1430,7 +1471,7 @@ html.compact-view #power-panel-top {
 #media-live {
   padding: 1px 6px;
   border-radius: 4px;
-  background: #e5484d;
+  background: var(--live);
   color: #fff;
   font-size: 9.5px;
   font-weight: 700;
@@ -1472,7 +1513,7 @@ html.compact-view #power-panel-top {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease);
 }
 
 .media-controls button:hover {
@@ -1571,8 +1612,8 @@ html.compact-view #power-panel-top {
   margin-top: -4px;
   border: none;
   border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  background: var(--knob);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.2), 0 1px 4px rgba(0, 0, 0, 0.4);
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -1892,7 +1933,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-table th { color: var(--text-dim); font-weight: 600; }
 
 /* Delayed hover hints: label plus optional kbd shortcut chip. */
-.nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--bg-opaque) 96%, transparent); border: 0; box-shadow: var(--shadow-pop); color: var(--text); font-size: 11.5px; line-height: 1.3; pointer-events: none; animation: nexTipIn 120ms var(--ease-out); }
+.nex-tip { position: fixed; z-index: 10000; display: flex; align-items: center; gap: 6px; max-width: 300px; padding: 5px 8px; border-radius: var(--r-sm); background: var(--bg-raised); border: 0; box-shadow: var(--shadow-pop); color: var(--text); font-size: 11.5px; line-height: 1.3; pointer-events: none; animation: nexTipIn 120ms var(--ease-out); }
 @keyframes nexTipIn { from { opacity: 0; } }
 .nex-tip .kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--r-xs); background: var(--kbd-bg); border: 0; box-shadow: inset 0 0 0 1px var(--sel-border); font-size: 10px; font-weight: 500; line-height: 1; color: var(--text); }
 
@@ -1922,7 +1963,7 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 #chat-input::placeholder { color: var(--text-faint); }
 .chat-composer-tools { display: flex; flex: 0 0 auto; align-items: center; align-self: center; gap: 3px; }
 .chat-composer-footer { max-width: 680px; min-height: 16px; display: flex; align-items: center; gap: 12px; margin: 3px auto 0; }
-.chat-send-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: var(--r-md); background: var(--accent); color: #fff; cursor: pointer; transition: opacity var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease); }
+.chat-send-button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: var(--r-md); background: var(--accent); color: var(--accent-fg); cursor: pointer; transition: opacity var(--dur-fast) var(--ease), scale var(--dur-fast) var(--ease); }
 .chat-send-button:disabled { opacity: 1; background: var(--kbd-bg); color: var(--text-faint); cursor: default; }
 .chat-send-button:not(:disabled):active { scale: 0.96; }
 .chat-send-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -2091,10 +2132,11 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   margin-top: 2px;
   padding: 12px 13px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 7%, var(--hover));
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--border);
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 
 .whats-new-tips .tips-heading {
@@ -2118,15 +2160,15 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
   border: none;
   border-radius: var(--r-md);
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: scale var(--dur-fast) var(--ease), filter var(--dur-fast) var(--ease);
+  transition: scale var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
 #whats-new-dismiss:hover {
-  filter: brightness(1.08);
+  opacity: 0.88;
 }
 
 #whats-new-dismiss:active {
@@ -2302,10 +2344,10 @@ html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blu
 /* ── context menu (right-click on rows) ──────────────────── */
 #context-menu {
   position: fixed;
-  min-width: 196px;
-  padding: 4px;
+  min-width: 200px;
+  padding: 5px;
   border-radius: var(--r-lg);
-  background: color-mix(in srgb, var(--bg-opaque) 94%, transparent);
+  background: var(--bg-raised);
   border: none;
   box-shadow: var(--shadow-pop);
   max-height: calc(100vh - 16px);
@@ -2332,7 +2374,7 @@ html[data-native-material="acrylic"] #context-menu {
 #context-menu button {
   display: block;
   width: 100%;
-  min-height: 28px;
+  min-height: 30px;
   padding: 0 10px;
   border: none;
   border-radius: var(--r-sm);
@@ -2351,7 +2393,7 @@ html[data-native-material="acrylic"] #context-menu {
 }
 #context-menu button:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
 #context-menu button[data-action="uninstall"] {
   color: var(--shutdown);
@@ -2361,7 +2403,7 @@ html[data-native-material="acrylic"] #context-menu {
 }
 #context-menu hr {
   height: 1px;
-  margin: 4px 6px;
+  margin: 5px 8px;
   border: none;
   background: var(--divider);
 }
@@ -2498,9 +2540,10 @@ html.glass-native.glass-light #panel {
    would put dark text on a dark menu. Accent and action colours stay:
    they are picked to read on either surface. */
 html.glass-native.glass-light {
-  --bg: #ffffff;
-  --bg-opaque: #ffffff;
-  --scrollbar-thumb: rgba(0, 0, 0, 0.28);
+  --bg: #fafafa;
+  --bg-opaque: #fafafa;
+  --bg-raised: #ffffff;
+  --scrollbar-thumb: rgba(0, 0, 0, 0.24);
   --panel-highlight: rgba(255, 255, 255, 0.65);
   --panel-edge: rgba(0, 0, 0, 0.1);
   --panel-glint: rgba(255, 255, 255, 0.25);
@@ -2509,14 +2552,17 @@ html.glass-native.glass-light {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
-  --text: #16161a;
-  --text-dim: #464c56;
-  --text-faint: #5f6772;
+  --text: #141414;
+  --text-dim: #474747;
+  --text-faint: #5c5c5c;
   --hover: rgba(0, 0, 0, 0.045);
   --sel: rgba(0, 0, 0, 0.075);
   --sel-border: rgba(0, 0, 0, 0.06);
   --pressed: rgba(0, 0, 0, 0.11);
   --track: rgba(0, 0, 0, 0.12);
+  --accent: #141414;
+  --accent-fg: #fafafa;
+  --focus: rgba(0, 0, 0, 0.36);
   --divider: rgba(0, 0, 0, 0.08);
   --kbd-bg: rgba(0, 0, 0, 0.055);
   --kbd-cap-bg: #ffffff;
@@ -2526,9 +2572,10 @@ html.glass-native.glass-light {
 }
 
 html.glass-native.glass-dark {
-  --bg: #1e1e1e;
-  --bg-opaque: #1e1e1e;
-  --scrollbar-thumb: rgba(255, 255, 255, 0.28);
+  --bg: #121212;
+  --bg-opaque: #121212;
+  --bg-raised: #1b1b1b;
+  --scrollbar-thumb: rgba(255, 255, 255, 0.26);
   --panel-highlight: rgba(255, 255, 255, 0.12);
   --panel-edge: rgba(255, 255, 255, 0.12);
   --panel-glint: rgba(255, 255, 255, 0.12);
@@ -2537,14 +2584,17 @@ html.glass-native.glass-dark {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --text: #f4f4f6;
-  --text-dim: #c6cbd3;
-  --text-faint: #a5acb7;
+  --text: #f5f5f5;
+  --text-dim: #c8c8c8;
+  --text-faint: #a8a8a8;
   --hover: rgba(255, 255, 255, 0.07);
   --sel: rgba(255, 255, 255, 0.11);
   --sel-border: rgba(255, 255, 255, 0.08);
   --pressed: rgba(255, 255, 255, 0.15);
   --track: rgba(255, 255, 255, 0.16);
+  --accent: #f5f5f5;
+  --accent-fg: #121212;
+  --focus: rgba(255, 255, 255, 0.42);
   --divider: rgba(255, 255, 255, 0.08);
   --kbd-bg: rgba(255, 255, 255, 0.08);
   --kbd-cap-bg: rgba(255, 255, 255, 0.1);
@@ -2595,13 +2645,10 @@ html.glass-native #divider {
 /* ── opaque panel backgrounds (settings → Appearance) ────────── */
 /* Solid paint for light rooms where glass washes out; glass layer
    stays parked (see glass_active) so this costs no capture. */
-html.bg-black #panel {
-  background: #000000;
-  box-shadow: none;
-}
-
+html.bg-black #panel,
 html.bg-white #panel {
-  background: #ffffff;
+  /* Must match the WebView surface colour in host.rs (OPAQUE_*_RGBA). */
+  background: var(--bg-opaque);
   box-shadow: none;
 }
 
@@ -2621,7 +2668,7 @@ html.bg-black #panel::after {
 }
 
 html.bg-white #panel::after {
-  border-color: rgba(0, 0, 0, 0.16);
+  border-color: rgba(0, 0, 0, 0.12);
 }
 
 /* DWM owns the outline when it also owns the opaque window corners. */
@@ -2725,7 +2772,7 @@ html.glass-native .row .icon.placeholder {
 .chat-file-picker-entry-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-file-picker-entry-size { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
 .chat-file-picker-entry-check { display: grid; width: 16px; height: 16px; flex: 0 0 auto; place-items: center; border: 1px solid var(--border-strong); border-radius: 4px; color: transparent; font-size: 11px; }
-.chat-file-picker-entry.is-selected .chat-file-picker-entry-check { border-color: var(--accent); background: var(--accent); color: #fff; }
+.chat-file-picker-entry.is-selected .chat-file-picker-entry-check { border-color: var(--accent); background: var(--accent); color: var(--accent-fg); }
 
 .chat-file-picker-footer {
   display: flex;
@@ -2741,8 +2788,8 @@ html.glass-native .row .icon.placeholder {
 .chat-file-picker-actions { display: flex; gap: 8px; }
 .chat-file-picker-action { min-height: 34px; padding: 0 13px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: 500 12px/1 var(--font); cursor: pointer; }
 .chat-file-picker-action:hover:not(:disabled) { background: var(--hover); }
-.chat-file-picker-action.is-primary { border-color: transparent; background: var(--accent); color: #fff; }
-.chat-file-picker-action.is-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.chat-file-picker-action.is-primary { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
+.chat-file-picker-action.is-primary:hover:not(:disabled) { opacity: 0.88; }
 .chat-file-picker-action:disabled { opacity: .45; cursor: default; }
 
 @media (max-width: 360px) {

@@ -199,6 +199,38 @@ pub(crate) fn build(cfg: &Config, theme: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every `FIELDS` id the settings page sends on save, parsed from the
+    /// embedded script so this test tracks the page as it ships.
+    fn settings_page_field_ids() -> Vec<String> {
+        let js = include_str!("../assets/settings.js");
+        let start = js.find("const FIELDS = [").expect("FIELDS table");
+        let end = start + js[start..].find("];").expect("FIELDS end");
+        js[start..end]
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("[\""))
+            .filter_map(|rest| rest.split('"').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn save_accepts_every_field_the_settings_page_sends() {
+        let ids = settings_page_field_ids();
+        assert!(ids.len() >= 5, "FIELDS parse found only {ids:?}");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&build(&Config::default(), "dark")).expect("snapshot json");
+        let mut cfg = serde_json::Map::new();
+        for id in &ids {
+            let value = snapshot
+                .get(id)
+                .unwrap_or_else(|| panic!("settings page field `{id}` missing from the snapshot"));
+            cfg.insert(id.clone(), value.clone());
+        }
+        let raw = serde_json::json!({ "t": "save", "cfg": cfg }).to_string();
+        apply(&Config::default(), &raw)
+            .unwrap_or_else(|e| panic!("save rejected a settings page field: {e}"));
+    }
+
     fn unique_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "nex-settings-{name}-{}-{}",

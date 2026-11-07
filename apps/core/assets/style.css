@@ -2459,9 +2459,11 @@ html.glass-native.glass-light {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
-  --text: #373737;
-  --text-dim: #525252;
-  --text-faint: #737373;
+  /* Opaque surfaces carry the restrained tokens; a translucent one needs
+     more ink so the text does not read gray. */
+  --text: #171717;
+  --text-dim: #404040;
+  --text-faint: #666666;
   --hover: rgba(0, 0, 0, 0.045);
   --sel: rgba(0, 0, 0, 0.075);
   --sel-border: rgba(0, 0, 0, 0.06);
@@ -2491,9 +2493,11 @@ html.glass-native.glass-dark {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --text: #c8c8c8;
-  --text-dim: #b0b0b0;
-  --text-faint: #888888;
+  /* Opaque surfaces carry the restrained tokens; a translucent one needs
+     more ink so the text does not read gray. */
+  --text: #ededed;
+  --text-dim: #c8c8c8;
+  --text-faint: #a0a0a0;
   --hover: rgba(255, 255, 255, 0.07);
   --sel: rgba(255, 255, 255, 0.11);
   --sel-border: rgba(255, 255, 255, 0.08);

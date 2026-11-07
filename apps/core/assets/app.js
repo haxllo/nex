@@ -3333,6 +3333,14 @@
         return;
       }
 
+      // Adaptive-ink-only update: the worker sends these while the
+      // backdrop moves. Apply before the menu-closing below so a moving
+      // backdrop cannot dismiss an open power/context menu.
+      if (!Array.isArray(state.rows) && typeof state.glassInk === "number") {
+        document.documentElement.style.setProperty("--glass-ink", state.glassInk + "%");
+        return;
+      }
+
       const wasGlassWaiting = glassWaitingForShow;
       const wasGlassNative = document.documentElement.classList.contains("glass-native");
       if (Number.isSafeInteger(state.showId) && state.showId >= 0 && state.showId !== activeShowId) {
@@ -3520,6 +3528,12 @@
         }
         root.classList.toggle("glass-light", isLight);
         root.classList.toggle("glass-dark", !isLight);
+      }
+      // Adaptive ink: how far the text tokens move toward pure white/black
+      // on the current glass surface. Quantized upstream; no easing here
+      // (steps are sub-perceptual, and a flip still uses glass-fading).
+      if (typeof state.glassInk === "number") {
+        document.documentElement.style.setProperty("--glass-ink", state.glassInk + "%");
       }
 
       // Track QL presence before overwriting rows — used to detect

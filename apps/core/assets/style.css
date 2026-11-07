@@ -2460,10 +2460,11 @@ html.glass-native.glass-light {
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
   /* Opaque surfaces carry the restrained tokens; a translucent one needs
-     more ink so the text does not read gray. */
+     more ink so the text does not read gray. Small subtitles prove it:
+     the old #666 fell to ~2:1 on a mid-bright surface. */
   --text: #171717;
-  --text-dim: #404040;
-  --text-faint: #666666;
+  --text-dim: #333333;
+  --text-faint: #4a4a4a;
   --hover: rgba(0, 0, 0, 0.045);
   --sel: rgba(0, 0, 0, 0.075);
   --sel-border: rgba(0, 0, 0, 0.06);
@@ -2494,10 +2495,11 @@ html.glass-native.glass-dark {
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
   /* Opaque surfaces carry the restrained tokens; a translucent one needs
-     more ink so the text does not read gray. */
+     more ink so the text does not read gray. Small subtitles prove it:
+     the old #a0 fell to ~3:1 on a mid-dark surface. */
   --text: #ededed;
-  --text-dim: #c8c8c8;
-  --text-faint: #a0a0a0;
+  --text-dim: #d4d4d4;
+  --text-faint: #bcbcbc;
   --hover: rgba(255, 255, 255, 0.07);
   --sel: rgba(255, 255, 255, 0.11);
   --sel-border: rgba(255, 255, 255, 0.08);
@@ -2512,6 +2514,60 @@ html.glass-native.glass-dark {
   --kbd-cap-border: rgba(0, 0, 0, 0.35);
   --icon-bg: rgba(255, 255, 255, 0.06);
   --text-select: rgba(255, 255, 255, 0.28);
+}
+
+/* Continuous ink: near the luminance where neither white nor black text
+   wins, ease the three text tokens toward the extreme the palette needs.
+   --glass-ink is the native worker's 0-100% ramp (the surface is always
+   between the base colour and pure white/black, so contrast only grows).
+   Dim and faint travel less to keep the hierarchy. */
+@supports (color: color-mix(in srgb, #000 50%, #fff)) {
+  html.glass-native.glass-dark {
+    --text: color-mix(in srgb, #ffffff var(--glass-ink, 0%), #ededed);
+    --text-dim: color-mix(in srgb, #ffffff calc(var(--glass-ink, 0%) * 0.9), #d4d4d4);
+    --text-faint: color-mix(in srgb, #ffffff calc(var(--glass-ink, 0%) * 0.85), #bcbcbc);
+  }
+
+  html.glass-native.glass-light {
+    --text: color-mix(in srgb, #000000 var(--glass-ink, 0%), #171717);
+    --text-dim: color-mix(in srgb, #000000 calc(var(--glass-ink, 0%) * 0.9), #333333);
+    --text-faint: color-mix(in srgb, #000000 calc(var(--glass-ink, 0%) * 0.85), #4a4a4a);
+  }
+}
+
+/* Glass glyph PNGs are white bitmaps, so they cannot inherit the ink tokens
+   like currentColor SVGs do. Follow the surface-flipped palette instead of
+   the system theme. */
+html.glass-native.glass-dark img.icon.glyph {
+  filter: brightness(0.95);
+}
+
+html.glass-native.glass-light img.icon.glyph {
+  filter: brightness(0.2);
+}
+
+/* Control icons rest on the raised dim ink, not faint: a 15-16px glyph
+   needs the same contrast headroom as body text on a translucent surface.
+   Decorative marks (search icon, watermark, placeholders) stay faint. */
+html.glass-native .footer-icon-btn,
+html.glass-native #power-btn-top,
+html.glass-native #help,
+html.glass-native #chat-voice-entry,
+html.glass-native .chat-history-item .chat-delete,
+html.glass-native .chat-icon-button:not([aria-pressed="true"]) {
+  color: var(--text-dim);
+}
+
+html.glass-native .footer-icon-btn:hover,
+html.glass-native .footer-icon-btn:focus-visible,
+html.glass-native #power-btn-top:hover,
+html.glass-native #power-btn-top.open,
+html.glass-native #help:hover,
+html.glass-native #chat-voice-entry:hover,
+html.glass-native .chat-history-item .chat-delete:hover,
+html.glass-native .chat-icon-button:not([aria-pressed="true"]):hover,
+html.glass-native .chat-icon-button:not([aria-pressed="true"]):focus-visible {
+  color: var(--text);
 }
 
 /* The material flip above is a step change in the palette; ease the

@@ -262,6 +262,9 @@ pub(crate) enum UiCommand {
     /// The glass material changed appearance (light surface + dark text,
     /// or the reverse). The page swaps its palette to follow.
     GlassPalette(bool),
+    /// Adaptive text ink for the current glass surface: 0 keeps the
+    /// palette base, 100 pushes body text to pure white/black.
+    GlassInk(u8),
     /// The page measured its content height (CSS px); resize to hug it.
     Resize {
         h: f64,
@@ -673,6 +676,21 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         };
                         if ready && visible {
                             push_state(&webview, &state, &icon_cache, false);
+                        }
+                    }
+                    UiCommand::GlassInk(ink) => {
+                        // Partial push only: rows and icons are unchanged,
+                        // and this arrives at up to ~7 Hz while the
+                        // backdrop moves.
+                        let visible = match state.lock() {
+                            Ok(mut s) => {
+                                s.glass_ink = ink;
+                                s.visible
+                            }
+                            Err(_) => false,
+                        };
+                        if ready && visible {
+                            push_glass_ink(&webview, ink);
                         }
                     }
                 UiCommand::Apply => {
@@ -2862,6 +2880,14 @@ fn push_selected(webview: &Option<WebView>, selected: usize) {
     post_json(&wv, &json);
 }
 
+/// Push only the adaptive glass ink (lightweight, no full re-render).
+/// The page applies it as `--glass-ink` without touching rows.
+fn push_glass_ink(webview: &Option<WebView>, ink: u8) {
+    let Some(wv) = webview else { return };
+    let json = serde_json::json!({ "glassInk": ink }).to_string();
+    post_json(&wv, &json);
+}
+
 /// Push only a status text change (lightweight, no full re-render).
 /// Mirrors push_selected: the JS side detects the missing `rows` field
 /// and applies the status without rebuilding the result list.
@@ -3036,6 +3062,7 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
             && OPAQUE_DWM_FRAME_ACTIVE.load(Ordering::SeqCst),
         "glassNative": transparent && s.glass_native && s.glass_frame_ready && !s.panel_background.is_opaque(),
         "glassLight": transparent && s.glass_native && s.glass_light,
+        "glassInk": if transparent && s.glass_native { s.glass_ink } else { 0 },
         "glassClip": &*LENS_CLIP,
         "compactView": s.compact_view,
     })

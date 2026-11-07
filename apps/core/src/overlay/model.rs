@@ -235,6 +235,9 @@ pub struct ShimState {
     /// the light palette with dark text (vibrancy: the material follows
     /// the backdrop, and the text follows the material).
     pub glass_light: bool,
+    /// Adaptive text ink for the current glass surface (0-100). The page
+    /// mixes the text tokens toward pure white/black by this much.
+    pub glass_ink: u8,
     /// Post-update version with unseen notes. When set, the update notice
     /// opens the What's New view instead of running an update check.
     pub whats_new_pending: Option<String>,
@@ -282,6 +285,7 @@ impl Default for ShimState {
             glass_show_fallback: false,
             show_id: 0,
             glass_light: false,
+            glass_ink: 0,
             panel_background: crate::config::PanelBackground::Black,
             content_pending: false,
         }

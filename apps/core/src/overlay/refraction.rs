@@ -204,6 +204,22 @@ const MATERIAL_HYSTERESIS: f32 = 0.18;
 const MATERIAL_DWELL: u32 = 8;
 const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
 const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
+/// Composited glass luma where white and black text have equal contrast
+/// (the WCAG crossover, ~0.46 in encoded sRGB). The palette flips here,
+/// not on the raw backdrop: the wash pulls the surface toward its own
+/// extreme, so raw luma alone switches too late on mid-tone scenes.
+const PALETTE_BALANCE: f32 = 0.46;
+/// Surface hysteresis either side of the balance so a backdrop resting on
+/// the crossover cannot flicker the palette.
+const PALETTE_HYSTERESIS: f32 = 0.02;
+/// Distance from the balance where adaptive ink reaches full strength.
+/// Wide enough to keep the small subtitle tokens legible across the whole
+/// mid-tone band, not just at the crossover. Outside it the base palette
+/// clears 4.5:1 on its own.
+const INK_SPAN: f32 = 0.30;
+/// Minimum gap between ink updates. The ramp is quantized to 5% steps,
+/// so this only skips sub-perceptual churn on fast-moving backdrops.
+const INK_RATE_MS: u64 = 150;
 /// Per-frame exponential smoothing on backdrop luminance (~150ms at
 /// 60fps) so a scene cut eases the tint instead of snapping it.
 const LUMA_EMA: f32 = 0.10;
@@ -2512,6 +2528,10 @@ fn worker_main(
     };
     // Last material the page was told about; None forces a re-send.
     let mut palette_sent: Option<bool> = None;
+    // Last adaptive-ink value sent, and when. Quantized, rate-limited:
+    // the page only needs the ramp, not every captured frame's estimate.
+    let mut ink_sent: Option<u8> = None;
+    let mut ink_at: Option<Instant> = None;
     // Per-show state: the held re-present and the lens swell a fresh show
     // arms (see `ShowCycle`).
     let mut cycle = ShowCycle { refresh: false, swell: None };
@@ -2556,6 +2576,8 @@ fn worker_main(
                     // Fresh show: re-announce the material, the page may
                     // have re-seeded its palette to the system theme.
                     palette_sent = None;
+                    ink_sent = None;
+                    ink_at = None;
                     // And let the first frame decide outright, so the
                     // page palette lands with the glass instead of
                     // waiting for the desktop to change eight times.
@@ -2833,8 +2855,12 @@ fn worker_main(
                                 if material.fresh {
                                     material.update(&sample);
                                     palette_sent = Some(material.light);
+                                    let ink = material.ink();
+                                    ink_sent = Some(ink);
+                                    ink_at = Some(Instant::now());
                                     let _ = proxy
                                         .send_event(UiCommand::GlassPalette(material.light));
+                                    let _ = proxy.send_event(UiCommand::GlassInk(ink));
                                 }
                                 if let Err(error) = e.update_local_tint(
                                     &sample,
@@ -3046,6 +3072,16 @@ fn worker_main(
                 palette_sent = Some(material.light);
                 let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
             }
+            if sample.is_some() {
+                let ink = material.ink();
+                let due = ink_sent != Some(ink)
+                    && ink_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(INK_RATE_MS));
+                if due {
+                    ink_sent = Some(ink);
+                    ink_at = Some(Instant::now());
+                    let _ = proxy.send_event(UiCommand::GlassInk(ink));
+                }
+            }
             let render_us = render_t.elapsed().as_micros() as u64;
             let _ = unsafe { cap.duplication.ReleaseFrame() };
             Ok((us, render_us))
@@ -3228,12 +3264,16 @@ impl Material {
         let settle = self.fresh;
         self.fresh = false;
         self.luma = Some(ema);
+        // Flip on the composited surface, not the raw backdrop: the wash
+        // already lifted a mid-tone scene toward the surface, and the text
+        // has to follow what is actually behind it.
+        let surface = self.surface_luma().unwrap_or(ema);
         let switch = if self.light {
-            MATERIAL_SWITCH - MATERIAL_HYSTERESIS
+            PALETTE_BALANCE - PALETTE_HYSTERESIS
         } else {
-            MATERIAL_SWITCH
+            PALETTE_BALANCE + PALETTE_HYSTERESIS
         };
-        if (ema > switch) == self.light {
+        if (surface > switch) == self.light {
             self.dwell = 0;
             return false;
         }
@@ -3247,8 +3287,27 @@ impl Material {
             }
         }
         self.dwell = 0;
-        self.light = ema > switch;
+        self.light = surface > switch;
         true
+    }
+
+    /// Luminance of the glass as the page sees it: the wash composited
+    /// over the backdrop. Used for both the palette decision and the ink
+    /// ramp, so text and surface always agree on where the contrast is.
+    fn surface_luma(&self) -> Option<f32> {
+        let luma = self.luma?.clamp(0.0, 1.0);
+        let (r, g, b, a) = self.wash();
+        let tint = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        Some((a * tint + (1.0 - a) * luma).clamp(0.0, 1.0))
+    }
+
+    /// Text-ink ramp, 0-100 in 5% steps: 0 keeps the palette's base
+    /// colour, 100 pushes body text to pure white (dark glass) or black
+    /// (light glass). Full at the balance point, where the base tokens
+    /// alone fall under 4.5:1, and gone where the wash carries contrast
+    /// on its own.
+    fn ink(&self) -> u8 {
+        self.surface_luma().map_or(0, ink_ramp)
     }
 
     /// Wash (r, g, b, a) over the current backdrop. Colour and alpha ease
@@ -3272,6 +3331,14 @@ impl Material {
             a,
         )
     }
+}
+
+/// How far the text must travel from its palette base toward the pure
+/// extreme (white on dark glass, black on light glass), 0-100 in 5%
+/// steps. Peaks at the contrast balance and fades out `INK_SPAN` away.
+fn ink_ramp(surface: f32) -> u8 {
+    let k = (1.0 - (surface - PALETTE_BALANCE).abs() / INK_SPAN).clamp(0.0, 1.0);
+    ((k * 20.0).round() as u8) * 5
 }
 
 /// Average luminance (BT.709) of a BGRA frame, sampled every 16th
@@ -3408,10 +3475,11 @@ fn main_rect(main_sys: isize) -> Option<(i32, i32, u32, u32)> {
 mod tests {
     use super::{
         clamp_panel_box, desktop_recent, display_frame_cap_ms, frame_luma, glass_region_size,
-        pass_plan, refresh_wait_ms, swell_bend,
+        ink_ramp, pass_plan, refresh_wait_ms, swell_bend,
         swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
         DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
-        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
+        HIDDEN_POLL_MS, INK_SPAN, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
+        PALETTE_BALANCE, PALETTE_HYSTERESIS,
         SHOW_REFRESH_WAIT_MS, SWELL_MS, SWELL_START, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
 
@@ -4127,7 +4195,7 @@ mod tests {
         // One bright frame past the switch counts, but does not flip;
         // the next frame back under the switch resets the count.
         let mut m = Material {
-            luma: Some(0.54),
+            luma: Some(0.50),
             light: false,
             dwell: 0,
             fresh: false,
@@ -4135,7 +4203,9 @@ mod tests {
         assert!(!m.update(&gray(255, 64)));
         assert!(!m.light);
         assert_eq!(m.dwell, 1, "a crossing frame starts the dwell count");
-        assert!(!m.update(&gray(20, 64)));
+        // Black pulls the smoothed backdrop and its surface back under
+        // the dark-to-light switch (raw 20 is still a mid-tone surface).
+        assert!(!m.update(&gray(0, 64)));
         assert_eq!(m.dwell, 0, "a frame back under the switch resets it");
         assert!(!m.light);
     }
@@ -4165,24 +4235,104 @@ mod tests {
         assert!(!m.light);
     }
 
+    /// Raw backdrop level whose composited glass surface lands on
+    /// `target`. The palette decision reads the surface, so tests must
+    /// aim at that, not at a raw gray.
+    fn raw_for_surface(target: f32) -> u8 {
+        let surface = |v: u8| {
+            Material {
+                luma: Some(v as f32 / 255.0),
+                light: false,
+                dwell: 0,
+                fresh: false,
+            }
+            .surface_luma()
+            .unwrap()
+        };
+        (0..=255u8)
+            .min_by(|&a, &b| {
+                (surface(a) - target)
+                    .abs()
+                    .partial_cmp(&(surface(b) - target).abs())
+                    .unwrap()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn surface_luma_composites_the_wash() {
+        let surface = |luma: f32| {
+            Material {
+                luma: Some(luma),
+                light: false,
+                dwell: 0,
+                fresh: false,
+            }
+            .surface_luma()
+            .unwrap()
+        };
+        assert!(surface(0.0) > 0.0 && surface(0.0) < 0.05, "dark wash still lifts black slightly");
+        assert!(surface(1.0) > 0.99);
+        // The wash pulls the middle toward its own tint, so the surface
+        // is not the raw luma.
+        assert!((surface(0.5) - 0.48).abs() < 0.02);
+        assert_eq!(
+            Material { luma: None, light: false, dwell: 0, fresh: false }.surface_luma(),
+            None
+        );
+    }
+
+    #[test]
+    fn ink_peaks_at_the_balance_and_fades_out() {
+        assert_eq!(ink_ramp(0.0), 0);
+        assert_eq!(ink_ramp(1.0), 0);
+        assert_eq!(ink_ramp(PALETTE_BALANCE), 100);
+        assert_eq!(ink_ramp(PALETTE_BALANCE - INK_SPAN), 0);
+        assert_eq!(ink_ramp(PALETTE_BALANCE + INK_SPAN), 0);
+        // Quantized to 5% steps, monotone on each side of the peak.
+        let mut prev = 0;
+        for i in 0..=20 {
+            let ink = ink_ramp(PALETTE_BALANCE - INK_SPAN + INK_SPAN * i as f32 / 20.0);
+            assert!(ink >= prev && ink <= 100);
+            assert_eq!(ink % 5, 0);
+            prev = ink;
+        }
+        assert_eq!(prev, 100);
+        let mut prev = 100;
+        for i in 0..=20 {
+            let ink = ink_ramp(PALETTE_BALANCE + INK_SPAN * i as f32 / 20.0);
+            assert!(ink <= prev);
+            prev = ink;
+        }
+        assert_eq!(prev, 0);
+        // No sample yet: no ink, so the page keeps the base palette.
+        assert_eq!(
+            Material { luma: None, light: false, dwell: 0, fresh: false }.ink(),
+            0
+        );
+    }
+
     #[test]
     fn material_hysteresis_holds_between_thresholds() {
-        // Mid-gray sits above the light-stay floor and below the
-        // dark-to-light switch: neither material should flip on it.
-        let mid = (((MATERIAL_SWITCH + MATERIAL_SWITCH - MATERIAL_HYSTERESIS) / 2.0) * 255.0) as u8;
+        // A surface inside the hysteresis band (just above the balance)
+        // neither flips a dark material nor a light one.
+        let inside = raw_for_surface(PALETTE_BALANCE + PALETTE_HYSTERESIS * 0.5);
+        let bright = raw_for_surface(0.85);
+        let dark = raw_for_surface(0.15);
+        assert!(PALETTE_HYSTERESIS > 0.0);
         let mut m = Material {
             luma: None,
             light: false,
             dwell: 0,
             fresh: false,
         };
-        assert_eq!(warm(&mut m, mid, 300), 0);
+        assert_eq!(warm(&mut m, inside, 300), 0);
         assert!(!m.light);
-        assert_eq!(warm(&mut m, 255, 300), 1);
+        assert_eq!(warm(&mut m, bright, 300), 1);
         assert!(m.light);
-        assert_eq!(warm(&mut m, mid, 300), 0, "hysteresis must hold the material");
+        assert_eq!(warm(&mut m, inside, 300), 0, "hysteresis must hold the material");
         assert!(m.light);
-        assert_eq!(warm(&mut m, 0, 300), 1);
+        assert_eq!(warm(&mut m, dark, 300), 1);
         assert!(!m.light);
     }
 

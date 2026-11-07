@@ -610,9 +610,13 @@ pub fn indexer_exe_path() -> Option<std::path::PathBuf> {
     Some(exe.parent()?.join("NexIndexerProcess.exe"))
 }
 
-/// Start the indexer when it is not answering yet. Rate-limited so a crash loop
-/// cannot spawn a new process on every keystroke.
-pub fn ensure_indexer_running(addr: &str) -> bool {
+/// Request an indexer process when one is not answering yet. Rate-limited so a
+/// crash loop cannot spawn a new process on every keystroke.
+///
+/// This only requests process creation; it deliberately does not wait for the
+/// IPC listener. The UI calls it during startup so its hotkey and overlay can
+/// become ready while the indexer opens its store and binds the socket.
+pub fn request_indexer_start(addr: &str) -> bool {
     if indexer_is_alive(addr) {
         return true;
     }
@@ -642,10 +646,21 @@ pub fn ensure_indexer_running(addr: &str) -> bool {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
-    let _ = command.spawn();
+    command.spawn().is_ok()
+}
+
+/// Start the indexer when needed, then wait briefly for its listener. This is
+/// for background recovery paths where waiting cannot delay the UI startup.
+pub fn ensure_indexer_running(addr: &str) -> bool {
+    if indexer_is_alive(addr) {
+        return true;
+    }
+    if !request_indexer_start(addr) {
+        return false;
+    }
 
     // The process needs a moment to bind its listener; a bounded wait keeps
-    // the first keystroke from falling back to a cold local cache.
+    // background snapshot recovery from falling back to a cold local cache.
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(100));
         if indexer_is_alive(addr) {

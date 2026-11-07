@@ -369,10 +369,6 @@ window.applySettings = function (s) {
   window.closeAfterSave = false;
 };
 
-document.getElementById("panelBackground")?.addEventListener("change", (e) => {
-  applyPanelTheme(e.target.value);
-});
-
 function settingsState() {
   const cfg = {};
   for (const [id, kind] of FIELDS) {
@@ -466,6 +462,7 @@ window.saveResult = function (r) {
       el.querySelector(".status-text").textContent = "Saved";
     }
     window.currentSettings = { ...window.currentSettings, ...readSettingsForBaseline() };
+    applyPanelTheme(window.currentSettings.panelBackground);
     window.settingsBaseline = settingsState();
     window.settingsDirty = false;
     if (window.closeAfterSave) {

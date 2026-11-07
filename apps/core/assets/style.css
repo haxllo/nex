@@ -45,7 +45,7 @@
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.13);
-  --text: #ededed;
+  --text: #c8c8c8;
   --text-dim: #b0b0b0;
   --text-faint: #888888;
   /* State layers: hover < selected < pressed, so the keyboard selection
@@ -85,7 +85,7 @@ html[data-theme="light"] {
   --panel-glint: rgba(255, 255, 255, 0.25);
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.12);
-  --text: #171717;
+  --text: #373737;
   --text-dim: #525252;
   --text-faint: #737373;
   --hover: rgba(0, 0, 0, 0.035);
@@ -2459,9 +2459,9 @@ html.glass-native.glass-light {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.14);
-  --text: #141414;
-  --text-dim: #474747;
-  --text-faint: #5c5c5c;
+  --text: #373737;
+  --text-dim: #525252;
+  --text-faint: #737373;
   --hover: rgba(0, 0, 0, 0.045);
   --sel: rgba(0, 0, 0, 0.075);
   --sel-border: rgba(0, 0, 0, 0.06);
@@ -2491,9 +2491,9 @@ html.glass-native.glass-dark {
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --text: #f5f5f5;
-  --text-dim: #c8c8c8;
-  --text-faint: #a8a8a8;
+  --text: #c8c8c8;
+  --text-dim: #b0b0b0;
+  --text-faint: #888888;
   --hover: rgba(255, 255, 255, 0.07);
   --sel: rgba(255, 255, 255, 0.11);
   --sel-border: rgba(255, 255, 255, 0.08);

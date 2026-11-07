@@ -2511,18 +2511,18 @@ html.glass-native.glass-dark {
 }
 
 /* The material flip above is a step change in the palette; ease the
-   properties that consume it so a flip reads as a fade rather than a
-   flash. Scoped to the swap window (html.glass-fading is armed by the
-   page for ~300ms) so it never overrides the hover and selection
+   surfaces that consume it so a flip reads as a fade rather than a
+   flash. Text and icon colours are deliberately not eased: the glass
+   under them has already stepped to the new material, and fading
+   through mid-gray would leave them nearly invisible for the length of
+   the swap. Scoped to the swap window (html.glass-fading is armed by
+   the page for ~300ms) so it never overrides the hover and selection
    transitions of the base rules. */
 html.glass-fading #panel,
 html.glass-fading #panel * {
   transition:
-    color 260ms ease,
     background-color 260ms ease,
     border-color 260ms ease,
-    fill 260ms ease,
-    stroke 260ms ease,
     text-shadow 260ms ease;
 }
 

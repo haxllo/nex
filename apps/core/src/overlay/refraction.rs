@@ -190,22 +190,37 @@ pub(crate) const CORNER_RADIUS: f32 = 12.0;
 const SAMPLE_W: u32 = 16;
 const SAMPLE_H: u32 = 16;
 /// Material follows the backdrop, like Apple's vibrancy: a bright scene
-/// gets a light surface with dark text, a dark scene the reverse, so
-/// the text colour never fights what is behind the glass. Alpha is the
-/// wash at the material's own extreme; hysteresis (plus the dwell below)
-/// stops flapping when the backdrop sits near the switch.
+/// gets a light surface with dark text, a dark scene the reverse. The
+/// wash holds the surface at the palette's own end of the ramp instead
+/// of blending toward the opposite end, so the text never crosses a
+/// mid-tone surface no matter where the backdrop sits.
 const TINT_MIN_ALPHA: f32 = 0.10;
-const TINT_MAX_ALPHA: f32 = 0.28;
+/// Cap on the veil: even when the backdrop is on the wrong side of the
+/// palette, enough of it reads through the glass, and body text stays
+/// above 4.5:1.
+const TINT_MAX_ALPHA: f32 = 0.72;
+/// Surface luminance (gamma space) the wash holds under each palette.
+/// Dark text lands at ~6.0:1 and dim text at ~4.6:1 on the dark target;
+/// light text at ~7.8:1 and dim at ~5.1:1 on the light target.
+const DARK_SURFACE: f32 = 0.26;
+const LIGHT_SURFACE: f32 = 0.82;
 const MATERIAL_SWITCH: f32 = 0.55;
 const MATERIAL_HYSTERESIS: f32 = 0.18;
 /// Consecutive frames past the switch before the material flips. Scene
 /// cuts and fast scrolling cross it for a frame or two; without this the
 /// palette flashes.
 const MATERIAL_DWELL: u32 = 8;
+/// Wall-clock companion to `MATERIAL_DWELL`: the desktop only yields
+/// frames while it changes, so a scene that settles after one frame
+/// would never finish a frame-counted dwell. The palette settles on this
+/// timer with the held frame instead.
+const MATERIAL_DWELL_MS: u128 = 120;
 const TINT_DARK: (f32, f32, f32) = (12.0 / 255.0, 14.0 / 255.0, 20.0 / 255.0);
 const TINT_LIGHT: (f32, f32, f32) = (255.0 / 255.0, 255.0 / 255.0, 255.0 / 255.0);
-/// Per-frame exponential smoothing on backdrop luminance (~150ms at
-/// 60fps) so a scene cut eases the tint instead of snapping it.
+const TINT_DARK_LUMA: f32 =
+    0.2126 * TINT_DARK.0 + 0.7152 * TINT_DARK.1 + 0.0722 * TINT_DARK.2;
+/// Per-frame exponential smoothing for the local tint grid (~150ms at
+/// 60fps) so its colour does not step with every captured frame.
 const LUMA_EMA: f32 = 0.10;
 /// Extra desktop pixels around the panel keep the blur kernel away from
 /// the capture boundary: 3σ + 2, the reference renderer's rule, now
@@ -2508,6 +2523,7 @@ fn worker_main(
         luma: None,
         light: false,
         dwell: 0,
+        past: None,
         fresh: false,
     };
     // Last material the page was told about; None forces a re-send.
@@ -2965,6 +2981,22 @@ fn worker_main(
             }
         };
         if !acquired {
+            // No new desktop frame. A scene that settled on its first
+            // frame leaves the dwell stranded: the capture stream stops
+            // when the desktop stops changing, so finish the pending
+            // flip on wall-clock time and re-present the held backdrop.
+            if visible && material.tick() {
+                if let Some(e) = &engine {
+                    if let Err(error) = e.present(&material, bend) {
+                        crate::logging::warn(&format!(
+                            "[nex][refract] static palette re-present failed: {error}"
+                        ));
+                    } else {
+                        palette_sent = Some(material.light);
+                        let _ = proxy.send_event(UiCommand::GlassPalette(material.light));
+                    }
+                }
+            }
             continue;
         }
         last_desktop_frame = Some(Instant::now());
@@ -3202,17 +3234,19 @@ impl Capture {
 /// surface (with hysteresis), and the tint always pushes the surface
 /// toward that material's own extreme so text keeps its contrast.
 struct Material {
-    /// Smoothed backdrop luminance; None until the first frame.
+    /// Last captured backdrop luminance; None until the first frame.
     luma: Option<f32>,
     /// Light surface + dark text (true) or dark surface + light text.
     light: bool,
     /// Consecutive frames the backdrop has sat past the switch.
     dwell: u32,
-    /// The next frame decides outright - no smoothing, no dwell. Set by
-    /// every fresh show: dwell guards against the backdrop changing
-    /// while the panel is open, and frames only arrive when the desktop
-    /// changes, so settling on open would leave the page palette
-    /// seconds behind the glass.
+    /// When the current dwell started, for `tick` on a static desktop.
+    past: Option<Instant>,
+    /// The next frame decides outright - no dwell. Set by every fresh
+    /// show: dwell guards against the backdrop changing while the panel
+    /// is open, and frames only arrive when the desktop changes, so
+    /// settling on open would leave the page palette seconds behind the
+    /// glass.
     fresh: bool,
 }
 
@@ -3220,57 +3254,81 @@ impl Material {
     /// Fold in one captured frame. Returns true when the material
     /// flipped - the caller tells the page, which swaps its palette.
     fn update(&mut self, pixels: &[u8]) -> bool {
-        let luma = frame_luma(pixels);
-        let ema = match self.luma {
-            Some(prev) if !self.fresh => prev + (luma - prev) * LUMA_EMA,
-            _ => luma,
-        };
-        let settle = self.fresh;
-        self.fresh = false;
-        self.luma = Some(ema);
+        self.observe(frame_luma(pixels))
+    }
+
+    fn observe(&mut self, luma: f32) -> bool {
+        let settle = std::mem::take(&mut self.fresh);
+        self.luma = Some(luma);
         let switch = if self.light {
             MATERIAL_SWITCH - MATERIAL_HYSTERESIS
         } else {
             MATERIAL_SWITCH
         };
-        if (ema > switch) == self.light {
+        if (luma > switch) == self.light {
             self.dwell = 0;
+            self.past = None;
             return false;
         }
         // Past the switch - but only flip once the backdrop has stayed
         // there a moment, so a scene cut or a fast scroll cannot flash
-        // the palette.
-        if !settle {
-            self.dwell += 1;
-            if self.dwell < MATERIAL_DWELL {
-                return false;
-            }
+        // the palette. Count frames for a moving desktop and wall clock
+        // for one that stops after the change.
+        self.dwell += 1;
+        let since = *self.past.get_or_insert_with(Instant::now);
+        if !settle
+            && self.dwell < MATERIAL_DWELL
+            && since.elapsed().as_millis() < MATERIAL_DWELL_MS
+        {
+            return false;
         }
         self.dwell = 0;
-        self.light = ema > switch;
+        self.past = None;
+        self.light = luma > switch;
         true
     }
 
-    /// Wash (r, g, b, a) over the current backdrop. Colour and alpha ease
-    /// across the hysteresis band rather than stepping when the palette
-    /// flips, so the composite under the text never jumps; `light` only
-    /// picks the page palette.
+    /// Finish a flip whose backdrop has gone static. The capture stream
+    /// stops when the desktop stops changing, so `update` never gets the
+    /// frames the dwell is waiting for. Called with the held frame still
+    /// in `luma`; a fresh show ignores it and waits for its first frame.
+    fn tick(&mut self) -> bool {
+        if self.fresh {
+            return false;
+        }
+        let (Some(luma), Some(since)) = (self.luma, self.past) else {
+            return false;
+        };
+        if since.elapsed().as_millis() < MATERIAL_DWELL_MS {
+            return false;
+        }
+        let switch = if self.light {
+            MATERIAL_SWITCH - MATERIAL_HYSTERESIS
+        } else {
+            MATERIAL_SWITCH
+        };
+        self.dwell = 0;
+        self.past = None;
+        self.light = luma > switch;
+        true
+    }
+
+    /// Wash (r, g, b, a) over the current backdrop. The surface is held
+    /// at the current palette's target luma while the backdrop is on the
+    /// wrong side, and follows the backdrop once it is already dark (or
+    /// bright) enough. Alpha is the smallest veil that gets there, so
+    /// the refracting backdrop stays visible where it can.
     fn wash(&self) -> (f32, f32, f32, f32) {
         let luma = self.luma.unwrap_or(0.5).clamp(0.0, 1.0);
-        let floor = MATERIAL_SWITCH - MATERIAL_HYSTERESIS;
-        let t = ((luma - floor) / (2.0 * MATERIAL_HYSTERESIS)).clamp(0.0, 1.0);
-        // A dark material washes a bright backdrop and follows the
-        // backdrop; a light one is the mirror of it. Blend both across
-        // the band so the crossover is continuous.
-        let alpha = |push: f32| TINT_MIN_ALPHA + (TINT_MAX_ALPHA - TINT_MIN_ALPHA) * push;
-        let a = alpha(1.0 - luma) * (1.0 - t) + alpha(luma) * t;
-        let mix = |dark: f32, light: f32| dark + (light - dark) * t;
-        (
-            mix(TINT_DARK.0, TINT_LIGHT.0),
-            mix(TINT_DARK.1, TINT_LIGHT.1),
-            mix(TINT_DARK.2, TINT_LIGHT.2),
-            a,
-        )
+        if self.light {
+            let alpha = ((LIGHT_SURFACE - luma) / (1.0 - luma).max(f32::EPSILON))
+                .clamp(TINT_MIN_ALPHA, TINT_MAX_ALPHA);
+            (TINT_LIGHT.0, TINT_LIGHT.1, TINT_LIGHT.2, alpha)
+        } else {
+            let alpha = ((luma - DARK_SURFACE) / (luma - TINT_DARK_LUMA).max(f32::EPSILON))
+                .clamp(TINT_MIN_ALPHA, TINT_MAX_ALPHA);
+            (TINT_DARK.0, TINT_DARK.1, TINT_DARK.2, alpha)
+        }
     }
 }
 
@@ -3411,9 +3469,10 @@ mod tests {
         pass_plan, refresh_wait_ms, swell_bend,
         swell_pass_due, swell_wants_mirror, GeometryCache, Material, Pass, ShowCycle,
         DESKTOP_RECENT_MS, GEOMETRY_CACHE_DEPTH,
-        HIDDEN_POLL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
+        HIDDEN_POLL_MS, MATERIAL_DWELL_MS, MATERIAL_HYSTERESIS, MATERIAL_SWITCH, MIN_FRAME_MS,
         SHOW_REFRESH_WAIT_MS, SWELL_MS, SWELL_START, TINT_MAX_ALPHA, TINT_MIN_ALPHA,
     };
+    use std::time::{Duration, Instant};
 
     fn bgra(b: u8, g: u8, r: u8, pixels: usize) -> Vec<u8> {
         (0..pixels).flat_map(|_| [b, g, r, 255]).collect()
@@ -3638,7 +3697,13 @@ mod tests {
             // (copy_crop); only the 16x16 statistics cross back.
             let pixels = gray(128, ((700 + BLUR_PAD * 2) * (441 + BLUR_PAD * 2)) as usize);
             engine.upload_source(&pixels, 700 + BLUR_PAD * 2, 441 + BLUR_PAD * 2)?;
-            let material = Material { luma: Some(0.5), light: false, dwell: 0, fresh: false };
+            let material = Material {
+                luma: Some(0.5),
+                light: false,
+                dwell: 0,
+                past: None,
+                fresh: false,
+            };
             let start = Instant::now();
             for _ in 0..30 {
                 let sample = engine.sample_backdrop().ok_or("no sample")?;
@@ -3719,6 +3784,7 @@ mod tests {
             luma: Some(0.5),
             light: false,
             dwell: 0,
+            past: None,
             fresh: false,
         };
         let fake_sample: Vec<u8> = (0..(SAMPLE_W * SAMPLE_H) as usize)
@@ -3890,6 +3956,7 @@ mod tests {
             luma: None,
             light: false,
             dwell: 0,
+            past: None,
             fresh: false,
         };
         // A bright scene turns the surface light — reported exactly once.
@@ -4099,27 +4166,108 @@ mod tests {
         wash.3 * tint + (1.0 - wash.3) * luma
     }
 
+    /// Relative luminance of an sRGB channel/level.
+    fn srgb_luminance(level: f32) -> f32 {
+        if level <= 0.04045 {
+            level / 12.92
+        } else {
+            ((level + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// WCAG relative luminance of an `#rrggbb` colour.
+    fn hex_luminance(hex: &str) -> f32 {
+        let channel = |i: usize| {
+            u8::from_str_radix(&hex[i..i + 2], 16).expect("hex channel") as f32 / 255.0
+        };
+        let [r, g, b] = [channel(1), channel(3), channel(5)];
+        0.2126 * srgb_luminance(r) + 0.7152 * srgb_luminance(g) + 0.0722 * srgb_luminance(b)
+    }
+
+    /// WCAG contrast of `fg` over the glass surface at `luma`.
+    fn glass_contrast(wash: (f32, f32, f32, f32), luma: f32, fg: &str) -> f32 {
+        let surface = srgb_luminance(composite(wash, luma));
+        let fg = hex_luminance(fg);
+        (fg.max(surface) + 0.05) / (fg.min(surface) + 0.05)
+    }
+
     #[test]
-    fn wash_stays_in_band_and_crosses_the_switch_smoothly() {
-        let at = |luma: f32| Material {
+    fn wash_keeps_text_above_4_5_to_1_across_backdrops() {
+        let at = |luma: f32, light: bool| Material {
             luma: Some(luma),
-            light: false,
+            light,
             dwell: 0,
+            past: None,
             fresh: false,
         }
         .wash();
-        for luma in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
-            let a = at(luma).3;
+        for step in 0..=100 {
+            let luma = step as f32 / 100.0;
+            let wash = at(luma, false);
             assert!(
-                (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&a),
-                "alpha {a} out of band at {luma}"
+                (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&wash.3),
+                "dark alpha {} out of band at {luma}",
+                wash.3
             );
+            let contrast = glass_contrast(wash, luma, "#c8c8c8");
+            assert!(contrast >= 4.5, "dark body text {contrast:.2}:1 at {luma}");
+            let wash = at(luma, true);
+            assert!(
+                (TINT_MIN_ALPHA..=TINT_MAX_ALPHA).contains(&wash.3),
+                "light alpha {} out of band at {luma}",
+                wash.3
+            );
+            let contrast = glass_contrast(wash, luma, "#373737");
+            assert!(contrast >= 4.5, "light body text {contrast:.2}:1 at {luma}");
         }
-        // The palette flips at the switch: the glass itself must not.
-        let lo = MATERIAL_SWITCH - 0.001;
-        let hi = MATERIAL_SWITCH + 0.001;
-        let jump = (composite(at(hi), hi) - composite(at(lo), lo)).abs();
-        assert!(jump < 0.01, "wetness jumped {jump} across the switch");
+        // Dim text keeps its floor wherever its palette is current.
+        for step in 0..=55 {
+            let luma = step as f32 / 100.0;
+            let contrast = glass_contrast(at(luma, false), luma, "#b0b0b0");
+            assert!(contrast >= 4.5, "dark dim text {contrast:.2}:1 at {luma}");
+        }
+        for step in 37..=100 {
+            let luma = step as f32 / 100.0;
+            let contrast = glass_contrast(at(luma, true), luma, "#525252");
+            assert!(contrast >= 4.5, "light dim text {contrast:.2}:1 at {luma}");
+        }
+    }
+
+    #[test]
+    fn a_static_backdrop_still_settles_the_palette() {
+        // Frames stop when the desktop stops changing. A backdrop that
+        // settled on one dark frame must still flip the palette on the
+        // wall clock instead of holding light text over the dark scene.
+        let waited = Instant::now() - Duration::from_millis(MATERIAL_DWELL_MS as u64 + 1);
+        let mut m = Material {
+            luma: Some(0.1),
+            light: true,
+            dwell: 1,
+            past: Some(waited),
+            fresh: false,
+        };
+        assert!(m.tick());
+        assert!(!m.light);
+        // Younger than the dwell: still waiting.
+        let mut m = Material {
+            luma: Some(0.1),
+            light: true,
+            dwell: 1,
+            past: Some(Instant::now()),
+            fresh: false,
+        };
+        assert!(!m.tick());
+        assert!(m.light);
+        // A fresh show is decided by its own first frame, not the held one.
+        let mut m = Material {
+            luma: Some(0.1),
+            light: true,
+            dwell: 0,
+            past: Some(waited),
+            fresh: true,
+        };
+        assert!(!m.tick());
+        assert!(m.light);
     }
 
     #[test]
@@ -4130,6 +4278,7 @@ mod tests {
             luma: Some(0.54),
             light: false,
             dwell: 0,
+            past: None,
             fresh: false,
         };
         assert!(!m.update(&gray(255, 64)));
@@ -4150,6 +4299,7 @@ mod tests {
             luma: Some(0.1),
             light: false,
             dwell: 0,
+            past: None,
             fresh: true,
         };
         assert!(m.update(&gray(255, 64)));
@@ -4159,6 +4309,7 @@ mod tests {
             luma: Some(0.54),
             light: false,
             dwell: 0,
+            past: None,
             fresh: false,
         };
         assert!(!m.update(&gray(255, 64)), "dwell must still gate later flips");
@@ -4174,6 +4325,7 @@ mod tests {
             luma: None,
             light: false,
             dwell: 0,
+            past: None,
             fresh: false,
         };
         assert_eq!(warm(&mut m, mid, 300), 0);

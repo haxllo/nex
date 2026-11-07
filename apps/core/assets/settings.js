@@ -322,8 +322,18 @@ document.addEventListener("keydown", (e) => {
 });
 // ───────────────────────────────────────────────────────────────────
 
+// Appearance picks the Settings palette too: Dark/Light are explicit,
+// Liquid Glass follows the system theme from the snapshot.
+let systemTheme = "dark";
+
+function applyPanelTheme(panel) {
+  document.documentElement.dataset.theme =
+    panel === "white" ? "light" : panel === "black" ? "dark" : systemTheme;
+}
+
 window.applySettings = function (s) {
-  document.documentElement.dataset.theme = s.theme || "dark";
+  systemTheme = s.theme || "dark";
+  applyPanelTheme(s.panelBackground);
   document.getElementById("app-version").textContent = s.version ? `v${s.version}` : "";
   window.currentSettings = s;
   window.pendingHotkey = null;
@@ -358,6 +368,10 @@ window.applySettings = function (s) {
   window.settingsDirty = false;
   window.closeAfterSave = false;
 };
+
+document.getElementById("panelBackground")?.addEventListener("change", (e) => {
+  applyPanelTheme(e.target.value);
+});
 
 function settingsState() {
   const cfg = {};

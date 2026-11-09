@@ -391,23 +391,32 @@ pub(crate) fn invalidate_start_gesture() {
     let _ = unsafe { SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32) };
 }
 
-/// Hold the menu mask unless this process already holds it.
+/// Hold the menu mask.
+///
+/// The injected mask key is one OS-level resource shared with the elevated
+/// helper, so only one process may send it per press. Callers decide who owns
+/// the press (see the recording guard and `hold_mask_for_press`); these two
+/// helpers only keep this process's own send/release pairing correct.
 pub(crate) fn mask_hold() {
     if !MASK_HELD.swap(true, Ordering::SeqCst) {
         send_mask_down();
     }
 }
 
-/// Release the menu mask if this process holds it.
+/// Release the menu mask if this process is the one holding it.
 pub(crate) fn mask_release() {
     if MASK_HELD.swap(false, Ordering::SeqCst) {
         send_mask_up();
     }
 }
 
-/// Hold the mask unless the helper owns it.
+/// Hold the mask for a Win press unless the helper is the one doing it.
+///
+/// The helper masks only while the configured hotkey is Win; with a non-Win
+/// hotkey its Win branch never runs, so this process must hold the mask or a
+/// bare Win tap opens Start.
 pub(crate) fn hold_mask_for_press() {
-    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+    if !helper_masks_win() {
         mask_hold();
     }
 }
@@ -415,9 +424,25 @@ pub(crate) fn hold_mask_for_press() {
 /// Release the mask unless the helper owns it — a release from this process
 /// while the helper still expects the mask held would end its suppression.
 pub(crate) fn release_mask_for_press() {
-    if !HELPER_ACTIVE.load(Ordering::SeqCst) {
+    if !helper_masks_win() {
         mask_release();
     }
+}
+
+/// Does the elevated helper hold the Win menu mask right now?
+///
+/// The helper's Win branch runs whenever its configured hotkey is Win, and it
+/// masks every physical Win press in that case. For any other hotkey the
+/// branch never runs, so nex must mask instead. Exactly one process may send
+/// the injected mask key, which is why this gate exists.
+fn helper_masks_win() -> bool {
+    masks_win_press(HELPER_ACTIVE.load(Ordering::SeqCst), is_win_key_hotkey())
+}
+
+/// Pure form of [`helper_masks_win`], so the ownership rule can be tested
+/// without a live helper or a globally installed hook context.
+fn masks_win_press(helper_active: bool, hotkey_is_win: bool) -> bool {
+    helper_active && hotkey_is_win
 }
 
 /// Send a single key-down for the menu-mask key. The mask is held
@@ -449,7 +474,7 @@ fn send_mask_up() {
 /// window.set_visible(false), so raw input consumers see Win+mask
 /// during the hide's focus transition.
 pub(crate) fn hold_mask_before_hide() {
-    if !is_win_key_hotkey() || HELPER_ACTIVE.load(Ordering::SeqCst) {
+    if !is_win_key_hotkey() || helper_masks_win() {
         // Non-Win hotkey needs no Start guard, and when the helper owns
         // the mask a release from this process would drop it early.
         return;
@@ -465,7 +490,7 @@ pub(crate) fn hold_mask_before_hide() {
 
 /// Release mask after hide completes.
 pub(crate) fn release_mask_after_hide() {
-    if !is_win_key_hotkey() || HELPER_ACTIVE.load(Ordering::SeqCst) {
+    if !is_win_key_hotkey() || helper_masks_win() {
         return;
     }
     send_mask_up();
@@ -544,11 +569,22 @@ unsafe fn keyboard_hook_proc_inner(
         }
     }
 
-    // Recording a hotkey in Settings while the configured hotkey is not Win:
-    // nothing below holds the mask for this press, so a bare Win tap would
-    // open Start. Raw input (the recorder) can observe keys but not block them.
-    if !ctx.target_is_win && !injected && (vk == VK_LWIN || vk == VK_RWIN) {
-        if is_keydown && crate::overlay::host::RECORDING_HOTKEY.load(Ordering::SeqCst) {
+    // Recording a hotkey in Settings: a bare Win tap must not open Start.
+    // Raw input (the recorder) can observe keys but not block them, so the
+    // menu mask has to be held for this press.
+    //
+    // Ownership rules, so exactly one process sends the injected mask key:
+    //  - helper live *and* the configured hotkey is Win: the helper masks on
+    //    every physical Win press, so this process stands down.
+    //  - helper live but the hotkey is not Win: the helper's Win branch is
+    //    not active, so nothing would hold the mask — nex must.
+    //  - no helper: nex owns it.
+    if !injected
+        && (vk == VK_LWIN || vk == VK_RWIN)
+        && crate::overlay::host::RECORDING_HOTKEY.load(Ordering::SeqCst)
+        && !helper_masks_win()
+    {
+        if is_keydown {
             mask_hold();
         } else if is_keyup && MASK_HELD.load(Ordering::SeqCst) {
             // Checked by mask state, not RECORDING_HOTKEY: a chord commit
@@ -2601,4 +2637,33 @@ mod tests {
         assert!(started.elapsed() <= HELPER_REPLACE_GRACE + Duration::from_millis(500));
         HELPER_ACTIVE.store(false, Ordering::SeqCst);
     }
+    /// The injected mask key is one OS-level resource. If nex and the helper
+    /// both send it for the same press, one side's release orphans the other's
+    /// flag and the next Win tap leaks the Start menu. Exactly one side must
+    /// own the press.
+    #[test]
+    fn only_one_process_masks_the_win_press() {
+        use super::masks_win_press;
+
+        // Helper live and the hotkey is Win: the helper masks on every
+        // physical Win press, so nex stands down.
+        assert!(masks_win_press(true, true));
+
+        // Helper live but the hotkey is not Win: the helper's Win branch never
+        // runs, so nex must own the mask itself or a bare Win tap opens Start.
+        assert!(!masks_win_press(true, false));
+
+        // No helper: nex always owns it.
+        assert!(!masks_win_press(false, true));
+        assert!(!masks_win_press(false, false));
+
+        // The regression this guards: deciding by helper liveness alone made
+        // nex stand down for a non-Win hotkey too, so neither process held the
+        // mask and Start opened on every Win tap.
+        assert!(
+            !masks_win_press(true, false),
+            "nex must mask when the helper does not",
+        );
+    }
+
 }

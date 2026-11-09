@@ -1730,7 +1730,13 @@ fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String
     // the reader still never produced it.
     const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
     const PIPE_WAIT: u32 = 0x0000_0000;
-    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+    // Exactly one instance. With PIPE_UNLIMITED_INSTANCES a reconnect could
+    // leave the previous instance alive, and the helper — which opens the name
+    // with OPEN_EXISTING — would attach to whichever instance the kernel hands
+    // back. When it attached to an abandoned one, its "HOTKEY" write filled a
+    // buffer nobody was draining and blocked the helper's loop, freezing input
+    // for ~10s on the first press after a hotkey save.
+    const PIPE_SINGLE_INSTANCE: u32 = 1;
     const ERROR_PIPE_CONNECTED: u32 = 535;
 
     #[link(name = "kernel32")]
@@ -1757,7 +1763,7 @@ fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String
             wide.as_ptr(),
             PIPE_ACCESS_INBOUND,
             PIPE_TYPE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
+            PIPE_SINGLE_INSTANCE,
             0,
             65536,
             0,

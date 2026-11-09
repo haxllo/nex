@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
@@ -133,6 +133,12 @@ unsafe extern "system" {
     fn GetCurrentProcess() -> PipeHandle;
 
     fn ConnectNamedPipe(hNamedPipe: PipeHandle, lpOverlapped: *mut core::ffi::c_void) -> i32;
+    fn SetNamedPipeHandleState(
+        hNamedPipe: *mut core::ffi::c_void,
+        lpMode: *const u32,
+        lpMaxCollectionCount: *mut u32,
+        lpCollectDataTimeout: *mut u32,
+    ) -> i32;
 
     fn CreateFileW(
         lpFileName: *const u16,
@@ -170,6 +176,15 @@ const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
 const GENERIC_READ: u32 = 0x80000000;
 const GENERIC_WRITE: u32 = 0x40000000;
+/// Read/write a pipe as a byte stream without waiting for a full message.
+const PIPE_READMODE_BYTE: u32 = 0x00000000;
+/// Non-blocking pipe I/O: a write with no space fails immediately instead
+/// of parking the calling thread.
+const PIPE_NOWAIT: u32 = 0x00000001;
+/// Bounded retries for a momentarily full detection pipe. Small on purpose:
+/// the caller is the hook loop and must stay responsive.
+const PIPE_WRITE_RETRIES: u32 = 20;
+const PIPE_WRITE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1);
 const FILE_SHARE_READ: u32 = 0x00000001;
 const FILE_SHARE_WRITE: u32 = 0x00000002;
 const OPEN_EXISTING: u32 = 3;
@@ -429,6 +444,84 @@ fn send_mask_down() {
 /// cannot type anything, but it cancels Start-menu-on-Win-key-up.
 const VK_START_GUARD: u16 = 0xFF;
 
+/// Injection work the hook proc must not do itself.
+///
+/// A low-level hook runs inside the OS input pipeline. `SendInput` from there
+/// re-enters that same pipeline and blocks until the queued event is
+/// delivered — to a hook that is still running. Windows gives a low-level hook
+/// a few seconds before it stalls the whole queue, which the user sees as
+/// every key and the mouse freezing for seconds on a Win press. The hook proc
+/// therefore only records the request and wakes the loop thread, which
+/// performs the injection from a safe context.
+const INJECT_MASK_DOWN: u8 = 1;
+const INJECT_MASK_UP: u8 = 2;
+const INJECT_START_GUARD: u8 = 4;
+
+static PENDING_INJECT: AtomicU8 = AtomicU8::new(0);
+
+/// Ask the loop thread to inject `action`. Never blocks, never calls SendInput.
+fn defer_inject(action: u8) {
+    PENDING_INJECT.fetch_or(action, Ordering::SeqCst);
+    if let Some(tid) = HELPER_THREAD_ID.get() {
+        unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0) };
+    }
+}
+
+/// Queue for deferred injection batches.
+static INJECT_TX: OnceLock<std::sync::mpsc::SyncSender<u8>> = OnceLock::new();
+
+/// Perform deferred injections on the injector thread.
+///
+/// `SendInput` waits for the event it queued to be delivered, and our own
+/// low-level keyboard hook is what must run first. Calling it from the loop
+/// thread that owns the hook therefore waits on itself: the helper parked with
+/// zero CPU and every key and the mouse stayed frozen until Windows gave up on
+/// the hook. The injector thread is the one context that can block safely.
+fn inject_writer_loop(rx: std::sync::mpsc::Receiver<u8>) {
+    while let Ok(pending) = rx.recv() {
+        if pending & INJECT_START_GUARD != 0 {
+            invalidate_start_gesture();
+        }
+        // Release before hold so a net hold in the same batch ends held.
+        if pending & INJECT_MASK_UP != 0 {
+            send_mask_up();
+        }
+        if pending & INJECT_MASK_DOWN != 0 {
+            send_mask_down();
+        }
+    }
+}
+
+/// Start the injector thread. Called once from `main` before the hooks.
+fn init_inject_sink() {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<u8>(INJECT_QUEUE);
+    if let Err(error) = std::thread::Builder::new()
+        .name("NexHelper-inject".into())
+        .spawn(move || inject_writer_loop(rx))
+    {
+        eprintln!("NexHelper: injector spawn failed: {error}");
+        return;
+    }
+    let _ = INJECT_TX.set(tx);
+}
+
+/// Hand a batch of injection work to the injector thread. Never blocks.
+fn run_pending_injections() {
+    let pending = PENDING_INJECT.swap(0, Ordering::SeqCst);
+    if pending == 0 {
+        return;
+    }
+    match INJECT_TX.get() {
+        Some(tx) => {
+            let _ = tx.try_send(pending);
+        }
+        None => {
+            // No injector (spawn failed): drop rather than inject inline.
+            // Blocking here is what froze input.
+        }
+    }
+}
+
 fn invalidate_start_gesture() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -493,12 +586,34 @@ fn release_mask() -> bool {
     }
 }
 
-/// Write "HOTKEY\n" to the pipe. Returns Err on failure (client disconnected).
-fn write_hotkey(pipe: &mut std::fs::File) -> Result<(), std::io::Error> {
-    debug_log("firing HOTKEY to nex");
-    pipe.write_all(b"HOTKEY\n")?;
-    pipe.flush()?;
-    Ok(())
+/// Write a line to the detection pipe.
+///
+/// Called only from the dedicated detection writer thread, never from the
+/// message loop: see [`queue_pipe_line`].
+///
+/// The pipe is opened PIPE_NOWAIT because this runs on the message loop that
+/// also pumps the low-level hooks: a reader that stops draining must not park
+/// that thread, or every key and mouse event freezes with it. A full buffer
+/// retries a bounded number of times and then reports the error, which the
+/// loop treats as a dead reader and hands to the supervisor to reconnect.
+fn write_pipe_line(pipe: &mut std::fs::File, line: &[u8]) -> Result<(), std::io::Error> {
+    use std::io::Write;
+    for _ in 0..PIPE_WRITE_RETRIES {
+        match pipe.write_all(line) {
+            Ok(()) => {
+                let _ = pipe.flush();
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(PIPE_WRITE_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "detection pipe stayed full",
+    ))
 }
 
 /// Inbound command pipe (nex writes, helper executes). Same per-pid
@@ -722,7 +837,9 @@ unsafe fn keyboard_hook_proc_inner(
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    hold_mask();
+                    // Never SendInput from the hook; ask the loop instead.
+                    MASK_HELD.store(true, Ordering::SeqCst);
+                    defer_inject(INJECT_MASK_DOWN);
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
             }
@@ -738,7 +855,9 @@ unsafe fn keyboard_hook_proc_inner(
                     if !win_press_fires(consumed_vk, chord) {
                         // A chord owns this press, so the OS needs the mask
                         // out of the way to run Win+E / Win+D normally.
-                        release_mask();
+                        if MASK_HELD.swap(false, Ordering::SeqCst) {
+                            defer_inject(INJECT_MASK_UP);
+                        }
                         debug_log(&format!(
                             "win key-up: no toggle (vk={consumed_vk} chord={chord})",
                         ));
@@ -752,7 +871,7 @@ unsafe fn keyboard_hook_proc_inner(
                     // then took focus while Start was up, saw a phantom
                     // outside-click + Escape and hid the panel immediately —
                     // reported as "the hotkey opens Start instead of nex".
-                    invalidate_start_gesture();
+                    defer_inject(INJECT_START_GUARD);
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
@@ -793,7 +912,9 @@ unsafe fn keyboard_hook_proc_inner(
                 "chord key vk={vk} joined the Win press; mask released, no toggle",
             ));
             CHORD_DETECTED.store(true, Ordering::SeqCst);
-            release_mask();
+            if MASK_HELD.swap(false, Ordering::SeqCst) {
+                defer_inject(INJECT_MASK_UP);
+            }
         }
     }
 
@@ -816,7 +937,8 @@ unsafe fn keyboard_hook_proc_inner(
             if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                 CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                 CHORD_DETECTED.store(false, Ordering::SeqCst);
-                hold_mask();
+                MASK_HELD.store(true, Ordering::SeqCst);
+                defer_inject(INJECT_MASK_DOWN);
             }
             // DO NOT EAT — pass Win through so Win+ chords work
             return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -1071,6 +1193,21 @@ fn connect_detection_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
             )
         };
         if !handle.is_null() && handle as isize != -1 {
+            // Non-blocking writes. This handle is written from the message
+            // loop that also pumps WH_KEYBOARD_LL / WH_MOUSE_LL, so a reader
+            // that stops draining must never park that thread: the write has
+            // to fail fast and let the supervisor reconnect instead of
+            // freezing all input.
+            let mode: u32 = PIPE_READMODE_BYTE | PIPE_NOWAIT;
+            let ok = unsafe {
+                SetNamedPipeHandleState(handle as *mut core::ffi::c_void, &mode, std::ptr::null_mut(), std::ptr::null_mut())
+            };
+            if ok == 0 {
+                debug_log(&format!(
+                    "detection pipe non-blocking mode failed: err={}",
+                    unsafe { windows_sys::Win32::Foundation::GetLastError() },
+                ));
+            }
             return Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut _) });
         }
         last_error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
@@ -1169,6 +1306,12 @@ pub(crate) fn debug_log(msg: &str) {
 /// Log lines buffered between the hooks and the writer thread.
 const LOG_QUEUE_LINES: usize = 1024;
 
+/// Bounded queue of detection lines awaiting the pipe writer thread.
+const DETECT_QUEUE_LINES: usize = 256;
+
+/// Bounded queue of deferred injection batches.
+const INJECT_QUEUE: usize = 64;
+
 static LOG_TX: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
 
 /// Start the log sink ahead of the hooks.
@@ -1190,6 +1333,47 @@ fn spawn_log_sink() -> std::sync::mpsc::SyncSender<String> {
         eprintln!("NexHelper: log writer spawn failed: {error}");
     }
     tx
+}
+
+/// Queue for lines bound for nex's detection pipe.
+static DETECT_TX: OnceLock<std::sync::mpsc::SyncSender<&'static [u8]>> = OnceLock::new();
+
+/// Hand a line to the detection-pipe writer thread.
+///
+/// The caller is the message loop that pumps WH_KEYBOARD_LL / WH_MOUSE_LL.
+/// Writing to the pipe from there blocked whenever nex was slow or gone, and
+/// because a low-level hook that does not return stalls the whole system input
+/// queue, the user saw every key and the mouse freeze for seconds on the first
+/// Win press after changing the hotkey. This never blocks: a full queue drops
+/// the line, and a dead pipe is handled by the writer thread.
+fn queue_pipe_line(line: &'static [u8]) -> bool {
+    match DETECT_TX.get() {
+        Some(tx) => tx.try_send(line).is_ok(),
+        None => false,
+    }
+}
+
+/// Own the detection pipe and write queued lines from this thread only.
+fn detection_writer_loop(pipe: std::fs::File, rx: std::sync::mpsc::Receiver<&'static [u8]>) {
+    let mut pipe = pipe;
+    while let Ok(line) = rx.recv() {
+        if write_pipe_line(&mut pipe, line).is_err() {
+            debug_log("detection pipe write failed — nex reader gone");
+            return;
+        }
+    }
+}
+
+fn spawn_detection_writer(pipe: std::fs::File) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<&'static [u8]>(DETECT_QUEUE_LINES);
+    if let Err(error) = std::thread::Builder::new()
+        .name("NexHelper-detect".into())
+        .spawn(move || detection_writer_loop(pipe, rx))
+    {
+        eprintln!("NexHelper: detection writer spawn failed: {error}");
+        return;
+    }
+    let _ = DETECT_TX.set(tx);
 }
 
 /// The only thread that touches the debug log file and the log pipe.
@@ -1539,6 +1723,9 @@ fn main() {
     // Start the log sink before anything can log or install a hook: the hook
     // path must never create a thread or touch a file inline.
     init_log_sink();
+    // Injection must never run on a thread that owns a hook: SendInput waits
+    // for the event to be delivered, and our own hook is in that path.
+    init_inject_sink();
     // Log startup immediately (before anything can fail)
     debug_log("helper started");
     // Orphan release: a dead predecessor may have held the mask down
@@ -1599,7 +1786,7 @@ fn main() {
 
     // Connect to the UI-owned detection pipe. nex creates it and reads; this
     // process only writes. See `connect_detection_pipe`.
-    let mut pipe = match connect_detection_pipe(&pipe_path) {
+    let pipe = match connect_detection_pipe(&pipe_path) {
         Ok(p) => p,
         Err(e) => {
             debug_log(&format!("detection pipe connect failed: {e}"));
@@ -1607,6 +1794,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // The pipe belongs to the writer thread from here on. The message loop
+    // only enqueues, so a slow or dead reader can never stall the low-level
+    // hooks and freeze system input.
+    spawn_detection_writer(pipe);
     debug_log("detection pipe connected");
 
     // Config-changed doorbell. nex (Medium IL) creates and signals it —
@@ -1799,8 +1990,14 @@ fn main() {
         register_fallback(cfg_guard.as_ref().unwrap())
     };
     FALLBACK_HOTKEY_ID.store(initial_id as u32, Ordering::SeqCst);
-    let cfg_guard = CFG.read().unwrap();
-    let ctx = cfg_guard.as_ref().unwrap();
+    // Clone the Arc and drop the read guard at once. Holding it here kept a
+    // reader alive for the whole of startup and straight into the message
+    // loop; the reload worker then blocked on `CFG.write()` at line ~1922, and
+    // because a queued writer makes every later reader wait too, the loop
+    // thread deadlocked on its own read — the helper parked at zero CPU with
+    // the Win press logged and never dispatched.
+    let ctx = CFG.read().unwrap().clone().unwrap();
+    let ctx = ctx.as_ref();
     // Open the overlay-ready event created by nex.exe (Medium IL).
     // The event has a Medium IL mandatory label so nex.exe can call
     // SetEvent (write-level) without UIPI blocking.
@@ -2001,7 +2198,7 @@ fn main() {
                 && FALLBACK_HOTKEY_ID.load(Ordering::SeqCst) != 0
                 && msg.wParam as u32 == FALLBACK_HOTKEY_ID.load(Ordering::SeqCst)
             {
-                if write_hotkey(&mut pipe).is_err() {
+                if !queue_pipe_line(b"HOTKEY\n") {
                     debug_log("write_hotkey failed — nex pipe reader gone");
                     got_quit = true;
                     break; // nex.exe disconnected
@@ -2030,20 +2227,27 @@ fn main() {
             break;
         }
 
+        // Run any injection the hook proc deferred. Do it here, on the loop
+        // thread: SendInput from inside a low-level hook re-enters the input
+        // pipeline and blocks, which froze every key and the mouse for secs.
+        run_pending_injections();
+
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {
             debug_log("hook fired: target matched, sending to nex");
-            if let Some(cfg) = CFG.read().unwrap().as_ref() {
-                if cfg.target_is_win {
-                    if pipe.write_all(b"SUPPRESS_ON\n").is_err() {
-                        break; // nex.exe disconnected
-                    }
-                }
+            let target_is_win = CFG
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|cfg| cfg.target_is_win)
+                .unwrap_or(false);
+            if target_is_win {
+                queue_pipe_line(b"SUPPRESS_ON\n");
             }
-            if write_hotkey(&mut pipe).is_err() {
-                debug_log("write_hotkey failed — nex pipe reader gone");
-                break; // nex.exe disconnected
-            }
+            // Enqueue only: the writer thread owns the pipe, so this loop —
+            // which pumps the low-level hooks — never blocks on nex.
+            debug_log("firing HOTKEY to nex");
+            queue_pipe_line(b"HOTKEY\n");
             // Mask release is deferred until nex has had time to show the
             // overlay and take foreground (see DEFER_MASK_RELEASE).
             if DEFER_MASK_RELEASE.load(Ordering::SeqCst) {
@@ -2061,14 +2265,14 @@ fn main() {
         // Forward elevated-window clicks (nex's own mouse hook is UIPI-blocked
         // for those). nex decides whether the click was outside the panel.
         if MOUSE_DOWN_FIRED.swap(false, Ordering::SeqCst) {
-            if pipe.write_all(b"MOUSEDOWN\n").is_err() {
+            if !queue_pipe_line(b"MOUSEDOWN\n") {
                 break; // nex.exe disconnected
             }
         }
 
         // Check if Win key was released (send SUPPRESS_OFF to nex.exe)
         if WIN_KEY_RELEASED.swap(false, Ordering::SeqCst) {
-            if pipe.write_all(b"SUPPRESS_OFF\n").is_err() {
+            if !queue_pipe_line(b"SUPPRESS_OFF\n") {
                 break; // nex.exe disconnected
             }
         }
@@ -2183,6 +2387,21 @@ mod tests {
     fn json_str_rejects_a_missing_key() {
         assert!(json_str(r#"{"a":"b"}"#, "hotkey").is_err());
     }
+    /// A wedged reader must never park the hook loop. The detection pipe is
+    /// opened PIPE_NOWAIT precisely so a full buffer reports WouldBlock and
+    /// the loop hands it to the supervisor, instead of freezing all input for
+    /// as long as the reader is stalled (observed as a ~10s mouse freeze on
+    /// the first Win press after a hotkey save).
+    #[test]
+    fn write_backoff_is_bounded() {
+        assert!(PIPE_WRITE_RETRIES > 0);
+        assert!(
+            PIPE_WRITE_BACKOFF * PIPE_WRITE_RETRIES <= std::time::Duration::from_millis(100),
+            "a full pipe must give up quickly enough to stay responsive",
+        );
+    }
+
+    #[test]
     fn json_u64_reads_generation() {
         let json = r#"{"generation":42,"target_pid":7}"#;
         assert_eq!(json_u64(json, "generation"), Some(42));

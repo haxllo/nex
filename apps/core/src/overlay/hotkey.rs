@@ -482,6 +482,28 @@ unsafe extern "system" fn keyboard_hook_proc(
 ) -> windows_sys::Win32::Foundation::LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT;
 
+    let entered = std::time::Instant::now();
+    let result = unsafe { keyboard_hook_proc_inner(n_code, w_param, l_param) };
+    // This proc runs inside the OS input pipeline for every keystroke on the
+    // system. Anything slow here is felt as low input-FPS for everything, so
+    // samples above the LowLevelHooksTimeout budget are logged.
+    let elapsed = entered.elapsed();
+    if elapsed >= Duration::from_millis(30) {
+        crate::runtime::log_warn(&format!(
+            "[nex::stall] keyboard hook proc took {}ms",
+            elapsed.as_millis()
+        ));
+    }
+    result
+}
+
+unsafe fn keyboard_hook_proc_inner(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::KBDLLHOOKSTRUCT;
+
     if n_code < 0 {
         return unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)

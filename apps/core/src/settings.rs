@@ -97,13 +97,19 @@ fn normalize_key(input: &str) -> Result<String, String> {
         return Ok("Win".to_string());
     }
 
-    if let Some(number) = upper.strip_prefix('F') {
-        if let Ok(parsed) = number.parse::<u8>() {
-            if (1..=24).contains(&parsed) {
-                return Ok(format!("F{parsed}"));
+    // Only treat this as a function key when the digits actually parse.
+    // `strip_prefix` alone made the bare letter "F" look like a malformed
+    // function key, so Ctrl+Shift+F was rejected as "must be between F1 and
+    // F24" instead of falling through to the single-letter case below.
+    if upper.len() > 1 {
+        if let Some(number) = upper.strip_prefix('F') {
+            if let Ok(parsed) = number.parse::<u8>() {
+                if (1..=24).contains(&parsed) {
+                    return Ok(format!("F{parsed}"));
+                }
+                return Err("Function key must be between F1 and F24.".to_string());
             }
         }
-        return Err("Function key must be between F1 and F24.".to_string());
     }
 
     if upper.len() == 1 {
@@ -139,4 +145,43 @@ fn is_reserved_hotkey(canonical: &str) -> bool {
         canonical,
         "Alt+Tab" | "Alt+F4" | "Ctrl+Esc" | "Alt+Esc" | "Ctrl+Shift+Esc" | "Alt+Space"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_hotkey;
+
+    #[test]
+    fn bare_letter_f_is_a_letter_not_a_function_key() {
+        // `strip_prefix('F')` on "F" leaves "" and used to fall into the
+        // function-key error arm, so Ctrl+Shift+F was rejected.
+        assert_eq!(validate_hotkey("Ctrl+Shift+F").unwrap(), "Ctrl+Shift+F");
+        assert_eq!(validate_hotkey("Ctrl+F").unwrap(), "Ctrl+F");
+    }
+
+    #[test]
+    fn function_keys_beyond_f12_are_accepted() {
+        for n in 1..=24 {
+            let combo = format!("Ctrl+F{n}");
+            assert_eq!(validate_hotkey(&combo).unwrap(), combo, "F{n}");
+        }
+        assert!(validate_hotkey("Ctrl+F25").is_err());
+        assert!(validate_hotkey("Ctrl+F0").is_err());
+    }
+
+    #[test]
+    fn letters_next_to_f_still_validate() {
+        for key in ["E", "G"] {
+            assert!(validate_hotkey(&format!("Ctrl+{key}")).is_ok(), "{key}");
+        }
+        // Not keys: two-letter names that merely start with F are rejected
+        // rather than reported as malformed function keys.
+        for key in ["FA", "FE", "FXX"] {
+            let err = validate_hotkey(&format!("Ctrl+{key}")).unwrap_err();
+            assert!(
+                !err.contains("Function key"),
+                "{key} should not be reported as a function key: {err}"
+            );
+        }
+    }
 }

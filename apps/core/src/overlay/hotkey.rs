@@ -1096,7 +1096,18 @@ impl HotkeyListener {
                         if required_mods_local.contains(&vk) { mods |= flag; }
                     }
                     // Generate a unique hotkey ID that won't collide.
-                    fallback_id = (tid as u32).wrapping_mul(7) ^ 0x4E45;
+                    // RegisterHotKey only accepts 0x0000..=0xBFFF for an
+                    // application hotkey; the raw mix below crosses that at
+                    // roughly tid 2100 and the call fails with a bogus
+                    // ERROR_INVALID_WINDOW_HANDLE, which looked like the
+                    // fallback "never registering". Fold into range and keep
+                    // 0 reserved for "not registered".
+                    const REGISTER_HOTKEY_MAX_ID: u32 = 0xBFFF;
+                    fallback_id = ((tid as u32).wrapping_mul(7) ^ 0x4E45)
+                        % (REGISTER_HOTKEY_MAX_ID + 1);
+                    if fallback_id == 0 {
+                        fallback_id = 1;
+                    }
                     let reason = dispatch_for(
                         target_key_local,
                         false,
@@ -2647,15 +2658,24 @@ fn modifier_vks_from_names(names: &[String]) -> Result<Vec<u32>, String> {
 }
 
 fn vk_from_key(key: &str) -> Result<u32, String> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_F1, VK_F10, VK_F11, VK_F12, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_SPACE,
-    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_F1, VK_SPACE};
     let upper = key.to_ascii_uppercase();
     Ok(match upper.as_str() {
         "WIN" | "META" | "SUPER" => VK_LWIN, "SPACE" => VK_SPACE as u32,
-        "F1" => VK_F1 as u32, "F2" => VK_F2 as u32, "F3" => VK_F3 as u32, "F4" => VK_F4 as u32,
-        "F5" => VK_F5 as u32, "F6" => VK_F6 as u32, "F7" => VK_F7 as u32, "F8" => VK_F8 as u32,
-        "F9" => VK_F9 as u32, "F10" => VK_F10 as u32, "F11" => VK_F11 as u32, "F12" => VK_F12 as u32,
+        // VK_F1..VK_F24 are contiguous (0x70..=0x87), so the whole documented
+        // range resolves here. Listing only F1-F12 made the recorder, which
+        // emits F1-F24 from 0x70..=0x87, produce a hotkey that validated and
+        // saved and then failed to register with "unsupported key: F13".
+        _ if upper.len() >= 2 && upper.len() <= 3 && upper.starts_with('F') => {
+            let n: u32 = upper[1..]
+                .parse()
+                .map_err(|_| format!("unsupported key: {key}"))?;
+            if (1..=24).contains(&n) {
+                0x70u32 + n - 1
+            } else {
+                return Err(format!("unsupported key: {key}"));
+            }
+        }
         _ if upper.len() == 1 => upper.as_bytes()[0] as u32,
         _ => return Err(format!("unsupported key: {key}")),
     })
@@ -2726,6 +2746,41 @@ mod tests {
     #[test] fn vk_f5() { assert_eq!(vk_from_key("F5").unwrap(), windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_F5 as u32); }
     #[test] fn vk_single_letter() { assert_eq!(vk_from_key("A").unwrap(), b'A' as u32); }
     #[test] fn vk_win_key() { assert_eq!(vk_from_key("Win").unwrap(), VK_LWIN); }
+
+    /// VK_F1..VK_F24 are contiguous. The recorder emits this whole range
+    /// (`vk_to_hotkey` maps 0x70..=0x87) and `normalize_key` accepts it, so
+    /// resolving only F1-F12 left F13+ saving successfully and then failing to
+    /// register with "unsupported key".
+    #[test]
+    fn vk_covers_the_full_function_key_range() {
+        for n in 1u32..=24 {
+            assert_eq!(vk_from_key(&format!("F{n}")).unwrap(), 0x70 + n - 1, "F{n}");
+        }
+        assert!(vk_from_key("F25").is_err());
+        assert!(vk_from_key("F0").is_err());
+    }
+
+    /// The bare letter F is a letter, not a malformed function key.
+    #[test]
+    fn vk_bare_letter_f() {
+        assert_eq!(vk_from_key("F").unwrap(), b'F' as u32);
+    }
+
+    /// RegisterHotKey only accepts ids up to 0xBFFF. The old mix overflowed
+    /// that for thread ids above roughly 2100.
+    #[test]
+    fn fallback_hotkey_id_stays_in_range() {
+        const MAX: u32 = 0xBFFF;
+        let mix = |tid: u32| {
+            let mut id = (tid.wrapping_mul(7) ^ 0x4E45) % (MAX + 1);
+            if id == 0 { id = 1; }
+            id
+        };
+        for tid in [4u32, 2100, 4096, 65536, 1_000_000, u32::MAX / 4] {
+            assert!(mix(tid) <= MAX, "tid {tid} produced out-of-range id");
+            assert_ne!(mix(tid), 0);
+        }
+    }
     #[test] fn modifier_vks() { let mods = modifier_vks_from_names(&["Ctrl".into(), "Shift".into()]).unwrap(); assert_eq!(mods, vec![VK_CTRL, VK_SHIFT]); }
     #[test] fn dispatch_win_goes_hook() { assert_eq!(dispatch_for(0x20, true, true, false), DispatchReason::WinCombo); }
     #[test] fn dispatch_numpad_goes_hook() { assert_eq!(dispatch_for(0x60, false, true, false), DispatchReason::NumpadKey); }

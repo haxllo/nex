@@ -1812,6 +1812,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     }
                                     Ok(SettingsMessage::RecordHotkey(_)) => {
                                         RECORDING_HOTKEY.store(true, Ordering::SeqCst);
+                                        // A fresh session starts with no Win chord
+                                        // seen, otherwise a chord recorded once would
+                                        // keep every later bare Win tap ignored.
+                                        RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
                                         // Raw input already swallows the keys;
                                         // keep Start shut by holding the mask
                                         // while Win is down (see handle_recording_key).
@@ -1819,6 +1823,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     }
                                     Ok(SettingsMessage::CancelRecord(_)) => {
                                         RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                                        RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
                                         register_raw_input_sink(record_hwnd);
                                     }
                                     Ok(SettingsMessage::IndexingStatus(_)) => {
@@ -3930,6 +3935,7 @@ unsafe extern "system" fn instance_signal_subclass(
             // press even where the LL hook is bypassed (Chromium's own
             // hook, elevated foreground); the Start menu is suppressed by
             // the menu-mask key, never by RIDEV_NOHOTKEYS.
+            let t_raw = std::time::Instant::now();
             let h_raw_input = lparam as windows_sys::Win32::Foundation::HANDLE;
             let header_sz = std::mem::size_of::<RAWINPUTHEADER>() as u32;
             let mut raw_input: std::mem::MaybeUninit<RAWINPUT> = std::mem::MaybeUninit::uninit();
@@ -4023,6 +4029,15 @@ unsafe extern "system" fn instance_signal_subclass(
                     }
                 }
             }
+            // WM_INPUT arrives for every keystroke system-wide; this handler
+            // runs on the UI thread, so a slow path here is felt as input lag.
+            let t_raw = t_raw.elapsed();
+            if t_raw >= std::time::Duration::from_millis(30) {
+                crate::runtime::log_warn(&format!(
+                    "[nex::stall] WM_INPUT handler took {}ms",
+                    t_raw.as_millis()
+                ));
+            }
         }
     }
     // SAFETY: hwnd is valid window handle from subclass registration
@@ -4083,7 +4098,12 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
                 crate::overlay::hotkey::mask_hold();
             }
         }
-        //Commit bare "Win" on keyup only if no other jey is joined it.
+        // A fresh Win press starts a fresh gesture. Any chord flag left over
+        // from an earlier press must not make this bare tap unrecordable.
+        if !is_break {
+            RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
+        }
+        // Commit bare "Win" on keyup only if no other key joined it.
         if is_break && !RECORD_WIN_CHORD.load(Ordering::SeqCst) {
             RECORDING_HOTKEY.store(false, Ordering::SeqCst);
             let _ = ctx
@@ -4093,6 +4113,14 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
         return 0;
     }
     if !is_break && !is_modifier {
+        // Any non-modifier key arriving while recording joined a Win press if
+        // Win was down when it started. Checking the live key state alone is
+        // unreliable: by the time this key is delivered Win may already read as
+        // released. Marking the chord here keeps the Win key-up from committing
+        // a bare "Win" for what was really Win+<key>.
+        if !crate::overlay::hotkey::is_win_key_hotkey() && recording_win_down() {
+            RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
+        }
         let mut parts: Vec<String> = Vec::new();
         unsafe {
             if GetAsyncKeyState(0x11) as u16 & 0x8000 != 0 {
@@ -4122,9 +4150,18 @@ unsafe fn handle_recording_key(vk: u16, flags: u16, ctx: &InstanceSignalCtx) -> 
     0
 }
 
+/// True while either Win key reads as physically down.
+fn recording_win_down() -> bool {
+    unsafe {
+        GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0
+            || GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0
+    }
+}
+
 /// Clear the Win press tracking. Called after a live hotkey change and on
 /// hide so a half-finished press of the old binding can't decide the next one.
 pub(crate) fn reset_raw_win_state() {
+    RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
     crate::overlay::hotkey::reset_win_press_state();
 }
 pub(crate) static RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
@@ -4196,6 +4233,45 @@ fn unregister_raw_input_sink() {
     ));
 }
 // ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod recorder_tests {
+    use super::RECORD_WIN_CHORD;
+    use std::sync::atomic::Ordering;
+
+    /// The recorder commits a bare "Win" on key-up unless a chord flag says
+    /// another key joined the press. That flag is per-gesture state: if it
+    /// survives into the next recording session, Win can never be recorded
+    /// again ("it records other keys except Win").
+    #[test]
+    fn recording_a_fresh_session_clears_a_previous_chord() {
+        RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
+        // Start of a new recording session.
+        RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
+        assert!(!RECORD_WIN_CHORD.load(Ordering::SeqCst));
+    }
+
+    /// A Win key-down on its own always starts a clean gesture, so a leftover
+    /// flag from an earlier press cannot block this tap.
+    #[test]
+    fn win_key_down_clears_the_chord_flag() {
+        RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
+        RECORD_WIN_CHORD.store(false, Ordering::SeqCst);
+        assert!(
+            !RECORD_WIN_CHORD.load(Ordering::SeqCst),
+            "a bare Win press must remain recordable",
+        );
+    }
+
+    /// Resetting the Win state after a live hotkey change must also drop a
+    /// pending chord, or the next recording inherits it.
+    #[test]
+    fn reset_raw_win_state_clears_the_chord_flag() {
+        RECORD_WIN_CHORD.store(true, Ordering::SeqCst);
+        super::reset_raw_win_state();
+        assert!(!RECORD_WIN_CHORD.load(Ordering::SeqCst));
+    }
+}
 
 #[cfg(test)]
 mod snapshot_tests {

@@ -2057,6 +2057,7 @@ impl RuntimeWorker {
                                 serde_json::json!({ "saved": false, "error": e }).to_string(),
                             ),
                         }
+
                     }
                     Err(e) => self.overlay.settings_save_result(
                         serde_json::json!({ "saved": false, "error": e }).to_string(),

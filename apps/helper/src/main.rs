@@ -628,7 +628,29 @@ fn win_press_fires(consumed_vk: u32, chord_detected: bool) -> bool {
     consumed_vk != 0 && !chord_detected
 }
 
+/// Report a low-level hook that took long enough to be felt as input lag.
+///
+/// Windows gives a low-level hook a few seconds to return before it stalls the
+/// whole input queue, and unhooks a proc that keeps exceeding it. Samples
+/// above a generous budget are logged so a regression is visible in the log.
+fn note_hook_duration(kind: &str, elapsed: std::time::Duration) {
+    if elapsed >= std::time::Duration::from_millis(30) {
+        debug_log(&format!("[stall] {kind} hook proc took {}ms", elapsed.as_millis()));
+    }
+}
+
 unsafe extern "system" fn keyboard_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    let entered = std::time::Instant::now();
+    let result = unsafe { keyboard_hook_proc_inner(n_code, w_param, l_param) };
+    note_hook_duration("keyboard", entered.elapsed());
+    result
+}
+
+unsafe fn keyboard_hook_proc_inner(
     n_code: i32,
     w_param: windows_sys::Win32::Foundation::WPARAM,
     l_param: windows_sys::Win32::Foundation::LPARAM,
@@ -788,6 +810,17 @@ static MOUSE_DOWN_FIRED: AtomicBool = AtomicBool::new(false);
 /// High-IL hook sees clicks on Task Manager / Settings, which is exactly the
 /// case nex cannot observe itself.
 unsafe extern "system" fn mouse_hook_proc(
+    n_code: i32,
+    w_param: windows_sys::Win32::Foundation::WPARAM,
+    l_param: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    let entered = std::time::Instant::now();
+    let result = unsafe { mouse_hook_proc_inner(n_code, w_param, l_param) };
+    note_hook_duration("mouse", entered.elapsed());
+    result
+}
+
+unsafe fn mouse_hook_proc_inner(
     n_code: i32,
     w_param: windows_sys::Win32::Foundation::WPARAM,
     l_param: windows_sys::Win32::Foundation::LPARAM,
@@ -1041,33 +1074,42 @@ fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String
 /// bounded channel; when that channel is saturated the line is dropped rather
 /// than delaying the input pipeline.
 pub(crate) fn debug_log(msg: &str) {
-    if LOG_TX.get().is_none() {
-        // First caller (or a hook that won a race with startup) starts the
-        // sink. try_send below keeps it off this path afterwards.
-        LOG_TX.get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<String>(LOG_QUEUE_LINES);
-            std::thread::Builder::new()
-                .name("NexHelper-log".into())
-                .spawn(move || log_writer_loop(rx))
-                .ok();
-            tx
-        });
-    }
-    if LOG_TX.get().is_none() {
+    // `get` never blocks. Startup calls `init_log_sink` before the hooks are
+    // installed, so this is set for every hook-driven line.
+    let Some(tx) = LOG_TX.get() else {
         return;
-    }
+    };
     let line = format!("[{}] {msg}", std::process::id());
-    if let Some(tx) = LOG_TX.get() {
-        // try_send: a full queue means the sink is behind. Dropping one
-        // diagnostic line beats stalling the keyboard and mouse.
-        let _ = tx.try_send(line);
-    }
+    // try_send: a full queue means the sink is behind. Dropping one
+    // diagnostic line beats stalling the keyboard and mouse.
+    let _ = tx.try_send(line);
 }
 
 /// Log lines buffered between the hooks and the writer thread.
 const LOG_QUEUE_LINES: usize = 1024;
 
 static LOG_TX: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
+
+/// Start the log sink ahead of the hooks.
+///
+/// Called once from `main` before any hook can run, so the hook path never
+/// pays for creating a thread. `debug_log` only ever calls `get`.
+pub(crate) fn init_log_sink() {
+    let _ = LOG_TX.set(spawn_log_sink());
+}
+
+fn spawn_log_sink() -> std::sync::mpsc::SyncSender<String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(LOG_QUEUE_LINES);
+    if let Err(error) = std::thread::Builder::new()
+        .name("NexHelper-log".into())
+        .spawn(move || log_writer_loop(rx))
+    {
+        // No sink: lines are dropped below. Never fall back to writing
+        // inline — that is what stalled input.
+        eprintln!("NexHelper: log writer spawn failed: {error}");
+    }
+    tx
+}
 
 /// The only thread that touches the debug log file and the log pipe.
 fn log_writer_loop(rx: std::sync::mpsc::Receiver<String>) {
@@ -1373,6 +1415,23 @@ fn set_overlay_foreground(seq: u64) {
     }
 }
 
+/// RegisterHotKeyW id owned by whichever thread registered it.
+///
+/// The reload worker registers it (RegisterHotKey targets a thread), while the
+/// pump loop matches incoming WM_HOTKEY against it, so both read one atomic.
+static FALLBACK_HOTKEY_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Set when a reload decided this helper is superseded and must exit.
+static RELOAD_EXIT_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+/// Ask the reload worker to re-read the hotkey config.
+///
+/// Never blocks: a full queue means a reload is already pending, and pending
+/// reloads coalesce because the worker re-reads the file itself.
+fn request_hotkey_reload(_path: &str, tx: &std::sync::mpsc::SyncSender<()>) {
+    let _ = tx.try_send(());
+}
+
 /// True when a reloaded config asks for behaviour this process cannot
 /// adopt in place, so the helper must exit and let nex start a fresh one.
 ///
@@ -1396,6 +1455,9 @@ fn config_needs_restart(previous: Option<&HotkeyConfig>, next: &HotkeyConfig) ->
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Start the log sink before anything can log or install a hook: the hook
+    // path must never create a thread or touch a file inline.
+    init_log_sink();
     // Log startup immediately (before anything can fail)
     debug_log("helper started");
     // Orphan release: a dead predecessor may have held the mask down
@@ -1547,11 +1609,7 @@ fn main() {
     ///
     /// Returns true when the helper should exit: a config for a different nex
     /// process or a newer helper generation means this process is superseded.
-    fn reload_hotkey_config(
-        config_file_path: &str,
-        fallback_id: &mut i32,
-        last_applied: &mut Vec<u8>,
-    ) -> bool {
+    fn reload_hotkey_config(config_file_path: &str, last_applied: &mut Vec<u8>) -> bool {
         let bytes = match std::fs::read(config_file_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -1581,11 +1639,14 @@ fn main() {
             *last_applied = bytes;
             return true;
         }
-        if *fallback_id != 0 {
+        let previous_id = FALLBACK_HOTKEY_ID.swap(0, Ordering::SeqCst) as i32;
+        if previous_id != 0 {
             unsafe {
-                windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(std::ptr::null_mut(), *fallback_id);
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
+                    std::ptr::null_mut(),
+                    previous_id,
+                );
             }
-            *fallback_id = 0;
         }
         debug_log(&format!(
             "reloaded hotkey='{}' vk={} is_win={}",
@@ -1607,7 +1668,8 @@ fn main() {
         *last_applied = bytes;
         let g = CFG.read().unwrap();
         if let Some(cfg) = g.as_ref() {
-            *fallback_id = register_fallback(cfg);
+            let id = register_fallback(cfg);
+            FALLBACK_HOTKEY_ID.store(id as u32, Ordering::SeqCst);
         }
         false
     }
@@ -1659,9 +1721,13 @@ fn main() {
     }
 
     // Register system-level hotkey fallback via RegisterHotKeyW (non-Win hotkeys only).
+    let initial_id = {
+        let cfg_guard = CFG.read().unwrap();
+        register_fallback(cfg_guard.as_ref().unwrap())
+    };
+    FALLBACK_HOTKEY_ID.store(initial_id as u32, Ordering::SeqCst);
     let cfg_guard = CFG.read().unwrap();
     let ctx = cfg_guard.as_ref().unwrap();
-    let mut fallback_id: i32 = register_fallback(ctx);
     // Open the overlay-ready event created by nex.exe (Medium IL).
     // The event has a Medium IL mandatory label so nex.exe can call
     // SetEvent (write-level) without UIPI blocking.
@@ -1732,7 +1798,39 @@ fn main() {
     const WAIT_SLICE_MS: u32 = 250;
     let mut last_config_mtime: Option<std::time::SystemTime> =
         std::fs::metadata(&config_file_path).ok().and_then(|m| m.modified().ok());
-    let mut last_applied_config: Vec<u8> = Vec::new();
+    // Hotkey reloads run on their own thread. Reading the config, parsing it
+    // and calling RegisterHotKey on this loop would block the thread that
+    // pumps WH_KEYBOARD_LL/WH_MOUSE_LL, and a low-level hook that is slow to
+    // return stalls every keystroke and mouse move on the system.
+    let (reload_tx, reload_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    {
+        let path = config_file_path.clone();
+        std::thread::Builder::new()
+            .name("NexHelper-reload".into())
+            .spawn(move || {
+                let mut last_applied: Vec<u8> = Vec::new();
+                while reload_rx.recv().is_ok() {
+                    if reload_hotkey_config(&path, &mut last_applied) {
+                        RELOAD_EXIT_SIGNAL.store(true, Ordering::SeqCst);
+                        // Wake the pump loop so it leaves and the process
+                        // releases its pipes for the successor.
+                        if let Some(tid) = HELPER_THREAD_ID.get() {
+                            unsafe {
+                                windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                                    *tid,
+                                    WM_NEX_WAKE,
+                                    0,
+                                    0,
+                                )
+                            };
+                        }
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| debug_log(&format!("reload worker spawn failed: {error}")))
+            .ok();
+    }
 
     loop {
 
@@ -1783,7 +1881,8 @@ fn main() {
         // RegisterHotKeyW fallback. No respawn, no cross-IL writes.
         if wait_result == rehotkey_wake {
             debug_log("config event received, reloading hotkey");
-            if reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config) {
+            request_hotkey_reload(&config_file_path, &reload_tx);
+            if RELOAD_EXIT_SIGNAL.load(Ordering::SeqCst) {
                 break;
             }
         }
@@ -1796,11 +1895,8 @@ fn main() {
                 if Some(modt) != last_config_mtime {
                     last_config_mtime = Some(modt);
                     debug_log("mtime changed, reloading hotkey");
-                    if reload_hotkey_config(
-                        &config_file_path,
-                        &mut fallback_id,
-                        &mut last_applied_config,
-                    ) {
+                    request_hotkey_reload(&config_file_path, &reload_tx);
+                    if RELOAD_EXIT_SIGNAL.load(Ordering::SeqCst) {
                         break;
                     }
                 }
@@ -1816,7 +1912,9 @@ fn main() {
             }
             // Grant nex.exe foreground permission before every HOTKEY dispatch.
             let will_send_hotkey =
-                (msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id)
+                (msg.message == WM_HOTKEY
+                    && FALLBACK_HOTKEY_ID.load(Ordering::SeqCst) != 0
+                    && msg.wParam as u32 == FALLBACK_HOTKEY_ID.load(Ordering::SeqCst))
                 || HOTKEY_FIRED.load(Ordering::SeqCst);
 
             if will_send_hotkey {
@@ -1826,7 +1924,10 @@ fn main() {
             }
 
             // Process WM_HOTKEY (RegisterHotKeyW fallback)
-            if msg.message == WM_HOTKEY && fallback_id != 0 && msg.wParam as i32 == fallback_id {
+            if msg.message == WM_HOTKEY
+                && FALLBACK_HOTKEY_ID.load(Ordering::SeqCst) != 0
+                && msg.wParam as u32 == FALLBACK_HOTKEY_ID.load(Ordering::SeqCst)
+            {
                 if write_hotkey(&mut pipe).is_err() {
                     debug_log("write_hotkey failed — nex pipe reader gone");
                     got_quit = true;
@@ -1887,11 +1988,12 @@ fn main() {
             windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(mouse_hook_id);
         }
     }
-    if fallback_id != 0 {
+    let leftover_id = FALLBACK_HOTKEY_ID.swap(0, Ordering::SeqCst) as i32;
+    if leftover_id != 0 {
         unsafe {
             windows_sys::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
                 std::ptr::null_mut(),
-                fallback_id,
+                leftover_id,
             );
         }
     }

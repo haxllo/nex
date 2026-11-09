@@ -169,6 +169,7 @@ const PIPE_WAIT: u32 = 0x00000000;
 const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
 const GENERIC_READ: u32 = 0x80000000;
+const GENERIC_WRITE: u32 = 0x40000000;
 const FILE_SHARE_READ: u32 = 0x00000001;
 const FILE_SHARE_WRITE: u32 = 0x00000002;
 const OPEN_EXISTING: u32 = 3;
@@ -997,6 +998,12 @@ fn check_modifiers(ctx: &HotkeyConfig) -> bool {
 /// of click/hotkey lines without ever blocking the hook thread.
 const PIPE_OUT_BUFFER_BYTES: u32 = 64 * 1024;
 
+/// Create a server pipe this process owns.
+///
+/// Only used for the log pipe, which nex merely reads: a Medium-IL process may
+/// read *down* from a High-IL server, so the helper may own that one. The
+/// detection pipe is the opposite direction and is owned by nex — see
+/// [`connect_detection_pipe`].
 fn create_named_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
     let wide_path = to_wide(pipe_path);
     let handle = unsafe {
@@ -1036,6 +1043,42 @@ fn wait_for_client(pipe: &std::fs::File) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Connect to the UI-owned detection pipe as the client.
+///
+/// nex (Medium IL) creates this pipe and reads it. UIPI refuses a Medium-IL
+/// read of a High-IL pipe, so this process must never own the pipe object —
+/// when it did, `write_hotkey` reported success into its own server end while
+/// nex received nothing, and every bare-Win press was detected then dropped.
+/// Writing down into a Medium-IL pipe is permitted, which is why the elevated
+/// helper is the client here.
+fn connect_detection_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
+    let wide = to_wide(pipe_path);
+    let mut last_error = 0;
+    // nex creates the pipe before launching this process, but the scheduled
+    // task can start us before its accept loop is ready.
+    for _ in 0..60 {
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if !handle.is_null() && handle as isize != -1 {
+            return Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut _) });
+        }
+        last_error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Err(format!(
+        "connect_detection_pipe failed for {pipe_path}: err={last_error}"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,26 +1597,17 @@ fn main() {
     // for indexers that predate it.
     mft::spawn_command_client(watch_pid);
 
-    debug_log(&format!("creating named pipe: {pipe_path}"));
-
-    // Create the named pipe
-    let mut pipe = match create_named_pipe(&pipe_path) {
+    // Connect to the UI-owned detection pipe. nex creates it and reads; this
+    // process only writes. See `connect_detection_pipe`.
+    let mut pipe = match connect_detection_pipe(&pipe_path) {
         Ok(p) => p,
         Err(e) => {
-            debug_log(&format!("create_named_pipe failed: {e}"));
+            debug_log(&format!("detection pipe connect failed: {e}"));
             eprintln!("NexHelper: {e}");
             std::process::exit(1);
         }
     };
-    debug_log("pipe created, waiting for client");
-
-    // Wait for nex.exe to connect
-    if let Err(e) = wait_for_client(&pipe) {
-        debug_log(&format!("wait_for_client failed: {e}"));
-        eprintln!("NexHelper: {e}");
-        std::process::exit(1);
-    }
-    debug_log("client connected");
+    debug_log("detection pipe connected");
 
     // Config-changed doorbell. nex (Medium IL) creates and signals it —
     // UIPI forbids Medium→High writes, so the helper can only open it for

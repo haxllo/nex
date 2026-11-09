@@ -1,8 +1,6 @@
 #[cfg(target_os = "windows")]
 use std::cell::RefCell;
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-#[cfg(target_os = "windows")]
 use std::rc::Rc;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -691,13 +689,19 @@ impl RuntimeWorker {
 
     /// Load Quick Launch items from the database and config.
     /// Called every time the overlay shows idle state to ensure fresh data.
-    /// Full hotkey re-registration: kill the helper and start a fresh
-    /// listener. Only used when no live helper is available — the live
-    /// path ([`crate::overlay::hotkey::update_live_hotkey`]) is preferred
-    /// because it never leaves the system without a detector.
+    /// Apply a hotkey change that the live path cannot serve.
+    ///
+    /// The in-process detector is never torn down for a hotkey change: the
+    /// hook thread, the raw-input sink and the RegisterHotKey fallback are
+    /// already retargeted by
+    /// [`crate::overlay::hotkey::update_live_hotkey`], and rebuilding them
+    /// meant dropping a live keyboard hook, re-running the listener, and
+    /// spawning console binaries — the input stall reported with every hotkey
+    /// change. Only the elevated helper is regenerated here, because its
+    /// `detect` flag depends on the combo, and that path closes pipes instead
+    /// of killing a process.
     fn reregister_hotkey_listener(&mut self, new_hotkey: &str) {
-        // Gate: only one re-registration at a time — drop old listener
-        // inside the gate so we don't lose it if another is in progress.
+        // Gate: only one re-registration at a time.
         if RE_REGISTERING
             .compare_exchange(
                 false,
@@ -710,54 +714,14 @@ impl RuntimeWorker {
             log_info("[nex] hotkey re-registration already in progress, skipping");
             return;
         }
-        // Dropped on the reconfig thread: Drop runs a blocking taskkill,
-        // which stalled the worker when it ran here.
-        let old_listener = self
-            .hotkey_listener
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
         let new_hotkey = new_hotkey.to_string();
-        let event_tx = self.event_tx.clone();
-        let lh = self.hotkey_listener.clone();
         std::thread::Builder::new()
             .name("nex-hotkey-reconfig".into())
             .spawn(move || {
-                drop(old_listener);
-                // Stop the scheduled task and kill the helper process so the
-                // new start() can write config and re-launch a clean helper.
-                let _ = std::process::Command::new("schtasks")
-                    .args(["/end", "/tn", "NexHelperV2"])
-                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                    .output();
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/F", "/IM", "NexHelper.exe"])
-                    .creation_flags(0x08000000)
-                    .output();
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                match HotkeyListener::start(&new_hotkey, event_tx) {
-                    Ok(listener) => {
-                        log_info("[nex] hotkey re-registered successfully");
-                        match lh.lock() {
-                            Ok(mut guard) => {
-                                *guard = Some(listener);
-                                log_info("[nex::diag] re-registration: listener stored in hotkey_listener");
-                            }
-                            Err(_) => {
-                                log_warn("[nex::diag] re-registration: hotkey_listener mutex poisoned, listener lost!");
-                            }
-                        }
-                        // Re-arm the raw input sink: the new hotkey may
-                        // be a Win combo requiring RIDEV_NOHOTKEYS, or a
-                        // non-Win combo where NOHOTKEYS must be cleared.
-                        // Without this, switching from non-Win to Win
-                        // mid-run leaves Start un-suppressed.
-                        crate::overlay::host::rearm_raw_input_sink();
-                    }
-                    Err(error) => {
-                        log_warn(&format!("[nex] hotkey re-registration failed: {error}"));
-                    }
-                }
+                // Only the helper is regenerated. The listener that owns the
+                // hook thread, the click-away poll and the detection event
+                // channel keeps running throughout.
+                crate::overlay::hotkey::restart_elevated_helper(&new_hotkey);
                 RE_REGISTERING.store(false, std::sync::atomic::Ordering::SeqCst);
             })
             .ok();
@@ -1498,16 +1462,16 @@ impl RuntimeWorker {
             };
             if needs_restart {
                 log_warn("[nex] hotkey listener thread died; attempting restart");
-                // Taken here, dropped on the recover thread: its Drop runs
-                // a blocking taskkill.
+                // Taken here and released on the recover thread: a listener's
+                // Drop stops its helper and posts WM_QUIT, both of which must
+                // stay off the runtime worker.
                 let dead_listener = self
                     .hotkey_listener
                     .lock()
                     .ok()
                     .and_then(|mut guard| guard.take());
-                // Spawn recovery on a separate thread so the runtime
-                // worker never blocks — same pattern as config-change
-                // re-registration.
+                // Recovery runs on its own thread so the worker never blocks —
+                // same pattern as config-change re-registration.
                 let recovery_hotkey = self.runtime_config.hotkey.clone();
                 let recovery_etx = self.event_tx.clone();
                 let recovery_lh = self.hotkey_listener.clone();
@@ -1515,25 +1479,22 @@ impl RuntimeWorker {
                     .name("nex-hotkey-recover".into())
                     .spawn(move || {
                         drop(dead_listener);
-                        let _ = std::process::Command::new("schtasks")
-                            .args(["/end", "/tn", "NexHelperV2"])
-                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                            .output();
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/F", "/IM", "NexHelper.exe"])
-                            .creation_flags(0x08000000)
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(500));
                         if QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
                             log_info("[nex] skipping hotkey listener restart: quit in progress");
                             return;
                         }
-                        match HotkeyListener::start(&recovery_hotkey, recovery_etx) {
+                        match HotkeyListener::start_no_helper(&recovery_hotkey, recovery_etx) {
                             Ok(listener) => {
                                 log_info("[nex] hotkey listener restarted successfully");
                                 if let Ok(mut guard) = recovery_lh.lock() {
                                     *guard = Some(listener);
                                 }
+                                // The new listener owns detection; regenerate
+                                // the helper separately so it never gates the
+                                // restart, and no console binary is spawned on
+                                // the way.
+                                crate::overlay::hotkey::restart_elevated_helper(&recovery_hotkey);
+                                crate::overlay::host::rearm_raw_input_sink();
                             }
                             Err(error) => {
                                 log_warn(&format!(
@@ -1577,18 +1538,19 @@ impl RuntimeWorker {
             );
             if hotkey_changed {
                 log_info(&format!(
-                    "[nex] config hotkey changed, re-registering listener for '{}'",
+                    "[nex] config hotkey changed, applying live for '{}'",
                     self.runtime_config.hotkey,
                 ));
-                // Fast path: an elevated helper is already running and owns
-                // detection. Rewrite its config and ring the doorbell —
-                // instant, and nothing gets killed, so the system is never
-                // left without a keyboard detector.
+                // The in-process detector is only ever retargeted, never
+                // rebuilt: dropping it pushed the whole re-registration
+                // (console spawns, a fresh hook thread) onto the critical
+                // path, which froze input after every hotkey change.
                 if crate::overlay::hotkey::update_live_hotkey(&self.runtime_config.hotkey) {
                     log_info("[nex] hotkey updated live (helper reloaded config)");
                 } else {
                     // Deferred: `svc` holds an immutable borrow of self for
-                    // the rest of this block; re-register after it drops.
+                    // the rest of this block; regenerate the helper after it
+                    // drops.
                     needs_reregister = Some(self.runtime_config.hotkey.clone());
                 }
                 // Status text already set by maybe_apply_runtime_config_reload.
@@ -1638,10 +1600,11 @@ impl RuntimeWorker {
             }
         }
 
-        // Deferred full re-registration (svc borrow dropped above).
+        // Deferred helper regeneration (svc borrow dropped above). The
+        // in-process detector stays exactly as it is.
         if let Some(new_hotkey) = needs_reregister.take() {
             log_info(&format!(
-                "[nex] helper unavailable — full hotkey re-registration for '{new_hotkey}'"
+                "[nex] regenerating the elevated helper for '{new_hotkey}'"
             ));
             self.reregister_hotkey_listener(&new_hotkey);
         }
@@ -2054,7 +2017,7 @@ impl RuntimeWorker {
                                         ));
                                     } else {
                                         log_info(&format!(
-                                            "[nex] hotkey save: no live helper, full re-registration for '{new_hotkey}'"
+                                            "[nex] hotkey save: regenerating the elevated helper for '{new_hotkey}'"
                                         ));
                                         self.reregister_hotkey_listener(&new_hotkey);
                                     }

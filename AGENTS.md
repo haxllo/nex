@@ -77,8 +77,13 @@ Config created at `%APPDATA%\Nex\config.toml` on first launch. Index at `%APPDAT
 
 **Pipe integrity rule (UIPI):** a Medium-IL process cannot write into a
 High-IL pipe (`Access is denied`). Therefore:
-- pipes the UI only *reads* may be created by the helper (`nex-hotkey`,
-  `NexHelperLog`);
+- only the log pipe the UI *reads* is created by the helper (`NexHelperLog`);
+  a Medium-IL reader is allowed to read *down* from a High-IL server;
+- the detection pipe (`nex-hotkey`) is created by the UI and read by the UI,
+  with the helper connecting as the client that writes. It cannot be
+  helper-created: that made the UI the reader of a High-IL pipe, which UIPI
+  refuses, so the helper's writes succeeded into its own server end while nex
+  received nothing;
 - the command pipe the UI *writes* must be created by the UI (`NexHelperCmd`),
   with the helper as the read-only client;
 - the MFT command channel (`NexMftCmd\<ui pid>`) is created by the indexer, which

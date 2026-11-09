@@ -1580,6 +1580,7 @@ fn run_helper_supervisor(
 /// Consume the detection pipe until the helper goes away.
 fn read_helper_pipe(pipe_file: std::fs::File, event_tx: &Sender<OverlayEvent>) {
     use std::io::BufRead;
+    logging::info("[nex] helper detection pipe reader attached");
     let reader = std::io::BufReader::new(pipe_file);
     for line in reader.lines() {
         match line {
@@ -1706,6 +1707,82 @@ fn start_helper_cmd_server() {
     if let Err(error) = spawned {
         logging::warn(&format!("[nex] failed to spawn helper cmd pipe: {error}"));
     }
+}
+
+/// Create the helper's detection pipe and hand back the read end.
+///
+/// The pipe object MUST be created by this Medium-IL process. It used to be
+/// created by the helper, and nex then connected as a reader — a Medium-IL
+/// read of a High-IL pipe, which UIPI refuses. The helper's writes reported
+/// success into its own pipe while nex received nothing, so every bare-Win
+/// press was detected and then silently dropped.
+///
+/// Ownership follows the same rule as `NexHelperCmd`, only mirrored: here the
+/// UI owns the pipe and reads, and the elevated helper connects as the client
+/// that writes. Writing *down* into a Medium-IL pipe is permitted.
+fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+
+    const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
+    // BYTE mode, not MESSAGE: the reader is a `BufReader::lines()` loop, which
+    // issues partial reads. On a message-mode pipe a read that does not
+    // consume a whole message blocks, so the helper's line was written and
+    // the reader still never produced it.
+    const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
+    const PIPE_WAIT: u32 = 0x0000_0000;
+    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+    const ERROR_PIPE_CONNECTED: u32 = 535;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateNamedPipeW(
+            lpName: *const u16,
+            dwOpenMode: u32,
+            dwPipeMode: u32,
+            nMaxInstances: u32,
+            nOutBufferSize: u32,
+            nInBufferSize: u32,
+            nDefaultTimeOut: u32,
+            lpSecurityAttributes: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        fn ConnectNamedPipe(
+            hNamedPipe: *mut core::ffi::c_void,
+            lpOverlapped: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+
+    let wide = to_wide(pipe_name);
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            PIPE_ACCESS_INBOUND,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            0,
+            65536,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle as isize == -1 {
+        return Err(format!(
+            "CreateNamedPipeW(inbound) failed for {pipe_name}: err={}",
+            unsafe { GetLastError() }
+        ));
+    }
+
+    let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+    if connected == 0 {
+        let error = unsafe { GetLastError() };
+        if error != ERROR_PIPE_CONNECTED {
+            unsafe { CloseHandle(handle) };
+            return Err(format!(
+                "ConnectNamedPipe(inbound) failed for {pipe_name}: err={error}"
+            ));
+        }
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_handle(handle as *mut _) })
 }
 
 /// Clear a helper left over from a previous connection before reconnecting.
@@ -2134,11 +2211,30 @@ fn spawn_and_connect_helper(
     let helper_path = find_helper_exe()?;
     ensure_helper_task(&helper_path, &config_path)?;
 
-    // 4. Run the scheduled task (no UAC)
+    // 4. Create the detection pipe and accept the helper's connection on a
+    //    helper thread, so this supervisor is not blocked past a bounded wait.
+    //    nex owns the pipe (Medium IL); the elevated helper connects as the
+    //    client that writes. See `create_helper_detection_pipe`.
+    let accept_name = pipe_name.clone();
+    let (pipe_tx, pipe_rx) = std::sync::mpsc::channel();
+    thread::Builder::new()
+        .name("nex-helper-pipe-accept".into())
+        .spawn(move || {
+            let _ = pipe_tx.send(create_helper_detection_pipe(&accept_name));
+        })
+        .map_err(|e| format!("failed to spawn pipe accept thread: {e}"))?;
+
+    // 5. Run the scheduled task (no UAC) — the helper connects to the pipe
+    //    created above as soon as it starts.
     run_helper_task()?;
 
-    // 5. Connect to the helper's named pipe (retry — helper may still be starting)
-    let pipe_file = connect_pipe(&pipe_name, 0x80000000, 10)?;
+    // 6. Take the accepted connection. Bounded so a helper that never starts
+    //    cannot wedge the supervisor; the caller retries with backoff.
+    let pipe_file = match pipe_rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(Ok(file)) => file,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err("helper did not connect to the detection pipe in time".into()),
+    };
 
     // Process handle = 0 (scheduled task, not directly manageable)
     Ok((0, pipe_file))

@@ -103,11 +103,59 @@ static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Helper generation counter. Bumped before a replacement helper is started
 /// so a reconfig thread can tell whether the previous generation is gone.
-static HELPER_GENERATION: AtomicU64 = AtomicU64::new(0);
+///
+/// Starts at 1, never 0: the helper treats generation 0 as "this config
+/// predates generations" and skips the superseded check, so every helper
+/// spawned with 0 could never recognise a later generation and would adopt a
+/// new combo in place instead of exiting. That is what left Win dead until a
+/// restart.
+static HELPER_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Claim the next helper generation. Strictly increasing, never 0.
+fn next_helper_generation() -> u64 {
+    HELPER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
 
 /// Runtime event sender, mirrored here so a helper relaunched outside the
 /// listener (hotkey swap, recovery) can forward detections to the same queue.
 static HELPER_EVENT_TX: Mutex<Option<Sender<OverlayEvent>>> = Mutex::new(None);
+
+/// The combo the helper should currently run, kept in sync by
+/// [`update_live_hotkey`].
+///
+/// The supervisor captured its spawn arguments once at thread start, so after
+/// a live hotkey change it kept resurrecting the *previous* combo: the old
+/// helper exited on the new generation as intended, the supervisor respawned,
+/// and the replacement came back with the stale hotkey. It must read the
+/// target fresh on every respawn.
+static HELPER_TARGET: Mutex<Option<HelperTarget>> = Mutex::new(None);
+
+/// Resolved helper target: hotkey key code, whether it is the Win key, the
+/// required modifiers, and the original string (for config/logging).
+#[derive(Clone)]
+struct HelperTarget {
+    key: u32,
+    is_win: bool,
+    mods: Vec<u32>,
+    hotkey: String,
+}
+
+/// Publish the combo the helper supervisor should spawn with.
+fn set_helper_target(key: u32, is_win: bool, mods: &[u32], hotkey: &str) {
+    if let Ok(mut slot) = HELPER_TARGET.lock() {
+        *slot = Some(HelperTarget {
+            key,
+            is_win,
+            mods: mods.to_vec(),
+            hotkey: hotkey.to_string(),
+        });
+    }
+}
+
+/// Read the combo the helper should be running right now.
+fn current_helper_target() -> Option<HelperTarget> {
+    HELPER_TARGET.lock().ok().and_then(|slot| slot.clone())
+}
 
 /// Real time of the last toggle any detection path accepted, plus the
 /// clock it is measured against.
@@ -1232,6 +1280,8 @@ impl HotkeyListener {
             helper_process_handle: None,
         }));
         let helper_thread = if try_helper {
+            // Seed the supervisor's shared target before it can spawn.
+            set_helper_target(target_key, target_is_win, &required_mods, &hotkey_str);
             let should_exit_h = should_exit.clone();
             let helper_h = helper.clone();
             let event_tx_h = event_tx.clone();
@@ -1462,7 +1512,20 @@ fn run_helper_supervisor(
         }
         reconnect = true;
 
-        match spawn_and_connect_helper(target_key, target_is_win, &required_mods, &hotkey) {
+        // Read the target fresh: a live hotkey change swaps it, and respawning
+        // with the values captured at thread start resurrected the old combo.
+        let (spawn_key, spawn_is_win, spawn_mods, spawn_hotkey) =
+            match current_helper_target() {
+                Some(target) => (target.key, target.is_win, target.mods, target.hotkey),
+                None => (
+                    target_key,
+                    target_is_win,
+                    required_mods.clone(),
+                    hotkey.clone(),
+                ),
+            };
+
+        match spawn_and_connect_helper(spawn_key, spawn_is_win, &spawn_mods, &spawn_hotkey) {
             Ok((helper_handle, pipe_file)) => {
                 if should_exit.load(Ordering::SeqCst) {
                     kill_helper_process(helper_handle);
@@ -1845,6 +1908,10 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
             ctx.required_mods = required_mods.clone();
         }
     }
+    // Publish the new target for the helper supervisor. Without this the
+    // supervisor kept respawning with the combo captured at listener start,
+    // so the replacement helper came back on the old hotkey.
+    set_helper_target(target_key, target_is_win, &required_mods, hotkey_str);
     // Drop transient key state so a half-finished press of the previous
     // hotkey can't swallow the first press of the new one.
     reset_win_press_state();
@@ -1913,55 +1980,80 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
 /// The helper is only regenerated when the window is free of one: a live pipe
 /// belongs to the listener's supervisor, which owns reconnecting, and a second
 /// connector would fight it for the single pipe instance.
-pub(crate) fn restart_elevated_helper(hotkey_str: &str) {
-    let previous_generation = HELPER_GENERATION.load(Ordering::SeqCst);
-    // Bump first: a helper that reads the new config sees a newer generation
-    // and exits on its own even if it never observes a closed pipe.
-    HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
-    wait_for_previous_helper_to_exit(previous_generation);
-
-    // The supervisor owns the pipe whenever it is live (helper mode is the
-    // only way `is_alive` reports true for a helper-backed listener), so it
-    // reconnects on its own — a second connector here would race it.
-    if HELPER_ACTIVE.load(Ordering::SeqCst) {
-        logging::info(
-            "[nex] helper restart deferred: the live supervisor reconnects the helper",
-        );
-        return;
-    }
-
-    let parsed = match parse_hotkey(hotkey_str) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            logging::warn(&format!(
-                "[nex] helper restart '{hotkey_str}': {error}"
-            ));
-            return;
-        }
-    };
+/// Resolve a hotkey string into the helper config's target triple.
+fn resolve_helper_target(hotkey_str: &str) -> Result<(u32, bool, Vec<u32>), String> {
+    let parsed = parse_hotkey(hotkey_str)?;
     let target_is_win = parsed.key.eq_ignore_ascii_case("win");
     let target_key = if target_is_win {
         VK_LWIN
     } else {
-        match vk_from_key(&parsed.key) {
-            Ok(vk) => vk,
+        vk_from_key(&parsed.key)?
+    };
+    let required_mods = modifier_vks_from_names(&parsed.modifiers)?;
+    Ok((target_key, target_is_win, required_mods))
+}
+
+/// Rewrite the helper config for `hotkey_str` at the current generation.
+///
+/// Used when the helper cannot be replaced here (a live supervisor owns the
+/// pipe) but the config still has to carry the bumped generation — that is the
+/// only signal the running helper uses to decide it has been superseded.
+fn publish_helper_config_for(hotkey_str: &str) -> Result<(), String> {
+    let (target_key, target_is_win, required_mods) = resolve_helper_target(hotkey_str)?;
+    write_helper_config(
+        &helper_config_path(),
+        target_key,
+        target_is_win,
+        &required_mods,
+        hotkey_str,
+        &overlay_event_name(),
+        &helper_detection_pipe_name(),
+        &config_event_name(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn restart_elevated_helper(hotkey_str: &str) {
+    let previous_generation = HELPER_GENERATION.load(Ordering::SeqCst);
+
+    // The supervisor owns the pipe whenever it is live (helper mode is the
+    // only way `is_alive` reports true for a helper-backed listener), so it
+    // reconnects on its own — a second connector here would race it.
+    //
+    // The bumped generation MUST still reach the helper's config file before
+    // returning. The helper decides to exit by comparing generations, and
+    // `update_live_hotkey` already wrote the previous generation while the
+    // combo was being retargeted. Returning here without a rewrite left the
+    // file at the old generation, so the live helper adopted the new combo in
+    // place instead of exiting: it kept mask state and detect semantics from
+    // the old family, and Win stopped opening the overlay until a restart.
+    if HELPER_ACTIVE.load(Ordering::SeqCst) {
+        if let Err(error) = publish_helper_config_for(hotkey_str) {
+            logging::warn(&format!(
+                "[nex] helper restart '{hotkey_str}': deferred config rewrite failed: {error}"
+            ));
+        } else {
+            ring_config_changed_event();
+            logging::info(&format!(
+                "[nex] helper restart deferred to the live supervisor; config re-published at generation {}",
+                HELPER_GENERATION.load(Ordering::SeqCst),
+            ));
+        }
+        wait_for_previous_helper_to_exit(previous_generation);
+        return;
+    }
+    wait_for_previous_helper_to_exit(previous_generation);
+
+    let (target_key, target_is_win, required_mods) =
+        match resolve_helper_target(hotkey_str) {
+            Ok(resolved) => resolved,
             Err(error) => {
                 logging::warn(&format!(
                     "[nex] helper restart '{hotkey_str}': {error}"
                 ));
                 return;
             }
-        }
-    };
-    let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
-        Ok(mods) => mods,
-        Err(error) => {
-            logging::warn(&format!(
-                "[nex] helper restart '{hotkey_str}': {error}"
-            ));
-            return;
-        }
-    };
+        };
 
     match spawn_and_connect_helper(target_key, target_is_win, &required_mods, hotkey_str) {
         Ok((helper_handle, pipe_file)) => {
@@ -2103,7 +2195,13 @@ fn write_helper_config(
     // `generation` lets a running helper recognise that it has been
     // superseded: a newer value means exit so the replacement can take the
     // single detection pipe.
-    let generation = HELPER_GENERATION.load(Ordering::SeqCst);
+    //
+    // Claim a fresh value per write. Reading the static here made two writes
+    // that straddle a bump share one value, so the helper saw "same
+    // generation" and adopted a new combo in place instead of exiting — which
+    // left the mask state and detect flag from the old combo family, and Win
+    // only worked again after a full restart.
+    let generation = next_helper_generation();
     // JSON needs the backslashes in a Windows path doubled; the helper parses
     // this file as JSON, so an unescaped `\\.\pipe\x` would be read back as a
     // different name.
@@ -2663,6 +2761,32 @@ mod tests {
         assert!(
             !masks_win_press(true, false),
             "nex must mask when the helper does not",
+        );
+    }
+
+    /// A helper spawned with generation 0 can never recognise a later
+    /// generation, because the helper skips the superseded check when the
+    /// config says 0. Such a helper adopted a new combo in place instead of
+    /// exiting, which is why Win stopped working until a restart.
+    #[test]
+    fn helper_generation_never_starts_at_zero() {
+        let start = AtomicU64::new(1);
+        assert_ne!(start.load(Ordering::SeqCst), 0);
+        let bumped = start.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_eq!(bumped, 2, "bumping from 1 yields a meaningful generation");
+        assert_ne!(bumped, 0);
+    }
+
+    /// The generation the running helper last saw must differ from the one
+    /// written after a bump, or it will not exit.
+    #[test]
+    fn a_bumped_generation_is_recognisably_newer() {
+        let generation = AtomicU64::new(1);
+        let written_before = generation.load(Ordering::SeqCst);
+        let written_after = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        assert_ne!(
+            written_before, written_after,
+            "the helper needs a different generation to exit on",
         );
     }
 

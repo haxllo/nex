@@ -66,6 +66,9 @@ struct HotkeyConfig {
     /// When false, this helper does NOT detect hotkeys — nex owns
     /// detection via raw input; the helper only assists foreground.
     detect_enabled: bool,
+    /// Helper generation counter written by nex. A value newer than the one
+    /// this process loaded means it has been superseded and must exit.
+    generation: u64,
 }
 
 static CFG: std::sync::RwLock<Option<std::sync::Arc<HotkeyConfig>>> = std::sync::RwLock::new(None);
@@ -185,8 +188,8 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read config '{path}': {e}"))?;
 
-    let pipe_path = json_str(&content, "pipe")?.to_string();
-    let hotkey_desc = json_str(&content, "hotkey").unwrap_or("unknown").to_string();
+    let pipe_path = json_str(&content, "pipe")?;
+    let hotkey_desc = json_str(&content, "hotkey").unwrap_or_else(|_| String::from("unknown"));
     let target_pid = json_u32(&content, "target_pid")?;
     let target_vk = json_u32(&content, "target_vk")?;
     let target_is_win = json_bool(&content, "target_is_win");
@@ -194,11 +197,12 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
     let mod_alt = json_bool(&content, "mod_alt");
     let mod_shift = json_bool(&content, "mod_shift");
     let mod_win = json_bool(&content, "mod_win");
-    let event_name = json_str(&content, "event").unwrap_or("").to_string();
-    let config_event_name = json_str(&content, "config_event").unwrap_or("").to_string();
+    let event_name = json_str(&content, "event").unwrap_or_default();
+    let config_event_name = json_str(&content, "config_event").unwrap_or_default();
     // nex owns hotkey detection — the helper's hook stays disabled unless
     // a legacy config explicitly opts in.
     let detect_enabled = json_bool(&content, "detect");
+    let generation = json_u64(&content, "generation").unwrap_or(0);
 
     if pipe_path.is_empty() {
         return Err("config: 'pipe' is required".into());
@@ -226,6 +230,7 @@ fn parse_config_file(path: &str) -> Result<HotkeyConfig, String> {
         event_name,
         config_event_name,
         detect_enabled,
+        generation,
     })
 }
 
@@ -302,12 +307,13 @@ fn parse_args_cli(args: &[String]) -> Result<HotkeyConfig, String> {
         event_name: String::new(),
         config_event_name: String::new(),
         detect_enabled: false,
+        generation: 0,
     })
 }
 
 /// Simple manual JSON helpers (no serde dependency needed).
 /// Expected format: `"key": value` where strings are `"..."` and numbers are bare.
-fn json_str<'a>(s: &'a str, key: &str) -> Result<&'a str, String> {
+fn json_str(s: &str, key: &str) -> Result<String, String> {
     let pattern = format!("\"{key}\":");
     let Some(start) = s.find(&pattern) else {
         return Err(format!("config: key '{key}' not found"));
@@ -317,9 +323,36 @@ fn json_str<'a>(s: &'a str, key: &str) -> Result<&'a str, String> {
     if !trimmed.starts_with('"') {
         return Err(format!("config: key '{key}' value is not a string"));
     }
-    let inner = &trimmed[1..];
-    let end = inner.find('"').ok_or(format!("config: key '{key}' unterminated string"))?;
-    Ok(&inner[..end])
+    // nex writes this file as JSON, so a Windows path arrives with its
+    // backslashes doubled. Unescape here: the pipe and event names are used
+    // verbatim, and a still-escaped path is not a pipe name.
+    let mut out = String::new();
+    let mut chars = trimmed[1..].chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Ok(out),
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('b') => out.push('\u{8}'),
+                Some('f') => out.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    let code = u32::from_str_radix(&hex, 16)
+                        .map_err(|e| format!("config: key '{key}' bad unicode escape: {e}"))?;
+                    out.push(
+                        char::from_u32(code)
+                            .ok_or_else(|| format!("config: key '{key}' invalid code point"))?,
+                    );
+                }
+                Some(other) => out.push(other),
+                None => break,
+            },
+            other => out.push(other),
+        }
+    }
+    Err(format!("config: key '{key}' unterminated string"))
 }
 
 fn json_u32(s: &str, key: &str) -> Result<u32, String> {
@@ -331,6 +364,16 @@ fn json_u32(s: &str, key: &str) -> Result<u32, String> {
     let end = after.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(after.len());
     after[..end].parse::<u32>()
         .map_err(|e| format!("config: key '{key}' invalid u32: {e}"))
+}
+
+fn json_u64(s: &str, key: &str) -> Option<u64> {
+    let pattern = format!("\"{key}\":");
+    let start = s.find(&pattern)?;
+    let after = s[start + pattern.len()..].trim_start();
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    after[..end].parse::<u64>().ok()
 }
 
 fn json_bool(s: &str, key: &str) -> bool {
@@ -877,6 +920,12 @@ fn check_modifiers(ctx: &HotkeyConfig) -> bool {
 // Named pipe (server side — helper creates, nex.exe connects)
 // ---------------------------------------------------------------------------
 
+/// Server out-buffer for the helper's pipes. A zero-sized buffer makes every
+/// write wait for the reader, and the message loop writes on this thread — it
+/// also pumps the global input hooks. 64 KiB holds a full log burst and a run
+/// of click/hotkey lines without ever blocking the hook thread.
+const PIPE_OUT_BUFFER_BYTES: u32 = 64 * 1024;
+
 fn create_named_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
     let wide_path = to_wide(pipe_path);
     let handle = unsafe {
@@ -885,7 +934,7 @@ fn create_named_pipe(pipe_path: &str) -> Result<std::fs::File, String> {
             PIPE_ACCESS_OUTBOUND,
             PIPE_TYPE_MESSAGE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            0,
+            PIPE_OUT_BUFFER_BYTES,
             0,
             0,
             std::ptr::null_mut(),
@@ -980,28 +1029,74 @@ fn format_activation_report(outcome: &str, target: &str, actual: &str) -> String
 }
 
 /// Write a diagnostic line to the helper debug log.
+///
 /// The helper has no console (windows_subsystem = "windows"), so file logging
 /// is the only way to observe failures. Lines also fan out to the log pipe
 /// (when nex connected) so they land in nex's own log.
+///
+/// **Never blocks the caller.** This runs inside the global low-level input
+/// hooks (every key-down and key-up), where a file open, a `flush`, or a pipe
+/// write waiting on a zero-buffer server stalls system-wide input for as long
+/// as the I/O takes. The line is handed to a dedicated writer thread over a
+/// bounded channel; when that channel is saturated the line is dropped rather
+/// than delaying the input pipeline.
 pub(crate) fn debug_log(msg: &str) {
+    if LOG_TX.get().is_none() {
+        // First caller (or a hook that won a race with startup) starts the
+        // sink. try_send below keeps it off this path afterwards.
+        LOG_TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<String>(LOG_QUEUE_LINES);
+            std::thread::Builder::new()
+                .name("NexHelper-log".into())
+                .spawn(move || log_writer_loop(rx))
+                .ok();
+            tx
+        });
+    }
+    if LOG_TX.get().is_none() {
+        return;
+    }
+    let line = format!("[{}] {msg}", std::process::id());
+    if let Some(tx) = LOG_TX.get() {
+        // try_send: a full queue means the sink is behind. Dropping one
+        // diagnostic line beats stalling the keyboard and mouse.
+        let _ = tx.try_send(line);
+    }
+}
+
+/// Log lines buffered between the hooks and the writer thread.
+const LOG_QUEUE_LINES: usize = 1024;
+
+static LOG_TX: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
+
+/// The only thread that touches the debug log file and the log pipe.
+fn log_writer_loop(rx: std::sync::mpsc::Receiver<String>) {
+    use std::io::Write;
     let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
-        let _ = f.flush();
-    }
-    if let Ok(mut slot) = LOG_PIPE.lock() {
-        if let Some(pipe) = slot.as_mut() {
-            use std::io::Write;
-            if writeln!(pipe, "{msg}").is_err() {
-                *slot = None; // reader gone; file log continues
-            } else {
-                let _ = pipe.flush();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok();
+    while let Ok(line) = rx.recv() {
+        if let Some(f) = file.as_mut() {
+            if writeln!(f, "{line}").is_err() {
+                file = None;
             }
         }
+        if let Ok(mut slot) = LOG_PIPE.lock() {
+            if let Some(pipe) = slot.as_mut() {
+                if writeln!(pipe, "{line}").is_err() {
+                    *slot = None; // reader gone; file log continues
+                }
+            }
+        }
+    }
+    if let Some(f) = file.as_mut() {
+        let _ = f.flush();
     }
 }
 
@@ -1278,6 +1373,24 @@ fn set_overlay_foreground(seq: u64) {
     }
 }
 
+/// True when a reloaded config asks for behaviour this process cannot
+/// adopt in place, so the helper must exit and let nex start a fresh one.
+///
+/// `target_pid` changes mean nex restarted. So does a generation change:
+/// nex writes one before it replaces a helper, and a helper that kept
+/// running would hold the single detection pipe against its successor.
+fn config_needs_restart(previous: Option<&HotkeyConfig>, next: &HotkeyConfig) -> bool {
+    match previous {
+        Some(previous) => {
+            previous.target_pid != next.target_pid
+                || (previous.generation != 0
+                    && next.generation != 0
+                    && previous.generation != next.generation)
+        }
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1431,15 +1544,42 @@ fn main() {
     /// Re-read the config file, republish hook atomics, reset transient
     /// key state, and swap the RegisterHotKeyW fallback. Skips when the
     /// file bytes match the last applied reload.
+    ///
+    /// Returns true when the helper should exit: a config for a different nex
+    /// process or a newer helper generation means this process is superseded.
     fn reload_hotkey_config(
         config_file_path: &str,
         fallback_id: &mut i32,
         last_applied: &mut Vec<u8>,
-    ) {
-        let bytes = std::fs::read(config_file_path).unwrap_or_default();
+    ) -> bool {
+        let bytes = match std::fs::read(config_file_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                debug_log(&format!("reload skipped: config unreadable ({error})"));
+                return false;
+            }
+        };
         if !config_changed(last_applied, &bytes) {
             debug_log("reload skipped: config unchanged");
-            return;
+            return false;
+        }
+        if config_file_path.is_empty() {
+            return false;
+        }
+        let next = match parse_config_file(config_file_path) {
+            Ok(next) => next,
+            Err(e) => {
+                debug_log(&format!("reload failed: {e}"));
+                return false;
+            }
+        };
+        let previous = CFG.read().ok().and_then(|guard| guard.clone());
+        if config_needs_restart(previous.as_deref(), &next) {
+            debug_log("config names a newer generation or a different nex; exiting");
+            // Claim the new bytes so a late mtime tick cannot reload them
+            // again, then leave the loop to release the pipes.
+            *last_applied = bytes;
+            return true;
         }
         if *fallback_id != 0 {
             unsafe {
@@ -1447,37 +1587,29 @@ fn main() {
             }
             *fallback_id = 0;
         }
-        if config_file_path.is_empty() {
-            return;
+        debug_log(&format!(
+            "reloaded hotkey='{}' vk={} is_win={}",
+            next.hotkey_desc, next.target_vk, next.target_is_win,
+        ));
+        publish_hotkey_atomics(&next);
+        *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
+        // Reset the hook's transient state. A stale CONSUMED_WIN_VK (Win
+        // key-down whose key-up was eaten by RIDEV_NOHOTKEYS) or a mask key
+        // left held by the old Win path makes the new combo undetectable.
+        CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
+        CHORD_DETECTED.store(false, Ordering::SeqCst);
+        HOTKEY_FIRED.store(false, Ordering::SeqCst);
+        WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
+        CTRL_DOWN.store(false, Ordering::SeqCst);
+        ALT_DOWN.store(false, Ordering::SeqCst);
+        SHIFT_DOWN.store(false, Ordering::SeqCst);
+        release_mask();
+        *last_applied = bytes;
+        let g = CFG.read().unwrap();
+        if let Some(cfg) = g.as_ref() {
+            *fallback_id = register_fallback(cfg);
         }
-        match parse_config_file(config_file_path) {
-            Ok(next) => {
-                debug_log(&format!(
-                    "reloaded hotkey='{}' vk={} is_win={}",
-                    next.hotkey_desc, next.target_vk, next.target_is_win,
-                ));
-                publish_hotkey_atomics(&next);
-                *CFG.write().unwrap() = Some(std::sync::Arc::new(next));
-                // Reset the hook's transient state. A stale
-                // CONSUMED_WIN_VK (Win key-down whose key-up was
-                // eaten by RIDEV_NOHOTKEYS) or a mask key left held
-                // by the old Win path makes the new combo undetectable.
-                CONSUMED_WIN_VK.store(0, Ordering::SeqCst);
-                CHORD_DETECTED.store(false, Ordering::SeqCst);
-                HOTKEY_FIRED.store(false, Ordering::SeqCst);
-                WIN_KEY_RELEASED.store(false, Ordering::SeqCst);
-                CTRL_DOWN.store(false, Ordering::SeqCst);
-                ALT_DOWN.store(false, Ordering::SeqCst);
-                SHIFT_DOWN.store(false, Ordering::SeqCst);
-                release_mask();
-                *last_applied = bytes;
-                let g = CFG.read().unwrap();
-                if let Some(cfg) = g.as_ref() {
-                    *fallback_id = register_fallback(cfg);
-                }
-            }
-            Err(e) => debug_log(&format!("reload failed: {e}")),
-        }
+        false
     }
 
     fn register_fallback(ctx: &HotkeyConfig) -> i32 {
@@ -1651,7 +1783,9 @@ fn main() {
         // RegisterHotKeyW fallback. No respawn, no cross-IL writes.
         if wait_result == rehotkey_wake {
             debug_log("config event received, reloading hotkey");
-            reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
+            if reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config) {
+                break;
+            }
         }
 
         // Mtime safety-net: catches a missed doorbell signal within one
@@ -1662,7 +1796,13 @@ fn main() {
                 if Some(modt) != last_config_mtime {
                     last_config_mtime = Some(modt);
                     debug_log("mtime changed, reloading hotkey");
-                    reload_hotkey_config(&config_file_path, &mut fallback_id, &mut last_applied_config);
+                    if reload_hotkey_config(
+                        &config_file_path,
+                        &mut fallback_id,
+                        &mut last_applied_config,
+                    ) {
+                        break;
+                    }
                 }
             }
         }
@@ -1823,6 +1963,87 @@ mod tests {
         let r = format_startup_report("Full", "High", false);
         assert_eq!(r, "privilege: elevation=Full integrity=High uiaccess=false");
         assert!(!r.contains('\n'));
+    }
+
+    #[test]
+    // nex writes this config as JSON, so the pipe arrives with its
+    // backslashes doubled. The helper uses the value as a real pipe name.
+    #[test]
+    fn json_str_unescapes_a_windows_pipe_path() {
+        let json = r#"{"pipe":"\\\\.\\pipe\\nex-hotkey\\42","target_pid":42}"#;
+        assert_eq!(json_str(json, "pipe").unwrap(), r"\\.\pipe\nex-hotkey\42");
+    }
+
+    #[test]
+    fn json_str_handles_plain_and_escaped_quotes() {
+        assert_eq!(json_str(r#"{"hotkey":"Win"}"#, "hotkey").unwrap(), "Win");
+        assert_eq!(json_str(r#"{"k":"a\"b"}"#, "k").unwrap(), "a\"b");
+    }
+
+    #[test]
+    fn json_str_rejects_a_missing_key() {
+        assert!(json_str(r#"{"a":"b"}"#, "hotkey").is_err());
+    }
+    fn json_u64_reads_generation() {
+        let json = r#"{"generation":42,"target_pid":7}"#;
+        assert_eq!(json_u64(json, "generation"), Some(42));
+        assert_eq!(json_u64(json, "target_pid"), Some(7));
+        assert_eq!(json_u64(json, "absent"), None);
+    }
+
+    fn config_with(target_pid: u32, generation: u64) -> HotkeyConfig {
+        HotkeyConfig {
+            pipe_path: String::from("test-pipe"),
+            hotkey_desc: String::from("Win"),
+            target_pid,
+            target_vk: VK_LWIN,
+            target_is_win: true,
+            mod_ctrl: false,
+            mod_alt: false,
+            mod_shift: false,
+            mod_win: false,
+            event_name: String::from("evt"),
+            config_event_name: String::from("cfg"),
+            detect_enabled: true,
+            generation,
+        }
+    }
+
+    // A replacement helper takes the single detection pipe, so the previous
+    // generation must recognise itself as superseded and exit.
+    #[test]
+    fn newer_generation_requires_restart() {
+        let current = config_with(100, 3);
+        let next = config_with(100, 4);
+        assert!(config_needs_restart(Some(&current), &next));
+    }
+
+    #[test]
+    fn same_generation_keeps_running() {
+        let current = config_with(100, 3);
+        let same = config_with(100, 3);
+        assert!(!config_needs_restart(Some(&current), &same));
+    }
+
+    #[test]
+    fn different_nex_pid_requires_restart() {
+        let current = config_with(100, 3);
+        let restarted = config_with(200, 3);
+        assert!(config_needs_restart(Some(&current), &restarted));
+    }
+
+    // A legacy config without a generation must not make a live helper exit.
+    #[test]
+    fn absent_generation_does_not_force_restart() {
+        let current = config_with(100, 3);
+        let legacy = config_with(100, 0);
+        assert!(!config_needs_restart(Some(&current), &legacy));
+    }
+
+    #[test]
+    fn first_apply_never_requests_restart() {
+        let next = config_with(100, 3);
+        assert!(!config_needs_restart(None, &next));
     }
 
     #[test]

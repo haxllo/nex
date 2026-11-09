@@ -187,6 +187,24 @@ fn drop_connection(state: &ChannelState, failed: &Arc<File>) {
     }
 }
 
+/// Release the current helper connection. Used when nex is about to replace
+/// the elevated helper: dropping this end lets the old helper's read hit EOF,
+/// which is how it notices that it is no longer in use. The accept loop keeps
+/// listening, so the replacement connects as usual.
+pub(crate) fn drop_helper_connection() {
+    let Some(state) = STATE.get() else {
+        return;
+    };
+    let taken = state
+        .connection
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    if taken.is_some() {
+        crate::logging::info("[nex] mft command channel released for helper replacement");
+    }
+}
+
 /// Run one request over the command channel and stream its records.
 pub(crate) fn request_snapshot<F>(
     letter: char,

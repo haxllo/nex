@@ -101,6 +101,14 @@ static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 /// detection defers to it only through [`helper_owns_detection`].
 static HELPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Helper generation counter. Bumped before a replacement helper is started
+/// so a reconfig thread can tell whether the previous generation is gone.
+static HELPER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Runtime event sender, mirrored here so a helper relaunched outside the
+/// listener (hotkey swap, recovery) can forward detections to the same queue.
+static HELPER_EVENT_TX: Mutex<Option<Sender<OverlayEvent>>> = Mutex::new(None);
+
 /// Real time of the last toggle any detection path accepted, plus the
 /// clock it is measured against.
 static HOTKEY_EVENT_AT_MS: AtomicU64 = AtomicU64::new(0);
@@ -868,6 +876,9 @@ impl HotkeyListener {
         start_click_away_fallback(Arc::clone(&should_exit));
 
         *HOOK_CTX.lock().unwrap() = Some(HookContext { sender: event_tx.clone(), hotkey_id: 1, target_key, target_is_win, required_mods: required_mods.clone() });
+        if let Ok(mut slot) = HELPER_EVENT_TX.lock() {
+            *slot = Some(event_tx.clone());
+        }
 
         if try_helper {
             logging::info("[nex] hotkey: elevated helper setup scheduled (async)");
@@ -1307,6 +1318,61 @@ fn kill_helper_process(handle: isize) {
     }
 }
 
+/// Time a replaced helper gets to notice that its pipes are gone and exit on
+/// its own. The wait ends sooner whenever the old generation is observed to
+/// be gone; this is only the ceiling for a wedged helper.
+const HELPER_REPLACE_GRACE: Duration = Duration::from_millis(1500);
+const HELPER_REPLACE_POLL: Duration = Duration::from_millis(25);
+
+/// Wait until the previous helper generation has released the detection pipe.
+///
+/// A replacement helper cannot be started while another one is running: the
+/// pipe server exists once, so the newcomer exits and the old generation —
+/// still configured for the previous hotkey — keeps detecting. Killing it from
+/// here is not an option (`taskkill` from Medium IL is denied against the
+/// elevated helper), so this only closes every pipe the helper could be
+/// holding: its read hits EOF and the next write fails, which is what its
+/// exit paths watch. Called from a reconfig/recovery thread only.
+fn wait_for_previous_helper_to_exit(previous_generation: u64) {
+    // Doorshut: the command pipe client and any command-channel connection
+    // for the previous generation must not survive into the new one.
+    if let Ok(mut slot) = HELPER_CMD.lock() {
+        *slot = None;
+    }
+    crate::mft_channel::drop_helper_connection();
+
+    // Ring the config doorbell: a helper that is still alive reloads, finds
+    // the new config and re-checks its pipes. Harmless if it never sees it.
+    {
+        use windows_sys::Win32::System::Threading::SetEvent;
+        if let Ok(guard) = CONFIG_CHANGED_EVENT.lock() {
+            if *guard != 0 {
+                unsafe { SetEvent(*guard as *mut core::ffi::c_void) };
+            }
+        }
+    }
+
+    let started = std::time::Instant::now();
+    loop {
+        let generation_advanced = HELPER_GENERATION.load(Ordering::SeqCst) != previous_generation;
+        if generation_advanced || !HELPER_ACTIVE.load(Ordering::SeqCst) || !helper_pipe_open() {
+            return;
+        }
+        if started.elapsed() >= HELPER_REPLACE_GRACE {
+            logging::warn(
+                "[nex] previous helper generation is still holding the detection pipe; starting anyway",
+            );
+            return;
+        }
+        thread::sleep(HELPER_REPLACE_POLL);
+    }
+}
+
+/// Whether this process currently holds a helper detection pipe.
+fn helper_pipe_open() -> bool {
+    HELPER_ACTIVE.load(Ordering::SeqCst)
+}
+
 /// Keep the elevated helper alive for the lifetime of the listener.
 ///
 /// The in-process hook is always live, so the helper is a supplement: when it
@@ -1356,6 +1422,7 @@ fn run_helper_supervisor(
                 read_helper_pipe(pipe_file, &event_tx);
 
                 HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
                 set_suppress_focus_escape(false);
                 if let Ok(mut st) = helper.lock() {
                     st.active = false;
@@ -1521,11 +1588,19 @@ fn start_helper_cmd_server() {
 }
 
 /// Clear a helper left over from a previous connection before reconnecting.
+///
+/// `taskkill` from Medium IL is denied against the High-IL helper, so this
+/// only closes this process's ends of the helper's pipes; the helper's own
+/// EOF/failed-write paths are what make it exit. Used by the supervisor
+/// before a reconnect, never while a helper pipe is live.
 fn kill_stale_helper() {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "NexHelper.exe"])
-        .creation_flags(0x08000000)
-        .output();
+    if HELPER_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Ok(mut slot) = HELPER_CMD.lock() {
+        *slot = None;
+    }
+    crate::mft_channel::drop_helper_connection();
 }
 
 fn post_quit_to_thread(thread_id: u32) {
@@ -1633,6 +1708,30 @@ fn create_config_event() -> String {
     name
 }
 
+/// The overlay-ready event name this process created and the helper opens.
+fn overlay_event_name() -> String {
+    format!("Global\\nex-overlay-ready-{}", std::process::id())
+}
+
+/// The config-changed doorbell name this process created.
+fn config_event_name() -> String {
+    format!("Global\\nex-hotkey-config-{}", std::process::id())
+}
+
+/// The helper's detection pipe for this nex process.
+fn helper_detection_pipe_name() -> String {
+    format!(r"\\.\pipe\nex-hotkey\{}", std::process::id())
+}
+
+/// Ring the config-changed doorbell so a running helper re-reads its config.
+fn ring_config_changed_event() {
+    use windows_sys::Win32::System::Threading::SetEvent;
+    let handle = CONFIG_CHANGED_EVENT.lock().map(|guard| *guard).unwrap_or(0);
+    if handle != 0 {
+        unsafe { SetEvent(handle as *mut core::ffi::c_void) };
+    }
+}
+
 /// Live-update the hotkey of an already-running elevated helper.
 ///
 /// Rewrites `helper-config.json` (nex owns that file) and rings the
@@ -1671,22 +1770,16 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
         }
     };
 
-    // nex owns ALL hotkey detection now (raw input for Win, WM_INPUT
-    // chord check + RegisterHotKeyW fallback for combos). The running
-    // helper keeps its OLD combo registered — harmless: its events are
-    // deduped by the 50ms debounce and it never touches the new combo.
-    // So a live update is purely local: sync HOOK_CTX + transient state.
+    // nex owns ALL hotkey detection: raw input for Win, the WM_INPUT chord
+    // check plus the RegisterHotKey fallback for combos. Nothing about the
+    // detector is tied to a helper generation, so a hotkey change is a pure
+    // local retarget: sync HOOK_CTX and the transient state below.
     //
-    // BUT when target_is_win changes (Win ↔ non-Win), the helper's
-    // detect_enabled flag changes too — it must be killed and restarted
-    // with fresh config.  Return false to trigger full re-registration.
+    // The helper still has to be regenerated when `detect` flips (Win ↔
+    // non-Win), and returns false for that. That restart closes pipes instead
+    // of killing a process — see [`restart_elevated_helper`].
     let old_is_win = HOOK_CTX.lock().ok().and_then(|g| g.as_ref().map(|c| c.target_is_win)).unwrap_or(false);
-    if old_is_win != target_is_win {
-        logging::info(&format!(
-            "[nex] live hotkey update: target_is_win changed ({old_is_win} → {target_is_win}), full re-register needed"
-        ));
-        return false;
-    }
+    let helper_needs_new_generation = old_is_win != target_is_win;
     if let Ok(mut guard) = HOOK_CTX.lock() {
         if let Some(ctx) = guard.as_mut() {
             ctx.target_key = target_key;
@@ -1711,7 +1804,143 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     logging::info(&format!(
         "[nex] live hotkey update applied locally: '{hotkey_str}'"
     ));
+    // Rewrite the helper's config and ring its doorbell. Without the rewrite
+    // the doorbell only makes the helper re-read its own stale file. The
+    // generation is carried along, so a helper that has since been superseded
+    // exits instead of adopting a config meant for its successor.
+    let helper_config_written = HELPER_ACTIVE.load(Ordering::SeqCst)
+        && write_helper_config(
+            &helper_config_path(),
+            target_key,
+            target_is_win,
+            &required_mods,
+            hotkey_str,
+            &overlay_event_name(),
+            &helper_detection_pipe_name(),
+            &config_event_name(),
+        )
+        .map_err(|error| {
+            logging::warn(&format!(
+                "[nex] live hotkey update '{hotkey_str}': helper config rewrite failed: {error}"
+            ));
+        })
+        .is_ok();
+    if helper_config_written {
+        ring_config_changed_event();
+    }
+
+    // The detector is retargeted either way. This only reports whether the
+    // helper also has to be regenerated — its `detect` flag follows the combo
+    // family, so a Win ↔ non-Win change needs a new helper process.
+    if helper_needs_new_generation {
+        logging::info(&format!(
+            "[nex] hotkey family changed ({old_is_win} → {target_is_win}); the elevated helper needs a new generation"
+        ));
+        return false;
+    }
     true
+}
+
+/// Restart the elevated helper with the current hotkey, without touching the
+/// in-process detector.
+///
+/// The hook thread, raw-input sink and RegisterHotKey fallback keep working,
+/// so no keystroke is ever undetected, and nothing in the restart path spawns
+/// a console binary as the old listeners did. The previous helper generation
+/// is asked to exit through the pipes it holds ([`wait_for_previous_helper_to_exit`]);
+/// only when it is confirmed gone is a replacement started.
+///
+/// Runs on a reconfig thread; blocks for at most [`HELPER_REPLACE_GRACE`].
+///
+/// The helper is only regenerated when the window is free of one: a live pipe
+/// belongs to the listener's supervisor, which owns reconnecting, and a second
+/// connector would fight it for the single pipe instance.
+pub(crate) fn restart_elevated_helper(hotkey_str: &str) {
+    let previous_generation = HELPER_GENERATION.load(Ordering::SeqCst);
+    // Bump first: a helper that reads the new config sees a newer generation
+    // and exits on its own even if it never observes a closed pipe.
+    HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
+    wait_for_previous_helper_to_exit(previous_generation);
+
+    // The supervisor owns the pipe whenever it is live (helper mode is the
+    // only way `is_alive` reports true for a helper-backed listener), so it
+    // reconnects on its own — a second connector here would race it.
+    if HELPER_ACTIVE.load(Ordering::SeqCst) {
+        logging::info(
+            "[nex] helper restart deferred: the live supervisor reconnects the helper",
+        );
+        return;
+    }
+
+    let parsed = match parse_hotkey(hotkey_str) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            logging::warn(&format!(
+                "[nex] helper restart '{hotkey_str}': {error}"
+            ));
+            return;
+        }
+    };
+    let target_is_win = parsed.key.eq_ignore_ascii_case("win");
+    let target_key = if target_is_win {
+        VK_LWIN
+    } else {
+        match vk_from_key(&parsed.key) {
+            Ok(vk) => vk,
+            Err(error) => {
+                logging::warn(&format!(
+                    "[nex] helper restart '{hotkey_str}': {error}"
+                ));
+                return;
+            }
+        }
+    };
+    let required_mods = match modifier_vks_from_names(&parsed.modifiers) {
+        Ok(mods) => mods,
+        Err(error) => {
+            logging::warn(&format!(
+                "[nex] helper restart '{hotkey_str}': {error}"
+            ));
+            return;
+        }
+    };
+
+    match spawn_and_connect_helper(target_key, target_is_win, &required_mods, hotkey_str) {
+        Ok((helper_handle, pipe_file)) => {
+            HELPER_ACTIVE.store(true, Ordering::SeqCst);
+            logging::info(&format!(
+                "[nex] elevated helper relaunched for '{hotkey_str}'"
+            ));
+            connect_helper_aux_pipes();
+            // Drain the new helper's detection pipe on a detached thread. The
+            // listener that owns the runtime channel is untouched, so these
+            // events use the same sender and the same same-press gate.
+            let event_tx = HELPER_EVENT_TX
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            std::thread::Builder::new()
+                .name("nex-helper-relaunch-reader".into())
+                .spawn(move || {
+                    if let Some(event_tx) = event_tx {
+                        read_helper_pipe(pipe_file, &event_tx);
+                    }
+                    HELPER_ACTIVE.store(false, Ordering::SeqCst);
+                    HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
+                    set_suppress_focus_escape(false);
+                    logging::info("[nex] relaunched helper pipe closed");
+                })
+                .ok();
+            if helper_handle != 0 {
+                kill_helper_process(helper_handle);
+            }
+        }
+        Err(error) => {
+            logging::warn(&format!(
+                "[nex] helper relaunch failed ({error}); in-process hook stays active"
+            ));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,7 +1965,7 @@ fn spawn_and_connect_helper(
     //    EVENT_MODIFY_STATE due to UIPI write-up restriction.
     let event_name = create_overlay_event();
     let config_event_name = create_config_event();
-    let pipe_name = format!(r"\\.\pipe\nex-hotkey\{}", std::process::id());
+    let pipe_name = helper_detection_pipe_name();
 
     // 2. Write JSON config for the helper (includes event name)
     let config_path = helper_config_path();
@@ -1813,9 +2042,17 @@ fn write_helper_config(
         let _ = std::fs::create_dir_all(parent);
     }
 
+    // `generation` lets a running helper recognise that it has been
+    // superseded: a newer value means exit so the replacement can take the
+    // single detection pipe.
+    let generation = HELPER_GENERATION.load(Ordering::SeqCst);
+    // JSON needs the backslashes in a Windows path doubled; the helper parses
+    // this file as JSON, so an unescaped `\\.\pipe\x` would be read back as a
+    // different name.
     let json = format!(
-        r#"{{"proto":1,"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
-        pipe_name,
+        r#"{{"proto":1,"generation":{},"pipe":"{}","target_pid":{},"target_vk":{},"target_is_win":{},"mod_ctrl":{},"mod_alt":{},"mod_shift":{},"mod_win":{},"detect":{},"hotkey":"{}","event":"{}","config_event":"{}"}}"#,
+        generation,
+        json_escape(pipe_name),
         pid,
         target_key,
         if target_is_win { "true" } else { "false" },
@@ -1828,13 +2065,27 @@ fn write_helper_config(
         // Non-Win combos are covered by RegisterHotKeyW + raw input, and
         // keeping the helper inert avoids double-toggles.
         if target_is_win { "true" } else { "false" },
-        hotkey_str,
-        overlay_event_name,
-        config_event_name,
+        json_escape(hotkey_str),
+        json_escape(overlay_event_name),
+        json_escape(config_event_name),
     );
 
     std::fs::write(path, &json)
         .map_err(|e| format!("failed to write helper config '{:?}': {e}", path))
+}
+
+/// Escape a string for embedding in the helper's JSON config.
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 const SCHTASK_NAME: &str = "NexHelperV2";
@@ -2270,5 +2521,62 @@ mod tests {
         note_chord_key();
         assert!(!finish_win_press());
         assert!(!is_bare_win_press_active());
+    }
+
+    // A hotkey change must never wait on the previous helper. These pin the
+    // wait's two exit conditions: it returns immediately when no helper pipe
+    // is held, and it is bounded when one is.
+
+    #[test]
+    fn json_escape_makes_a_pipe_path_parseable() {
+        let path = r"\.\pipe\nex-hotkey\42";
+        let escaped = json_escape(path);
+        assert_eq!(escaped, r"\\.\\pipe\\nex-hotkey\\42");
+        // The doubling is reversible, so the helper reads back the real path.
+        assert_eq!(escaped.replace(r"\\", r"\"), path);
+    }
+
+    #[test]
+    fn json_escape_quotes_and_control_bytes() {
+        assert_eq!(json_escape("a\"b"), r#"a\"b"#);
+        assert_eq!(json_escape("\u{1}"), r"\u0001");
+    }
+
+    #[test] fn helper_wait_returns_immediately_without_a_pipe() {
+        HELPER_ACTIVE.store(false, Ordering::SeqCst);
+        HELPER_GENERATION.store(41, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        wait_for_previous_helper_to_exit(41);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "a listener without a helper pipe must not wait",
+        );
+    }
+
+    #[test] fn helper_wait_returns_when_the_generation_advanced() {
+        HELPER_ACTIVE.store(true, Ordering::SeqCst);
+        HELPER_GENERATION.store(7, Ordering::SeqCst);
+        // The previous generation is already gone: its bump is observable.
+        let previous = HELPER_GENERATION.load(Ordering::SeqCst);
+        HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        wait_for_previous_helper_to_exit(previous);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "an advanced generation means the previous helper exited",
+        );
+        HELPER_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    #[test] fn helper_wait_is_bounded() {
+        HELPER_ACTIVE.store(true, Ordering::SeqCst);
+        HELPER_GENERATION.store(99, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        // Nothing can advance the generation here, so only the ceiling ends
+        // the wait. It must not hang the reconfig thread.
+        let previous = HELPER_GENERATION.load(Ordering::SeqCst);
+        wait_for_previous_helper_to_exit(previous);
+        assert!(started.elapsed() <= HELPER_REPLACE_GRACE + Duration::from_millis(500));
+        HELPER_ACTIVE.store(false, Ordering::SeqCst);
     }
 }

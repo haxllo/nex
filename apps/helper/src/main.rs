@@ -40,6 +40,14 @@ static WIN_KEY_RELEASED: AtomicBool = AtomicBool::new(false);
 /// WM_APP (0x8000) + unique magic bytes to avoid collisions.
 const WM_NEX_WAKE: u32 = 0x8000 + 0x4E45;
 
+/// Timer id used to release the Win menu mask after nex has shown the overlay.
+const MASK_RELEASE_TIMER_ID: usize = 0x4E46;
+
+/// How long the helpers holds the mask past a bare Win key-up. nex needs to
+/// show the panel and take foreground in that window; releasing earlier lets
+/// the shell begin opening Start, which steals focus from the overlay.
+const MASK_RELEASE_DELAY_MS: u32 = 120;
+
 /// Cached thread ID of the helper's message-loop thread.  The hook proc
 /// calls PostThreadMessageW with this to wake GetMessageW after setting
 /// HOTKEY_FIRED, since RegisterHotKeyW cannot register bare-Win hotkeys.
@@ -456,6 +464,14 @@ fn send_mask_up() {
 /// pairing so a missed key-up path can't double-hold or leak the hold.
 static MASK_HELD: AtomicBool = AtomicBool::new(false);
 
+/// Set by the Win key-up path when the press toggled the overlay. The mask
+/// must outlive the key-up so the shell never starts opening Start while nex
+/// is still taking foreground; the loop thread releases it after the grace
+/// window. Without this, releasing at key-up let Start open, which stole
+/// focus, produced a phantom outside-click and hid the panel that had just
+/// been shown.
+static DEFER_MASK_RELEASE: AtomicBool = AtomicBool::new(false);
+
 /// Hold the mask unless already held. Returns true on transition.
 fn hold_mask() -> bool {
     if MASK_HELD.swap(true, Ordering::SeqCst) {
@@ -675,6 +691,7 @@ unsafe fn keyboard_hook_proc_inner(
     let vk = kb.vkCode;
     let injected = (kb.flags & 0x10) != 0;
 
+
     // Track modifier state via atomics — GetAsyncKeyState lies when
     // WebView has focus and consumed the modifier key-down.
     if !injected {
@@ -712,15 +729,29 @@ unsafe fn keyboard_hook_proc_inner(
                 let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
                 if consumed_vk != 0 {
                     let chord = CHORD_DETECTED.swap(false, Ordering::SeqCst);
-                    release_mask();
                     // Chord keys must never toggle — Win+E opens Explorer
                     // and nothing else. CHORD_DETECTED is set by any real
                     // non-modifier key-down during the press, and it is NOT
                     // reset by Win auto-repeat (that re-arm made a held Win
                     // key fire after every chord).
                     if !win_press_fires(consumed_vk, chord) {
+                        // A chord owns this press, so the OS needs the mask
+                        // out of the way to run Win+E / Win+D normally.
+                        release_mask();
+                        debug_log(&format!(
+                            "win key-up: no toggle (vk={consumed_vk} chord={chord})",
+                        ));
                         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
                     }
+                    debug_log(&format!("bare Win press vk={consumed_vk} -> reporting HOTKEY"));
+                    // ORDER MATTERS. Kill the Start gesture *before* the mask
+                    // goes away, and keep the mask held until nex has shown
+                    // the overlay and taken foreground. Releasing first let
+                    // the shell start opening Start on this same key-up; nex
+                    // then took focus while Start was up, saw a phantom
+                    // outside-click + Escape and hid the panel immediately —
+                    // reported as "the hotkey opens Start instead of nex".
+                    invalidate_start_gesture();
                     // Fire: the helper MUST report Win presses — over
                     // Task Manager / elevated focus, nex's raw-input sink
                     // receives nothing (UIPI), so without this the
@@ -737,7 +768,11 @@ unsafe fn keyboard_hook_proc_inner(
                     // twice for the first seconds after launch.
                     HOTKEY_FIRED.store(true, Ordering::SeqCst);
                     WIN_KEY_RELEASED.store(true, Ordering::SeqCst);
-                    invalidate_start_gesture();
+                    // The mask stays held across this key-up (see the order
+                    // note above). The loop thread releases it once nex has
+                    // acknowledged the press or the grace window expires —
+                    // never from the hook, which cannot wait.
+                    DEFER_MASK_RELEASE.store(true, Ordering::SeqCst);
                     if let Some(tid) = HELPER_THREAD_ID.get() {
                         unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0); }
                     }
@@ -753,6 +788,9 @@ unsafe fn keyboard_hook_proc_inner(
             // remember the chord until this press ends. CONSUMED_WIN_VK keeps
             // its VK across Win auto-repeat on purpose: clearing it here let
             // the next repeat start a *new* bare press that fired on key-up.
+            debug_log(&format!(
+                "chord key vk={vk} joined the Win press; mask released, no toggle",
+            ));
             CHORD_DETECTED.store(true, Ordering::SeqCst);
             release_mask();
         }
@@ -1570,6 +1608,7 @@ fn main() {
         eprintln!("NexHelper: SetWindowsHookExW failed");
         std::process::exit(1);
     }
+    debug_log("WH_KEYBOARD_LL installed");
 
     // Install WH_MOUSE_LL so elevated-window clicks still dismiss the overlay.
     // Non-fatal: without it, nex just cannot see clicks over elevated windows.
@@ -1935,6 +1974,18 @@ fn main() {
                 }
             }
 
+            // Deferred Win mask release: nex has now been told about the press
+            // and has had the grace window to take foreground.
+            if msg.message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER as u32
+                && msg.wParam == MASK_RELEASE_TIMER_ID
+            {
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::KillTimer(std::ptr::null_mut(), MASK_RELEASE_TIMER_ID) };
+                if DEFER_MASK_RELEASE.swap(false, Ordering::SeqCst) {
+                    debug_log("deferred mask release after overlay focus");
+                    release_mask();
+                }
+            }
+
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
                 windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
@@ -1958,6 +2009,18 @@ fn main() {
             if write_hotkey(&mut pipe).is_err() {
                 debug_log("write_hotkey failed — nex pipe reader gone");
                 break; // nex.exe disconnected
+            }
+            // Mask release is deferred until nex has had time to show the
+            // overlay and take foreground (see DEFER_MASK_RELEASE).
+            if DEFER_MASK_RELEASE.load(Ordering::SeqCst) {
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(
+                        std::ptr::null_mut(),
+                        MASK_RELEASE_TIMER_ID,
+                        MASK_RELEASE_DELAY_MS,
+                        None,
+                    )
+                };
             }
         }
 

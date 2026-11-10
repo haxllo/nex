@@ -260,6 +260,17 @@ pub(crate) fn send_helper_key(cmd: &str) -> bool {
     false
 }
 
+/// Tell the helper whether the foreground is a game nex must stay out of.
+///
+/// The helper runs the low-level hook, so it is the only place that can hold
+/// the Start mask and swallow the press before the shell or the game sees it.
+/// It cannot work the verdict out itself without a second copy of the
+/// game/fullscreen heuristic, so nex evaluates once — it already does so for
+/// its own suppression — and hands the result over.
+pub(crate) fn push_game_mode_suppression(suppress: bool) {
+    let _ = send_helper_key(if suppress { "GAME_ON" } else { "GAME_OFF" });
+}
+
 /// True from a consumed bare-Win key-down through its matching key-up.
 /// The overlay host uses this to avoid treating the Win press's transient
 /// focus loss as click-outside dismissal; the hotkey event owns that toggle.

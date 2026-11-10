@@ -504,7 +504,7 @@ fn read_system_clipboard_text() -> Result<Option<String>, String> {
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     };
-    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 
     unsafe {
@@ -529,8 +529,13 @@ fn read_system_clipboard_text() -> Result<Option<String>, String> {
             return Ok(None);
         }
 
+        // Bound the scan by the allocation the clipboard reports. Scanning for
+        // a NUL with no limit reads past the block when the owner supplies
+        // text without a terminator, which is a read of memory we do not own
+        // and can fault or pick up adjacent heap bytes.
+        let byte_len = GlobalSize(handle) as usize / std::mem::size_of::<u16>();
         let mut len = 0usize;
-        while *ptr.add(len) != 0 {
+        while len < byte_len && *ptr.add(len) != 0 {
             len += 1;
         }
         let slice = std::slice::from_raw_parts(ptr, len);
@@ -884,7 +889,15 @@ fn capture_clipboard_thumbnail_png(
 
         // 10. Stream full-res to disk WHILE clipboard is still locked
         //     (dib_ptr is only valid between GlobalLock and GlobalUnlock)
-        stream_fullres_to_disk(cfg, hash, dib_ptr, header_size, width, height, bpp, row_bytes)?;
+        //
+        // A `?` here would return before the cleanup below, leaving the
+        // clipboard open and its memory locked for the life of the process.
+        // The next capture then reads a handle from that broken state, which
+        // is what produced STATUS_HEAP_CORRUPTION inside GlobalSize during
+        // GetClipboardData. Every other path in this function releases first;
+        // this one has to release before propagating the error.
+        let stream_result =
+            stream_fullres_to_disk(cfg, hash, dib_ptr, header_size, width, height, bpp, row_bytes);
 
         // 11. Cleanup GDI resources and release clipboard
         SelectObject(src_dc, old_src);
@@ -895,6 +908,8 @@ fn capture_clipboard_thumbnail_png(
         DeleteDC(dst_dc);
         GlobalUnlock(clip_handle);
         CloseClipboard();
+
+        stream_result?;
 
         // 12. Encode thumbnail as PNG (pure in-memory, no clipboard needed)
         let thumbnail_png = encode_thumbnail_png(&rgba, thumb_w as u32, thumb_h as u32)?;

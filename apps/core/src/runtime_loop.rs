@@ -219,6 +219,7 @@ pub(crate) fn run_windows_runtime(
     let tray_icon = TrayIcon::create(
         event_tx.clone(),
         runtime_config.config_path.to_string_lossy().as_ref(),
+        runtime_config.game_mode_enabled,
     )
     .map_err(|e| RuntimeError::Overlay(format!("tray icon: {e}")))?;
     log_info("[nex] system tray icon created");
@@ -389,6 +390,7 @@ pub(crate) fn run_windows_runtime(
         hotkey_listener: hotkey_listener.clone(),
         event_tx: event_tx.clone(),
         hotkey_check_counter: 0,
+        last_foreground_hwnd: 0,
         last_memory_log: Instant::now(),
         quick_launch_items: Vec::new(),
         quick_launch_loaded: false,
@@ -583,6 +585,9 @@ struct RuntimeWorker {
     hotkey_listener: Arc<Mutex<Option<HotkeyListener>>>,
     event_tx: crossbeam_channel::Sender<OverlayEvent>,
     hotkey_check_counter: u32,
+    /// Last foreground window seen, so the helper's game-mode verdict is only
+    /// recomputed when focus actually moves.
+    last_foreground_hwnd: isize,
     last_memory_log: Instant,
     /// Quick Launch items for idle state display.
     quick_launch_items: Vec<crate::overlay::model::QuickLaunchItem>,
@@ -1436,6 +1441,14 @@ impl RuntimeWorker {
     fn on_event(&mut self, event: OverlayEvent) {
         self.hotkey_check_counter = self.hotkey_check_counter.wrapping_add(1);
 
+        // Keep the helper's game-mode verdict current. It has to be pushed
+        // before a press, and the helper owns Win detection, so nex cannot
+        // decide at press time.
+        crate::runtime_hotkey::refresh_helper_game_mode(
+            &self.runtime_config,
+            &mut self.last_foreground_hwnd,
+        );
+
         // Diagnostic: heartbeat every 128 events (Tick or otherwise)
         if self.hotkey_check_counter % 128 == 0 {
             log_info(&format!(
@@ -2158,9 +2171,16 @@ impl RuntimeWorker {
                 self.overlay.focus_search_input();
             }
             OverlayEvent::Tick => {
-                let action = self
-                    .progress_window_gate
-                    .observe(crate::indexing_progress::latest_indexer_progress());
+                // Game mode means never surface the progress window. Showing
+                // any top-level window while a game holds exclusive fullscreen
+                // drops the game out of it, and game mode exists to prevent
+                // exactly that kind of interruption.
+                let action = if self.runtime_config.game_mode_enabled {
+                    crate::indexing_progress::ProgressWindowAction::None
+                } else {
+                    self.progress_window_gate
+                        .observe(crate::indexing_progress::latest_indexer_progress())
+                };
                 self.overlay.set_indexing_progress(action);
                 // Periodic background tasks
                 // Updates are checked on startup only, not periodically

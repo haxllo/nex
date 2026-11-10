@@ -738,6 +738,15 @@ fn spawn_cmd_pipe_client(cmd_path: String) {
                     Ok(_) => {}
                 }
                 let cmd = buf.trim().to_string();
+                // Game-mode suppression is a verdict nex has already
+                // computed; it is not an action to execute.
+                if cmd == "GAME_ON" || cmd == "GAME_OFF" {
+                    let on = cmd == "GAME_ON";
+                    if SUPPRESS_FOR_GAME.swap(on, Ordering::SeqCst) != on {
+                        debug_log(&format!("game suppression -> {on}"));
+                    }
+                    continue;
+                }
                 match sim_action(&cmd) {
                     Some(action) => {
                         debug_log(&format!("sim exec: {cmd}"));
@@ -759,6 +768,13 @@ fn spawn_cmd_pipe_client(cmd_path: String) {
 fn win_press_fires(consumed_vk: u32, chord_detected: bool) -> bool {
     consumed_vk != 0 && !chord_detected
 }
+
+/// Set while nex says the foreground is a game neX must not appear over.
+///
+/// nex pushes this before every hotkey press. The helper cannot ask the
+/// question itself without duplicating the whole game/fullscreen heuristic, so
+/// it only ever obeys the verdict it was just handed.
+static SUPPRESS_FOR_GAME: AtomicBool = AtomicBool::new(false);
 
 /// Report a low-level hook that took long enough to be felt as input lag.
 ///
@@ -863,6 +879,22 @@ unsafe fn keyboard_hook_proc_inner(
                         ));
                         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
                     }
+                    // nex has already decided this press must not surface:
+                    // the foreground is a game it must not appear over. Hold
+                    // the mask and cancel the Start gesture, so the shell does
+                    // not open Start over the game either — then stay silent.
+                    // Releasing here would flash Start and drop the game out
+                    // of exclusive fullscreen, which is exactly what game mode
+                    // exists to prevent.
+                    if SUPPRESS_FOR_GAME.load(Ordering::SeqCst) {
+                        defer_inject(INJECT_START_GUARD);
+                        MASK_HELD.store(true, Ordering::SeqCst);
+                        defer_inject(INJECT_MASK_DOWN);
+                        debug_log(&format!(
+                            "bare Win press vk={consumed_vk} suppressed for game mode",
+                        ));
+                        return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+                    }
                     debug_log(&format!("bare Win press vk={consumed_vk} -> reporting HOTKEY"));
                     // ORDER MATTERS. Kill the Start gesture *before* the mask
                     // goes away, and keep the mask held until nex has shown
@@ -942,6 +974,14 @@ unsafe fn keyboard_hook_proc_inner(
             }
             // DO NOT EAT — pass Win through so Win+ chords work
             return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+        }
+        // nex has already decided this press must not surface.
+        if SUPPRESS_FOR_GAME.load(Ordering::SeqCst) {
+            debug_log(&format!(
+                "hook: non-win target vk={vk} suppressed for game mode",
+            ));
+            // Swallow it so the game does not receive the bare hotkey either.
+            return 1;
         }
         // Non-Win hotkey: eat key-down (prevents key from reaching focused window).
         debug_log(&format!(

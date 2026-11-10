@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use crate::config::{self, Config};
 use crate::runtime::log_info;
 use crate::runtime::log_warn;
@@ -43,6 +44,12 @@ pub(crate) fn toggle_game_mode_from_tray(
     } else {
         "Game Mode disabled"
     });
+
+    // Turning game mode off must clear any suppression the helper is holding,
+    // or the hotkey would stay dead until the next press re-stated it.
+    if !next {
+        crate::overlay::hotkey::push_game_mode_suppression(false);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -54,6 +61,39 @@ pub(crate) fn should_suppress_hotkey_for_game_mode(cfg: &Config) -> bool {
     collect_foreground_window_snapshot()
         .is_some_and(|snapshot| should_block_hotkey_for_foreground_window(&snapshot))
 }
+
+/// Refresh the helper's game-mode verdict when the foreground window changes.
+///
+/// The helper runs the low-level hook, so it needs the verdict *before* the
+/// press reaches it — evaluating on the press is too late, and for a Win
+/// hotkey nex does not even see the press (the helper owns detection).
+/// Recomputed only when the foreground handle actually moves, so a steady
+/// desktop costs one handle comparison per tick instead of a process query.
+#[cfg(target_os = "windows")]
+pub(crate) fn refresh_helper_game_mode(cfg: &Config, last_foreground: &mut isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let foreground = unsafe { GetForegroundWindow() } as isize;
+    if foreground == *last_foreground {
+        return;
+    }
+    *last_foreground = foreground;
+
+    let suppress = should_suppress_hotkey_for_game_mode(cfg);
+    // Log only real verdict flips: this runs on every foreground change, and a
+    // line per window switch would drown the log.
+    if SUPPRESS_PUSHED.swap(suppress, Ordering::SeqCst) != suppress {
+        log_info(&format!(
+            "[nex] game mode: hotkey suppression -> {suppress} (foreground changed)"
+        ));
+    }
+    crate::overlay::hotkey::push_game_mode_suppression(suppress);
+}
+
+/// Last verdict pushed to the helper, so only flips are logged.
+#[cfg(target_os = "windows")]
+static SUPPRESS_PUSHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 fn collect_foreground_window_snapshot() -> Option<ForegroundWindowSnapshot> {

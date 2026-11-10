@@ -85,11 +85,16 @@ impl TrayIcon {
     pub(crate) fn create(
         event_tx: Sender<OverlayEvent>,
         config_path: &str,
+        game_mode_enabled: bool,
     ) -> Result<Self, String> {
         let state = Arc::new(Mutex::new(TrayState {
             event_tx,
             config_path: config_path.to_string(),
-            game_mode_enabled: false,
+            // Seed from the live config. Hardcoding `false` left the menu
+            // unchecked for a session that started with game mode already on,
+            // so the user had no way to tell the mode was active until they
+            // toggled it twice.
+            game_mode_enabled,
             hotkey_issue_active: false,
         }));
 
@@ -157,12 +162,20 @@ impl TrayIcon {
             ));
         }
 
-        Ok(Self {
+        let icon = Self {
             message_hwnd: msg_hwnd,
             icon_handle,
             icon_added: true,
             state,
-        })
+        };
+        // Apply the tooltip once now that the icon exists. It was otherwise
+        // only written on a state change, so a session that started with game
+        // mode on showed the plain tooltip until something toggled.
+        {
+            let guard = icon.state.lock().unwrap_or_else(|e| e.into_inner());
+            icon.update_tray_tooltip(&guard);
+        }
+        Ok(icon)
     }
 
     pub(crate) fn set_game_mode(&self, enabled: bool) {
@@ -312,7 +325,14 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
     let open_text = to_wide("Open Nex");
     let settings_text = to_wide("Settings");
     let updates_text = to_wide("Check for Updates");
-    let game_mode_text = to_wide("Game Mode");
+    // Spell the state out rather than relying on the tick alone: a checkmark
+    // is easy to miss, and game mode silently suppressing the hotkey is
+    // exactly the kind of thing a user needs to be able to see at a glance.
+    let game_mode_text = to_wide(if s.game_mode_enabled {
+        "Game Mode: On"
+    } else {
+        "Game Mode: Off"
+    });
     let lock_text = to_wide("Lock");
     let sleep_text = to_wide("Sleep");
     let shutdown_text = to_wide("Shutdown");
@@ -439,5 +459,25 @@ fn show_context_menu(hwnd: HWND, s: &MenuSnapshot) {
 
     unsafe {
         DestroyMenu(menu);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tooltip_text;
+
+    #[test]
+    fn tooltip_reports_game_mode() {
+        assert_eq!(tooltip_text(false, false), "Nex Launcher");
+        assert_eq!(tooltip_text(true, false), "Nex (Game Mode)");
+    }
+
+    #[test]
+    fn hotkey_issue_outranks_game_mode_in_the_tooltip() {
+        // A hotkey that does not work is more urgent than the mode state, and
+        // hiding it behind "(Game Mode)" would leave the user with no clue why
+        // nothing happens.
+        assert_eq!(tooltip_text(false, true), "Nex (hotkey issue)");
+        assert_eq!(tooltip_text(true, true), "Nex (hotkey issue)");
     }
 }

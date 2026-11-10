@@ -146,6 +146,27 @@ fn warn_everything_backend_removed() {
     });
 }
 
+/// Say which parser accepted the file, once per process.
+///
+/// A config that only parses as JSON or JSON5 is being rewritten as TOML on
+/// this load, so the user should know where their old comments or quoting went
+/// before they open the file and find it changed.
+fn warn_legacy_config_format(format: ConfigFormat, path: &Path, backed_up: bool) {
+    if !format.is_legacy() {
+        return;
+    }
+    let fate = if backed_up {
+        "a backup of the original is beside it"
+    } else {
+        "the file was left as-is"
+    };
+    crate::logging::warn(&format!(
+        "[nex] {} was read as {} because it is not valid TOML; {fate}. TOML is the supported format.",
+        path.display(),
+        format.name()
+    ));
+}
+
 #[cfg(test)]
 mod discovery_backend_tests {
     use super::*;
@@ -747,7 +768,7 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                 .find(|candidate| candidate.exists())
             {
                 let raw = std::fs::read_to_string(&legacy_path)?;
-                let mut cfg: Config = parse_text(&raw).map_err(|e| {
+                let (mut cfg, format) = parse_text_with_format(&raw).map_err(|e| {
                     ConfigError::Parse(format!("Error in {}: {e}", legacy_path.display()))
                 })?;
                 let source_version = cfg.version;
@@ -763,6 +784,9 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                 let original_cfg = cfg.clone();
                 let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
                 should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
+                // A legacy-format file is rewritten even when no field changed:
+                // the point is to stop reading a format the docs do not describe.
+                should_persist_migration |= format.is_legacy();
                 validate(&cfg).map_err(ConfigError::Validation)?;
                 if should_persist_migration && cfg != original_cfg {
                     persist_migrated_config(
@@ -772,6 +796,9 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
                         source_version,
                         &legacy_path,
                     )?;
+                    warn_legacy_config_format(format, &legacy_path, true);
+                } else {
+                    warn_legacy_config_format(format, &legacy_path, false);
                 }
                 return Ok(cfg);
             }
@@ -783,7 +810,7 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
     }
 
     let raw = std::fs::read_to_string(&resolved_path)?;
-    let mut cfg: Config = parse_text(&raw).map_err(|e| {
+    let (mut cfg, format) = parse_text_with_format(&raw).map_err(|e| {
         ConfigError::Parse(format!("Error in {}: {e}", resolved_path.display()))
     })?;
     let source_version = cfg.version;
@@ -799,12 +826,18 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
     let original_cfg = cfg.clone();
     let mut should_persist_migration = apply_migrations(&mut cfg, &raw);
     should_persist_migration |= rewrite_managed_paths_to_current_app_dir(&mut cfg);
+    // Rewrite a legacy-format file even when no field changed, so the user ends
+    // up on TOML instead of being silently served JSON5 indefinitely.
+    should_persist_migration |= format.is_legacy();
     validate(&cfg).map_err(ConfigError::Validation)?;
     // Only rewrite when the migration actually changed the config. A missing
     // template key alone must not trigger a write: the mtime change would
     // make the config watcher reload and rewrite forever.
     if should_persist_migration && cfg != original_cfg {
         persist_migrated_config(&cfg, &resolved_path, &raw, source_version, &resolved_path)?;
+        warn_legacy_config_format(format, &resolved_path, true);
+    } else {
+        warn_legacy_config_format(format, &resolved_path, false);
     }
     Ok(cfg)
 }
@@ -1788,37 +1821,75 @@ fn raw_extract_string_array(raw: &str, key: &str) -> Vec<String> {
     Vec::new()
 }
 
-fn parse_text(raw: &str) -> Result<Config, ConfigError> {
-    match toml::from_str::<Config>(raw) {
-        Ok(cfg) => Ok(cfg),
-        Err(toml_err) => match serde_json::from_str::<Config>(raw) {
-            Ok(cfg) => Ok(cfg),
-            Err(json_err) => match json5::from_str::<Config>(raw) {
-                Ok(cfg) => Ok(cfg),
-                Err(_json5_err) => {
-                    let looks_like_toml = raw.contains('[') || raw.contains(" = ");
-                    let looks_like_json = raw.trim_start().starts_with('{');
+/// Which parser accepted the raw config text.
+///
+/// TOML is the documented format; JSON and JSON5 are read only so an old
+/// install keeps working. The caller uses this to migrate the file to TOML
+/// instead of leaving it in a legacy format forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFormat {
+    Toml,
+    Json,
+    Json5,
+}
 
-                    let msg = if looks_like_toml {
-                        format!(
-                            "Config error: {}. Check your config.toml syntax.",
-                            toml_err
-                        )
-                    } else if looks_like_json {
-                        format!(
-                            "Config error: {}. JSON config is still read but TOML is preferred. Use config.toml instead.",
-                            json_err
-                        )
-                    } else {
-                        format!(
-                            "Config error: {}. Check your config file format — TOML is expected (key = \"value\").",
-                            toml_err
-                        )
-                    };
-                    Err(ConfigError::Parse(msg))
-                }
-            },
-        },
+impl ConfigFormat {
+    /// True when the text was not TOML and should be rewritten as TOML.
+    fn is_legacy(self) -> bool {
+        !matches!(self, ConfigFormat::Toml)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ConfigFormat::Toml => "TOML",
+            ConfigFormat::Json => "JSON",
+            ConfigFormat::Json5 => "JSON5",
+        }
+    }
+}
+
+fn parse_text(raw: &str) -> Result<Config, ConfigError> {
+    parse_text_with_format(raw).map(|(cfg, _)| cfg)
+}
+
+fn parse_text_with_format(raw: &str) -> Result<(Config, ConfigFormat), ConfigError> {
+    let toml_err = match toml::from_str::<Config>(raw) {
+        Ok(cfg) => return Ok((cfg, ConfigFormat::Toml)),
+        Err(error) => error,
+    };
+    let json_err = match serde_json::from_str::<Config>(raw) {
+        Ok(cfg) => return Ok((cfg, ConfigFormat::Json)),
+        Err(error) => error,
+    };
+    // JSON5 last: it accepts things neither TOML nor JSON does (comments,
+    // single quotes, unquoted keys), so a config that reaches here is being
+    // read in a format the docs never describe. It is still accepted so an
+    // existing install does not lose its settings, but the caller rewrites it
+    // as TOML with a backup, which is the only way the user finds out.
+    match json5::from_str::<Config>(raw) {
+        Ok(cfg) => Ok((cfg, ConfigFormat::Json5)),
+        Err(_json5_err) => {
+            let looks_like_toml = raw.contains('[') || raw.contains(" = ");
+            let looks_like_json = raw.trim_start().starts_with('{');
+
+            let msg = if looks_like_toml {
+                format!(
+                    "Config error: {}. Check your config.toml syntax.",
+                    toml_err
+                )
+            } else if looks_like_json {
+                format!(
+                    "Config error: {}. JSON config is still read but TOML is preferred. Use config.toml instead.",
+                    json_err
+                )
+            } else {
+                format!(
+                    "Config error: {}. Check your config file format — TOML is expected (key = \"value\").",
+                    toml_err
+                )
+            };
+            Err(ConfigError::Parse(msg))
+        }
     }
 }
 

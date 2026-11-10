@@ -214,3 +214,83 @@ The Nex Linear project is [P-CIQ-2](https://linear.app/ciqada/project/nex-838bd9
 - When work is delegated, agents should update the same issue and avoid creating duplicate issues for subtasks. If an agent cannot access Linear, it must ask the user to connect Linear for that agent and wait before starting the Nex task.
 - Use project status updates for periodic progress, health, and risks; use milestones for major deliverables with clear outcomes. Do not create a milestone for every issue or a health update without evidence.
 - If Linear is unavailable, ask the user to connect it for the current agent before starting implementation.
+
+### Use the whole issue, not just the title
+
+Linear is the record of the work, not a to-do list. Fill in the fields that
+carry meaning, and skip the ones that would be invented:
+
+- **Description** — the observed behaviour, the cause if known, and the
+  intended fix. Write it so someone who was not in the session can act on it.
+- **Labels** — reuse the existing set (`Bug`, `Performance`, `Tech Debt`,
+  `Discovery`, `Hotkey`, `UX`, `Search`, `IPC`, `Compatibility`). Do not
+  invent a label for a single issue; if nothing fits, leave it empty rather
+  than creating noise.
+- **Priority** — 1 Urgent, 2 High, 3 Medium, 4 Low. Set it from impact, not
+  from how interesting the work is.
+- **Milestone** — attach to an existing milestone when the work clearly
+  belongs to one (e.g. "Hotkey stack robustness", "Reliable file/folder
+  search"). Do not create a milestone for a single issue.
+- **Relations** — link issues that genuinely depend on each other with
+  `blocks` / `blockedBy`, and use `relatedTo` for shared-cause work. This is
+  how a fix that unblocks another gets found later.
+- **Comments** — post the PR link, what was verified, and what was not. When
+  splitting a ticket, comment on the parent naming the new issues so the
+  split is traceable.
+- **Estimate** — only when the user asks for one. Do not guess.
+- **Assignee** — set it when the user is the one who will act on it.
+
+Do not create labels, milestones, cycles, or documents speculatively. Check
+what already exists first (`list_project_labels`, `list_milestones`,
+`list_cycles`) and reuse it.
+
+### Closing and splitting
+
+- A PR that only *partly* addresses an issue must say `Related to CIQ-n`, not
+  `Closes CIQ-n`. Closing a ticket with work still on it silently drops the
+  remainder.
+- When an issue carries unrelated items, split them into their own issues
+  before the PR merges, comment on the parent naming them, and leave the
+  parent tracking only what the PR actually delivers.
+- Only a merged PR moves an issue to Done. If a PR is merged and the issue is
+  still open, pull master, confirm the change is present, then close it.
+
+### Other Linear surfaces worth using
+
+The workspace has one team (`CIQ`, "Ciqada") and one project (`Nex`, `P-CIQ-2`).
+There are **no** release pipelines and **no** project or issue templates, so
+do not reach for those. Features that do exist and are under-used:
+
+- **Documents** (`list_documents`, `get_document`, `save_document`) — the
+  established pattern for work that outlives an issue: investigation write-ups,
+  multi-phase plans, audit roadmaps. `CIQ-78 plan` and the search/scalability
+  audit are both documents. When an issue is really a design question, write a
+  document and link it from the issue instead of a very long description.
+- **Development log documents** (`Nex Development Log — <Month> <Year>`) — a
+  per-month commit ledger maintained by the repo owner. Do not edit these from
+  an agent session; they are generated. Read them when you need history.
+- **Project status updates** (`get_status_updates`, `save_status_update`) — for
+  periodic progress, health (`onTrack` / `atRisk` / `offTrack`) and risks. Use
+  these to report on a body of work; use comments to report on one issue. Post
+  an update only when there is evidence, never as a ritual.
+- **Notifications** (`get_notifications`, `mark_notification`) — check with
+  `get_notifications` at the start of a session to see whether the owner has
+  replied on an issue. Two caveats: the list is mostly historical (status
+  changes and old comments, not unread replies), and some bodies are errors
+  from Linear's own AI features (e.g. missing AI credits) that are not
+  addressed to the agent. Filter by `issueNewComment` near the top, and ignore
+  the rest.
+- **Search** (`list_issues` with `query`, `search_documentation`) — `query`
+  searches titles and descriptions, which beats guessing an identifier. Use
+  `search_documentation` for how Linear itself works.
+- **Statuses** (`list_issue_statuses`) — the workflow is Triage, Backlog, Todo,
+  In Progress, In Review, Done, Canceled, Duplicate. "In Review" is a
+  *started* state, which is why a merged PR still has to move an issue to Done
+  explicitly.
+- **Users** (`list_users`, `get_user`, `whoami`) — resolve a name to an id when
+  setting an assignee.
+
+Deliberately unused in this workspace: release pipelines and releases (none
+configured), issue/project templates (none defined), customers and customer
+needs (not used), agent skills, and the diff-review tools (reviews happen on
+GitHub PRs, not Linear diffs). Do not introduce them without the owner asking.

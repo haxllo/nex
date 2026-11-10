@@ -252,8 +252,28 @@ what already exists first (`list_project_labels`, `list_milestones`,
 - When an issue carries unrelated items, split them into their own issues
   before the PR merges, comment on the parent naming them, and leave the
   parent tracking only what the PR actually delivers.
+
 - Only a merged PR moves an issue to Done. If a PR is merged and the issue is
   still open, pull master, confirm the change is present, then close it.
+
+### GitHub issues mirror Linear — keep both in step
+
+Every Linear issue in P-CIQ-2 has a GitHub issue with the same title, and the
+two are **not** linked automatically. GitHub `#126` is not Linear `CIQ-126`;
+the numbers drift apart, so never assume they match. Title is the join key.
+
+In practice, `#NNN` in a PR body closes the *GitHub* issue and does nothing to
+Linear. Handle both:
+
+1. Put the GH reference in the PR body (`Closes #128`) so GitHub closes itself.
+2. Put the Linear id in the PR title/body (`CIQ-127`) so the branch and commit
+   pass CI, and set the Linear issue to In Review.
+3. After merge, close both: the Linear issue to Done, and the GitHub issue
+   with `gh issue close <n> --reason completed --comment "Fixed in #<pr> (<commit>)"`.
+
+When closing a batch, match by title — do not trust the number. Audit drift
+with `gh issue list --state open` against `list_issues` on P-CIQ-2; a burst of
+GitHub issues that are Done in Linear means the sync was skipped.
 
 ### Other Linear surfaces worth using
 

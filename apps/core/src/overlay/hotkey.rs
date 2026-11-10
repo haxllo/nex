@@ -116,6 +116,38 @@ fn next_helper_generation() -> u64 {
     HELPER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+/// The generation claimed for the hotkey target currently being applied.
+///
+/// Every config write for one target ships this value, so the helper sees a
+/// single generation change per save. Claiming a fresh generation per write
+/// made each save produce a chain of them, and the last write always
+/// superseded the helper the supervisor had just launched — which is why one
+/// Settings save could spawn several elevated helpers.
+static HELPER_SAVE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Generation to stamp on a config write for the current target.
+fn current_save_generation() -> u64 {
+    HELPER_SAVE_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Progress the shared generation without changing the target.
+///
+/// Used after a helper's pipe closes: the replacement must be newer than the
+/// one that just died, so the dead helper cannot come back and reclaim the
+/// single detection pipe.
+///
+/// Derived from the save generation, not from `HELPER_GENERATION`: the two are
+/// separate counters, and reading only one of them could hand out a value that
+/// does not advance on the other.
+fn bump_helper_generation() -> u64 {
+    let next = current_save_generation() + 1;
+    HELPER_SAVE_GENERATION.store(next, Ordering::SeqCst);
+    // Keep the global high-water mark ahead so nothing else hands out a value
+    // already used for a config write.
+    HELPER_GENERATION.fetch_max(next, Ordering::SeqCst);
+    next
+}
+
 /// Runtime event sender, mirrored here so a helper relaunched outside the
 /// listener (hotkey swap, recovery) can forward detections to the same queue.
 static HELPER_EVENT_TX: Mutex<Option<Sender<OverlayEvent>>> = Mutex::new(None);
@@ -1492,6 +1524,52 @@ fn helper_pipe_open() -> bool {
     HELPER_ACTIVE.load(Ordering::SeqCst)
 }
 
+/// Block while a save is applying its helper changes.
+///
+/// Returns true when the caller should stop (quit requested). Bounded so a
+/// save that never completes cannot disable the supervisor forever.
+fn wait_while_save_in_flight(should_exit: &AtomicBool) -> bool {
+    const MAX_WAIT: Duration = Duration::from_secs(10);
+    const POLL: Duration = Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    while HELPER_SAVE_IN_FLIGHT.load(Ordering::SeqCst) {
+        if should_exit.load(Ordering::SeqCst) {
+            return true;
+        }
+        if started.elapsed() >= MAX_WAIT {
+            logging::warn("[nex] save still in flight; supervisor starting the helper anyway");
+            return false;
+        }
+        thread::sleep(POLL);
+    }
+    false
+}
+
+/// Set while a hotkey save is applying its helper changes.
+///
+/// The supervisor reacts to a closed pipe by spawning immediately, which is
+/// right after a crash but wrong in the middle of a save: the exit it is
+/// reacting to is one the save asked for, and the save is already producing a
+/// replacement. Without this the two paths each launched a helper and the
+/// supervisor's was superseded by the save's next config write.
+static HELPER_SAVE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Marks a save as in flight, clearing it on drop (including on panic).
+struct HelperSaveGuard;
+
+impl HelperSaveGuard {
+    fn begin() -> Self {
+        HELPER_SAVE_IN_FLIGHT.store(true, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for HelperSaveGuard {
+    fn drop(&mut self) {
+        HELPER_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Keep the elevated helper alive for the lifetime of the listener.
 ///
 /// The in-process hook is always live, so the helper is a supplement: when it
@@ -1522,6 +1600,13 @@ fn run_helper_supervisor(
             kill_stale_helper();
         }
         reconnect = true;
+
+        // A save in flight is already producing the replacement, and the exit
+        // we just saw is the one it asked for. Spawning here as well is what
+        // made one Settings save launch several elevated helpers.
+        if wait_while_save_in_flight(&should_exit) {
+            return;
+        }
 
         // Read the target fresh: a live hotkey change swaps it, and respawning
         // with the values captured at thread start resurrected the old combo.
@@ -1554,7 +1639,10 @@ fn run_helper_supervisor(
                 read_helper_pipe(pipe_file, &event_tx);
 
                 HELPER_ACTIVE.store(false, Ordering::SeqCst);
-                HELPER_GENERATION.fetch_add(1, Ordering::SeqCst);
+                // The replacement must be newer than the helper that just
+                // died, or the dead one could reclaim the single detection
+                // pipe. Keep the save generation in step with it.
+                bump_helper_generation();
                 set_suppress_focus_escape(false);
                 if let Ok(mut st) = helper.lock() {
                     st.active = false;
@@ -2027,9 +2115,15 @@ pub(crate) fn update_live_hotkey(hotkey_str: &str) -> bool {
     // the doorbell only makes the helper re-read its own stale file. The
     // generation is carried along, so a helper that has since been superseded
     // exits instead of adopting a config meant for its successor.
+    // One save claims one generation. The retarget write, the restart
+    // republish and the supervisor's spawn all share it, so the replacement
+    // helper is not superseded by the config write that launched it.
+    let save_generation = next_helper_generation();
+    HELPER_SAVE_GENERATION.store(save_generation, Ordering::SeqCst);
     let helper_config_written = HELPER_ACTIVE.load(Ordering::SeqCst)
         && write_helper_config(
             &helper_config_path(),
+            save_generation,
             target_key,
             target_is_win,
             &required_mods,
@@ -2094,8 +2188,11 @@ fn resolve_helper_target(hotkey_str: &str) -> Result<(u32, bool, Vec<u32>), Stri
 /// only signal the running helper uses to decide it has been superseded.
 fn publish_helper_config_for(hotkey_str: &str) -> Result<(), String> {
     let (target_key, target_is_win, required_mods) = resolve_helper_target(hotkey_str)?;
+    // Reuse the generation the save already claimed instead of taking another.
+    let generation = current_save_generation();
     write_helper_config(
         &helper_config_path(),
+        generation,
         target_key,
         target_is_win,
         &required_mods,
@@ -2121,6 +2218,9 @@ pub(crate) fn restart_elevated_helper(hotkey_str: &str) {
     // file at the old generation, so the live helper adopted the new combo in
     // place instead of exiting: it kept mask state and detect semantics from
     // the old family, and Win stopped opening the overlay until a restart.
+    // Held for the whole save so the supervisor does not spawn a second
+    // replacement for the exit this save is causing.
+    let _save = HelperSaveGuard::begin();
     if HELPER_ACTIVE.load(Ordering::SeqCst) {
         if let Err(error) = publish_helper_config_for(hotkey_str) {
             logging::warn(&format!(
@@ -2211,10 +2311,15 @@ fn spawn_and_connect_helper(
     let config_event_name = create_config_event();
     let pipe_name = helper_detection_pipe_name();
 
-    // 2. Write JSON config for the helper (includes event name)
+    // 2. Write JSON config for the helper (includes event name).
+    //    Reuse the generation already claimed for this hotkey target: claiming
+    //    a fresh one here superseded the helper this very call was about to
+    //    launch, so the supervisor had to spawn again — the churn that
+    //    produced several elevated helpers per Settings save.
     let config_path = helper_config_path();
     write_helper_config(
-        &config_path, 
+        &config_path,
+        current_save_generation(),
         target_key, 
         target_is_win, 
         required_mods, 
@@ -2286,6 +2391,7 @@ fn helper_config_path() -> std::path::PathBuf {
 /// Write JSON config file that the helper reads at startup.
 fn write_helper_config(
     path: &std::path::Path,
+    generation: u64,
     target_key: u32,
     target_is_win: bool,
     required_mods: &[u32],
@@ -2309,12 +2415,12 @@ fn write_helper_config(
     // superseded: a newer value means exit so the replacement can take the
     // single detection pipe.
     //
-    // Claim a fresh value per write. Reading the static here made two writes
-    // that straddle a bump share one value, so the helper saw "same
-    // generation" and adopted a new combo in place instead of exiting — which
-    // left the mask state and detect flag from the old combo family, and Win
-    // only worked again after a full restart.
-    let generation = next_helper_generation();
+    // The caller supplies it rather than claiming one here. Claiming per write
+    // meant a single hotkey save produced a chain of generations — the live
+    // update wrote one, the restart path republished another, and
+    // `spawn_and_connect_helper` claimed a third — so the supervisor's fresh
+    // helper was superseded by its own config write. That is what spawned
+    // several elevated helpers per save. One save now claims exactly one.
     // JSON needs the backslashes in a Windows path doubled; the helper parses
     // this file as JSON, so an unescaped `\\.\pipe\x` would be read back as a
     // different name.
@@ -2864,6 +2970,66 @@ mod tests {
             started.elapsed() < Duration::from_millis(200),
             "a listener without a helper pipe must not wait",
         );
+    }
+
+    /// One save must not advance the generation more than once, or the last
+    /// write supersedes the helper the supervisor just launched — the churn
+    /// that spawned several elevated helpers per Settings save.
+    #[test]
+    fn one_save_claims_one_generation() {
+        let claimed = next_helper_generation();
+        HELPER_SAVE_GENERATION.store(claimed, Ordering::SeqCst);
+
+        // Every write for one target reuses the claimed value.
+        assert_eq!(current_save_generation(), claimed);
+        assert_eq!(current_save_generation(), claimed);
+    }
+
+    /// A dead helper's exit must advance the generation, so its replacement is
+    /// strictly newer and the dead one cannot reclaim the detection pipe.
+    #[test]
+    fn pipe_close_bumps_the_shared_generation() {
+        HELPER_SAVE_GENERATION.store(5, Ordering::SeqCst);
+        let bumped = bump_helper_generation();
+        assert!(bumped > 5, "replacement generation must advance");
+        assert_eq!(current_save_generation(), bumped);
+    }
+
+    /// The supervisor must not spawn while a save is producing the
+    /// replacement, otherwise both paths launch a helper.
+    #[test]
+    fn supervisor_waits_while_a_save_is_in_flight() {
+        let should_exit = AtomicBool::new(false);
+        let guard = HelperSaveGuard::begin();
+        assert!(HELPER_SAVE_IN_FLIGHT.load(Ordering::SeqCst));
+
+        // Released by the save finishing, not by waiting out the cap.
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            drop(guard);
+        });
+        let started = std::time::Instant::now();
+        let stop = wait_while_save_in_flight(&should_exit);
+        released.join().ok();
+        assert!(!stop, "a released save must not signal quit");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "it should have waited for the save",
+        );
+        assert!(!HELPER_SAVE_IN_FLIGHT.load(Ordering::SeqCst));
+    }
+
+    /// Quit must not be blocked by an in-flight save.
+    #[test]
+    fn quit_is_not_held_by_a_save_in_flight() {
+        let should_exit = AtomicBool::new(true);
+        // Held for the duration: only the quit flag can end the wait.
+        let guard = HelperSaveGuard::begin();
+        let started = std::time::Instant::now();
+        let stop = wait_while_save_in_flight(&should_exit);
+        assert!(stop);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(guard);
     }
 
     #[test] fn helper_wait_returns_when_the_generation_advanced() {

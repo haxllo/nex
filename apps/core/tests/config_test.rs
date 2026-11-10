@@ -412,3 +412,82 @@ fn removed_everything_discovery_backend_loads_as_auto() {
 
     std::fs::remove_dir_all(&config_dir).unwrap();
 }
+
+/// JSON5 accepts comments, single quotes and unquoted keys — none of which are
+/// TOML. A file like this is read and then rewritten as TOML with a backup, so
+/// the user is not served a format the docs never describe, indefinitely.
+#[test]
+fn json5_config_is_rewritten_as_toml_with_a_backup() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_dir = std::env::temp_dir().join("swiftfind").join(format!("json5-{unique}"));
+    let config_path = config_dir.join("config.json5");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    // No comment, no single quotes: valid JSON5 *and* valid JSON, but not TOML.
+    std::fs::write(
+        &config_path,
+        "{\n  version: 1,\n  hotkey: 'Ctrl+Alt+J',\n  max_results: 44\n}\n",
+    )
+    .unwrap();
+
+    let loaded = nex_core::config::load(Some(&config_path)).unwrap();
+    assert_eq!(loaded.hotkey, "Ctrl+Alt+J");
+    assert_eq!(loaded.max_results, 44);
+
+    let rewritten = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        rewritten.contains("hotkey = \"Ctrl+Alt+J\""),
+        "legacy config should be rewritten as TOML, got: {rewritten}"
+    );
+
+    // The original must be kept, since rewriting discards its formatting.
+    let backups: Vec<_> = std::fs::read_dir(&config_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.contains("backup"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(!backups.is_empty(), "rewriting a legacy config must leave a backup");
+
+    // Reloading the rewritten file must succeed and keep the values.
+    let again = nex_core::config::load(Some(&config_path)).unwrap();
+    assert_eq!(again.hotkey, "Ctrl+Alt+J");
+    assert_eq!(again.max_results, 44);
+
+    for backup in backups {
+        let _ = std::fs::remove_file(backup);
+    }
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::remove_dir_all(&config_dir).unwrap();
+}
+
+/// A TOML config must not be rewritten on load — the write would change the
+/// mtime and make the config watcher reload in a loop.
+#[test]
+fn toml_config_is_not_rewritten_on_load() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_dir = std::env::temp_dir().join("swiftfind").join(format!("toml-{unique}"));
+    let config_path = config_dir.join("config.toml");
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let original = "hotkey = \"Ctrl+Alt+K\"\nmax_results = 27\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    let _ = nex_core::config::load(Some(&config_path)).unwrap();
+    let after = std::fs::read_to_string(&config_path).unwrap();
+    assert_eq!(after, original, "a valid TOML config must be left untouched");
+
+    std::fs::remove_file(&config_path).unwrap();
+    std::fs::remove_dir_all(&config_dir).unwrap();
+}

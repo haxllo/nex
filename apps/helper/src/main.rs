@@ -1417,12 +1417,40 @@ fn spawn_detection_writer(pipe: std::fs::File) {
 }
 
 /// The only thread that touches the debug log file and the log pipe.
+/// Size at which the live log is rotated mid-session.
+///
+/// The interesting window for a hotkey bug is the current session, so a few
+/// megabytes is plenty; without a cap a helper left running for days grows the
+/// file until it is useless to read and awkward to attach to a report.
+const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Move `path` to `path` + `.prev`, replacing any older generation.
+///
+/// Only one previous generation is kept: the point is to bound the file, not
+/// to keep history. Failures are ignored — a log that cannot rotate must still
+/// let the helper run.
+fn rotate_log_file(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    let mut prev = path.as_os_str().to_os_string();
+    prev.push(".prev");
+    let prev = std::path::PathBuf::from(prev);
+    let _ = std::fs::remove_file(&prev);
+    let _ = std::fs::rename(path, &prev);
+}
+
 fn log_writer_loop(rx: std::sync::mpsc::Receiver<String>) {
     use std::io::Write;
     let path = std::env::temp_dir().join("NexHelper-debug.log");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // Start each run with a fresh file, keeping the previous run as `.prev`.
+    // Appending across runs buried the current session under everything that
+    // ever happened, which is what made this log hard to read.
+    rotate_log_file(&path);
+    let mut written = 0u64;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1432,6 +1460,22 @@ fn log_writer_loop(rx: std::sync::mpsc::Receiver<String>) {
         if let Some(f) = file.as_mut() {
             if writeln!(f, "{line}").is_err() {
                 file = None;
+            } else {
+                written += line.len() as u64 + 1;
+                // Cap the live file so a long-running helper cannot grow it
+                // without bound. Rotate rather than truncate so the lines just
+                // before the cap are still readable.
+                if written >= LOG_ROTATE_BYTES {
+                    let _ = f.flush();
+                    drop(file.take());
+                    rotate_log_file(&path);
+                    written = 0;
+                    file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .ok();
+                }
             }
         }
         if let Ok(mut slot) = LOG_PIPE.lock() {
@@ -1442,7 +1486,7 @@ fn log_writer_loop(rx: std::sync::mpsc::Receiver<String>) {
             }
         }
     }
-    if let Some(f) = file.as_mut() {
+    if let Some(mut f) = file {
         let _ = f.flush();
     }
 }

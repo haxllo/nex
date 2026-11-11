@@ -1239,6 +1239,111 @@ html.compact-view #power-panel-top {
   visibility: hidden;
 }
 
+/* Shared geometry for the artwork slot and its vinyl fallback, so switching
+   between the two never shifts the layout. */
+#media-art,
+.media-platter {
+  width: 148px;
+  height: 148px;
+  flex: 0 0 auto;
+}
+
+/* Vinyl fallback, shown when the session reports no album art.
+
+   Disc grooves are a repeating-radial-gradient and the sheen is a
+   conic-gradient; the only animating property is `rotate`, so the spin stays
+   on the compositor and never triggers layout or paint per frame. The label
+   carries the first letter of the title so a track without art still reads as
+   *that* track rather than a generic disc. Adapted from the CodeFronts
+   "vinyl record" play/pause component, restyled to nex's tokens. */
+.media-platter {
+  position: relative;
+  border-radius: 50%;
+  background: var(--icon-bg);
+  box-shadow: 0 0 0 1px var(--sel-border), 0 10px 28px -10px rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.media-platter.hidden {
+  display: none;
+}
+
+.media-disc {
+  position: absolute;
+  inset: 6px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background:
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgba(0, 0, 0, 0.86) 0 2px,
+      rgba(255, 255, 255, 0.07) 2px 3px,
+      rgba(0, 0, 0, 0.9) 3px 5px
+    ),
+    conic-gradient(
+      from 210deg,
+      transparent 0deg,
+      rgba(255, 255, 255, 0.11) 24deg,
+      transparent 60deg,
+      transparent 200deg,
+      rgba(255, 255, 255, 0.07) 232deg,
+      transparent 268deg
+    );
+  animation: media-disc-spin 3.6s linear infinite;
+  animation-play-state: paused;
+  will-change: transform;
+}
+
+/* Spins only while the track is actually playing, matching the play/pause
+   state the panel already shows. */
+.media-platter.playing .media-disc {
+  animation-play-state: running;
+}
+
+@keyframes media-disc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.media-disc-label {
+  width: 44%;
+  height: 44%;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--text-faint), var(--text-dim));
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--accent-fg);
+  letter-spacing: -0.02em;
+  user-select: none;
+}
+
+.media-disc-label:empty {
+  background: linear-gradient(135deg, var(--text-faint), transparent);
+}
+
+/* Spindle: the pin through the centre of the label. */
+.media-spindle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  box-shadow: inset 0 -1px 2px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-disc {
+    animation: none !important;
+  }
+}
+
 .media-main {
   display: flex;
   flex-direction: column;

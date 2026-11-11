@@ -44,6 +44,8 @@
   const whatsNewTips = $("whats-new-tips");
   const whatsNewScroll = $("whats-new-scroll");
   const mediaArt = $("media-art");
+  const mediaPlatter = $("media-platter");
+  const mediaDiscInitials = $("media-disc-initials");
   const mediaTitle = $("media-title");
   const mediaArtist = $("media-artist");
   const mediaProgressFill = $("media-progress-fill");
@@ -4105,13 +4107,26 @@
     } else {
       mediaArt.removeAttribute("src");
     }
+    const playing = m.status === "playing";
+    // No album art: show the vinyl fallback instead of an empty slot. The two
+    // share the same box, so swapping them never shifts the layout.
+    const hasArt = !!m.art;
+    mediaPlatter.classList.toggle("hidden", hasArt);
+    mediaArt.classList.toggle("hidden", !hasArt);
+    if (!hasArt) {
+      // Seeded from the title so the label identifies the track; the artwork
+      // is what usually carries that, and here there is none.
+      const label = (m.title || "").trim();
+      const initials = label ? label[0].toUpperCase() : "";
+      if (mediaDiscInitials.textContent !== initials) mediaDiscInitials.textContent = initials;
+    }
+    mediaPlatter.classList.toggle("playing", playing);
     const dur = Number(m.duration_secs) || 0;
     const live = !!m.live;
     const seekable = !!m.seekable && !live;
     mediaLive.classList.toggle("hidden", !live);
     mediaDur.textContent = live ? "" : fmtTime(dur);
     mediaProgress.classList.toggle("locked", !seekable);
-    const playing = m.status === "playing";
     mediaPlayIcon.classList.toggle("hidden", playing);
     mediaPauseIcon.classList.toggle("hidden", !playing);
     mediaEq.classList.toggle("paused", !playing);

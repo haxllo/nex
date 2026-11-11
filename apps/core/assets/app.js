@@ -2169,6 +2169,11 @@
       for (const message of chatMessages) {
         const article = document.createElement("article");
         article.className = "chat-message " + (message.role === "user" ? "user" : "assistant") + (message.error ? " error" : "");
+        // A reply with actions gets one surface around cards and prose, so the
+        // result reads as part of the answer instead of a separate widget.
+        if (message.role === "assistant" && Array.isArray(message.actions) && message.actions.length && !message.error) {
+          article.classList.add("has-surface");
+        }
         article.dataset.messageId = message.id;
         if (Array.isArray(message.actions) && message.actions.length) {
           const list = document.createElement("div");

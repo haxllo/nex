@@ -496,9 +496,17 @@ fn flush_pending(
 
     // Deletions first: removing an item frees its id, which is required
     // before we can re-upsert under the same id.
+    //
+    // Removals must be filtered by the same exclusion policy as adds. The
+    // watcher sees the whole root recursively including AppData, and adds
+    // under an excluded path were dropped while their removals were not — so
+    // every excluded-path churn became a delete delta for items that were
+    // never indexed. That is where the constant `ui_delta_applied` spam came
+    // from: real store contents never changed, but the deltas did.
     let removed_paths: Vec<(String, [String; 2])> = removed
         .iter()
         .filter(|path| is_under_root(path, root))
+        .filter(|path| !exclusion.should_exclude_path_under_root(path, root))
         .map(|path| {
             let text = path.to_string_lossy().to_string();
             let normalized = text.to_ascii_lowercase();
@@ -531,7 +539,10 @@ fn flush_pending(
                         .is_some()
             });
             for id in ids {
-                if guard.delete_item_by_id(id).is_ok() {
+                // Only count and publish deletes for ids that are actually
+                // present. A phantom delete used to count here and publish an
+                // empty delta, which bumped the generation for nothing.
+                if guard.delete_item_by_id_if_present(id).unwrap_or(false) {
                     deleted += 1;
                 }
             }

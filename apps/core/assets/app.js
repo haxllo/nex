@@ -115,7 +115,7 @@
   let chatPendingAction = null;
   let chatActiveRequest = null;
   let chatSelectedFiles = [];
-  let chatIncludePcInfo = false;
+  let chatIncludePcInfo = true;
   let chatFilesLoading = false;
   let chatContextSelectionEpoch = 0;
   let chatFilePickerOpen = false;
@@ -2486,7 +2486,10 @@
     chatContextSelectionEpoch++;
     chatFilesLoading = false;
     chatSelectedFiles = [];
-    chatIncludePcInfo = false;
+    // Kept on: the assistant needs to know the machine it is acting on. Turning
+    // this off after every send meant "my desktop" had no real location behind
+    // it and the model guessed the path.
+    chatIncludePcInfo = true;
     chatAttachButton.disabled = false;
     renderChatContextSelection();
   }

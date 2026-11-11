@@ -3385,7 +3385,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatActionPending || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

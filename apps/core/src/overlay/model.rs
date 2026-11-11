@@ -195,6 +195,12 @@ pub struct ShimState {
     pub has_focus: bool,
     pub hwnd: isize,
     pub chat_file_picker_open: bool,
+    /// A chat action is waiting for the user to allow or cancel it.
+    ///
+    /// While true the overlay must not hide on focus loss: the user has to be
+    /// able to see and answer the card. Losing focus to another app otherwise
+    /// dismisses the only surface that can approve the action.
+    pub chat_action_pending: bool,
     pub chat_file_picker_pending: bool,
     pub idle_cache_trim_ms: u32,
     pub active_memory_target_mb: u16,
@@ -270,6 +276,7 @@ impl Default for ShimState {
             has_focus: false,
             hwnd: 0,
             chat_file_picker_open: false,
+            chat_action_pending: false,
             chat_file_picker_pending: false,
             idle_cache_trim_ms: 90_000,
             active_memory_target_mb: 72,

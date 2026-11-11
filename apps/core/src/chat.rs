@@ -662,7 +662,7 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
                 "openai-compatible" => {
                     stream_openai(&config, &request, id, &mut emit, &worker_push, request_id.as_deref())
                 }
-                "codex" => stream_chatgpt(&config, &request, id, &mut emit),
+                "codex" => stream_chatgpt(&config, &request, id, &mut emit, &worker_push, request_id.as_deref()),
                 _ => Err("Choose a chat provider in settings.".into()),
             };
             if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
@@ -711,9 +711,27 @@ struct StreamedTurn {
 #[derive(Debug, Default)]
 struct ToolCallAccumulator {
     by_index: std::collections::BTreeMap<i64, (String, String)>,
+    /// The responses API streams arguments under an `item_id` rather than an
+    /// index, so the two halves of a call have to be joined by hand.
+    item_to_index: std::collections::HashMap<String, i64>,
+    next: i64,
 }
 
 impl ToolCallAccumulator {
+    fn next_index(&mut self) -> i64 {
+        let index = self.next;
+        self.next += 1;
+        index
+    }
+
+    fn bind_item(&mut self, index: i64, item_id: &str) {
+        self.item_to_index.insert(item_id.to_string(), index);
+    }
+
+    fn index_of_item(&self, item_id: &str) -> Option<i64> {
+        self.item_to_index.get(item_id).copied()
+    }
+
     fn absorb(&mut self, call: &Value) {
         let index = call.get("index").and_then(Value::as_i64).unwrap_or(0);
         let entry = self.by_index.entry(index).or_default();
@@ -945,8 +963,10 @@ fn stream_chatgpt(
     request: &SendRequest,
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
+    sink: &ChatUpdateSink,
+    request_id: Option<&str>,
 ) -> Result<(), String> {
-    stream_chatgpt_native(config, request, id, emit)
+    stream_chatgpt_native(config, request, id, emit, sink, request_id)
 }
 
 /// Friendly ChatGPT backend failures: quota/rate limits with reset time,
@@ -1022,6 +1042,8 @@ fn stream_chatgpt_native(
     request: &SendRequest,
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
+    sink: &ChatUpdateSink,
+    request_id: Option<&str>,
 ) -> Result<(), String> {
     let prompt = conversation_prompt(request);
     let started = Instant::now();
@@ -1043,6 +1065,7 @@ fn stream_chatgpt_native(
         "stream": true,
         "store": false,
         "max_output_tokens": 1024,
+        "tools": crate::chat_tools::responses_tool_declarations(),
     });
     if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
         return Ok(());
@@ -1079,6 +1102,9 @@ fn stream_chatgpt_native(
     let mut event = String::new();
     let mut first_token_logged = false;
     let mut finished = false;
+    // Function calls arrive as `response.output_item.added` (name) followed by
+    // `response.function_call_arguments.delta` (arguments), matched by item id.
+    let mut calls = ToolCallAccumulator::default();
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             return Ok(());
@@ -1148,6 +1174,36 @@ fn stream_chatgpt_native(
             }
             emit(message, None);
         }
+        // A function call the model wants to make: name on the item, arguments
+        // streamed separately. Both carry the same item id.
+        if event == "response.output_item.added" {
+            if let Some(item) = data.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let index = calls.next_index();
+                    if let Some(name) = item.get("name").and_then(Value::as_str) {
+                        calls.absorb(&json!({
+                            "index": index,
+                            "function": {"name": name, "arguments": ""}
+                        }));
+                    }
+                    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                        calls.bind_item(index, item_id);
+                    }
+                }
+            }
+        } else if event == "response.function_call_arguments.delta" {
+            let index = data
+                .get("item_id")
+                .and_then(Value::as_str)
+                .and_then(|id| calls.index_of_item(id))
+                .unwrap_or(0);
+            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                calls.absorb(&json!({
+                    "index": index,
+                    "function": {"arguments": delta}
+                }));
+            }
+        }
         if let Some(error) = data
             .pointer("/error/message")
             .and_then(Value::as_str)
@@ -1177,10 +1233,71 @@ fn stream_chatgpt_native(
     if !finished {
         return Err("The ChatGPT connection ended before the response was complete.".into());
     }
+    if !calls.is_empty() {
+        let requested = calls.finish();
+        crate::runtime::log_info(&format!(
+            "[nex][chat] ChatGPT account requested {} action(s)",
+            requested.len()
+        ));
+        let create_base = create_base_dir();
+        run_requested_actions(
+            requested,
+            id,
+            emit,
+            sink,
+            request_id,
+            &create_base,
+        )?;
+    }
     crate::runtime::log_info(&format!(
         "[nex][chat] ChatGPT account done in {}ms",
         started.elapsed().as_millis()
     ));
+    Ok(())
+}
+
+/// Run the actions the model asked for, through the same gate as the streamed
+/// provider path. Shared so the two providers cannot diverge on the one rule
+/// that matters: a mutating action waits for the user.
+fn run_requested_actions(
+    requested: Vec<crate::chat_tools::RawToolCall>,
+    id: u64,
+    emit: &mut impl FnMut(&str, Option<&str>),
+    sink: &ChatUpdateSink,
+    request_id: Option<&str>,
+    create_base: &std::path::Path,
+) -> Result<(), String> {
+    let mut loop_state = crate::chat_tools::ToolLoop::new();
+    for raw in requested {
+        let tool = match raw.validate() {
+            Ok(tool) => tool,
+            Err(error) => {
+                // The model asked for something we do not offer. Say so plainly
+                // rather than doing a nearby thing it did not ask for.
+                emit(&format!("I can't do that: {error}."), None);
+                continue;
+            }
+        };
+        match loop_state.on_tool_call(tool.clone()) {
+            crate::chat_tools::LoopStep::Stop { reason } => {
+                emit(&format!("Stopping here: {reason}."), None);
+                break;
+            }
+            crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
+                let confirmed = await_confirmation(id, request_id, sink, &tool);
+                if !confirmed {
+                    emit(&format!("I did not run {}; you declined it.", tool.name()), None);
+                    continue;
+                }
+                let outcome = crate::chat_tools::run(&tool, true, create_base);
+                emit(&outcome.summary, None);
+            }
+            crate::chat_tools::LoopStep::RunTool { tool } => {
+                let outcome = crate::chat_tools::run(&tool, false, create_base);
+                emit(&outcome.summary, None);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1768,6 +1885,53 @@ mod tests {
     }
 
     #[test]
+    /// The responses API splits a call across two events joined by item id:
+    /// the name arrives on the item, the arguments stream separately. Getting
+    /// the join wrong silently produces a call with no arguments, which then
+    /// fails validation for the wrong reason.
+    #[test]
+    fn function_call_halves_are_joined_by_item_id() {
+        let mut calls = ToolCallAccumulator::default();
+        let index = calls.next_index();
+        calls.bind_item(index, "item_abc");
+        calls.absorb(&json!({
+            "index": index,
+            "function": {"name": "open_path", "arguments": ""}
+        }));
+        let index = calls.index_of_item("item_abc").unwrap();
+        calls.absorb(&json!({
+            "index": index,
+            "function": {"arguments": "{\"path\":"}
+        }));
+        // Fragments concatenate, so each contributes part of one JSON object.
+        calls.absorb(&json!({
+            "index": index,
+            "function": {"arguments": "\"C:/Windows\"}"}
+        }));
+
+        let finished = calls.finish();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].name, "open_path");
+        // Raw strings so the Windows backslash is data, not an escape.
+        assert_eq!(finished[0].arguments["path"], "C:/Windows");
+    }
+
+    #[test]
+    fn an_unfinished_argument_stream_still_yields_a_call() {
+        // Truncated JSON must not be silently dropped: validation rejects it
+        // and the model is told, which is better than an action appearing to
+        // succeed with no target.
+        let mut calls = ToolCallAccumulator::default();
+        let index = calls.next_index();
+        calls.absorb(&json!({
+            "index": index,
+            "function": {"name": "create_file", "arguments": "{\"name\":\"a" }
+        }));
+        let finished = calls.finish();
+        assert_eq!(finished.len(), 1);
+        assert!(finished.into_iter().next().unwrap().validate().is_err());
+    }
+
     fn chatgpt_input_items_use_output_text_for_assistant_turns() {
         let request = SendRequest {
             request_id: "request-1".into(),

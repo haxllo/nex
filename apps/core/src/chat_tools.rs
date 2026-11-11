@@ -608,6 +608,34 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
     }
 }
 
+/// The same five tools in the shape the ChatGPT `/responses` API expects.
+///
+/// That API is flat (`{type, name, parameters}`) rather than OpenAI's nested
+/// `{type, function: {name, parameters}}`. Declaring them once and converting
+/// keeps the two providers from drifting apart, which is the failure this would
+/// otherwise invite: a tool added to one surface and forgotten in the other.
+pub(crate) fn responses_tool_declarations() -> serde_json::Value {
+    let nested = tool_declarations();
+    let flat: Vec<serde_json::Value> = nested
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    let f = tool.get("function")?;
+                    Some(serde_json::json!({
+                        "type": "function",
+                        "name": f.get("name")?,
+                        "description": f.get("description")?,
+                        "parameters": f.get("parameters")?,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::Value::Array(flat)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

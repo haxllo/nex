@@ -1846,12 +1846,17 @@ html.compact-view #power-panel-top {
 .chat-model-button svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .chat-header-actions { display: flex; gap: 2px; margin-left: auto; }
 
+/* The settings sheet opens from the model button on the left, so it anchors
+   there and takes the width a form needs - not the whole view. Measured
+   against the full-width variant: spanning 732px in a 760px panel read as a
+   takeover of the conversation, while a 560px sheet keeps the blurred strip
+   reading as the sheet's edge rather than a glitch. */
 .chat-settings {
   position: absolute;
   z-index: 6;
   top: 56px;
   left: 14px;
-  right: 14px;
+  width: 560px;
   padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
@@ -1983,13 +1988,21 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 @media (hover: hover) and (pointer: fine) {
   .chat-history-item:hover { background: var(--hover); }
 }
-.chat-history-item.active { background: transparent; }
-.chat-history-item.active:hover { background: var(--hover); }
-/* The title reserves the meta's width so a long name ellipsises before it
-   reaches the date, instead of running underneath it. */
-.chat-history-item strong { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 78px); overflow: hidden; font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+/* The row you are in must be findable at a glance: a persistent wash plus the
+   accent bar, outranking hover rather than disappearing under it. Transparent
+   made the active row the least visible row in the list the moment anything
+   was hovered. */
+.chat-history-item.active { background: var(--hover); }
+.chat-history-item.active:hover { background: var(--hover-strong); }
+/* The title owns its line: the date lives on the line below, so capping the
+   title's width was a leftover from the one-line layout and cost 76px of
+   readable name per row (measured: 174px box in a 250px row). */
+.chat-history-item strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-history-item .chat-meta { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 2px; }
-.chat-history-item .chat-date { color: var(--text-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+/* --text-dim, not --text-faint: on the active row's fill the faint grey
+   measures 4.22:1, under the 4.5 AA floor for 10.5px text. --text-dim gives
+   6.4:1 light and stays clearly secondary to the 12.5px title. */
+.chat-history-item .chat-date { color: var(--text-dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .chat-history-item .chat-delete { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-faint); opacity: 0; cursor: pointer; transition: opacity var(--dur) var(--ease), background-color var(--dur) var(--ease), color var(--dur) var(--ease); }
 .chat-history-item .chat-delete:hover { background: var(--hover-strong); color: var(--danger); }
 .chat-history-item .chat-delete svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }

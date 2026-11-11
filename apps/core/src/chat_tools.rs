@@ -46,7 +46,13 @@ pub(crate) enum ChatTool {
     RevealPath { path: String },
     OpenUrl { url: String },
     CreateFolder { name: String },
-    CreateFile { name: String },
+    /// A new file. `parent` names an existing folder to put it in; without one
+    /// the file goes to the configured create directory, which is what makes
+    /// "create a folder, then put a file in it" possible in one request.
+    CreateFile {
+        name: String,
+        parent: Option<std::path::PathBuf>,
+    },
 }
 
 /// Why a call was refused before it ran.
@@ -116,7 +122,7 @@ impl ChatTool {
             Self::OpenPath { path }
             | Self::RevealPath { path } => path,
             Self::OpenUrl { url } => url,
-            Self::CreateFolder { name } | Self::CreateFile { name } => name,
+            Self::CreateFolder { name } | Self::CreateFile { name, .. } => name,
         }
     }
 }
@@ -212,7 +218,40 @@ impl RawToolCall {
             "create_file" => {
                 let name = arg("name")?;
                 validate_name("create_file", &name)?;
-                Ok(ChatTool::CreateFile { name })
+                // Optional destination folder. It must be an existing directory
+                // the user can see: absolute, and never a system location. A
+                // model-supplied path is the one thing here it fully controls,
+                // so it is checked before anything is joined or written.
+                let parent = self
+                    .arguments
+                    .get("parent")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|raw| {
+                        let path = std::path::PathBuf::from(raw);
+                        if !path.is_absolute() {
+                            return Err(ToolError::IllegalName {
+                                tool: "create_file",
+                                reason: "parent must be an absolute path".into(),
+                            });
+                        }
+                        if !path.is_dir() {
+                            return Err(ToolError::IllegalName {
+                                tool: "create_file",
+                                reason: "parent folder does not exist".into(),
+                            });
+                        }
+                        if crate::chat_tools::is_system_path(&path) {
+                            return Err(ToolError::IllegalName {
+                                tool: "create_file",
+                                reason: "parent is a system folder".into(),
+                            });
+                        }
+                        Ok(path)
+                    })
+                    .transpose()?;
+                Ok(ChatTool::CreateFile { name, parent })
             }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
@@ -274,6 +313,31 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
 /// Separators are rejected outright: a model that could name `..\..\Windows`
 /// could write outside the folder the user chose. Reserved device names are
 /// rejected because Windows silently redirects them.
+/// Whether a path points into a location nex should never write to.
+///
+/// A folder supplied by the model is the one argument it fully controls, so a
+/// file can only be created inside one that is not a system directory. This is
+/// a coarse prefix test on purpose: it runs before anything is joined or
+/// written, and a false positive costs the user one alternative folder.
+fn is_system_path(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    const BLOCKED: &[&str] = &[
+        "\\windows",
+        "\\windows\\system32",
+        "\\program files",
+        "\\program files (x86)",
+        "\\programdata",
+        "\\$recycle.bin",
+        "\\system volume information",
+        "\\perflogs",
+        "\\recovery",
+    ];
+    BLOCKED.iter().any(|prefix| text.contains(prefix))
+        // A drive root is not a folder anyone should drop a file into.
+        || text.trim_end_matches('\\').ends_with(':')
+        || text == "c:\\"
+}
+
 fn validate_name(tool: &'static str, name: &str) -> Result<(), ToolError> {
     if name == "." || name == ".." {
         return Err(ToolError::IllegalName {
@@ -480,7 +544,8 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "File name, no path separators."}
+                        "name": {"type": "string", "description": "File name, no path separators."},
+                        "parent": {"type": "string", "description": "Optional absolute path of an existing folder to create the file in, such as a folder you just created. Omit for the user's default create folder."}
                     },
                     "required": ["name"]
                 }
@@ -581,8 +646,11 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
             }
         }
-        ChatTool::CreateFile { name } => {
-            let target = create_base.join(name);
+        ChatTool::CreateFile { name, parent } => {
+            // `parent`, when given, was validated as an existing directory and
+            // `name` as a single component, so this join cannot escape either.
+            let base = parent.clone().unwrap_or_else(|| create_base.to_path_buf());
+            let target = base.join(name);
             if target.exists() {
                 return ToolOutcome::failure(
                     tool.name(),
@@ -670,7 +738,7 @@ mod tests {
             name: "x".into()
         }
         .needs_confirmation());
-        assert!(ChatTool::CreateFile { name: "x".into() }.needs_confirmation());
+        assert!(ChatTool::CreateFile { name: "x".into(), parent: None }.needs_confirmation());
     }
 
     #[test]
@@ -872,6 +940,7 @@ mod tests {
     fn pending_action_shows_the_exact_target() {
         let tool = ChatTool::CreateFile {
             name: "quarterly report.docx".into(),
+            parent: None,
         };
         let pending = PendingAction::of(&tool);
         // The user approves this string, so it must be the real value — not a
@@ -898,8 +967,9 @@ mod tests {
                 name: "ShouldNotExist".into(),
             },
             ChatTool::CreateFile {
-                name: "should_not_exist.txt".into(),
-            },
+            name: "should_not_exist.txt".into(),
+            parent: None,
+        },
         ] {
             let outcome = run(&tool, false, &dir);
             assert!(!outcome.ok, "{} ran without confirmation", tool.name());
@@ -939,8 +1009,9 @@ mod tests {
 
         let outcome = run(
             &ChatTool::CreateFile {
-                name: "notes.txt".into(),
-            },
+            name: "notes.txt".into(),
+            parent: None,
+        },
             true,
             &dir,
         );
@@ -950,6 +1021,71 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Create a folder, then put a file in it" is one request, so the second
+    /// step has to be able to target the folder the first one made. Without a
+    /// parent the file always landed in the create base and the user was told
+    /// the tool could not choose a folder.
+    #[test]
+    fn create_file_can_target_an_existing_folder() {
+        let root = std::env::temp_dir().join(format!("nex-137-parent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let inner = root.join("fossa");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let outcome = run(
+            &ChatTool::CreateFile {
+                name: "hello.txt".into(),
+                parent: Some(inner.clone()),
+            },
+            true,
+            &root,
+        );
+        assert!(outcome.ok, "{}", outcome.summary);
+        assert!(inner.join("hello.txt").is_file());
+        // Not in the base: the parent decides.
+        assert!(!root.join("hello.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_file_rejects_a_parent_that_is_missing_or_relative() {
+        let missing = RawToolCall {
+            name: "create_file".into(),
+            arguments: serde_json::json!({"name": "a.txt", "parent": r"C:\definitely-not-here-nex\x"}),
+            id: None,
+        };
+        assert!(missing.validate().is_err());
+
+        let relative = RawToolCall {
+            name: "create_file".into(),
+            arguments: serde_json::json!({"name": "a.txt", "parent": "just/a/relative/path"}),
+            id: None,
+        };
+        assert!(relative.validate().is_err());
+    }
+
+    /// A model-supplied folder is the one argument it fully controls, so a file
+    /// must not be creatable inside a system directory.
+    #[test]
+    fn create_file_refuses_a_system_folder() {
+        for blocked in [
+            r"C:\Windows\System32",
+            r"C:\Program Files",
+            r"C:\ProgramData",
+        ] {
+            let call = RawToolCall {
+                name: "create_file".into(),
+                arguments: serde_json::json!({"name": "a.txt", "parent": blocked}),
+                id: None,
+            };
+            assert!(
+                call.validate().is_err(),
+                "{blocked} should not be writable"
+            );
+        }
     }
 
     /// A created name is one component, so joining it to the base cannot walk

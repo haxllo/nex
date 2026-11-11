@@ -9,3 +9,9 @@ target/
 artifacts
 nul
 .commandcode/
+
+# Agent skill installations (npx skills add) — local tooling, not project source
+.agents/
+.claude/skills/
+agent/
+skills-lock.json

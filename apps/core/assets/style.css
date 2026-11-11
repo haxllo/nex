@@ -73,6 +73,14 @@
   --sleep: #b9a3f5;
   --restart: #7dd3a0;
   --shutdown: #f28b82;
+  --hover-strong: rgba(255, 255, 255, 0.075);
+  --warn: #ffba5c;
+  --warn-wash: rgba(255, 186, 92, 0.07);
+  --warn-border: rgba(255, 186, 92, 0.34);
+  --danger: #e06a6a;
+  --danger-wash: rgba(224, 106, 106, 0.09);
+  --danger-border: rgba(224, 106, 106, 0.30);
+  --font-mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
 }
 
 html[data-theme="light"] {
@@ -88,6 +96,13 @@ html[data-theme="light"] {
   --text: #373737;
   --text-dim: #525252;
   --text-faint: #737373;
+  --hover-strong: rgba(0, 0, 0, 0.055);
+  --warn: #9a6208;
+  --warn-wash: rgba(154, 98, 8, 0.06);
+  --warn-border: rgba(154, 98, 8, 0.26);
+  --danger: #b4342f;
+  --danger-wash: rgba(180, 52, 47, 0.07);
+  --danger-border: rgba(180, 52, 47, 0.24);
   --hover: rgba(0, 0, 0, 0.035);
   --sel: rgba(0, 0, 0, 0.06);
   --sel-border: rgba(0, 0, 0, 0.04);
@@ -1866,7 +1881,7 @@ html[data-native-material="acrylic"] .chat-settings {
 .chat-connection-hint { min-width: 0; flex: 1; color: var(--text-faint); font-size: 10px; line-height: 14px; }
 .chat-secondary-button { min-height: 30px; flex: 0 0 auto; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--bg-opaque) 35%, transparent); color: var(--text-dim); font: 10px var(--font); cursor: pointer; transition: background 120ms ease, color 120ms ease, border-color 120ms ease; }
 .chat-secondary-button:hover { background: var(--hover); color: var(--text); }
-.chat-secondary-button:active { transform: scale(0.96); }
+.chat-secondary-button:active { transform: scale(0.97); }
 .chat-secondary-button:disabled { opacity: .65; cursor: wait; }
 .chat-secondary-button[aria-busy="true"]::before { content: ""; width: 9px; height: 9px; display: inline-block; margin-right: 6px; vertical-align: -1px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: chatSpin 700ms linear infinite; }
 .chat-provider-picker, .chat-model-picker { position: relative; min-width: 0; }
@@ -1931,17 +1946,68 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-empty-title { font-size: 19px; line-height: 24px; font-weight: 550; letter-spacing: -0.035em; text-wrap: balance; }
 .chat-empty-copy { max-width: 400px; margin: 7px auto 0; color: var(--text-faint); font-size: 12px; line-height: 18px; text-wrap: pretty; }
 .chat-suggestions { display: flex; justify-content: center; flex-wrap: wrap; gap: 7px; margin-top: 21px; }
-.chat-suggestions button { min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: transparent; color: var(--text-dim); font: 12px var(--font); cursor: pointer; transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.chat-suggestions button { min-height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: transparent; color: var(--text-dim); font: 12px var(--font); cursor: pointer; transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform 160ms var(--ease-out); }
 .chat-suggestions button:hover { background: var(--hover); color: var(--text); }
+.chat-suggestions button:active { transform: scale(0.97); }
 .chat-suggestions button span { color: var(--text-faint); }
 
-#chat-messages { display: flex; flex-direction: column; gap: 11px; max-width: 680px; margin: 0 auto; }
-.chat-message { width: fit-content; max-width: min(86%, 550px); min-width: 0; color: var(--text); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-.chat-message.user { align-self: flex-end; padding: 7px 11px; border-radius: 11px 11px 3px 11px; background: rgba(255,255,255,0.075); color: var(--text); }
+#chat-messages { display: flex; flex-direction: column; gap: 18px; max-width: 680px; margin: 0 auto; }
+.chat-message { width: fit-content; max-width: min(86%, 550px); min-width: 0; color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.chat-message.user { align-self: flex-end; padding: 8px 12px; border-radius: 12px 12px 4px 12px; background: var(--hover-strong); color: var(--text); }
 [data-theme="light"] .chat-message.user { background: rgba(0,0,0,0.055); }
-.chat-message.assistant { align-self: flex-start; max-width: min(95%, 590px); }
-.chat-message.error { align-self: stretch; max-width: none; padding: 9px 11px; border-radius: 7px; color: var(--text-dim); background: rgba(220,90,90,0.09); }
-.chat-message-actions { display: flex; gap: 4px; margin-top: 3px; opacity: 0; transition: opacity 150ms ease; }
+.chat-message.assistant { align-self: flex-start; max-width: min(95%, 590px); display: flex; flex-direction: column; gap: 10px; }
+.chat-message.error { align-self: stretch; max-width: none; padding: 9px 12px; border-radius: 8px; color: var(--text-dim); background: var(--danger-wash); }
+.chat-message-actions { display: flex; gap: 4px; margin-top: -4px; opacity: 0; transition: opacity var(--dur) var(--ease); }
+
+/* A run of completed actions. Cards, not sentences: a four-step task should be
+   scannable at a glance instead of parsed out of a wall of text. */
+.chat-actions { display: flex; flex-direction: column; gap: 6px; }
+.chat-action {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  animation: chatActionIn 180ms var(--ease-out) both;
+}
+.chat-action.ok { border-color: var(--border-strong); }
+.chat-action.failed { border-color: var(--danger-border); background: var(--danger-wash); }
+.chat-action-glyph {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--hover-strong);
+  color: var(--text-dim);
+}
+.chat-action.ok .chat-action-glyph { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.chat-action.failed .chat-action-glyph { background: var(--danger-wash); color: var(--danger); }
+.chat-action-body { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1 1 auto; }
+.chat-action-label { flex: 0 0 auto; font-size: 11.5px; font-weight: 600; color: var(--text); letter-spacing: -0.005em; }
+.chat-action-text { min-width: 0; color: var(--text); font-size: 12.5px; overflow-wrap: anywhere; }
+.chat-action-target {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  background: var(--hover);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  direction: rtl;
+  text-align: left;
+}
 
 /* A proposed action, shown before it runs. Deliberately louder than an
    assistant message: it is the one thing in the transcript that blocks on the
@@ -1949,44 +2015,66 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-pending-action {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 10px 0 10px 0;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 186, 92, 0.38);
-  background: rgba(255, 186, 92, 0.07);
+  gap: 9px;
+  align-self: stretch;
+  margin: 0;
+  padding: 13px 15px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-wash);
+  animation: chatActionIn 180ms var(--ease-out) both;
 }
-.chat-pending-title { font-size: 12px; font-weight: 600; letter-spacing: 0.01em; color: #ffba5c; }
+.chat-pending-title { font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; color: var(--warn); }
 .chat-pending-target {
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.4;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
   padding: 6px 8px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.28);
-  color: #ededed;
+  border-radius: var(--r-sm);
+  background: var(--hover);
+  color: var(--text);
   overflow-wrap: anywhere;
 }
-.chat-pending-hint { margin: 0; font-size: 11.5px; color: #a8a8a8; }
-.chat-pending-actions { display: flex; gap: 6px; }
+.chat-pending-effect { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-dim); }
+.chat-pending-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-faint); }
+.chat-pending-actions { display: flex; gap: 6px; margin-top: 1px; }
 .chat-pending-confirm,
 .chat-pending-cancel {
-  min-height: 26px;
-  padding: 0 12px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  font: 600 12px Inter, "Segoe UI", system-ui, sans-serif;
+  min-height: 28px;
+  padding: 0 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  font: 600 12px var(--font);
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform 160ms var(--ease-out);
 }
-.chat-pending-confirm { background: #ededed; color: #121212; border-color: transparent; }
-.chat-pending-confirm:hover { background: #ffffff; }
-.chat-pending-cancel { background: transparent; color: #c8c8c8; }
-.chat-pending-cancel:hover { background: rgba(255, 255, 255, 0.08); color: #ededed; }
+.chat-pending-confirm:active, .chat-pending-cancel:active { transform: scale(0.97); }
+.chat-pending-confirm { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.chat-pending-confirm:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+.chat-pending-cancel { background: transparent; color: var(--text-dim); }
+.chat-pending-cancel:hover { background: var(--hover-strong); color: var(--text); }
+
+@keyframes chatActionIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Reduced motion means fewer and gentler, not none: the fade stays because it
+   signals that something new appeared; the slide does not. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-action, .chat-pending-action { animation: chatActionIn 200ms ease both; }
+  .chat-action, .chat-pending-action { animation-name: chatFadeIn; }
+  .chat-suggestions button:active,
+  .chat-secondary-button:active,
+  .chat-pending-confirm:active,
+  .chat-pending-cancel:active { transform: none; }
+}
+@keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 .chat-message:hover .chat-message-actions, .chat-message:focus-within .chat-message-actions { opacity: 1; }
 .chat-message-actions button { min-height: 28px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
 .chat-message-actions button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .chat-message-actions button:disabled { opacity: .45; cursor: default; }
+.chat-message-content { display: flex; flex-direction: column; }
 .chat-message-content > :first-child { margin-top: 0; }
 .chat-message-content > :last-child { margin-bottom: 0; }
 .chat-message-content.chat-streaming-text { white-space: pre-wrap; overflow-wrap: anywhere; }

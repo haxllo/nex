@@ -600,6 +600,12 @@ impl NativeOverlayShell {
 
     /// Push chat config and response deltas without rebuilding search state.
     pub fn push_chat(&self, json: String) {
+        // A pending action is the one chat message that must keep the overlay
+        // on screen: it is the only surface that can approve or cancel it, so
+        // losing focus to another app must not dismiss it.
+        if let Some(pending) = pending_action_state(&json) {
+            self.with_state(|s| s.chat_action_pending = pending);
+        }
         self.post(UiCommand::ChatData(json));
     }
 
@@ -804,4 +810,24 @@ impl Drop for Inner {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::SeqCst);
     }
+}
+
+/// Read `chatActionPending` out of a chat update without parsing the whole
+/// message again.
+///
+/// Returns `Some(true)` when a card is waiting, `Some(false)` when the turn
+/// produced a terminal update, and `None` for updates that say nothing about
+/// it — so unrelated chat traffic cannot clear the flag by accident.
+fn pending_action_state(json: &str) -> Option<bool> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    if value.get("chatActionPending").is_some() {
+        return Some(true);
+    }
+    // The card is answered or the turn ended.
+    for key in ["chatDone", "chatError", "chatCancelled"] {
+        if value.get(key).is_some() {
+            return Some(false);
+        }
+    }
+    None
 }

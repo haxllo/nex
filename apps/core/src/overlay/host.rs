@@ -1915,7 +1915,11 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     push_fg_stack(&mut fg_stack, hwnd);
                     let picker_active = state
                         .lock()
-                        .map(|s| s.chat_file_picker_open || s.chat_file_picker_pending)
+                        .map(|s| {
+                            s.chat_file_picker_open
+                                || s.chat_file_picker_pending
+                                || s.chat_action_pending
+                        })
                         .unwrap_or(false);
                     let was_focused_val = was_focused;
                     let show_pending_val = show_pending;
@@ -1961,6 +1965,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     if s.visible
                                         && !s.has_focus
                                         && !foreground_owned
+                                        && !s.chat_action_pending
                                         && !crate::overlay::hotkey::is_bare_win_press_active()
                                     {
                                         Some(

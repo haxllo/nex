@@ -45,7 +45,14 @@ pub(crate) enum ChatTool {
     OpenPath { path: String },
     RevealPath { path: String },
     OpenUrl { url: String },
-    CreateFolder { name: String },
+    /// A new folder. `parent` names an existing folder to put it in; without one
+    /// it goes to the configured create directory. "documents folder" is a
+    /// destination the user names in words, and a tool that cannot take one
+    /// sends the folder somewhere else while reporting success.
+    CreateFolder {
+        name: String,
+        parent: Option<std::path::PathBuf>,
+    },
     /// A new file. `parent` names an existing folder to put it in; without one
     /// the file goes to the configured create directory, which is what makes
     /// "create a folder, then put a file in it" possible in one request.
@@ -122,7 +129,7 @@ impl ChatTool {
             Self::OpenPath { path }
             | Self::RevealPath { path } => path,
             Self::OpenUrl { url } => url,
-            Self::CreateFolder { name } | Self::CreateFile { name, .. } => name,
+            Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
         }
     }
 }
@@ -213,7 +220,8 @@ impl RawToolCall {
             "create_folder" => {
                 let name = arg("name")?;
                 validate_name("create_folder", &name)?;
-                Ok(ChatTool::CreateFolder { name })
+                let parent = parse_parent(&self.arguments, "create_folder")?;
+                Ok(ChatTool::CreateFolder { name, parent })
             }
             "create_file" => {
                 let name = arg("name")?;
@@ -222,40 +230,52 @@ impl RawToolCall {
                 // the user can see: absolute, and never a system location. A
                 // model-supplied path is the one thing here it fully controls,
                 // so it is checked before anything is joined or written.
-                let parent = self
-                    .arguments
-                    .get("parent")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|raw| {
-                        let path = std::path::PathBuf::from(raw);
-                        if !path.is_absolute() {
-                            return Err(ToolError::IllegalName {
-                                tool: "create_file",
-                                reason: "parent must be an absolute path".into(),
-                            });
-                        }
-                        if !path.is_dir() {
-                            return Err(ToolError::IllegalName {
-                                tool: "create_file",
-                                reason: "parent folder does not exist".into(),
-                            });
-                        }
-                        if crate::chat_tools::is_system_path(&path) {
-                            return Err(ToolError::IllegalName {
-                                tool: "create_file",
-                                reason: "parent is a system folder".into(),
-                            });
-                        }
-                        Ok(path)
-                    })
-                    .transpose()?;
+                let parent = parse_parent(&self.arguments, "create_file")?;
                 Ok(ChatTool::CreateFile { name, parent })
             }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
     }
+}
+
+/// Read and validate the optional `parent` argument shared by the create tools.
+///
+/// A model-supplied path is the one thing a create call fully controls, so it is
+/// checked before anything is joined or written: absolute, an existing directory,
+/// and never a system location. Both create tools use this, so they cannot drift
+/// into accepting different destinations.
+fn parse_parent(
+    arguments: &serde_json::Value,
+    tool: &'static str,
+) -> Result<Option<std::path::PathBuf>, ToolError> {
+    arguments
+        .get("parent")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|raw| {
+            let path = std::path::PathBuf::from(raw);
+            if !path.is_absolute() {
+                return Err(ToolError::IllegalName {
+                    tool,
+                    reason: "parent must be an absolute path".into(),
+                });
+            }
+            if !path.is_dir() {
+                return Err(ToolError::IllegalName {
+                    tool,
+                    reason: "parent folder does not exist".into(),
+                });
+            }
+            if is_system_path(&path) {
+                return Err(ToolError::IllegalName {
+                    tool,
+                    reason: "parent is a system folder".into(),
+                });
+            }
+            Ok(path)
+        })
+        .transpose()
 }
 
 /// Tool names are only ever one of the five known constants, so leaking the
@@ -530,7 +550,8 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Folder name, no path separators."}
+                        "name": {"type": "string", "description": "Folder name, no path separators."},
+                        "parent": {"type": "string", "description": "Absolute path of an existing folder to create it inside, such as the Documents or Desktop path from the user folders in this request. Omit to use the default create folder."}
                     },
                     "required": ["name"]
                 }
@@ -624,10 +645,11 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
             },
             Err(error) => ToolOutcome::failure(tool.name(), url, error),
         },
-        ChatTool::CreateFolder { name } => {
-            // `name` is a single component, re-validated above, so joining it to
-            // the chosen base cannot escape that base.
-            let target = create_base.join(name);
+        ChatTool::CreateFolder { name, parent } => {
+            // `parent`, when given, was validated as an existing directory and
+            // `name` as a single component, so this join cannot escape either.
+            let base = parent.clone().unwrap_or_else(|| create_base.to_path_buf());
+            let target = base.join(name);
             if target.exists() {
                 return ToolOutcome::failure(
                     tool.name(),
@@ -735,7 +757,8 @@ mod tests {
         }
         .needs_confirmation());
         assert!(ChatTool::CreateFolder {
-            name: "x".into()
+            name: "x".into(),
+            parent: None,
         }
         .needs_confirmation());
         assert!(ChatTool::CreateFile { name: "x".into(), parent: None }.needs_confirmation());
@@ -908,6 +931,7 @@ mod tests {
         let mut loop_state = ToolLoop::new();
         let tool = ChatTool::CreateFolder {
             name: "Reports".into(),
+        parent: None,
         };
         let step = loop_state.on_tool_call(tool.clone());
         assert_eq!(step, LoopStep::AwaitConfirmation { tool: tool.clone() });
@@ -965,6 +989,7 @@ mod tests {
         for tool in [
             ChatTool::CreateFolder {
                 name: "ShouldNotExist".into(),
+            parent: None,
             },
             ChatTool::CreateFile {
             name: "should_not_exist.txt".into(),
@@ -988,6 +1013,7 @@ mod tests {
 
         let tool = ChatTool::CreateFolder {
             name: "Reports".into(),
+        parent: None,
         };
         let first = run(&tool, true, &dir);
         assert!(first.ok, "{} should succeed", first.summary);
@@ -1027,8 +1053,64 @@ mod tests {
     /// step has to be able to target the folder the first one made. Without a
     /// parent the file always landed in the create base and the user was told
     /// the tool could not choose a folder.
+    /// "create a folder named sasa in documents folder" went to the Desktop and
+    /// the reply admitted it could not choose a parent. The tool had no parent
+    /// argument, so the destination the user named in words was unrepresentable.
     #[test]
-    fn create_file_can_target_an_existing_folder() {
+    fn create_folder_can_target_an_existing_folder() {
+        let root = std::env::temp_dir().join(format!("nex-141-folder-parent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let documents = root.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
+
+        let outcome = run(
+            &ChatTool::CreateFolder {
+                name: "sasa".into(),
+                parent: Some(documents.clone()),
+            },
+            true,
+            &root,
+        );
+        assert!(outcome.ok, "{}", outcome.summary);
+        assert!(documents.join("sasa").is_dir());
+        // Not the base: the parent decides.
+        assert!(!root.join("sasa").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_folder_refuses_a_parent_that_is_missing_or_a_system_folder() {
+        let root = std::env::temp_dir().join(format!("nex-141-folder-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let missing = RawToolCall {
+            name: "create_folder".into(),
+            arguments: serde_json::json!({"name": "x", "parent": r"C:\definitely-not-here-nex\docs"}),
+            id: None,
+        };
+        assert!(missing.validate().is_err());
+
+        let relative = RawToolCall {
+            name: "create_folder".into(),
+            arguments: serde_json::json!({"name": "x", "parent": "Documents"}),
+            id: None,
+        };
+        assert!(relative.validate().is_err());
+
+        let system = RawToolCall {
+            name: "create_folder".into(),
+            arguments: serde_json::json!({"name": "x", "parent": r"C:\Windows\System32"}),
+            id: None,
+        };
+        assert!(system.validate().is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_file_can_target_an_existing_folder_ciq144() {
         let root = std::env::temp_dir().join(format!("nex-137-parent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let inner = root.join("fossa");

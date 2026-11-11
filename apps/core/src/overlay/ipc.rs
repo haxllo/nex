@@ -190,6 +190,19 @@ pub(crate) struct ChatCancelPayload {
     pub request_id: String,
 }
 
+/// The user's answer to a suspended chat action.
+///
+/// `accept: false` and an omitted field are treated the same: the action is
+/// discarded. Absence of a decision must never run something.
+#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatConfirmActionPayload {
+    #[serde(default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub accept: bool,
+}
+
 /// Resize payload: `{t:"resize", v:{v:h, immediate:bool}}` (current) or
 /// `{t:"resize", v:h}` (legacy number-only).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -332,6 +345,8 @@ pub(crate) enum OverlayMessage {
     ChatDisconnect(NoPayload),
     #[serde(rename = "chatCancel")]
     ChatCancel(ChatCancelPayload),
+    #[serde(rename = "chatConfirmAction")]
+    ChatConfirmAction(ChatConfirmActionPayload),
     #[serde(rename = "chatPickFiles")]
     ChatPickFiles(NoPayload),
     #[serde(rename = "chatPickerNavigate")]
@@ -415,6 +430,8 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConnect",
         "chatDisconnect",
         "chatCancel",
+        "chatConfirmAction",
+        "chatConfirmAction",
         "chatPickFiles",
         "chatPickerNavigate",
         "chatPickerUp",
@@ -539,6 +556,10 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             }
         }
         OverlayMessage::ChatCancel(p) => {
+            check_len(&p.request_id, MAX_CHAT_REQUEST_ID_CHARS, "chat request ID")
+                .map_err(IpcReject::BadPayload)?;
+        }
+        OverlayMessage::ChatConfirmAction(p) => {
             check_len(&p.request_id, MAX_CHAT_REQUEST_ID_CHARS, "chat request ID")
                 .map_err(IpcReject::BadPayload)?;
         }

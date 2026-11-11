@@ -109,6 +109,10 @@
   let chatOpen = false;
   let chatReturnToMedia = false;
   let chatStreaming = false;
+  // A call the model wants to make that waits for the user. Held separately
+  // from chatStreaming because the two look identical in the UI but behave
+  // differently: streaming ends on its own, this does not.
+  let chatPendingAction = null;
   let chatActiveRequest = null;
   let chatSelectedFiles = [];
   let chatIncludePcInfo = false;
@@ -278,7 +282,7 @@
   };
   const ICON_GENERIC_COMMAND = () => cmdSvg('<path d="M12.6 3.2L6.4 12.4h4.4L9.8 20.8 17.6 9.6h-4.2z"/>');
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatPickerNavigate", "chatPickerAdd"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatConfirmAction", "chatPickerNavigate", "chatPickerAdd"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -2326,6 +2330,78 @@
     chatSendButton.disabled = !chatStreaming && !chatInput.value.trim();
   }
 
+  /**
+   * A call the model proposed, shown before it runs.
+   *
+   * The exact target is displayed rather than a paraphrase: the user is
+   * approving the real value, so a card that described the action instead of
+   * naming it would be a decoration, not a check.
+   */
+  function renderChatPendingAction() {
+    const existing = $("chat-pending-action");
+    if (existing) existing.remove();
+    if (!chatPendingAction) return;
+    const card = document.createElement("div");
+    card.id = "chat-pending-action";
+    card.className = "chat-pending-action";
+    card.setAttribute("role", "alertdialog");
+    card.setAttribute("aria-label", "Confirm action");
+
+    const title = document.createElement("div");
+    title.className = "chat-pending-title";
+    title.textContent = "Nex wants to act on your PC";
+    card.appendChild(title);
+
+    const target = document.createElement("code");
+    target.className = "chat-pending-target";
+    target.textContent = chatPendingAction.target || "";
+    card.appendChild(target);
+
+    if (chatPendingAction.description) {
+      const effect = document.createElement("p");
+      effect.className = "chat-pending-effect";
+      effect.textContent = chatPendingAction.description;
+      card.appendChild(effect);
+    }
+
+    const hint = document.createElement("p");
+    hint.className = "chat-pending-hint";
+    hint.textContent = "Nothing has run yet. Review the target above.";
+    card.appendChild(hint);
+
+    const row = document.createElement("div");
+    row.className = "chat-pending-actions";
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "chat-pending-confirm";
+    confirm.textContent = "Allow";
+    confirm.addEventListener("click", () => answerChatPendingAction(true));
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chat-pending-cancel";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => answerChatPendingAction(false));
+    row.appendChild(confirm);
+    row.appendChild(cancel);
+    card.appendChild(row);
+
+    chatMessagesEl.appendChild(card);
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  }
+
+  function answerChatPendingAction(accept) {
+    if (!chatPendingAction) return;
+    const requestId = chatPendingAction.requestId;
+    chatPendingAction = null;
+    const card = $("chat-pending-action");
+    if (card) card.remove();
+    if (!requestId) return;
+    // The turn resumes server-side either way: approved runs, refused tells the
+    // model it was not done so it does not claim otherwise.
+    post("chatConfirmAction", { requestId, accept: !!accept });
+    updateChatStreamingState(true);
+  }
+
   function createChatRequestId() {
     const cryptoApi = window.crypto;
     if (typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
@@ -3243,6 +3319,13 @@
         renderChatModelOptions();
         flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
       }
+    }
+    if (state.chatActionPending && (!hasRequestId || requestMatches)) {
+      // The model proposed an action. Nothing runs until the user clicks.
+      chatPendingAction = { ...state.chatActionPending, requestId: state.requestId || chatActiveRequest?.requestId || null };
+      // Streaming is over for now; the wait is on the user, not the provider.
+      updateChatStreamingState(false);
+      renderChatPendingAction();
     }
     if (state.chatNotice) flashChatNotice(state.chatNotice);
     if (state.chatError && (!hasRequestId || requestMatches)) {

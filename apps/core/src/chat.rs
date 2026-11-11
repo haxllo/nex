@@ -714,6 +714,8 @@ struct ToolCallAccumulator {
     /// The responses API streams arguments under an `item_id` rather than an
     /// index, so the two halves of a call have to be joined by hand.
     item_to_index: std::collections::HashMap<String, i64>,
+    /// The provider's call id per index, so the result can be reported back.
+    id_by_index: std::collections::HashMap<i64, String>,
     next: i64,
 }
 
@@ -726,6 +728,8 @@ impl ToolCallAccumulator {
 
     fn bind_item(&mut self, index: i64, item_id: &str) {
         self.item_to_index.insert(item_id.to_string(), index);
+        // Kept as the call id we report results against.
+        self.id_by_index.insert(index, item_id.to_string());
     }
 
     fn index_of_item(&self, item_id: &str) -> Option<i64> {
@@ -749,12 +753,13 @@ impl ToolCallAccumulator {
 
     fn finish(self) -> Vec<crate::chat_tools::RawToolCall> {
         self.by_index
-            .into_values()
-            .filter(|(name, _)| !name.trim().is_empty())
-            .map(|(name, arguments)| crate::chat_tools::RawToolCall {
+            .into_iter()
+            .filter(|(_, (name, _))| !name.trim().is_empty())
+            .map(|(index, (name, arguments))| crate::chat_tools::RawToolCall {
                 name,
                 arguments: serde_json::from_str(&arguments)
                     .unwrap_or(serde_json::Value::Null),
+                id: self.id_by_index.get(&index).cloned(),
             })
             .collect()
     }
@@ -832,9 +837,15 @@ fn stream_openai(
                     let confirmed = await_confirmation(id, request_id, sink, &tool);
                     if confirmed {
                         let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                        // Show the user what happened, not just the model.
+                        emit(&outcome.summary, None);
                         messages.push(json!({"role":"user","content": format!(
                             "Action result: {}", outcome.summary)}));
                     } else {
+                        emit(
+                            &format!("I did not run {}; you declined it.", tool.name()),
+                            None,
+                        );
                         messages.push(json!({"role":"user","content": format!(
                             "The user did not approve {}. Do not retry it; tell them it was not done.",
                             tool.name())}));
@@ -842,6 +853,7 @@ fn stream_openai(
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    emit(&outcome.summary, None);
                     messages.push(json!({"role":"user","content": format!(
                         "Action result: {}", outcome.summary)}));
                 }
@@ -1037,6 +1049,41 @@ fn describe_reset(resets_at: i64) -> String {
     format!("resets in about {}h", minutes / 60)
 }
 
+/// One completed round of a ChatGPT request: the text it streamed, plus any
+/// actions it asked for and did not get to run.
+struct ChatgptRound {
+    requested: Vec<crate::chat_tools::RawToolCall>,
+}
+
+/// Sentinel for a request the user stopped. Distinct from a real failure so the
+/// round loop can end without reporting an error the user caused on purpose.
+const CANCELLED: &str = "\u{0}cancelled";
+
+/// What happened to an action the model asked for, in the shape the model can
+/// read back. `/responses` expects each result as a `function_call_output` item
+/// keyed by the `call_id` the model gave.
+fn action_output_items(
+    outcomes: &[(String, crate::chat_tools::ToolOutcome)],
+) -> Vec<Value> {
+    outcomes
+        .iter()
+        .map(|(call_id, outcome)| {
+            json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": outcome.summary,
+            })
+        })
+        .collect()
+}
+
+/// Run the ChatGPT account path, including the rounds that follow an action.
+///
+/// This used to run whatever actions the model asked for and then stop, so the
+/// model never learned whether they worked: it could not react to a failure, try
+/// a different path, or chain a second step. Now an action's outcome is fed back
+/// as a `function_call_output` item and the model gets another round, bounded by
+/// `MAX_TOOL_ROUNDS` so a model that keeps calling tools cannot spin forever.
 fn stream_chatgpt_native(
     config: &StoredConfig,
     request: &SendRequest,
@@ -1045,19 +1092,157 @@ fn stream_chatgpt_native(
     sink: &ChatUpdateSink,
     request_id: Option<&str>,
 ) -> Result<(), String> {
-    let prompt = conversation_prompt(request);
     let started = Instant::now();
-    crate::runtime::log_info(&format!(
-        "[nex][chat] ChatGPT account start model={} prompt_chars={}",
-        config.model,
-        prompt.chars().count()
-    ));
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(30))
         .build();
+    let create_base = create_base_dir();
+    let mut input_items = chatgpt_input_items(request);
+    let mut loop_state = crate::chat_tools::ToolLoop::new();
+
+    for round in 0..=crate::chat_tools::MAX_TOOL_ROUNDS {
+        if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+            return Ok(());
+        }
+        let round_started = Instant::now();
+        let streamed = match stream_chatgpt_once(
+            config,
+            &agent,
+            &input_items,
+            id,
+            emit,
+            started,
+            round,
+        ) {
+            Ok(streamed) => streamed,
+            // A cancelled request ends the whole exchange quietly: the user
+            // stopped it, so there is nothing to report and no further round.
+            Err(error) if error == CANCELLED => {
+                crate::runtime::log_info(&format!(
+                    "[nex][chat] ChatGPT account cancelled in round {round}"
+                ));
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if streamed.requested.is_empty() {
+            crate::runtime::log_info(&format!(
+                "[nex][chat] ChatGPT account done in {}ms (rounds={round})",
+                started.elapsed().as_millis()
+            ));
+            return Ok(());
+        }
+
+        crate::runtime::log_info(&format!(
+            "[nex][chat] ChatGPT account requested {} action(s) in round {round}",
+            streamed.requested.len()
+        ));
+
+        // The last allowed round is for answering, not for more actions: stop
+        // rather than run tools we will never get to report on.
+        if round == crate::chat_tools::MAX_TOOL_ROUNDS {
+            crate::runtime::log_info(
+                "[nex][chat] ChatGPT account hit the tool round limit; stopping",
+            );
+            emit(
+                "I stopped after several steps without finishing; ask again if you want to continue.",
+                None,
+            );
+            return Ok(());
+        }
+
+        let mut outcomes = Vec::new();
+        let mut ran_any = false;
+        for raw in streamed.requested {
+            let call_id = raw.id.clone().unwrap_or_default();
+            let tool = match raw.validate() {
+                Ok(tool) => tool,
+                Err(error) => {
+                    // Not a tool we offer. Report it back rather than doing a
+                    // nearby thing it did not ask for.
+                    let outcome = crate::chat_tools::ToolOutcome::failure(
+                        "unknown",
+                        "",
+                        &error,
+                    );
+                    emit(&format!("I can't do that: {error}."), None);
+                    outcomes.push((call_id, outcome));
+                    continue;
+                }
+            };
+            match loop_state.on_tool_call(tool.clone()) {
+                crate::chat_tools::LoopStep::Stop { reason } => {
+                    emit(&format!("Stopping here: {reason}."), None);
+                    return Ok(());
+                }
+                crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
+                    let confirmed = await_confirmation(id, request_id, sink, &tool);
+                    if !confirmed {
+                        // Tell the model plainly it was declined, so it does not
+                        // retry or narrate work it did not do.
+                        let outcome = crate::chat_tools::ToolOutcome::failure(
+                            tool.name(),
+                            tool.target(),
+                            "the user declined this; do not retry it",
+                        );
+                        emit(
+                            &format!("I did not run {}; you declined it.", tool.name()),
+                            None,
+                        );
+                        outcomes.push((call_id, outcome));
+                        continue;
+                    }
+                    let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                    emit(&outcome.summary, None);
+                    ran_any = true;
+                    outcomes.push((call_id, outcome));
+                }
+                crate::chat_tools::LoopStep::RunTool { tool } => {
+                    let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    emit(&outcome.summary, None);
+                    ran_any = true;
+                    outcomes.push((call_id, outcome));
+                }
+            }
+        }
+
+        // Nothing actually ran and nothing is left to report: a comment round
+        // would just repeat itself.
+        if !ran_any && outcomes.iter().all(|(_, o)| !o.ok) {
+            crate::runtime::log_info(&format!(
+                "[nex][chat] ChatGPT account round {round}: no action ran ({:.0}ms)",
+                round_started.elapsed().as_millis() as f64
+            ));
+        }
+
+        // Feed the outcomes back so the model can react: confirm success, explain
+        // a failure, or take the next step of a multi-step request.
+        input_items.extend(action_output_items(&outcomes));
+    }
+    Ok(())
+}
+
+/// One streaming request to `/responses`. Returns the actions the model asked
+/// for; running them is the caller's job, because that is where the confirmation
+/// gate and the round loop live.
+fn stream_chatgpt_once(
+    config: &StoredConfig,
+    agent: &ureq::Agent,
+    input_items: &[Value],
+    id: u64,
+    emit: &mut impl FnMut(&str, Option<&str>),
+    started: Instant,
+    round: usize,
+) -> Result<ChatgptRound, String> {
+    if round == 0 {
+        crate::runtime::log_info(&format!(
+            "[nex][chat] ChatGPT account start model={} input_items={}",
+            config.model,
+            input_items.len()
+        ));
+    }
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
-    let input_items = chatgpt_input_items(request);
     let body = json!({
         "model": config.model,
         "instructions": SYSTEM_PROMPT,
@@ -1068,7 +1253,7 @@ fn stream_chatgpt_native(
         "tools": crate::chat_tools::responses_tool_declarations(),
     });
     if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
-        return Ok(());
+        return Err(CANCELLED.into());
     }
     let response = chatgpt_request(&agent, "POST", &url)?
         .set("Accept", "text/event-stream")
@@ -1107,7 +1292,7 @@ fn stream_chatgpt_native(
     let mut calls = ToolCallAccumulator::default();
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
-            return Ok(());
+            return Err(CANCELLED.into());
         }
         let line = match read_stream_line(&mut reader, &mut pending_line) {
             Ok(Some(line)) => line,
@@ -1233,72 +1418,9 @@ fn stream_chatgpt_native(
     if !finished {
         return Err("The ChatGPT connection ended before the response was complete.".into());
     }
-    if !calls.is_empty() {
-        let requested = calls.finish();
-        crate::runtime::log_info(&format!(
-            "[nex][chat] ChatGPT account requested {} action(s)",
-            requested.len()
-        ));
-        let create_base = create_base_dir();
-        run_requested_actions(
-            requested,
-            id,
-            emit,
-            sink,
-            request_id,
-            &create_base,
-        )?;
-    }
-    crate::runtime::log_info(&format!(
-        "[nex][chat] ChatGPT account done in {}ms",
-        started.elapsed().as_millis()
-    ));
-    Ok(())
-}
-
-/// Run the actions the model asked for, through the same gate as the streamed
-/// provider path. Shared so the two providers cannot diverge on the one rule
-/// that matters: a mutating action waits for the user.
-fn run_requested_actions(
-    requested: Vec<crate::chat_tools::RawToolCall>,
-    id: u64,
-    emit: &mut impl FnMut(&str, Option<&str>),
-    sink: &ChatUpdateSink,
-    request_id: Option<&str>,
-    create_base: &std::path::Path,
-) -> Result<(), String> {
-    let mut loop_state = crate::chat_tools::ToolLoop::new();
-    for raw in requested {
-        let tool = match raw.validate() {
-            Ok(tool) => tool,
-            Err(error) => {
-                // The model asked for something we do not offer. Say so plainly
-                // rather than doing a nearby thing it did not ask for.
-                emit(&format!("I can't do that: {error}."), None);
-                continue;
-            }
-        };
-        match loop_state.on_tool_call(tool.clone()) {
-            crate::chat_tools::LoopStep::Stop { reason } => {
-                emit(&format!("Stopping here: {reason}."), None);
-                break;
-            }
-            crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
-                let confirmed = await_confirmation(id, request_id, sink, &tool);
-                if !confirmed {
-                    emit(&format!("I did not run {}; you declined it.", tool.name()), None);
-                    continue;
-                }
-                let outcome = crate::chat_tools::run(&tool, true, create_base);
-                emit(&outcome.summary, None);
-            }
-            crate::chat_tools::LoopStep::RunTool { tool } => {
-                let outcome = crate::chat_tools::run(&tool, false, create_base);
-                emit(&outcome.summary, None);
-            }
-        }
-    }
-    Ok(())
+    Ok(ChatgptRound {
+        requested: calls.finish(),
+    })
 }
 
 /// The assistant's standing instructions.
@@ -1610,25 +1732,6 @@ fn bounded_history(history: &[ChatTurn], max_turns: usize, max_chars: usize) -> 
     selected
 }
 
-fn conversation_prompt(request: &SendRequest) -> String {
-    let mut prompt = String::from(SYSTEM_PROMPT);
-    prompt.push_str("\n\n");
-    for turn in bounded_history(&request.history, 12, HISTORY_CONTEXT_BUDGET_CHARS) {
-        let role = if turn.role == "assistant" {
-            "Assistant"
-        } else {
-            "User"
-        };
-        prompt.push_str(role);
-        prompt.push_str(":\n");
-        prompt.push_str(&turn.content);
-        prompt.push_str("\n\n");
-    }
-    prompt.push_str("User:\n");
-    prompt.push_str(&message_with_local_context(request));
-    prompt
-}
-
 fn http_error(code: u16, body: String, secret: &str) -> String {
     match code {
         401 | 403 => {
@@ -1715,6 +1818,62 @@ fn dpapi_decrypt(input: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// The codex path used to run an action and stop, so the model never learned
+    /// whether it worked. A result has to come back as a `function_call_output`
+    /// item keyed by the call id, or the model cannot match it to its own call
+    /// and the next round is a guess.
+    #[test]
+    fn action_results_are_reported_back_with_the_provider_call_id() {
+        let outcomes = vec![
+            (
+                "call_abc".to_string(),
+                crate::chat_tools::ToolOutcome {
+                    tool: "create_folder".into(),
+                    target: "C:\\Users\\x\\Desktop\\Test123".into(),
+                    ok: true,
+                    summary: "Created folder C:\\Users\\x\\Desktop\\Test123".into(),
+                },
+            ),
+            (
+                "call_def".to_string(),
+                crate::chat_tools::ToolOutcome::failure("open_path", "C:\\missing", "not found"),
+            ),
+        ];
+        let items = action_output_items(&outcomes);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], "call_abc");
+        assert!(items[0]["output"].as_str().unwrap().contains("Created folder"));
+        // A failure is reported as faithfully as a success, so the model can
+        // explain it rather than pretending the action worked.
+        assert_eq!(items[1]["call_id"], "call_def");
+        assert!(items[1]["output"].as_str().unwrap().contains("Failed"));
+    }
+
+    /// A declined action must come back as a refusal the model can read, so it
+    /// does not retry it or narrate work it did not do.
+    #[test]
+    fn a_declined_action_is_reported_to_the_model() {
+        let call = crate::chat_tools::RawToolCall {
+            name: "create_folder".into(),
+            arguments: json!({"name": "Test123"}),
+            id: Some("call_ghi".into()),
+        };
+        assert_eq!(call.id.as_deref(), Some("call_ghi"));
+
+        let decline = crate::chat_tools::ToolOutcome::failure(
+            "create_folder",
+            "C:\\Users\\x\\Desktop\\Test123",
+            "the user declined this; do not retry it",
+        );
+        let items = action_output_items(&[(call.id.clone().unwrap(), decline)]);
+        let output = items[0]["output"].as_str().unwrap();
+        assert!(output.contains("declined"));
+        assert!(output.contains("do not retry"));
+    }
+
+    /// The assistant is told it can act. Without this it answered "I can't open
+    /// folders from here" while holding an open_path tool.
     #[test]
     fn new_install_defaults_to_chatgpt_account() {
         let config = StoredConfig::default();

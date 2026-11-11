@@ -1224,38 +1224,23 @@ html.compact-view #power-panel-top {
   opacity: 0.8;
 }
 
-#media-art {
-  width: 148px;
-  height: 148px;
-  flex: 0 0 auto;
-  border-radius: var(--r-xl);
-  object-fit: cover;
-  background: var(--icon-bg);
-  box-shadow: 0 0 0 1px var(--sel-border), 0 10px 28px -10px rgba(0, 0, 0, 0.55);
-}
-
-#media-art[src=""],
-#media-art:not([src]) {
-  visibility: hidden;
-}
-
-/* Shared geometry for the artwork slot and its vinyl fallback, so switching
-   between the two never shifts the layout. */
-#media-art,
+/* The record occupies the same 148x148 box the artwork tile used to occupy,
+   so the panel layout is unchanged by the art moving onto the disc label. */
+/* The record occupies the same box the album-art tile used to, so the panel
+   layout is unchanged by the artwork living on the disc label instead. */
 .media-platter {
   width: 148px;
   height: 148px;
   flex: 0 0 auto;
 }
 
-/* Vinyl fallback, shown when the session reports no album art.
+/* Vinyl record, shown for every track: the album art is the centre label when
+   the session provides one, otherwise the label shows the title's initial.
 
    Disc grooves are a repeating-radial-gradient and the sheen is a
    conic-gradient; the only animating property is `rotate`, so the spin stays
-   on the compositor and never triggers layout or paint per frame. The label
-   carries the first letter of the title so a track without art still reads as
-   *that* track rather than a generic disc. Adapted from the CodeFronts
-   "vinyl record" play/pause component, restyled to nex's tokens. */
+   on the compositor and never triggers layout or paint per frame. Adapted from
+   the CodeFronts "vinyl record" component, restyled to nex's tokens. */
 .media-platter {
   position: relative;
   border-radius: 50%;
@@ -1270,6 +1255,15 @@ html.compact-view #power-panel-top {
   display: none;
 }
 
+/* Grooves are deliberately fine (1px line every 3.5px) and the dark base is a
+   soft radial-gradient rather than a third repeating band.
+
+   The earlier version used 1px-on/2px-off hard stops, which is below what the
+   disc's ~136px radius can resolve evenly: the GPU sampled them as wide
+   aliased bands that stair-stepped and moire'd as the disc rotated. Widening
+   the period and letting the base be a smooth gradient keeps every edge under
+   a pixel of contrast, so the texture reads as fine concentric grooves instead
+   of banding. */
 .media-disc {
   position: absolute;
   inset: 6px;
@@ -1279,9 +1273,14 @@ html.compact-view #power-panel-top {
   background:
     repeating-radial-gradient(
       circle at 50% 50%,
-      rgba(0, 0, 0, 0.86) 0 2px,
-      rgba(255, 255, 255, 0.07) 2px 3px,
-      rgba(0, 0, 0, 0.9) 3px 5px
+      rgba(255, 255, 255, 0.055) 0 1px,
+      rgba(0, 0, 0, 0) 1px 3.5px
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      rgba(0, 0, 0, 0.9) 0 40%,
+      rgba(0, 0, 0, 0.85) 48%,
+      rgba(0, 0, 0, 0.92) 100%
     ),
     conic-gradient(
       from 210deg,
@@ -1310,11 +1309,13 @@ html.compact-view #power-panel-top {
 }
 
 .media-disc-label {
+  position: relative;
   width: 44%;
   height: 44%;
   border-radius: 50%;
   display: grid;
   place-items: center;
+  overflow: hidden;
   background: linear-gradient(135deg, var(--text-faint), var(--text-dim));
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
   font-size: 22px;
@@ -1326,6 +1327,34 @@ html.compact-view #power-panel-top {
 
 .media-disc-label:empty {
   background: linear-gradient(135deg, var(--text-faint), transparent);
+}
+
+/* Cover art as the centre label: it spins with the disc, which is the whole
+   point of showing it on a record rather than as a flat tile. */
+/* Cover art as the centre label: it spins with the disc, which is the whole
+   point of showing it on a record rather than as a flat tile.
+
+   The label is a grid with `place-items: center`, which centres and sizes a
+   child to its intrinsic dimensions rather than stretching it. A percentage
+   width/height on the image therefore did not give it the label's box, so
+   `object-fit: cover` had nothing to crop against and a non-square thumbnail
+   (16:9 video, 9:16 short) overflowed the circle with gaps showing through.
+   Absolute positioning inset to zero pins the image to the label box, which is
+   what makes cover work and keeps every aspect ratio filling the label. */
+#media-disc-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+}
+
+#media-disc-art.hidden,
+#media-disc-initials.hidden {
+  display: none;
 }
 
 /* Spindle: the pin through the centre of the label. */

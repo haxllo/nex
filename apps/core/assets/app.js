@@ -43,9 +43,9 @@
   const whatsNewItems = $("whats-new-items");
   const whatsNewTips = $("whats-new-tips");
   const whatsNewScroll = $("whats-new-scroll");
-  const mediaArt = $("media-art");
   const mediaPlatter = $("media-platter");
   const mediaDiscInitials = $("media-disc-initials");
+  const mediaDiscArt = $("media-disc-art");
   const mediaTitle = $("media-title");
   const mediaArtist = $("media-artist");
   const mediaProgressFill = $("media-progress-fill");
@@ -4102,18 +4102,18 @@
     }
     mediaTitle.textContent = m.title || "Unknown track";
     mediaArtist.textContent = [m.artist, m.album].filter(Boolean).join(" — ");
-    if (m.art) {
-      if (mediaArt.getAttribute("src") !== m.art) mediaArt.setAttribute("src", m.art);
-    } else {
-      mediaArt.removeAttribute("src");
-    }
     const playing = m.status === "playing";
-    // No album art: show the vinyl fallback instead of an empty slot. The two
-    // share the same box, so swapping them never shifts the layout.
-    const hasArt = !!m.art;
-    mediaPlatter.classList.toggle("hidden", hasArt);
-    mediaArt.classList.toggle("hidden", !hasArt);
-    if (!hasArt) {
+    // The artwork is the record's centre label rather than a separate tile, so
+    // every track spins and a session without art still shows a record. Both
+    // variants share the label box, so switching between them never reflows.
+    if (m.art) {
+      if (mediaDiscArt.getAttribute("src") !== m.art) mediaDiscArt.setAttribute("src", m.art);
+      mediaDiscArt.classList.remove("hidden");
+      mediaDiscInitials.classList.add("hidden");
+    } else {
+      mediaDiscArt.removeAttribute("src");
+      mediaDiscArt.classList.add("hidden");
+      mediaDiscInitials.classList.remove("hidden");
       // Seeded from the title so the label identifies the track; the artwork
       // is what usually carries that, and here there is none.
       const label = (m.title || "").trim();

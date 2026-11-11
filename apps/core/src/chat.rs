@@ -1085,18 +1085,26 @@ const CANCELLED: &str = "\u{0}cancelled";
 /// read back. `/responses` expects each result as a `function_call_output` item
 /// keyed by the `call_id` the model gave.
 fn action_output_items(
-    outcomes: &[(String, crate::chat_tools::ToolOutcome)],
+    outcomes: &[(String, String, serde_json::Value, crate::chat_tools::ToolOutcome)],
 ) -> Vec<Value> {
-    outcomes
-        .iter()
-        .map(|(call_id, outcome)| {
-            json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": outcome.summary,
-            })
-        })
-        .collect()
+    let mut items = Vec::with_capacity(outcomes.len() * 2);
+    for (call_id, name, arguments, outcome) in outcomes {
+        // The API needs the call it is answering to be in the transcript. Sending
+        // only the output leaves a `call_id` with nothing that produced it, and
+        // the request stalls with no error event.
+        items.push(json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments.to_string(),
+        }));
+        items.push(json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": outcome.summary,
+        }));
+    }
+    items
 }
 
 /// Run the ChatGPT account path, including the rounds that follow an action.
@@ -1178,6 +1186,8 @@ fn stream_chatgpt_native(
         let mut ran_any = false;
         for raw in streamed.requested {
             let call_id = raw.id.clone().unwrap_or_default();
+            let call_name = raw.name.clone();
+            let call_args = raw.arguments.clone();
             let tool = match raw.validate() {
                 Ok(tool) => tool,
                 Err(error) => {
@@ -1189,7 +1199,7 @@ fn stream_chatgpt_native(
                         &error,
                     );
                     emit(&format!("I can't do that: {error}."), None);
-                    outcomes.push((call_id, outcome));
+                    outcomes.push((call_id, call_name, call_args, outcome));
                     continue;
                 }
             };
@@ -1212,26 +1222,26 @@ fn stream_chatgpt_native(
                             &format!("I did not run {}; you declined it.", tool.name()),
                             None,
                         );
-                        outcomes.push((call_id, outcome));
+                        outcomes.push((call_id, call_name, call_args, outcome));
                         continue;
                     }
                     let outcome = crate::chat_tools::run(&tool, true, &create_base);
                     emit(&outcome.summary, None);
                     ran_any = true;
-                    outcomes.push((call_id, outcome));
+                    outcomes.push((call_id, call_name, call_args, outcome));
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
                     emit(&outcome.summary, None);
                     ran_any = true;
-                    outcomes.push((call_id, outcome));
+                    outcomes.push((call_id, call_name, call_args, outcome));
                 }
             }
         }
 
         // Nothing actually ran and nothing is left to report: a comment round
         // would just repeat itself.
-        if !ran_any && outcomes.iter().all(|(_, o)| !o.ok) {
+        if !ran_any && outcomes.iter().all(|(_, _, _, o)| !o.ok) {
             crate::runtime::log_info(&format!(
                 "[nex][chat] ChatGPT account round {round}: no action ran ({:.0}ms)",
                 round_started.elapsed().as_millis() as f64
@@ -1251,6 +1261,11 @@ fn stream_chatgpt_native(
         }
         // Feed the outcomes back so the model can react: confirm success, explain
         // a failure, or take the next step of a multi-step request.
+        crate::runtime::log_info(&format!(
+            "[nex][chat] round {round} produced {} outcome(s); continuing with {} input item(s)",
+            outcomes.len(),
+            input_items.len() + outcomes.len()
+        ));
         input_items.extend(action_output_items(&outcomes));
     }
     Ok(())
@@ -1268,13 +1283,11 @@ fn stream_chatgpt_once(
     started: Instant,
     round: usize,
 ) -> Result<ChatgptRound, String> {
-    if round == 0 {
-        crate::runtime::log_info(&format!(
-            "[nex][chat] ChatGPT account start model={} input_items={}",
-            config.model,
-            input_items.len()
-        ));
-    }
+    crate::runtime::log_info(&format!(
+        "[nex][chat] ChatGPT account round {round} start model={} input_items={}",
+        config.model,
+        input_items.len()
+    ));
     let url = format!("{}/responses", crate::codex_auth::CODEX_BASE_URL);
     let body = json!({
         "model": config.model,
@@ -1982,6 +1995,8 @@ mod tests {
         let outcomes = vec![
             (
                 "call_abc".to_string(),
+                "create_folder".to_string(),
+                json!({"name": "Test123"}),
                 crate::chat_tools::ToolOutcome {
                     tool: "create_folder".into(),
                     target: "C:\\Users\\x\\Desktop\\Test123".into(),
@@ -1991,18 +2006,28 @@ mod tests {
             ),
             (
                 "call_def".to_string(),
+                "open_path".to_string(),
+                json!({"path": "C:\\missing"}),
                 crate::chat_tools::ToolOutcome::failure("open_path", "C:\\missing", "not found"),
             ),
         ];
         let items = action_output_items(&outcomes);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["type"], "function_call_output");
+        // Each result needs the call it answers to be present too, otherwise the
+        // output references a call_id with nothing that produced it and the next
+        // request stalls without an error event.
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0]["type"], "function_call");
         assert_eq!(items[0]["call_id"], "call_abc");
-        assert!(items[0]["output"].as_str().unwrap().contains("Created folder"));
+        assert_eq!(items[0]["name"], "create_folder");
+        assert!(items[0]["arguments"].as_str().unwrap().contains("Test123"));
+
+        assert_eq!(items[1]["type"], "function_call_output");
+        assert_eq!(items[1]["call_id"], "call_abc");
+        assert!(items[1]["output"].as_str().unwrap().contains("Created folder"));
         // A failure is reported as faithfully as a success, so the model can
         // explain it rather than pretending the action worked.
-        assert_eq!(items[1]["call_id"], "call_def");
-        assert!(items[1]["output"].as_str().unwrap().contains("Failed"));
+        assert_eq!(items[3]["call_id"], "call_def");
+        assert!(items[3]["output"].as_str().unwrap().contains("Failed"));
     }
 
     /// A declined action must come back as a refusal the model can read, so it
@@ -2021,10 +2046,16 @@ mod tests {
             "C:\\Users\\x\\Desktop\\Test123",
             "the user declined this; do not retry it",
         );
-        let items = action_output_items(&[(call.id.clone().unwrap(), decline)]);
-        let output = items[0]["output"].as_str().unwrap();
+        let items = action_output_items(&[(
+            call.id.clone().unwrap(),
+            call.name.clone(),
+            call.arguments.clone(),
+            decline,
+        )]);
+        let output = items[1]["output"].as_str().unwrap();
         assert!(output.contains("declined"));
         assert!(output.contains("do not retry"));
+        assert_eq!(items[0]["type"], "function_call");
     }
 
     /// The assistant is told it can act. Without this it answered "I can't open

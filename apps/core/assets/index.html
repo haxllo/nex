@@ -214,8 +214,22 @@
             <div class="chat-empty-title">What’s on your mind?</div>
             <div class="chat-empty-copy">Ask a question, work through an idea, or paste something you want to understand.</div>
             <div class="chat-suggestions">
-              <button type="button" data-chat-prompt="Help me think through an idea">Think through an idea <span>↗</span></button>
-              <button type="button" data-chat-prompt="Explain this in plain language">Explain something clearly <span>↗</span></button>
+              <button type="button" class="chat-suggestion" data-chat-prompt="Open my downloads folder">
+                <span class="chat-suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></span>
+                <span class="chat-suggestion-text"><strong>Open something</strong><em>Point Nex at a folder</em></span>
+              </button>
+              <button type="button" class="chat-suggestion" data-chat-prompt="Make a folder called Invoices on my desktop">
+                <span class="chat-suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M12 11v5m-2.5-2.5h5"/></svg></span>
+                <span class="chat-suggestion-text"><strong>Make a folder</strong><em>Set something up on disk</em></span>
+              </button>
+              <button type="button" class="chat-suggestion" data-chat-prompt="Explain this in plain language">
+                <span class="chat-suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 20a8 8 0 1 0-8-8"/><path d="M4 12H2m10-8V2"/><path d="M9 12h6M12 9v6"/></svg></span>
+                <span class="chat-suggestion-text"><strong>Explain something</strong><em>Plain language, no jargon</em></span>
+              </button>
+              <button type="button" class="chat-suggestion" data-chat-prompt="Help me think through an idea">
+                <span class="chat-suggestion-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-3.6 10.8c.6.5.9 1.2.9 1.9v.3h5.4v-.3c0-.7.3-1.4.9-1.9A6 6 0 0 0 12 3Z"/><path d="M10 19.5h4"/></svg></span>
+                <span class="chat-suggestion-text"><strong>Think it through</strong><em>Work an idea out loud</em></span>
+              </button>
             </div>
           </div>
           <div id="chat-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>

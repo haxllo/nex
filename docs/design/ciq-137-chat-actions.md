@@ -76,11 +76,18 @@ language model is not a combination to ship before the basics work.
 
 ### Confirmation model
 
-Every tool call is classified at the Rust layer, not by the model:
+Every tool call is classified at the Rust layer, not by the model. The
+classification is a set of annotations, not a two-way split:
 
-- `ReadOnly` — runs immediately, result returned to the model.
-- `Mutating` — the call is **suspended** and surfaced to the UI as a pending
+- `read_only` — runs immediately, result returned to the model.
+- `destructive` — the call is **suspended** and surfaced to the UI as a pending
   action with the exact parameters; it runs only after an explicit click.
+- `open_world` — reaches the network. Runs immediately; see the departure below.
+
+An earlier draft used a two-way `ReadOnly` / `Mutating` enum. It was replaced by
+annotations because two buckets cannot express `open_url`: harmless locally but
+long-reaching, so it would have been forced into the mutating bucket and
+prompted on every link.
 
 The classification lives in a `match` on a parsed enum. The model cannot
 influence it: it names a tool and supplies arguments, and an unrecognised tool

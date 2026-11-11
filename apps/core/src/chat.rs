@@ -869,12 +869,29 @@ fn stream_openai(
 /// cannot walk out even if validation were bypassed.
 fn create_base_dir() -> std::path::PathBuf {
     let configured = crate::config::load(None).ok().map(|config| config.default_create_dir);
-    match configured {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => std::env::var("USERPROFILE")
-            .map(|profile| std::path::PathBuf::from(profile).join("Desktop"))
-            .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    if let Some(dir) = configured.filter(|dir| !dir.as_os_str().is_empty()) {
+        return dir;
     }
+    // Ask the shell where the Desktop actually is rather than joining
+    // "Desktop" onto the profile. When OneDrive has taken the folder over, the
+    // shell folder is `%USERPROFILE%\OneDrive\Desktop` and a stale
+    // `%USERPROFILE%\Desktop` may also exist; building the path by hand picks
+    // the wrong one, so files were created somewhere the user does not see and
+    // the model was then told the folder it created did not exist.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(desktop) =
+            crate::action_executor::known_folder_path(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop)
+        {
+            let path = std::path::PathBuf::from(desktop.trim_end_matches('\\'));
+            if path.is_dir() {
+                return path;
+            }
+        }
+    }
+    std::env::var("USERPROFILE")
+        .map(|profile| std::path::PathBuf::from(profile).join("Desktop"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// One request/response against the provider.
@@ -1898,6 +1915,35 @@ mod tests {
     /// The model was given CPU, GPU and memory but no file paths, so a request
     /// mentioning "my desktop" had nothing valid to take a path from and it
     /// invented `C:\Users\Alex\Desktop`. These are the real locations.
+    /// A regression test for the worst version of this bug. `create_base_dir`
+    /// joined "Desktop" onto the user profile, which is wrong wherever OneDrive
+    /// has taken the folder over: the shell reports
+    /// `%USERPROFILE%\OneDrive\Desktop`, a stale `%USERPROFILE%\Desktop` may also
+    /// exist, and files landed in the one the user does not see. The reported
+    /// symptom was nex creating a folder and then denying it existed.
+    #[test]
+    fn the_create_base_is_where_windows_says_the_desktop_is() {
+        #[cfg(target_os = "windows")]
+        {
+            let shell_desktop =
+                crate::action_executor::known_folder_path(&windows_sys::Win32::UI::Shell::FOLDERID_Desktop)
+                    .expect("the shell should know where the Desktop is");
+            let shell_desktop = std::path::PathBuf::from(shell_desktop.trim_end_matches('\\'));
+            // Only meaningful when no explicit create directory is configured.
+            let configured = crate::config::load(None)
+                .ok()
+                .map(|config| config.default_create_dir)
+                .filter(|dir| !dir.as_os_str().is_empty());
+            if configured.is_none() {
+                assert_eq!(
+                    create_base_dir(),
+                    shell_desktop,
+                    "created files must land in the real Desktop, not a hand-built one"
+                );
+            }
+        }
+    }
+
     #[test]
     fn pc_facts_include_real_user_folders() {
         let facts = user_folder_facts().expect("user folders should resolve on Windows");

@@ -163,39 +163,61 @@
         </header>
 
         <div id="chat-settings" class="chat-settings" hidden>
-          <div class="chat-settings-grid">
-            <label>Provider
-              <div class="chat-provider-picker">
-                <input id="chat-provider" type="hidden" value="codex" />
-                <button type="button" id="chat-provider-button" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-provider-options" aria-expanded="false">
-                  <span id="chat-provider-choice">ChatGPT account</span>
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
-                </button>
-                <div id="chat-provider-options" class="chat-provider-options" role="listbox" aria-label="Provider" hidden>
-                  <button type="button" class="chat-provider-option" role="option" data-chat-provider="codex" aria-selected="true">ChatGPT account</button>
-                  <button type="button" class="chat-provider-option" role="option" data-chat-provider="openai-compatible">OpenAI-compatible API</button>
-                </div>
+          <div class="chat-settings-head">
+            <div class="chat-settings-title">Chat settings</div>
+            <button type="button" id="chat-settings-close" class="chat-icon-button" title="Close settings" aria-label="Close settings">
+              <svg viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+            </button>
+          </div>
+          <div class="chat-settings-body">
+            <div class="chat-settings-section">
+              <div class="chat-settings-heading">Account</div>
+              <div class="chat-settings-grid">
+                <label>Provider
+                  <div class="chat-provider-picker">
+                    <input id="chat-provider" type="hidden" value="codex" />
+                    <button type="button" id="chat-provider-button" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-provider-options" aria-expanded="false">
+                      <span id="chat-provider-choice">ChatGPT account</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+                    </button>
+                    <div id="chat-provider-options" class="chat-provider-options" role="listbox" aria-label="Provider" hidden>
+                      <button type="button" class="chat-provider-option" role="option" data-chat-provider="codex" aria-selected="true">
+                        <span class="chat-provider-option-name">ChatGPT account</span>
+                        <span class="chat-provider-option-desc">Sign in with your ChatGPT plan</span>
+                      </button>
+                      <button type="button" class="chat-provider-option" role="option" data-chat-provider="openai-compatible" aria-selected="false">
+                        <span class="chat-provider-option-name">OpenAI-compatible API</span>
+                        <span class="chat-provider-option-desc">Any endpoint that speaks the OpenAI API</span>
+                      </button>
+                    </div>
+                  </div>
+                </label>
+                <label class="chat-model-field">Model
+                  <div class="chat-model-picker">
+                    <input id="chat-model" type="hidden" value="" />
+                    <button type="button" id="chat-model-select" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-model-options" aria-expanded="false">
+                      <span id="chat-model-choice">Choose a model</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
+                    </button>
+                    <div id="chat-model-options" class="chat-model-options" hidden>
+                      <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
+                      <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>
+                    </div>
+                  </div>
+                </label>
               </div>
-            </label>
-            <label class="chat-model-field">Model
-              <div class="chat-model-picker">
-                <input id="chat-model" type="hidden" value="" />
-                <button type="button" id="chat-model-select" class="chat-select-button" aria-haspopup="listbox" aria-controls="chat-model-options" aria-expanded="false">
-                  <span id="chat-model-choice">Choose a model</span>
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
-                </button>
-                <div id="chat-model-options" class="chat-model-options" hidden>
-                  <input id="chat-model-search" class="chat-model-search" type="search" placeholder="Filter available models" aria-label="Filter available models" />
-                  <div id="chat-model-results" class="chat-model-results" role="listbox" aria-label="Available models"></div>
-                </div>
+            </div>
+            <div class="chat-settings-section" id="chat-endpoint-section">
+              <div class="chat-settings-heading">Custom endpoint</div>
+              <div class="chat-settings-grid">
+                <label id="chat-endpoint-field">Base URL
+                  <input id="chat-base-url" type="url" maxlength="2048" autocomplete="url" placeholder="https://api.openai.com/v1" />
+                </label>
+                <label id="chat-key-field">API key
+                  <input id="chat-api-key" type="password" maxlength="4096" autocomplete="off" placeholder="Saved securely on this device" />
+                </label>
               </div>
-            </label>
-            <label id="chat-endpoint-field">Base URL
-              <input id="chat-base-url" type="url" maxlength="2048" autocomplete="url" placeholder="https://api.openai.com/v1" />
-            </label>
-            <label id="chat-key-field">API key
-              <input id="chat-api-key" type="password" maxlength="4096" autocomplete="off" placeholder="Saved securely on this device" />
-            </label>
+            </div>
           </div>
           <div class="chat-settings-actions">
             <div id="chat-connection-hint" class="chat-connection-hint">Your ChatGPT sign-in is stored securely in Nex's app data.</div>

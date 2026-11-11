@@ -1823,13 +1823,41 @@
     if (first) conversation.title = first.content.trim().replace(/\s+/g, " ").slice(0, 54) || "New conversation";
   }
 
+  // Absolute dates force the reader to do subtraction; relative ones do it
+  // for them. Same-day entries say the time, everything older says the day.
+  function relativeChatDate(timestamp) {
+    const then = new Date(timestamp);
+    const now = new Date();
+    const sameDay = then.toDateString() === now.toDateString();
+    if (sameDay) return then.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const days = Math.floor((now - then) / 86400000);
+    if (days === 1) return "Yesterday";
+    if (days < 7) return then.toLocaleDateString([], { weekday: "long" });
+    return then.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+
   function renderChatHistory() {
+    // A head with a count gives the list a name; the list scrolls under it so
+    // the header stays put while older conversations scroll past.
     chatHistory.replaceChildren();
+    const head = document.createElement("div");
+    head.className = "chat-history-head";
+    const heading = document.createElement("div");
+    heading.className = "chat-history-title";
+    heading.textContent = "History";
+    const count = document.createElement("span");
+    count.className = "chat-history-count";
+    count.textContent = chatConversations.length ? String(chatConversations.length) : "";
+    head.append(heading, count);
+    chatHistory.appendChild(head);
+    const list = document.createElement("div");
+    list.className = "chat-history-list";
+    chatHistory.appendChild(list);
     if (!chatConversations.length) {
       const empty = document.createElement("div");
       empty.className = "chat-history-empty";
       empty.textContent = "Your conversations will appear here.";
-      chatHistory.appendChild(empty);
+      list.appendChild(empty);
       return;
     }
     for (const conversation of chatConversations.slice().sort((a, b) => b.updatedAt - a.updatedAt)) {
@@ -1838,9 +1866,14 @@
       button.className = "chat-history-item" + (conversation.id === chatConversationId ? " active" : "");
       const title = document.createElement("strong");
       title.textContent = conversation.title || "New conversation";
+      // Two lines: what it was, and when. The date no longer vanishes to make
+      // room for delete - both can be true at once, and a date that disappears
+      // on hover reads as the row forgetting its own metadata.
+      const meta = document.createElement("span");
+      meta.className = "chat-meta";
       const date = document.createElement("span");
       date.className = "chat-date";
-      date.textContent = new Date(conversation.updatedAt || Date.now()).toLocaleDateString();
+      date.textContent = relativeChatDate(conversation.updatedAt || Date.now());
       const del = document.createElement("button");
       del.type = "button";
       del.className = "chat-delete";
@@ -1851,7 +1884,8 @@
         event.stopPropagation();
         deleteChatConversation(conversation.id);
       });
-      button.append(title, date, del);
+      meta.append(date, del);
+      button.append(title, meta);
       button.addEventListener("click", () => {
         invalidateChatRequest();
         clearChatContextSelection();
@@ -1869,7 +1903,7 @@
         chatNotice.classList.remove("error");
         chatInput.focus();
       });
-      chatHistory.appendChild(button);
+      list.appendChild(button);
     }
   }
 
@@ -2289,6 +2323,10 @@
     chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "gpt-4o-mini");
     syncChatModelChoice();
     chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
+    // The custom-endpoint section exists only for the API provider; hiding the
+    // two fields left an orphaned "Custom endpoint" heading behind.
+    const endpointSection = $("chat-endpoint-section");
+    if (endpointSection) endpointSection.hidden = provider !== "openai-compatible";
     chatEndpointField.hidden = provider !== "openai-compatible";
     chatKeyField.hidden = provider !== "openai-compatible";
     chatConnectButton.hidden = provider !== "codex" || !!chatConfig.accountConnected;
@@ -2311,6 +2349,8 @@
     else { closeChatModelOptions(); closeChatProviderOptions(); }
     chatMenuScrim.hidden = chatSettings.hidden && chatHistory.hidden;
   }
+
+  $("chat-settings-close").addEventListener("click", () => setChatSettingsOpen(false));
 
   function setChatHistoryOpen(open) {
     chatHistory.hidden = !open;

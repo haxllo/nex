@@ -809,10 +809,30 @@ fn read_thumbnail_with_reason(session: &Session) -> Result<String, ArtMiss> {
     } else {
         mime
     };
+    let mime = normalize_mime(&mime);
     Ok(format!(
         "data:{mime};base64,{}",
         base64_encode(&bytes)
     ))
+}
+
+/// Coerce an SMTC `ContentType` into a single usable MIME type.
+///
+/// Windows Media Player reports the stream's content type as a comma-separated
+/// list of accepted types — `image/jpeg,image/jpe,image/jpg` — rather than one
+/// type, and a `data:` URI's media type ends at the first comma. Dropping that
+/// straight into `data:{mime};base64,...` produced
+/// `data:image/jpeg,image/jpe,image/jpg;base64,...`, so the browser parsed the
+/// media type as `image/jpeg` and the rest as payload, failed to decode, and
+/// showed its broken-image icon. The art was always there; the URI was invalid.
+fn normalize_mime(raw: &str) -> String {
+    let first = raw.split(',').next().unwrap_or("").trim();
+    // Strip any parameters (`;charset=...`) that would also break the URI.
+    let base = first.split(';').next().unwrap_or("").trim();
+    if base.is_empty() || !base.contains('/') {
+        return "image/png".to_string();
+    }
+    base.to_ascii_lowercase()
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1093,6 +1113,36 @@ mod tests {
             );
         }
         assert!(ART_RETRY_ATTEMPTS >= 2, "a single attempt is not a retry");
+    }
+
+    /// The reported bug: WMP reports a comma-separated list of content types,
+    /// and a data: URI's media type ends at the first comma, so the browser got
+    /// an invalid URI and drew its broken-image icon for real album art.
+    #[test]
+    fn normalize_mime_takes_the_first_type_from_a_list() {
+        assert_eq!(
+            normalize_mime("image/jpeg,image/jpe,image/jpg"),
+            "image/jpeg"
+        );
+        assert_eq!(normalize_mime("image/png,image/webp"), "image/png");
+    }
+
+    #[test]
+    fn normalize_mime_handles_single_types_and_parameters() {
+        assert_eq!(normalize_mime("image/png"), "image/png");
+        assert_eq!(normalize_mime("IMAGE/PNG"), "image/png");
+        assert_eq!(normalize_mime("image/jpeg; charset=binary"), "image/jpeg");
+        assert_eq!(normalize_mime("  image/webp  "), "image/webp");
+    }
+
+    /// Anything unusable must not reach the URI, or the image silently fails
+    /// to decode again.
+    #[test]
+    fn normalize_mime_falls_back_when_unusable() {
+        assert_eq!(normalize_mime(""), "image/png");
+        assert_eq!(normalize_mime("   "), "image/png");
+        assert_eq!(normalize_mime("image"), "image/png");
+        assert_eq!(normalize_mime(",,,"), "image/png");
     }
 
     #[test]

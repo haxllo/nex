@@ -1784,10 +1784,30 @@
     postChatResize();
   }
 
+  // One action as a plain-text line. Cards are DOM siblings of the message
+  // body, so serialising only `content` silently dropped them and a copied
+  // transcript lost every result it showed on screen.
+  function chatActionAsText(action) {
+    const label = CHAT_ACTION_LABELS[action.tool] || (action.ok ? "Done" : "Not done");
+    const parts = [action.ok ? "\u2713" : "\u00d7", label];
+    if (action.target) parts.push(action.target);
+    else if (action.summary) parts.push(action.summary.trim());
+    return parts.join(" ");
+  }
+
+  function chatMessageAsText(message) {
+    const lines = [];
+    if (Array.isArray(message.actions)) {
+      for (const action of message.actions) lines.push(chatActionAsText(action));
+    }
+    if (typeof message.content === "string" && message.content.trim()) lines.push(message.content.trim());
+    return lines.join("\n");
+  }
+
   function copyChatTranscript() {
     const text = chatMessages
-      .filter((message) => message && typeof message.content === "string" && message.content.trim())
-      .map((message) => `${message.role === "user" ? "You" : "Assistant"}: ${message.content.trim()}`)
+      .filter((message) => message && chatMessageAsText(message))
+      .map((message) => `${message.role === "user" ? "You" : "Assistant"}: ${chatMessageAsText(message)}`)
       .join("\n\n");
     if (!text) { flashChatNotice("Nothing to copy yet."); return; }
     navigator.clipboard.writeText(text).then(
@@ -2196,7 +2216,7 @@
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
           const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy response";
           copy.addEventListener("click", async () => {
-            try { await navigator.clipboard.writeText(message.content); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
+            try { await navigator.clipboard.writeText(chatMessageAsText(message)); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
             catch (_) { copy.textContent = "Unavailable"; }
           });
           actions.appendChild(copy);
@@ -2380,24 +2400,30 @@
       : "Not done";
     body.appendChild(label);
 
-    // The summary is the sentence the user needs; the target is the path it
-    // happened to. Keep the path secondary and readable, not code-styled.
+    // The label already says what happened, so the text is the name alone.
+    // Rendering the whole summary put the sentence there too and the card read
+    // "Created folder created folder C:\\...\sasa".
     const summary = (action.summary || "").trim();
-    if (summary) {
+    const ok = action.ok && !!action.target;
+    const name = ok ? action.target.split(/[\\/]/).filter(Boolean).pop() || "" : summary;
+    if (name) {
       const text = document.createElement("span");
       text.className = "chat-action-text";
-      text.textContent = summary;
+      text.textContent = name;
       body.appendChild(text);
     }
     card.appendChild(body);
 
-    if (action.target && !summary.includes(action.target)) {
+    // The path, dimmed and truncated from the left so the useful end stays
+    // visible. Skipped when the text above already is the whole answer.
+    if (ok) {
       const target = document.createElement("code");
       target.className = "chat-action-target";
       target.textContent = action.target;
       target.title = action.target;
       card.appendChild(target);
     }
+    card.title = summary;
     return card;
   }
 

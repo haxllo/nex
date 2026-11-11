@@ -951,9 +951,13 @@ impl CoreService {
 
     /// Apply an incremental change published by the indexer.
     ///
-    /// Returns false when the delta was empty. Upserts replace by id (or are
-    /// appended); deleted ids are removed. Item order is not significant for
-    /// search, so this is a single rebuild pass rather than an index shuffle.
+    /// Returns false when the delta could not change search: it was empty, or
+    /// every deleted id and every upsert was already in the state it asked
+    /// for. Returning true for those would rebuild the whole cache and bump the
+    /// generation for a no-op, which is what turned excluded-path churn into
+    /// constant work and log lines. Upserts replace by id (or are appended);
+    /// deleted ids are removed. Item order is not significant for search, so
+    /// this is a single rebuild pass rather than an index shuffle.
     pub fn apply_external_delta(&self, upserts: Vec<SearchItem>, deleted: Vec<String>) -> bool {
         if upserts.is_empty() && deleted.is_empty() {
             return false;
@@ -964,16 +968,35 @@ impl CoreService {
 
         let mut guard = self.cached_items.write().unwrap_or_else(|e| e.into_inner());
         let mut next = Vec::with_capacity(guard.len() + replacements.len());
+        // Track whether anything really moved. A delta naming ids we do not
+        // hold must not be reported as a change.
+        let mut changed = false;
         for item in guard.drain(..) {
             if deleted.contains(&item.id) {
+                changed = true;
                 continue;
             }
             match replacements.remove(&item.id) {
-                Some(replacement) => next.push(replacement),
+                Some(replacement) => {
+                    if replacement != item {
+                        changed = true;
+                    }
+                    next.push(replacement);
+                }
                 None => next.push(item),
             }
         }
-        next.extend(replacements.into_values());
+        if !replacements.is_empty() {
+            changed = true;
+            next.extend(replacements.into_values());
+        }
+        if !changed {
+            // Put the cache back untouched and report a no-op so the caller
+            // does not log, bump the generation or rebuild the search index.
+            *guard = next;
+            drop(guard);
+            return false;
+        }
         let next = if self.ui_client {
             bounded_ui_items(&next)
         } else {
@@ -1538,6 +1561,45 @@ impl CoreService {
         self.remove_item_from_backends(id);
         self.record_publish(&[], std::slice::from_ref(&id.to_string()));
         Ok(())
+    }
+
+    /// Delete `id` only if it is actually present, and report whether it was.
+    ///
+    /// Watcher removals arrive for paths that were never indexed: the watcher
+    /// sees the whole root, so churn under an excluded path produces deletes
+    /// for ids that do not exist. Calling `delete_item_by_id` for those still
+    /// published an empty delta and bumped the generation, which is what made
+    /// `ui_delta_applied` fire several times a second with `upserts=0`.
+    pub fn delete_item_by_id_if_present(&self, id: &str) -> Result<bool, ServiceError> {
+        if !self.item_exists(id) {
+            return Ok(false);
+        }
+        index_store::delete_item(&*self.db(), id)?;
+        self.remove_cached_item_by_id(id);
+        self.remove_item_from_backends(id);
+        self.record_publish(&[], std::slice::from_ref(&id.to_string()));
+        Ok(true)
+    }
+
+    /// True when `id` is in the in-memory cache or the SQLite store.
+    ///
+    /// The cache answers for everything a search can return, so it is checked
+    /// first; the DB check only runs for ids the cache does not hold, which
+    /// keeps a watcher batch of phantoms from turning into table lookups.
+    pub fn item_exists(&self, id: &str) -> bool {
+        let cached = self
+            .cached_items
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|item| item.id == id);
+        if cached {
+            return true;
+        }
+        index_store::get_item(&*self.db(), id)
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Delete every file/folder row beneath `folder_path` (not the folder
@@ -3167,6 +3229,101 @@ mod tests {
         let mut config = Config::default();
         config.index_db_path = dir.join("index.sqlite3");
         config
+    }
+
+    fn delta_test_item(id: &str) -> SearchItem {
+        let path = format!(r"C:\delta\{id}");
+        SearchItem::new(
+            &format!("file:{}", path.to_ascii_lowercase()),
+            "file",
+            id,
+            &path,
+        )
+    }
+
+    fn delta_test_service() -> (CoreService, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut config = Config::default();
+        config.index_db_path = dir.path().join("index.sqlite3");
+        let service = CoreService::new_ui_client(config).expect("service");
+        (service, dir)
+    }
+
+    /// A delta naming only ids we do not hold must not count as a change.
+    ///
+    /// Watcher removals arrive for paths that were never indexed whenever the
+    /// watched root contains excluded subtrees. Reporting those as changes is
+    /// what rebuilt the whole cache and bumped the generation several times a
+    /// second, and what produced the `ui_delta_applied ... upserts=0` spam.
+    #[test]
+    fn delta_of_missing_ids_reports_no_change() {
+        let (service, _dir) = delta_test_service();
+        service.apply_external_delta(vec![delta_test_item("kept")], Vec::new());
+        let generation_before = service.search_generation();
+
+        let changed = service.apply_external_delta(
+            Vec::new(),
+            vec![r"file:c:\never\existed".to_string(), r"folder:c:\never".to_string()],
+        );
+
+        assert!(
+            !changed,
+            "deleting ids that were never indexed must not report a change"
+        );
+        assert_eq!(
+            service.search_generation(),
+            generation_before,
+            "a no-op delta must not bump the generation"
+        );
+    }
+
+    /// The same, for an upsert that matches what is already cached.
+    #[test]
+    fn delta_repeating_identical_upsert_reports_no_change() {
+        let (service, _dir) = delta_test_service();
+        let item = delta_test_item("same");
+        service.apply_external_delta(vec![item.clone()], Vec::new());
+        let generation_before = service.search_generation();
+
+        let changed = service.apply_external_delta(vec![item], Vec::new());
+        assert!(!changed, "re-upserting identical content is not a change");
+        assert_eq!(service.search_generation(), generation_before);
+    }
+
+    /// A real delete must still be applied and reported.
+    #[test]
+    fn delta_deleting_a_present_id_still_changes_and_removes() {
+        let (service, _dir) = delta_test_service();
+        let item = delta_test_item("doomed");
+        let id = item.id.clone();
+        service.apply_external_delta(vec![item], Vec::new());
+        assert!(service.item_exists(&id));
+
+        let changed = service.apply_external_delta(Vec::new(), vec![id.clone()]);
+        assert!(changed, "removing a present item must report a change");
+        assert!(!service.item_exists(&id), "the item must be gone");
+    }
+
+    /// Deleting an absent id reports `false` rather than publishing a delta.
+    #[test]
+    fn delete_if_present_skips_absent_ids() {
+        let (service, _dir) = delta_test_service();
+        assert!(!service.item_exists(r"file:c:\nope"));
+
+        let removed = service
+            .delete_item_by_id_if_present(r"file:c:\nope")
+            .expect("delete should not error");
+        assert!(!removed, "an absent id must not be reported as removed");
+
+        let item = delta_test_item("present");
+        let id = item.id.clone();
+        service.apply_external_delta(vec![item], Vec::new());
+        assert!(
+            service
+                .delete_item_by_id_if_present(&id)
+                .expect("delete should succeed"),
+            "a present id must be reported as removed"
+        );
     }
 
     #[test]

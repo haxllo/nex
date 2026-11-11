@@ -137,9 +137,7 @@ fn start_ui_snapshot_sync(
                             Ok(svc) => {
                                 let changed = svc.apply_external_delta(upserts, deleted);
                                 applied_worker.store(true, Ordering::Release);
-                                log_info(&format!(
-                                    "[nex] ui_delta_applied upserts={upserts_n} deletes={deleted_n} changed={changed} generation={generation} instance={instance}"
-                                ));
+                                log_delta_applied(upserts_n, deleted_n, changed, generation, instance);
                                 outcome = Some((generation, instance));
                                 break;
                             }
@@ -198,6 +196,55 @@ enum SnapshotSync {
     Full(u64, u64, Vec<crate::model::SearchItem>),
     Delta(u64, u64, Vec<crate::model::SearchItem>, Vec<String>),
     Unreachable,
+}
+
+/// Log an applied delta, but keep no-op deltas from flooding the log.
+///
+/// Watch churn over an excluded path used to produce one of these several
+/// times a second with `upserts=0`, which buried real diagnostics. Real changes
+/// are logged every time because they are rare and worth seeing; no-ops are
+/// folded into one suppressed-total line per minute so the fact that the UI is
+/// dropping them is still observable.
+fn log_delta_applied(
+    upserts: usize,
+    deletes: usize,
+    changed: bool,
+    generation: u64,
+    instance: u64,
+) {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::OnceLock;
+
+    static NOOP_COUNT: AtomicU64 = AtomicU64::new(0);
+    static LAST_NOOP_LOG: OnceLock<Mutex<Instant>> = OnceLock::new();
+    const NOOP_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+    if changed {
+        let suppressed = NOOP_COUNT.swap(0, Ordering::Relaxed);
+        if suppressed > 0 {
+            log_info(&format!(
+                "[nex] ui_delta_applied: {suppressed} no-op delta(s) suppressed since the last change"
+            ));
+        }
+        log_info(&format!(
+            "[nex] ui_delta_applied upserts={upserts} deletes={deletes} changed=true generation={generation} instance={instance}"
+        ));
+        return;
+    }
+
+    NOOP_COUNT.fetch_add(1, Ordering::Relaxed);
+    let last = LAST_NOOP_LOG.get_or_init(|| Mutex::new(Instant::now()));
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    if last.elapsed() < NOOP_LOG_INTERVAL {
+        return;
+    }
+    *last = Instant::now();
+    let count = NOOP_COUNT.swap(0, Ordering::Relaxed);
+    // Counted before the swap, so this batch is already included.
+    log_info(&format!(
+        "[nex] ui_delta_applied: {count} no-op delta(s) in the last {}s (nothing indexed changed)",
+        NOOP_LOG_INTERVAL.as_secs()
+    ));
 }
 
 /// One long-poll per call: the indexer reports whether the changelog moved and

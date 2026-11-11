@@ -158,6 +158,11 @@ pub(crate) struct RawToolCall {
     pub name: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+    /// The provider's id for this call, when it gave one. The `/responses` API
+    /// needs it back on the `function_call_output` item that reports the result,
+    /// otherwise the model cannot tell which of its calls the outcome belongs to.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 impl RawToolCall {
@@ -644,6 +649,7 @@ mod tests {
         RawToolCall {
             name: name.to_string(),
             arguments: args,
+            id: None,
         }
     }
 

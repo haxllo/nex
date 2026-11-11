@@ -676,6 +676,22 @@ pub fn set_muted(muted: bool) -> Result<(), String> {
     }
 }
 
+/// Attempts to make at a thumbnail that is not ready yet.
+///
+/// The snapshot runs roughly once a second, so a player that publishes art a
+/// moment after its metadata needs a few tries rather than one. Kept low on
+/// purpose: this runs synchronously inside `snapshot_inner`, and each attempt
+/// is a full `TryGetMediaPropertiesAsync` + stream open. Five attempts against
+/// a player that never publishes art would add seconds to a snapshot and stall
+/// the media view, which is the failure this project has repeatedly fixed
+/// elsewhere. Three attempts plus the cache means a player that does publish
+/// art is covered without a deep retry loop.
+const ART_RETRY_ATTEMPTS: u32 = 3;
+/// Delay between attempts. Short, because the caller already retries every
+/// snapshot: a player still loading art will be caught by the next push even
+/// if this miss gives up.
+const ART_RETRY_DELAY_MS: u64 = 80;
+
 fn read_thumbnail_data_uri(
     session: &Session,
     cache_key: &str,
@@ -685,41 +701,115 @@ fn read_thumbnail_data_uri(
             return Some(uri.clone());
         }
     }
-    let uri = read_thumbnail_data_uri_uncached(session)?;
-    if let Ok(mut cache) = art_cache().lock() {
-        if cache.len() > 32 {
-            cache.clear();
+    // Retry only when the read failed for a reason that can resolve itself.
+    // `Empty`, `TooLarge` and `ReadFailed` are answers about this thumbnail,
+    // not races, so retrying them would only add latency and log noise.
+    let mut last = ArtMiss::NotReady;
+    for attempt in 0..ART_RETRY_ATTEMPTS {
+        match read_thumbnail_with_reason(session) {
+            Ok(uri) => {
+                if let Ok(mut cache) = art_cache().lock() {
+                    if cache.len() > 32 {
+                        cache.clear();
+                    }
+                    cache.insert(cache_key.to_string(), uri.clone());
+                }
+                return Some(uri);
+            }
+            Err(miss) => {
+                last = miss;
+                if miss != ArtMiss::NotReady {
+                    break;
+                }
+                if attempt + 1 < ART_RETRY_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(ART_RETRY_DELAY_MS));
+                }
+            }
         }
-        cache.insert(cache_key.to_string(), uri.clone());
     }
-    Some(uri)
+    log_art_miss(cache_key, last);
+    None
 }
 
-fn read_thumbnail_data_uri_uncached(session: &Session) -> Option<String> {
+/// Log a failed art read once per key, so a player that never publishes a
+/// thumbnail is diagnosable instead of silently showing the initial forever.
+fn log_art_miss(cache_key: &str, miss: ArtMiss) {
+    use std::sync::OnceLock;
+    static LOGGED: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        OnceLock::new();
+    let seen = LOGGED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let Ok(mut seen) = seen.lock() else {
+        return;
+    };
+    if !seen.insert(cache_key.to_string()) {
+        return;
+    }
+    crate::runtime::log_info(&format!(
+        "[nex] media_art_unavailable reason={miss:?} key={:?}",
+        cache_key.split('\u{1f}').next().unwrap_or("")
+    ));
+}
+
+/// Why a thumbnail read produced nothing. Distinguishing these matters: only
+/// `NotReady` is worth retrying on a later snapshot, and only `Empty` means the
+/// player genuinely has no art.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum ArtMiss {
+    /// `Thumbnail()` threw or returned nothing yet. Players commonly populate
+    /// art only after metadata finishes loading, so this can succeed later.
+    NotReady,
+    /// The thumbnail reference exists but the stream is empty (size 0): the
+    /// player advertised art and then delivered nothing.
+    Empty,
+    /// The stream is larger than we will embed.
+    TooLarge,
+    /// Reading the stream failed part way (closed, locked, decode error).
+    ReadFailed,
+}
+
+fn read_thumbnail_with_reason(session: &Session) -> Result<String, ArtMiss> {
     use windows::Storage::Streams::{DataReader, IInputStream};
 
-    let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
-    let reference = props.Thumbnail().ok()?;
-    let stream = reference.OpenReadAsync().ok()?.get().ok()?;
-    let size = stream.Size().ok()?;
-    if size == 0 || size > MAX_ART_BYTES {
-        return None;
+    let props = session
+        .TryGetMediaPropertiesAsync()
+        .map_err(|_| ArtMiss::NotReady)?
+        .get()
+        .map_err(|_| ArtMiss::NotReady)?;
+    let reference = props.Thumbnail().map_err(|_| ArtMiss::NotReady)?;
+    let stream = reference
+        .OpenReadAsync()
+        .map_err(|_| ArtMiss::NotReady)?
+        .get()
+        .map_err(|_| ArtMiss::NotReady)?;
+    let size = stream.Size().map_err(|_| ArtMiss::ReadFailed)?;
+    if size == 0 {
+        return Err(ArtMiss::Empty);
+    }
+    if size > MAX_ART_BYTES {
+        return Err(ArtMiss::TooLarge);
     }
     let mime = stream
         .ContentType()
         .map(|mime| mime.to_string())
         .unwrap_or_default();
-    let input: IInputStream = stream.cast().ok()?;
-    let reader = DataReader::CreateDataReader(&input).ok()?;
-    let loaded = reader.LoadAsync(size as u32).ok()?.get().ok()?;
+    let input: IInputStream = stream.cast().map_err(|_| ArtMiss::ReadFailed)?;
+    let reader = DataReader::CreateDataReader(&input).map_err(|_| ArtMiss::ReadFailed)?;
+    let loaded = reader
+        .LoadAsync(size as u32)
+        .map_err(|_| ArtMiss::ReadFailed)?
+        .get()
+        .map_err(|_| ArtMiss::ReadFailed)?;
     let mut bytes = vec![0u8; loaded as usize];
-    reader.ReadBytes(&mut bytes).ok()?;
+    reader
+        .ReadBytes(&mut bytes)
+        .map_err(|_| ArtMiss::ReadFailed)?;
     let mime = if mime.is_empty() {
         "image/png".to_string()
     } else {
         mime
     };
-    Some(format!(
+    Ok(format!(
         "data:{mime};base64,{}",
         base64_encode(&bytes)
     ))
@@ -987,6 +1077,23 @@ pub fn control(action: MediaAction) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `NotReady` is a race that a later snapshot can fix. Retrying the
+    /// others would just add latency for a thumbnail that is definitively
+    /// empty, oversized or broken.
+    #[test]
+    fn only_not_ready_is_worth_retrying() {
+        assert_eq!(ArtMiss::NotReady, ArtMiss::NotReady);
+        // The properties the retry loop branches on: any other miss stops it.
+        for miss in [ArtMiss::Empty, ArtMiss::TooLarge, ArtMiss::ReadFailed] {
+            assert_ne!(
+                miss,
+                ArtMiss::NotReady,
+                "{miss:?} must not be retried"
+            );
+        }
+        assert!(ART_RETRY_ATTEMPTS >= 2, "a single attempt is not a retry");
+    }
 
     #[test]
     fn base64_roundtrip_shape() {

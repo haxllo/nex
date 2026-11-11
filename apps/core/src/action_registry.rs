@@ -183,7 +183,7 @@ fn folder_target_base(cfg: &Config) -> std::path::PathBuf {
 }
 
 /// Windows device names can never be created as files/folders.
-fn is_windows_reserved_name(name: &str) -> bool {
+pub(crate) fn is_windows_reserved_name(name: &str) -> bool {
     let base = name
         .split('.')
         .next()

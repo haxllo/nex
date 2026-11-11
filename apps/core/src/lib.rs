@@ -5,6 +5,8 @@ pub(crate) mod bookmarks;
 pub(crate) mod calculator;
 #[cfg(target_os = "windows")]
 pub(crate) mod chat;
+#[cfg(target_os = "windows")]
+pub(crate) mod chat_tools;
 pub mod clipboard_history;
 #[cfg(target_os = "windows")]
 pub(crate) mod codex_auth;

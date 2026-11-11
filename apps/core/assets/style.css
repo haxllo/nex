@@ -1806,8 +1806,8 @@ html.compact-view #power-panel-top {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 52px;
-  padding: 4px 12px 5px 10px;
+  min-height: 56px;
+  padding: 6px 14px 7px 12px;
   border-bottom: 1px solid var(--divider);
 }
 
@@ -1936,7 +1936,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-history-item:hover .chat-delete, .chat-history-item:focus-within .chat-delete, .chat-history-item[aria-selected="true"] .chat-delete { display: grid; }
 .chat-history-empty { padding: 16px 10px; color: var(--text-faint); font-size: 11px; text-align: center; }
 
-.chat-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 12px 22px 8px; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+.chat-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 20px 26px 16px; scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 .chat-empty { max-width: 520px; margin: clamp(32px, 9vh, 86px) auto 32px; text-align: center; }
 .chat-empty-mark { height: 34px; display: flex; justify-content: center; align-items: end; gap: 4px; margin-bottom: 13px; }
 .chat-empty-mark span { width: 5px; border-radius: 4px; background: var(--accent); opacity: 0.76; }
@@ -1951,11 +1951,15 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-suggestions button:active { transform: scale(0.97); }
 .chat-suggestions button span { color: var(--text-faint); }
 
-#chat-messages { display: flex; flex-direction: column; gap: 18px; max-width: 680px; margin: 0 auto; }
+#chat-messages { display: flex; flex-direction: column; gap: 24px; max-width: 660px; margin: 0 auto; }
+#chat-messages > .chat-message.user + .chat-message { margin-top: 2px; }
 .chat-message { width: fit-content; max-width: min(86%, 550px); min-width: 0; color: var(--text); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .chat-message.user { align-self: flex-end; padding: 8px 12px; border-radius: 12px 12px 4px 12px; background: var(--hover-strong); color: var(--text); }
 [data-theme="light"] .chat-message.user { background: rgba(0,0,0,0.055); }
-.chat-message.assistant { align-self: flex-start; max-width: min(95%, 590px); display: flex; flex-direction: column; gap: 10px; }
+.chat-message.assistant { align-self: flex-start; max-width: 96%; display: flex; flex-direction: column; gap: 9px; }
+/* A reply is one thing: cards and prose share a surface so the result does not
+   float away from the sentence that explains it. */
+.chat-message.assistant.has-surface { padding: 11px 13px; border-radius: 4px 12px 12px 12px; background: var(--hover); }
 .chat-message.error { align-self: stretch; max-width: none; padding: 9px 12px; border-radius: 8px; color: var(--text-dim); background: var(--danger-wash); }
 .chat-message-actions { display: flex; gap: 4px; margin-top: -4px; opacity: 0; transition: opacity var(--dur) var(--ease); }
 
@@ -2121,7 +2125,7 @@ html[data-native-material="acrylic"] .chat-history { background: color-mix(in sr
 .chat-context-chip:hover button, .chat-context-chip:focus-within button { opacity: 1; }
 .chat-context-chip button:hover { background: var(--hover); color: var(--text); }
 .chat-message-context { margin-top: 5px; color: var(--text-faint); font-size: 9px; line-height: 13px; }
-.chat-composer-shell { min-height: 40px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; margin: 0 10px 10px; padding: 3px 6px 3px 6px; border: 1px solid var(--border); border-radius: var(--r-xl); background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.chat-composer-shell { min-height: 46px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px; margin: 0 14px 14px; padding: 4px 7px; border: 1px solid var(--border); border-radius: var(--r-xl); background: color-mix(in srgb, var(--bg-opaque) 25%, rgba(255,255,255,0.045)); box-shadow: none; transition: border-color 140ms var(--ease), background 140ms var(--ease), transform 160ms var(--ease-out); }
 /* Composer blur is glass-only: the filter layer grayscales the input text. */
 html[data-native-material="acrylic"] .chat-composer-shell { backdrop-filter: blur(16px) saturate(1.08); }
 [data-theme="light"] .chat-composer-shell { background: color-mix(in srgb, var(--bg-opaque) 28%, rgba(255,255,255,0.16)); }

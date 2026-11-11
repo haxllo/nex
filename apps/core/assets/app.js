@@ -2170,8 +2170,15 @@
         const article = document.createElement("article");
         article.className = "chat-message " + (message.role === "user" ? "user" : "assistant") + (message.error ? " error" : "");
         article.dataset.messageId = message.id;
+        if (Array.isArray(message.actions) && message.actions.length) {
+          const list = document.createElement("div");
+          list.className = "chat-actions";
+          for (const action of message.actions) list.appendChild(renderChatActionCard(action));
+          article.appendChild(list);
+        }
         const content = document.createElement("div"); content.className = "chat-message-content";
         renderChatMarkdown(content, message.content);
+        if (!message.content) content.hidden = true;
         article.appendChild(content);
         if (Array.isArray(message.localContext) && message.localContext.length) {
           const context = document.createElement("div");
@@ -2214,6 +2221,7 @@
             content.replaceChildren(document.createTextNode(""));
           }
           if (message.content.length > chatStreamOffset) {
+            content.hidden = false;
             content.firstChild.appendData(message.content.slice(chatStreamOffset));
             chatStreamOffset = message.content.length;
           }
@@ -2337,6 +2345,57 @@
    * approving the real value, so a card that described the action instead of
    * naming it would be a decoration, not a check.
    */
+  // A completed action, shown where it happened in the transcript.
+  // What a tool is called is not what the user did, so the label is spelled out.
+  const CHAT_ACTION_LABELS = {
+    open_path: "Opened",
+    reveal_path: "Showed in Explorer",
+    open_url: "Opened link",
+    create_folder: "Created folder",
+    create_file: "Created file",
+  };
+
+  function renderChatActionCard(action) {
+    const card = document.createElement("div");
+    card.className = "chat-action" + (action.ok ? " ok" : " failed");
+
+    const glyph = document.createElement("span");
+    glyph.className = "chat-action-glyph";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = action.ok ? "\u2713" : "\u00d7";
+    card.appendChild(glyph);
+
+    const body = document.createElement("div");
+    body.className = "chat-action-body";
+
+    const label = document.createElement("span");
+    label.className = "chat-action-label";
+    label.textContent = action.ok
+      ? (CHAT_ACTION_LABELS[action.tool] || "Done")
+      : "Not done";
+    body.appendChild(label);
+
+    // The summary is the sentence the user needs; the target is the path it
+    // happened to. Keep the path secondary and readable, not code-styled.
+    const summary = (action.summary || "").trim();
+    if (summary) {
+      const text = document.createElement("span");
+      text.className = "chat-action-text";
+      text.textContent = summary;
+      body.appendChild(text);
+    }
+    card.appendChild(body);
+
+    if (action.target && !summary.includes(action.target)) {
+      const target = document.createElement("code");
+      target.className = "chat-action-target";
+      target.textContent = action.target;
+      target.title = action.target;
+      card.appendChild(target);
+    }
+    return card;
+  }
+
   function renderChatPendingAction() {
     const existing = $("chat-pending-action");
     if (existing) existing.remove();
@@ -3351,6 +3410,21 @@
         persistChat();
       }
     }
+    if (state.chatAction && requestMatches) {
+      const last = chatMessages[chatMessages.length - 1];
+      if (last && last.role === "assistant") {
+        const action = state.chatAction;
+        if (!Array.isArray(last.actions)) last.actions = [];
+        last.actions.push({
+          tool: typeof action.tool === "string" ? action.tool : "action",
+          target: typeof action.target === "string" ? action.target : "",
+          ok: action.ok !== false,
+          summary: typeof action.summary === "string" ? action.summary : "",
+        });
+        renderChatMessages();
+      }
+      persistChat();
+    }
     if (state.chatDelta && requestMatches) {
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") {
@@ -3388,7 +3462,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatDone || state.chatActionPending || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

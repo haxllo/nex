@@ -788,6 +788,16 @@ fn stream_openai(
         .build();
     let create_base = create_base_dir();
     let mut loop_state = crate::chat_tools::ToolLoop::new();
+    // Same contract as the ChatGPT-account path: after an action, the next
+    // round's prose starts on its own line instead of under the result.
+    let needs_break = std::cell::Cell::new(false);
+    let mut emit_with_break = |text: &str, status: Option<&str>| {
+        if needs_break.get() && !text.trim().is_empty() {
+            needs_break.set(false);
+            emit("\n\n", None);
+        }
+        emit(text, status);
+    };
     loop {
         let body = json!({
             "model": config.model,
@@ -795,7 +805,7 @@ fn stream_openai(
             "stream": true,
             "tools": crate::chat_tools::tool_declarations(),
         });
-        let turn = stream_openai_once(config, &agent, &body, id, emit)?;
+        let turn = stream_openai_once(config, &agent, &body, id, &mut emit_with_break)?;
         if turn.calls.is_empty() {
             return Ok(());
         }
@@ -838,14 +848,20 @@ fn stream_openai(
                     if confirmed {
                         let outcome = crate::chat_tools::run(&tool, true, &create_base);
                         // Show the user what happened, not just the model.
-                        emit(&outcome.summary, None);
+                        push_action_outcome(sink, request_id, &outcome);
+                        needs_break.set(true);
                         messages.push(json!({"role":"user","content": format!(
                             "Action result: {}", outcome.summary)}));
                     } else {
-                        emit(
-                            &format!("I did not run {}; you declined it.", tool.name()),
-                            None,
+                        let outcome = crate::chat_tools::ToolOutcome::failure(
+                            tool.name(),
+                            tool.target(),
+                            "the user declined this; do not retry it",
                         );
+                        // The card carries the refusal; prose here would be the
+                        // same sentence twice in two different places.
+                        push_action_outcome(sink, request_id, &outcome);
+                        needs_break.set(true);
                         messages.push(json!({"role":"user","content": format!(
                             "The user did not approve {}. Do not retry it; tell them it was not done.",
                             tool.name())}));
@@ -853,7 +869,8 @@ fn stream_openai(
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
-                    emit(&outcome.summary, None);
+                    push_action_outcome(sink, request_id, &outcome);
+                    needs_break.set(true);
                     messages.push(json!({"role":"user","content": format!(
                         "Action result: {}", outcome.summary)}));
                 }
@@ -1084,12 +1101,28 @@ const CANCELLED: &str = "\u{0}cancelled";
 /// What happened to an action the model asked for, in the shape the model can
 /// read back. `/responses` expects each result as a `function_call_output` item
 /// keyed by the `call_id` the model gave.
-/// Emit an action outcome into the stream without running into the text the
-/// model already streamed. Without the break the two readings came out joined:
-/// `Created folder C:\...\fossa6Created C:\...\fossa6`.
-fn emit_after_action(emit: &mut impl FnMut(&str, Option<&str>), summary: &str) {
-    emit("\n\n", None);
-    emit(summary, None);
+/// Publish the outcome as its own event so the transcript can render a card for
+/// it instead of a line of text. The text stream is one string appended to one
+/// assistant message, so a run of actions and the model's own words arrived as a
+/// single block with no structure the UI could use.
+fn push_action_outcome(
+    sink: &ChatUpdateSink,
+    request_id: Option<&str>,
+    outcome: &crate::chat_tools::ToolOutcome,
+) {
+    push_chat_update(
+        sink,
+        request_update(
+            request_id,
+            "chatAction",
+            json!({
+                "tool": outcome.tool,
+                "target": outcome.target,
+                "ok": outcome.ok,
+                "summary": outcome.summary,
+            }),
+        ),
+    );
 }
 
 fn action_output_items(
@@ -1138,6 +1171,16 @@ fn stream_chatgpt_native(
     let create_base = create_base_dir();
     let mut input_items = chatgpt_input_items(request);
     let mut loop_state = crate::chat_tools::ToolLoop::new();
+    // Set once an action has run, so the next round's first text does not open
+    // immediately under the last result line.
+    let needs_break = std::cell::Cell::new(false);
+    let mut emit_with_break = |text: &str, status: Option<&str>| {
+        if needs_break.get() && !text.trim().is_empty() {
+            needs_break.set(false);
+            emit("\n\n", None);
+        }
+        emit(text, status);
+    };
 
     for round in 0..=crate::chat_tools::MAX_TOOL_ROUNDS {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
@@ -1149,7 +1192,7 @@ fn stream_chatgpt_native(
             &agent,
             &input_items,
             id,
-            emit,
+            &mut emit_with_break,
             started,
             round,
         ) {
@@ -1206,7 +1249,7 @@ fn stream_chatgpt_native(
                         "",
                         &error,
                     );
-                    emit(&format!("I can't do that: {error}."), None);
+                    push_action_outcome(sink, request_id, &outcome);
                     outcomes.push((call_id, call_name, call_args, outcome));
                     continue;
                 }
@@ -1226,21 +1269,21 @@ fn stream_chatgpt_native(
                             tool.target(),
                             "the user declined this; do not retry it",
                         );
-                        emit(
-                            &format!("I did not run {}; you declined it.", tool.name()),
-                            None,
-                        );
+                        push_action_outcome(sink, request_id, &outcome);
+                        needs_break.set(true);
                         outcomes.push((call_id, call_name, call_args, outcome));
                         continue;
                     }
                     let outcome = crate::chat_tools::run(&tool, true, &create_base);
-                    emit_after_action(emit, &outcome.summary);
+                    push_action_outcome(sink, request_id, &outcome);
+                    needs_break.set(true);
                     ran_any = true;
                     outcomes.push((call_id, call_name, call_args, outcome));
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
-                    emit_after_action(emit, &outcome.summary);
+                    push_action_outcome(sink, request_id, &outcome);
+                    needs_break.set(true);
                     ran_any = true;
                     outcomes.push((call_id, call_name, call_args, outcome));
                 }
@@ -1996,6 +2039,61 @@ mod tests {
     fn the_prompt_forbids_guessing_a_home_path() {
         assert!(SYSTEM_PROMPT.contains("never invent one"));
         assert!(SYSTEM_PROMPT.contains("PC information in this request"));
+    }
+
+    #[test]
+    fn an_action_outcome_is_published_as_its_own_event() {
+        // The transcript used to receive outcomes as plain text appended to one
+        // assistant message, so a run of actions and the model's prose arrived
+        // as a single undifferentiated block. The card needs structure.
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let sink: ChatUpdateSink = Arc::new(Mutex::new(Box::new(move |update: Value| {
+            sink_seen.lock().unwrap().push(update);
+        })));
+        let outcome = crate::chat_tools::ToolOutcome {
+            tool: "create_file".into(),
+            target: "C:\\Users\\x\\Desktop\\hello.txt".into(),
+            ok: true,
+            summary: "Created file hello.txt".into(),
+        };
+
+        push_action_outcome(&sink, Some("req-1"), &outcome);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let update = &seen[0];
+        assert_eq!(update["requestId"], "req-1");
+        let action = &update["chatAction"];
+        assert_eq!(action["tool"], "create_file");
+        assert_eq!(action["ok"], true);
+        assert_eq!(action["summary"], "Created file hello.txt");
+        // The target travels separately so the card can show the path the user
+        // can act on, instead of it being buried inside a sentence.
+        assert_eq!(action["target"], "C:\\Users\\x\\Desktop\\hello.txt");
+    }
+
+    #[test]
+    fn a_failed_action_is_published_as_failed() {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let sink: ChatUpdateSink = Arc::new(Mutex::new(Box::new(move |update: Value| {
+            sink_seen.lock().unwrap().push(update);
+        })));
+        let outcome = crate::chat_tools::ToolOutcome::failure(
+            "open_path",
+            "C:\\missing",
+            "path does not exist",
+        );
+
+        push_action_outcome(&sink, None, &outcome);
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0]["chatAction"]["ok"], false);
+        assert!(seen[0]["chatAction"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"));
     }
 
     #[test]

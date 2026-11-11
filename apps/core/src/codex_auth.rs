@@ -3,6 +3,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -34,7 +35,7 @@ pub(crate) struct PendingLogin {
     deadline: Instant,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct StoredTokens {
     id_token: String,
     access_token: String,
@@ -42,6 +43,25 @@ struct StoredTokens {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
 }
+
+/// Never let a credential reach a log.
+///
+/// `nex.log` persists across sessions and is what users are asked to attach to
+/// a bug report, so a single `{:?}` on this type would write three live tokens
+/// into a file that then gets shared. Nothing formats `StoredTokens` today;
+/// this exists so that stays true by construction rather than by discipline.
+impl fmt::Debug for StoredTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredTokens")
+            .field("id_token", &REDACTED)
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("account_id", &self.account_id)
+            .finish()
+    }
+}
+
+const REDACTED: &str = "<redacted>";
 
 /// Encrypted Nex-only token store.
 fn nex_auth_file() -> PathBuf {
@@ -503,6 +523,31 @@ mod tests {
         let header = b64url(br#"{"alg":"none"}"#);
         let body = b64url(&serde_json::to_vec(payload).unwrap());
         format!("{header}.{body}.sig")
+    }
+
+    /// The whole point of the manual impl: a stray `{:?}` must not write live
+    /// credentials into nex.log, which users attach to bug reports.
+    #[test]
+    fn stored_tokens_debug_never_reveals_a_credential() {
+        let tokens = StoredTokens {
+            id_token: "SECRET-ID-TOKEN".to_string(),
+            access_token: "SECRET-ACCESS-TOKEN".to_string(),
+            refresh_token: "SECRET-REFRESH-TOKEN".to_string(),
+            account_id: Some("acct-123".to_string()),
+        };
+        let rendered = format!("{tokens:?}");
+        for secret in [
+            "SECRET-ID-TOKEN",
+            "SECRET-ACCESS-TOKEN",
+            "SECRET-REFRESH-TOKEN",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug output leaked {secret}: {rendered}"
+            );
+        }
+        // The account id is not a credential and stays readable for triage.
+        assert!(rendered.contains("acct-123"), "lost account_id: {rendered}");
     }
 
     #[test]

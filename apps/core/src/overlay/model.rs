@@ -127,6 +127,8 @@ pub enum OverlayEvent {
     ChatConnect(String),
     ChatDisconnect,
     ChatCancel(String),
+    /// The user's answer to a suspended chat action: (request_id, accepted).
+    ChatConfirmAction(String, bool),
     /// Open a URL in the default browser (chat links; http/https only).
     OpenExternal(String),
     /// Media transport controls from the media widget.

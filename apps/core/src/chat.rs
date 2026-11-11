@@ -3,7 +3,9 @@
 //! Provider credentials and network/process access stay in Rust. The
 //! WebView receives only public connection settings and streamed text.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
+#[cfg(test)]
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +19,22 @@ static ACTIVE_REQUEST: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_CLIENT_REQUEST_ID: Mutex<Option<String>> = Mutex::new(None);
 const HISTORY_CONTEXT_BUDGET_CHARS: usize = 24_000;
 type ChatUpdateSink = Arc<Mutex<Box<dyn FnMut(Value) + Send>>>;
+
+/// How long a suspended action waits for the user before being discarded.
+///
+/// Deliberately generous: the user may have walked away, and discarding a
+/// pending action is safe, whereas running one after they forgot about it is
+/// not. On timeout nothing runs.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The user's answer to a suspended action, delivered to the waiting worker.
+type ConfirmReply = std::sync::mpsc::Sender<bool>;
+
+/// One suspended action at a time, keyed by request id.
+///
+/// In-flight state rather than a config value: a second request must not be
+/// able to confirm the first request's action, so the key is checked on reply.
+static PENDING_CONFIRM: Mutex<Option<(u64, ConfirmReply)>> = Mutex::new(None);
 
 fn push_chat_update(sink: &ChatUpdateSink, update: Value) {
     let mut push = sink
@@ -429,6 +447,9 @@ pub(crate) fn cancel(request_id: &str) -> bool {
     if !cancel_matches(request_id, active_request_id.as_deref()) {
         return false;
     }
+    // Wake a worker suspended on a confirmation before invalidating the id, so
+    // it stops waiting and discards the action instead of running it later.
+    reject_pending_confirmation();
     let id = ACTIVE_REQUEST.load(Ordering::SeqCst);
     ACTIVE_REQUEST.store(id.wrapping_add(1), Ordering::SeqCst);
     *active_request_id = None;
@@ -442,6 +463,84 @@ fn request_id_from_raw(raw: &str) -> Option<String> {
         .as_str()?
         .to_string();
     (!id.is_empty() && id.chars().count() <= 128).then_some(id)
+}
+
+/// The user answered a suspended action.
+///
+/// Returns false when there is nothing pending or the id does not match, so a
+/// stale UI cannot confirm a different request's action.
+pub(crate) fn confirm_action(request_id: &str, accept: bool) -> bool {
+    let mut pending = PENDING_CONFIRM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((pending_id, _)) = pending.as_ref() else {
+        return false;
+    };
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != *pending_id {
+        return false;
+    }
+    if !cancel_matches(request_id, ACTIVE_CLIENT_REQUEST_ID.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_deref())
+    {
+        return false;
+    }
+    let Some((_, sender)) = pending.take() else {
+        return false;
+    };
+    sender.send(accept).is_ok()
+}
+
+/// Wake any suspended worker with a rejection so it discards its action.
+///
+/// Used when a request is cancelled or replaced. Sending rather than dropping
+/// keeps the worker's wait finite and makes the rejection explicit.
+fn reject_pending_confirmation() {
+    let mut pending = PENDING_CONFIRM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, sender)) = pending.take() {
+        let _ = sender.send(false);
+    }
+}
+
+/// Block until the user answers, the request is superseded, or the timeout
+/// elapses. Every non-confirm path returns false, so the caller cannot run the
+/// action by accident.
+fn await_confirmation(id: u64, request_id: Option<&str>, sink: &ChatUpdateSink, tool: &crate::chat_tools::ChatTool) -> bool {
+    let (sender, receiver) = std::sync::mpsc::channel::<bool>();
+    {
+        let mut pending = PENDING_CONFIRM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A previous suspension is superseded, never left confirmable.
+        if let Some((_, previous)) = pending.replace((id, sender)) {
+            let _ = previous.send(false);
+        }
+    }
+    push_chat_update(
+        sink,
+        request_update(
+            request_id,
+            "chatActionPending",
+            json!(crate::chat_tools::PendingAction::of(tool)),
+        ),
+    );
+    let accepted = matches!(
+        receiver.recv_timeout(CONFIRM_TIMEOUT),
+        Ok(true)
+    );
+    // Only clear the slot if it is still ours; a newer request may have taken it.
+    {
+        let mut pending = PENDING_CONFIRM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.as_ref().is_some_and(|(pending_id, _)| *pending_id == id) {
+            *pending = None;
+        }
+    }
+    // Superseded requests must not run their action even if they were approved.
+    accepted && ACTIVE_REQUEST.load(Ordering::SeqCst) == id
 }
 
 fn request_update(request_id: Option<&str>, key: &str, value: Value) -> Value {
@@ -543,10 +642,14 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
                 clear_active_request(id, request_id.as_deref());
                 return;
             }
+            // Cloned so the loop can also push action updates while this
+            // closure is alive. Push takes the sink lock, so a nested push
+            // would deadlock; cloning the Arc keeps the borrows disjoint.
+            let emit_sink = Arc::clone(&worker_push);
             let mut emit = |text: &str, status: Option<&str>| {
                 if ACTIVE_REQUEST.load(Ordering::SeqCst) == id {
                     push_chat_update(
-                        &worker_push,
+                        &emit_sink,
                         request_update(
                             request_id.as_deref(),
                             "chatDelta",
@@ -556,7 +659,9 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
                 }
             };
             let result = match config.provider.as_str() {
-                "openai-compatible" => stream_openai(&config, &request, id, &mut emit),
+                "openai-compatible" => {
+                    stream_openai(&config, &request, id, &mut emit, &worker_push, request_id.as_deref())
+                }
                 "codex" => stream_chatgpt(&config, &request, id, &mut emit),
                 _ => Err("Choose a chat provider in settings.".into()),
             };
@@ -592,11 +697,58 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
     }
 }
 
+/// One streamed reply: the assistant text, plus any tool calls it asked for.
+///
+/// Both wire formats (OpenAI `tool_calls` deltas and the ChatGPT responses
+/// event stream) collapse into this, so the loop above them is single.
+#[derive(Debug, Default)]
+struct StreamedTurn {
+    text: String,
+    calls: Vec<crate::chat_tools::RawToolCall>,
+}
+
+/// Accumulates `tool_calls` deltas, which arrive fragmented by index.
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    by_index: std::collections::BTreeMap<i64, (String, String)>,
+}
+
+impl ToolCallAccumulator {
+    fn absorb(&mut self, call: &Value) {
+        let index = call.get("index").and_then(Value::as_i64).unwrap_or(0);
+        let entry = self.by_index.entry(index).or_default();
+        if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+            entry.0.push_str(name);
+        }
+        if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str) {
+            entry.1.push_str(args);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.by_index.is_empty()
+    }
+
+    fn finish(self) -> Vec<crate::chat_tools::RawToolCall> {
+        self.by_index
+            .into_values()
+            .filter(|(name, _)| !name.trim().is_empty())
+            .map(|(name, arguments)| crate::chat_tools::RawToolCall {
+                name,
+                arguments: serde_json::from_str(&arguments)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+            .collect()
+    }
+}
+
 fn stream_openai(
     config: &StoredConfig,
     request: &SendRequest,
     id: u64,
     emit: &mut impl FnMut(&str, Option<&str>),
+    sink: &ChatUpdateSink,
+    request_id: Option<&str>,
 ) -> Result<(), String> {
     let history = bounded_history(&request.history, 24, HISTORY_CONTEXT_BUDGET_CHARS);
     let mut messages = Vec::with_capacity(history.len() + 2);
@@ -606,21 +758,113 @@ fn stream_openai(
         messages.push(json!({"role":turn.role,"content":turn.content}));
     }
     messages.push(json!({"role":"user","content":message_with_local_context(request)}));
-    let body = json!({"model":config.model,"messages":messages,"stream":true});
-    let endpoint = format!("{}/chat/completions", config.base_url);
+
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(1))
         .build();
+    let create_base = create_base_dir();
+    let mut loop_state = crate::chat_tools::ToolLoop::new();
+    loop {
+        let body = json!({
+            "model": config.model,
+            "messages": messages,
+            "stream": true,
+            "tools": crate::chat_tools::tool_declarations(),
+        });
+        let turn = stream_openai_once(config, &agent, &body, id, emit)?;
+        if turn.calls.is_empty() {
+            return Ok(());
+        }
+        // Tool calls are only meaningful with the text that introduced them.
+        if !turn.text.is_empty() {
+            messages.push(json!({"role":"assistant","content":turn.text}));
+        }
+        for raw in turn.calls {
+            let name = raw.name.clone();
+            let arguments = raw.arguments.to_string();
+            let tool = match raw.clone().validate() {
+                Ok(tool) => tool,
+                Err(error) => {
+                    // Feed the refusal back instead of aborting: the model gets
+                    // one chance to correct a bad call before the turn ends.
+                    messages.push(json!({
+                        "role":"assistant",
+                        "content":null,
+                        "tool_calls":[{
+                            "id": format!("call_{name}"),
+                            "type":"function",
+                            "function": {"name": name, "arguments": arguments}
+                        }]
+                    }));
+                    messages.push(json!({
+                        "role":"tool",
+                        "tool_call_id": format!("call_{name}"),
+                        "content": error.to_string()
+                    }));
+                    continue;
+                }
+            };
+            match loop_state.on_tool_call(tool.clone()) {
+                crate::chat_tools::LoopStep::Stop { reason } => {
+                    emit(&format!("Stopping here: {reason}."), None);
+                    return Ok(());
+                }
+                crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
+                    let confirmed = await_confirmation(id, request_id, sink, &tool);
+                    if confirmed {
+                        let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                        messages.push(json!({"role":"user","content": format!(
+                            "Action result: {}", outcome.summary)}));
+                    } else {
+                        messages.push(json!({"role":"user","content": format!(
+                            "The user did not approve {}. Do not retry it; tell them it was not done.",
+                            tool.name())}));
+                    }
+                }
+                crate::chat_tools::LoopStep::RunTool { tool } => {
+                    let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    messages.push(json!({"role":"user","content": format!(
+                        "Action result: {}", outcome.summary)}));
+                }
+            }
+        }
+    }
+}
+
+/// Where created files and folders go.
+///
+/// The user's configured create directory, or the Desktop. Never a path the
+/// model supplied: a created name is one component joined to this base, so it
+/// cannot walk out even if validation were bypassed.
+fn create_base_dir() -> std::path::PathBuf {
+    let configured = crate::config::load(None).ok().map(|config| config.default_create_dir);
+    match configured {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::env::var("USERPROFILE")
+            .map(|profile| std::path::PathBuf::from(profile).join("Desktop"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    }
+}
+
+/// One request/response against the provider.
+fn stream_openai_once(
+    config: &StoredConfig,
+    agent: &ureq::Agent,
+    body: &Value,
+    id: u64,
+    emit: &mut impl FnMut(&str, Option<&str>),
+) -> Result<StreamedTurn, String> {
+    let endpoint = format!("{}/chat/completions", config.base_url);
     if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
-        return Ok(());
+        return Ok(StreamedTurn::default());
     }
     let response = match agent
         .post(&endpoint)
         .set("Authorization", &format!("Bearer {}", config.api_key))
         .set("Content-Type", "application/json")
         .set("Accept", "text/event-stream")
-        .send_json(body)
+        .send_json(body.clone())
     {
         Ok(response) => response,
         Err(ureq::Error::Status(code, response)) => {
@@ -638,9 +882,11 @@ fn stream_openai(
     let mut reader = BufReader::new(response.into_reader());
     let mut pending_line = String::new();
     let mut finished = false;
+    let mut turn = StreamedTurn::default();
+    let mut calls = ToolCallAccumulator::default();
     loop {
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
-            return Ok(());
+            return Ok(turn);
         }
         let line = match read_stream_line(&mut reader, &mut pending_line) {
             Ok(Some(line)) => line,
@@ -670,17 +916,28 @@ fn stream_openai(
             .pointer("/choices/0/delta/content")
             .and_then(Value::as_str)
         {
+            turn.text.push_str(message);
             emit(message, None);
+        }
+        if let Some(calls_delta) = event
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+        {
+            for call in calls_delta {
+                calls.absorb(call);
+            }
         }
         if let Some(error) = event.pointer("/error/message").and_then(Value::as_str) {
             return Err(error.to_string());
         }
     }
-    if finished {
-        Ok(())
-    } else {
-        Err("The provider connection ended before the response was complete.".into())
+    if !finished {
+        return Err("The provider connection ended before the response was complete.".into());
     }
+    if !calls.is_empty() {
+        turn.calls = calls.finish();
+    }
+    Ok(turn)
 }
 
 fn stream_chatgpt(

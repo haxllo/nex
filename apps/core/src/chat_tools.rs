@@ -153,7 +153,7 @@ pub(crate) fn needs_confirmation(annotations: Annotations) -> bool {
 }
 
 /// A tool call exactly as the model produced it. Untrusted.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RawToolCall {
     pub name: String,
     #[serde(default)]
@@ -314,6 +314,100 @@ fn validate_name(tool: &'static str, name: &str) -> Result<(), ToolError> {
 /// Kept next to the enum so a new tool cannot be added without appearing
 /// here — the test below fails if the two drift apart.
 pub(crate) const MAX_TOOL_ROUNDS: usize = 4;
+
+/// Where the tool loop is, as a value rather than as control flow.
+///
+/// The stream workers are unavoidably imperative, but the decision they make
+/// at each step is not. Keeping that decision here means the confirm/resume
+/// handshake can be tested exactly, without a provider, a thread or a channel
+/// — which is the only way to be confident that a suspended mutating call
+/// cannot resume by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoopStep {
+    /// Run this already-validated tool, then send its outcome back.
+    RunTool { tool: ChatTool },
+    /// Stop and wait for the user. Nothing runs until `resume_after_confirm`.
+    AwaitConfirmation { tool: ChatTool },
+    /// Give up on tools and answer in words; the round bound was hit.
+    Stop { reason: String },
+}
+
+/// The tool loop's state. Holds no tool result of its own — the transcript is
+/// sent back to the model intact, so there is one source of truth.
+#[derive(Debug, Clone)]
+pub(crate) struct ToolLoop {
+    rounds: usize,
+}
+
+impl ToolLoop {
+    pub(crate) fn new() -> Self {
+        Self { rounds: 0 }
+    }
+
+    pub(crate) fn rounds(&self) -> usize {
+        self.rounds
+    }
+
+    /// The user clicked Allow. Resuming yields the run, never a second wait.
+    pub(crate) fn resume_after_confirm(&mut self, tool: ChatTool) -> LoopStep {
+        LoopStep::RunTool { tool }
+    }
+
+    /// Decide what to do with a tool call the model just made.
+    ///
+    /// Validation happens outside this type, so anything arriving here has
+    /// already had its arguments checked. What is decided here is only whether
+    /// the call runs now, waits for the user, or is refused for running on too
+    /// long.
+    pub(crate) fn on_tool_call(&mut self, tool: ChatTool) -> LoopStep {
+        if self.rounds >= MAX_TOOL_ROUNDS {
+            return LoopStep::Stop {
+                reason: format!(
+                    "stopped after {MAX_TOOL_ROUNDS} action rounds"
+                ),
+            };
+        }
+        self.rounds += 1;
+        if tool.needs_confirmation() {
+            LoopStep::AwaitConfirmation { tool }
+        } else {
+            LoopStep::RunTool { tool }
+        }
+    }
+
+}
+
+/// What the user was shown when a call suspended, in the order the UI renders
+/// it. Kept next to the loop because a pending card that omits the target is
+/// the difference between a real check and a decorative one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PendingAction {
+    pub tool: String,
+    pub target: String,
+    pub description: String,
+}
+
+impl PendingAction {
+    pub(crate) fn of(tool: &ChatTool) -> Self {
+        let verb = match tool {
+            ChatTool::OpenPath { .. } => "Open",
+            ChatTool::RevealPath { .. } => "Show in File Explorer",
+            ChatTool::OpenUrl { .. } => "Open link",
+            ChatTool::CreateFolder { .. } => "Create folder",
+            ChatTool::CreateFile { .. } => "Create file",
+        };
+        let effect = if tool.needs_confirmation() {
+            "This will change something on your PC."
+        } else {
+            "This changes nothing on your PC."
+        };
+        Self {
+            tool: tool.name().to_string(),
+            target: tool.target().to_string(),
+            description: format!("{verb}. {effect}"),
+        }
+    }
+}
 
 pub(crate) fn tool_declarations() -> serde_json::Value {
     serde_json::json!([
@@ -690,6 +784,69 @@ mod tests {
         .validate()
         .unwrap_err();
         assert!(matches!(err, ToolError::MissingPath { .. }));
+    }
+
+    // --- loop state ---
+
+    #[test]
+    fn a_read_only_call_runs_without_waiting() {
+        let mut loop_state = ToolLoop::new();
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        match loop_state.on_tool_call(ChatTool::OpenPath { path: exe }) {
+            LoopStep::RunTool { tool } => assert_eq!(tool.name(), "open_path"),
+            other => panic!("expected RunTool, got {other:?}"),
+        }
+        assert_eq!(loop_state.rounds(), 1);
+    }
+
+    /// The property the whole design rests on: a mutating call must wait, and
+    /// waiting must be a distinct state rather than a flag someone could miss.
+    #[test]
+    fn a_mutating_call_awaits_confirmation_and_does_not_advance() {
+        let mut loop_state = ToolLoop::new();
+        let tool = ChatTool::CreateFolder {
+            name: "Reports".into(),
+        };
+        let step = loop_state.on_tool_call(tool.clone());
+        assert_eq!(step, LoopStep::AwaitConfirmation { tool: tool.clone() });
+
+        // Resuming yields a run, never a second wait or an implicit success.
+        assert_eq!(
+            loop_state.resume_after_confirm(tool.clone()),
+            LoopStep::RunTool { tool }
+        );
+    }
+
+    #[test]
+    fn the_round_bound_stops_a_repeating_model() {
+        let mut loop_state = ToolLoop::new();
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        for _ in 0..MAX_TOOL_ROUNDS {
+            assert!(matches!(
+                loop_state.on_tool_call(ChatTool::OpenPath { path: exe.clone() }),
+                LoopStep::RunTool { .. }
+            ));
+        }
+        // One past the bound ends the turn instead of looping forever.
+        match loop_state.on_tool_call(ChatTool::OpenPath { path: exe }) {
+            LoopStep::Stop { reason } => assert!(reason.contains("action rounds")),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_action_shows_the_exact_target() {
+        let tool = ChatTool::CreateFile {
+            name: "quarterly report.docx".into(),
+        };
+        let pending = PendingAction::of(&tool);
+        // The user approves this string, so it must be the real value — not a
+        // paraphrase of it.
+        assert_eq!(pending.target, "quarterly report.docx");
+        assert_eq!(pending.tool, "create_file");
+        // The description states the consequence separately from the target, so
+        // the card can show "this will change something" next to the exact path.
+        assert!(pending.description.contains("change something"));
     }
 
     // --- execution ---

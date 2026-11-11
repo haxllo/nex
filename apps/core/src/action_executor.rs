@@ -312,7 +312,7 @@ pub fn resolve_shell_appsfolder_path(value: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn known_folder_path(folder: &windows_sys::core::GUID) -> Option<String> {
+pub(crate) fn known_folder_path(folder: &windows_sys::core::GUID) -> Option<String> {
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
 

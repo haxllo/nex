@@ -2176,6 +2176,9 @@
   function renderChatMessages(streamOnly = false) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
+    // The empty state is centred in the panel rather than parked under the
+    // header, so a new user's first screen is balanced instead of top-heavy.
+    chatScroll.classList.toggle("is-empty", chatMessages.length === 0);
     $("chat-copy-button").disabled = chatMessages.length === 0;
     $("chat-new-button").disabled = chatMessages.length === 0;
     if (!streamOnly) {

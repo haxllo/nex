@@ -258,18 +258,29 @@ what already exists first (`list_project_labels`, `list_milestones`,
 
 ### GitHub issues mirror Linear — keep both in step
 
-Every Linear issue in P-CIQ-2 has a GitHub issue with the same title, and the
-two are **not** linked automatically. GitHub `#126` is not Linear `CIQ-126`;
-the numbers drift apart, so never assume they match. Title is the join key.
+Every Linear issue in P-CIQ-2 has a GitHub issue with the same title. GitHub
+`#126` is not Linear `CIQ-126`; the numbers drift apart, so never assume they
+match. Title is the join key.
 
-In practice, `#NNN` in a PR body closes the *GitHub* issue and does nothing to
-Linear. Handle both:
+**Creation is automatic.** A Linear integration creates the GitHub issue from
+the Linear one, usually within seconds and with the full description. Do **not**
+run `gh issue create` for a Linear issue — that produces a duplicate. Create the
+Linear issue and wait (or re-list `gh issue list --state open`) to confirm the
+GitHub side appeared.
+
+**Closing is manual.** Nothing closes the GitHub issue for you, and `#NNN` in a
+PR body closes the *GitHub* issue while doing nothing to Linear. Handle both:
 
 1. Put the GH reference in the PR body (`Closes #128`) so GitHub closes itself.
 2. Put the Linear id in the PR title/body (`CIQ-127`) so the branch and commit
    pass CI, and set the Linear issue to In Review.
 3. After merge, close both: the Linear issue to Done, and the GitHub issue
    with `gh issue close <n> --reason completed --comment "Fixed in #<pr> (<commit>)"`.
+
+Caveat on step 1: a plain `Related to #NNN` reference is **also** auto-closed by
+a merged PR (observed on #120), so a partial PR can close a GitHub issue you
+meant to leave open. Prefer naming the number in prose, not as a `Related to`
+keyword, when the work is partial.
 
 When closing a batch, match by title — do not trust the number. Audit drift
 with `gh issue list --state open` against `list_issues` on P-CIQ-2; a burst of

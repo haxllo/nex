@@ -4106,6 +4106,10 @@
     // The artwork is the record's centre label rather than a separate tile, so
     // every track spins and a session without art still shows a record. Both
     // variants share the label box, so switching between them never reflows.
+    //
+    // The platter ships `hidden` in the markup so it cannot flash before the
+    // first media push; it has to be un-hidden here, on every push.
+    mediaPlatter.classList.remove("hidden");
     if (m.art) {
       if (mediaDiscArt.getAttribute("src") !== m.art) mediaDiscArt.setAttribute("src", m.art);
       mediaDiscArt.classList.remove("hidden");

@@ -190,6 +190,10 @@ struct LiveSession {
     session: Session,
     playing: bool,
     changing: bool,
+    /// Unix millis of the session's last timeline update, 0 when unreadable.
+    /// Used only to order genuinely-playing sessions against each other, so
+    /// the one the user just started wins a tie.
+    last_updated_ms: u64,
 }
 
 /// All playing/paused/changing sessions that answer. `changing`
@@ -220,11 +224,20 @@ fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
                     .SourceAppUserModelId()
                     .map(|id| id.to_string())
                     .unwrap_or_default();
+                // Recency signal for tie-breaking between playing sessions.
+                // Cheap enough to read per session; 0 when the source does not
+                // expose a timeline, which sorts it behind any real stamp.
+                let last_updated_ms = session
+                    .GetTimelineProperties()
+                    .and_then(|t| t.LastUpdatedTime())
+                    .map(datetime_to_unix_millis)
+                    .unwrap_or(0);
                 out.push(LiveSession {
                     app_id,
                     session,
                     playing: status == S::Playing,
                     changing: status == S::Changing,
+                    last_updated_ms,
                 });
             }
         }
@@ -243,9 +256,12 @@ fn playback_status_usable(session: &Session) -> bool {
         .is_ok()
 }
 
-/// Rank a candidate session: lower is better. Effectively-playing beats
-/// paused (a paused corpse holds stale metadata forever); Spotify keeps
-/// its historical preference within each tier.
+/// Rank a candidate session: lower is better.
+///
+/// Being in the playing tier dominates; Spotify is only a tie-break *within*
+/// a tier. The previous form ranked playing-Spotify above playing-anything-
+/// else, which meant a playing browser session could never take over while
+/// Spotify played — the view stuck to Spotify no matter what the user started.
 fn session_rank(is_spotify: bool, playing: bool) -> u8 {
     match (playing, is_spotify) {
         (true, true) => 0,
@@ -259,6 +275,15 @@ fn session_rank(is_spotify: bool, playing: bool) -> u8 {
 /// background-tab stall. Below this, buffering flicker is tolerated so
 /// the view doesn't flap on every micro-stall.
 const STUCK_GRACE_MS: u64 = 10_000;
+
+/// How much newer another playing session's timeline must be before it takes
+/// the view over from a session that is still playing.
+///
+/// Both sessions may be advancing (a browser video keeps ticking while a track
+/// plays), so a bare "newer wins" test would hand the view back and forth on
+/// sub-second differences. One snapshot interval of slack is enough to
+/// distinguish "I just started this" from "both are still running".
+const SWITCH_STAMP_SLACK_MS: u64 = 1_500;
 /// Position advance counting as real movement (dust/granularity ignored).
 const ADVANCE_EPS_SECS: f64 = 0.5;
 
@@ -330,6 +355,29 @@ const PICK_HOLD_MS: u64 = 3000;
 static LAST_GOOD: OnceLock<Mutex<Option<(String, bool, MediaState, u64)>>> =
     OnceLock::new();
 
+/// Whether a playing session should take the view over from the sticky pick.
+///
+/// `sticky_playing` is the current pick's playback state and the stamps are
+/// each session's timeline `LastUpdatedTime` (0 meaning unreadable). Pure so
+/// the switch policy is testable without COM.
+fn should_take_over(sticky_playing: bool, sticky_stamp: u64, challenger_stamp: u64) -> bool {
+    // A paused/stuck sticky pick never defends itself; any playing session wins.
+    if !sticky_playing {
+        return true;
+    }
+    if challenger_stamp == 0 {
+        // No timeline to compare. Do not switch on absence of evidence.
+        return false;
+    }
+    if sticky_stamp == 0 {
+        // The sticky pick has no stamp and the challenger does, so treat the
+        // challenger as newer. Otherwise two stamp-less sessions would be
+        // permanently unswappable.
+        return true;
+    }
+    challenger_stamp > sticky_stamp.saturating_add(SWITCH_STAMP_SLACK_MS)
+}
+
 /// Pure hold decision, unit-tested: hold a playing state through a
 /// switch to a non-playing pick, unless pinned or the grace expired.
 /// Takeovers by genuinely playing sessions are never held.
@@ -370,16 +418,35 @@ fn pick_from_list(manager: &SessionManager, live: &[LiveSession]) -> Option<(Ses
         }
     }
     let now_ms = unix_millis();
-    // Owned candidates: (session, app_id, effectively playing, spotify).
-    let cands: Vec<(Session, String, bool, bool)> = live
+    // Owned candidates: (session, app_id, effectively playing, spotify,
+    // last_updated_ms). Recency is the final tie-break so that when two
+    // sessions are both genuinely playing, the one the user just started wins.
+    let cands: Vec<(Session, String, bool, bool, u64)> = live
         .iter()
         .map(|s| {
             let playing_like = s.playing || s.changing;
             let eff = playing_like && effectively_playing(&s.app_id, &s.session, now_ms);
             let spotify = s.app_id.to_ascii_lowercase().contains("spotify");
-            (s.session.clone(), s.app_id.clone(), eff, spotify)
+            (
+                s.session.clone(),
+                s.app_id.clone(),
+                eff,
+                spotify,
+                s.last_updated_ms,
+            )
         })
         .collect();
+    // Ordering for two playing candidates: most recent timeline wins, then
+    // Spotify, then app id for stability. `u64::MAX - stamp` so the normal
+    // ascending sort puts the newest first; a 0 stamp (no timeline) sorts
+    // last rather than as "infinitely old but still competing".
+    let recent_key = |stamp: u64| if stamp == 0 { u64::MAX } else { u64::MAX - stamp };
+    let best_playing = |pool: &[(Session, String, bool, bool, u64)]| {
+        pool.iter()
+            .filter(|c| c.2)
+            .min_by_key(|c| (recent_key(c.4), c.3 as u8, c.1.clone()))
+            .map(|c| c.1.clone())
+    };
     // Sticky current: never flap away from useful playback on a
     // 1-snapshot flicker; follow real playback when paused/stuck.
     if let Some(last) = LAST_PICK
@@ -390,23 +457,42 @@ fn pick_from_list(manager: &SessionManager, live: &[LiveSession]) -> Option<(Ses
     {
         if let Some(cur) = cands.iter().find(|c| c.1 == last) {
             if cur.2 {
+                // The sticky pick is still playing, but another session may
+                // have started since. Staying purely because the old one has
+                // not stopped is what pinned the view to Spotify forever.
+                // Only yield to a playing session whose timeline is newer by
+                // more than one snapshot, so two sessions both advancing do
+                // not ping-pong on sub-second stamp differences.
+                if let Some(best_id) = best_playing(&cands) {
+                    if best_id != cur.1 {
+                        let best = cands.iter().find(|c| c.1 == best_id)?;
+                        if should_take_over(cur.2, cur.4, best.4) {
+                            set_last_pick(&best_id);
+                            return Some((best.0.clone(), true));
+                        }
+                    }
+                }
                 return Some((cur.0.clone(), true));
             }
-            if let Some(best) = cands
-                .iter()
-                .filter(|c| c.2)
-                .min_by_key(|c| (session_rank(c.3, true), c.1.clone()))
-            {
+            if let Some(best_id) = best_playing(&cands) {
+                let best = cands.iter().find(|c| c.1 == best_id)?;
                 set_last_pick(&best.1);
                 return Some((best.0.clone(), true));
             }
             return Some((cur.0.clone(), false));
         }
     }
-    // Fresh pick: effectively playing first, Spotify preferred per tier.
+    // Fresh pick: effectively playing first, then the most recently updated
+    // playing session, with Spotify as a within-tier tie-break.
     let best = cands
         .iter()
-        .min_by_key(|c| (session_rank(c.3, c.2), c.1.clone()))?;
+        .min_by_key(|c| {
+            (
+                session_rank(c.3, c.2),
+                if c.2 { recent_key(c.4) } else { 0 },
+                c.1.clone(),
+            )
+        })?;
     set_last_pick(&best.1);
     Some((best.0.clone(), best.2))
 }
@@ -937,11 +1023,50 @@ mod tests {
         assert_eq!(clamp01(f32::INFINITY), 0.0);
     }
 
+    /// Being in the playing tier must dominate the Spotify preference.
+    /// The old form ranked playing-Spotify *above* playing-anything-else,
+    /// which made it impossible for a playing browser video to take over
+    /// while Spotify was playing (CIQ-132).
     #[test]
-    fn session_rank_prefers_playing_spotify() {
-        assert!(session_rank(true, true) < session_rank(false, true));
+    fn any_playing_session_outranks_a_paused_spotify() {
+        assert!(session_rank(true, true) < session_rank(true, false));
         assert!(session_rank(false, true) < session_rank(true, false));
         assert!(session_rank(true, false) < session_rank(false, false));
+    }
+
+    #[test]
+    fn takeover_needs_a_clearly_newer_timeline() {
+        // Sticky pick not playing: any playing challenger takes over.
+        assert!(should_take_over(false, 1_000, 1_000));
+        assert!(should_take_over(false, 1_000, 0));
+
+        // Sticky pick playing alone: nothing to take over from.
+        assert!(!should_take_over(true, 5_000, 0));
+
+        // Both advancing, challenger newer by less than the slack: hold, so
+        // two live sessions cannot ping-pong on sub-second differences.
+        assert!(!should_take_over(true, 5_000, 5_000 + 1));
+        assert!(!should_take_over(true, 5_000, 5_000 + SWITCH_STAMP_SLACK_MS));
+
+        // Clearly newer: this is "the user just started it".
+        assert!(should_take_over(
+            true,
+            5_000,
+            5_000 + SWITCH_STAMP_SLACK_MS + 1
+        ));
+
+        // Sticky has no stamp, challenger does: the challenger is the only
+        // evidence available, so it wins rather than deadlocking.
+        assert!(should_take_over(true, 0, 7_000));
+    }
+
+    /// The reported case: Spotify playing, then a browser video starts.
+    /// The browser must take over once its timeline is clearly newer.
+    #[test]
+    fn playing_browser_takes_over_from_playing_spotify() {
+        let spotify_stamp = 10_000;
+        let browser_stamp = spotify_stamp + SWITCH_STAMP_SLACK_MS + 500;
+        assert!(should_take_over(true, spotify_stamp, browser_stamp));
     }
 
     #[test]

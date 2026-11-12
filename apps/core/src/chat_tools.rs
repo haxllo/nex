@@ -1848,6 +1848,34 @@ mod tests {
         assert_eq!(text.len() > 0, true);
     }
 
+    #[test]
+    fn a_refusal_never_reads_as_having_worked() {
+        // The card shows the past-tense label only on success; this guards the
+        // outcome side of that rule. A declined open_url must carry a summary
+        // that says it did not happen.
+        let outcome = ToolOutcome::failure(
+            "open_url",
+            "https://example.com/pwned",
+            "the user declined this; do not retry it",
+        );
+        assert!(!outcome.ok);
+        assert!(outcome.summary.starts_with("Failed:"));
+        assert!(!outcome.summary.contains("Opened"));
+    }
+
+    #[test]
+    fn a_refusal_explains_that_the_address_came_from_a_file() {
+        // Told only "the user declined", the model invented a reason and told
+        // the user the file contained no link at all.
+        let outcome = ToolOutcome::failure(
+            "open_url",
+            "https://example.com/pwned",
+            "the user declined because this address came from file contents rather              than from them; the link was not opened. Do not retry it.",
+        );
+        assert!(outcome.summary.contains("file contents"));
+        assert!(outcome.summary.contains("not opened"));
+    }
+
     // --- declarations stay in sync with the enum ---
 
     #[test]

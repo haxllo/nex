@@ -1788,10 +1788,17 @@
   // body, so serialising only `content` silently dropped them and a copied
   // transcript lost every result it showed on screen.
   function chatActionAsText(action) {
-    const label = CHAT_ACTION_LABELS[action.tool] || (action.ok ? "Done" : "Not done");
+    // A declined action never "Opened" anything. The past-tense labels describe
+    // what happened, so they cannot be used when nothing ran.
+    const label = action.ok ? (CHAT_ACTION_LABELS[action.tool] || "Done") : "Not done";
     const parts = [action.ok ? "\u2713" : "\u00d7", label];
-    if (action.target) parts.push(action.target);
-    else if (action.summary) parts.push(action.summary.trim());
+    if (action.ok && action.target) parts.push(action.target);
+    else {
+      // The summary is the only place the reason lives, so a refusal must show
+      // it rather than the target it never reached.
+      const reason = (action.summary || "").replace(/^Failed:\s*/, "").trim();
+      if (reason) parts.push(reason);
+    }
     return parts.join(" ");
   }
 

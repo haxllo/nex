@@ -875,9 +875,25 @@ fn stream_openai(
                         // same sentence twice in two different places.
                         push_action_outcome(sink, request_id, &outcome);
                         needs_break.set(true);
-                        messages.push(json!({"role":"user","content": format!(
-                            "The user did not approve {}. Do not retry it; tell them it was not done.",
-                            tool.name())}));
+                        // Say why it was asked. Told only "the user did not
+                        // approve", the model invented an explanation - in a real
+                        // session it told the user the file "contains no link",
+                        // which was false and unstoppable once written.
+                        let why = if loop_state.is_unfamiliar_url(&tool) {
+                            format!(
+                                "The user did not approve opening {} because the \
+                                 address came from file contents rather than from \
+                                 them. Do not retry it. Tell them the link was not \
+                                 opened and why you asked.",
+                                tool.name()
+                            )
+                        } else {
+                            format!(
+                                "The user did not approve {}. Do not retry it; tell them it was not done.",
+                                tool.name()
+                            )
+                        };
+                        messages.push(json!({"role":"user","content": why}));
                     }
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
@@ -1280,7 +1296,17 @@ fn stream_chatgpt_native(
                         let outcome = crate::chat_tools::ToolOutcome::failure(
                             tool.name(),
                             tool.target(),
-                            "the user declined this; do not retry it",
+                            if loop_state.is_unfamiliar_url(&tool) {
+                                // Say why it was asked. Told only "the user
+                                // declined", the model invented a reason - in a
+                                // real session it told the user the file
+                                // "contains no link", which was false.
+                                "the user declined because this address came from \
+                                 file contents rather than from them; the link was not \
+                                 opened. Do not retry it."
+                            } else {
+                                "the user declined this; do not retry it"
+                            },
                         );
                         push_action_outcome(sink, request_id, &outcome);
                         needs_break.set(true);

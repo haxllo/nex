@@ -504,6 +504,11 @@ pub(crate) struct ToolLoop {
     seeded_hosts: std::collections::BTreeSet<String>,
     /// Hosts the user named in the text that started the request.
     user_hosts: std::collections::BTreeSet<String>,
+    /// A one-line account of each action that actually ran, in order.
+    ///
+    /// Kept so the round limit can say what was done instead of only that it
+    /// stopped. A user left with half a folder tree needs to know which half.
+    done: Vec<String>,
 }
 
 impl ToolLoop {
@@ -512,6 +517,7 @@ impl ToolLoop {
             rounds: 0,
             seeded_hosts: std::collections::BTreeSet::new(),
             user_hosts: std::collections::BTreeSet::new(),
+            done: Vec::new(),
         }
     }
 
@@ -546,6 +552,7 @@ impl ToolLoop {
                 self.seeded_hosts.insert(host);
             }
         }
+        self.done.push(outcome.summary.clone());
     }
 
     /// True when the destination came from tool output rather than the user.
@@ -575,7 +582,7 @@ impl ToolLoop {
     pub(crate) fn on_tool_call(&mut self, tool: ChatTool) -> LoopStep {
         if self.rounds >= MAX_TOOL_ROUNDS {
             return LoopStep::Stop {
-                reason: format!("stopped after {MAX_TOOL_ROUNDS} action rounds"),
+                reason: self.limit_report(),
             };
         }
         self.rounds += 1;
@@ -584,6 +591,32 @@ impl ToolLoop {
         } else {
             LoopStep::RunTool { tool }
         }
+    }
+
+    /// What happened before the round limit stopped the loop.
+    ///
+    /// "Stopped after 4 rounds" told the user nothing they could act on: the
+    /// first four actions had already changed the disk, and there was no way to
+    /// tell how much of the request was done. Naming the actions that ran, and
+    /// saying plainly that the rest did not, is the difference between a
+    /// usable half-finished job and a mystery.
+    pub(crate) fn limit_report(&self) -> String {
+        let count = self.done.len();
+        if count == 0 {
+            return format!(
+                "I reached the {MAX_TOOL_ROUNDS}-step limit before running anything"
+            );
+        }
+        // "1 actions" is the kind of small wrongness that makes a message read
+        // as machine output rather than as a report.
+        let plural = if count == 1 { "action" } else { "actions" };
+        let mut report = format!(
+            "I reached the {MAX_TOOL_ROUNDS}-step limit. These {count} {plural} did run, and anything after them did NOT:"
+        );
+        for (index, line) in self.done.iter().enumerate() {
+            report.push_str(&format!("\n{}. {}", index + 1, line));
+        }
+        report
     }
 
     /// Whether this call is being held only because its destination came from
@@ -1206,6 +1239,7 @@ fn third_person(text: &str) -> String {
 }
 
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1632,7 +1666,10 @@ mod tests {
         }
         // One past the bound ends the turn instead of looping forever.
         match loop_state.on_tool_call(ChatTool::OpenPath { path: exe }) {
-            LoopStep::Stop { reason } => assert!(reason.contains("action rounds")),
+            LoopStep::Stop { reason } => {
+                // The report must name the limit rather than only that it stopped.
+                assert!(reason.contains("step limit"), "{reason}");
+            }
             other => panic!("expected Stop, got {other:?}"),
         }
     }
@@ -2125,6 +2162,74 @@ mod tests {
         assert!(is_drive_root(std::path::Path::new("C:\\")));
         assert!(!is_drive_root(std::path::Path::new("G:\\scripts")));
         assert!(!is_drive_root(std::path::Path::new("C:\\Windows")));
+    }
+
+    // --- round limit reports what happened (CIQ-149) ---
+
+    fn ran(summary: &str) -> ToolOutcome {
+        ToolOutcome {
+            tool: "create_folder".to_string(),
+            target: "C:/x".to_string(),
+            ok: true,
+            summary: summary.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_limit_report_names_the_work_that_ran() {
+        // A user left with half a folder tree must be able to see which half.
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/projects"));
+        l.observe_output(&ran("Created folder C:/projects/web"));
+        let report = l.limit_report();
+        assert!(report.contains("C:/projects"), "{report}");
+        assert!(report.contains("C:/projects/web"), "{report}");
+        assert!(report.contains("2 actions"), "{report}");
+    }
+
+    #[test]
+    fn the_limit_report_says_the_rest_did_not_run() {
+        // The important half: partial work must not look like finished work.
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/a"));
+        let report = l.limit_report();
+        assert!(report.contains("did NOT"), "{report}");
+    }
+
+    #[test]
+    fn the_limit_report_orders_the_actions() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("first thing"));
+        l.observe_output(&ran("second thing"));
+        let report = l.limit_report();
+        let first = report.find("first thing").unwrap();
+        let second = report.find("second thing").unwrap();
+        assert!(first < second, "report lost the order: {report}");
+    }
+
+    #[test]
+    fn a_limit_reached_with_nothing_run_says_so() {
+        let l = ToolLoop::new();
+        let report = l.limit_report();
+        assert!(report.contains("before running anything"), "{report}");
+    }
+
+    #[test]
+    fn the_report_reads_naturally_for_one_action() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/one"));
+        let report = l.limit_report();
+        assert!(report.contains("These 1 action did run"), "{report}");
+        assert!(!report.contains("1 actions"), "{report}");
+    }
+
+    #[test]
+    fn the_report_counts_only_actions_that_ran() {
+        // observe_output is fed from run(), so a refused action never lands.
+        let mut l = ToolLoop::new();
+        assert!(l.limit_report().contains("before running anything"));
+        l.observe_output(&ran("Created folder C:/one"));
+        assert!(l.limit_report().contains("These 1 action"));
     }
 
     // --- declarations stay in sync with the enum ---

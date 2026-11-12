@@ -920,7 +920,7 @@ fn stream_openai(
             };
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
-                    emit(&format!("Stopping here: {reason}."), None);
+                    emit(&reason, None);
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
@@ -935,7 +935,7 @@ fn stream_openai(
                                 request_id,
                                 "chatNotice",
                                 json!(format!(
-                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    "The confirmation for this action expired after {}, so nothing ran.",
                                     confirm_wait_words()
                                 )),
                             ),
@@ -1332,8 +1332,12 @@ fn stream_chatgpt_native(
             crate::runtime::log_info(
                 "[nex][chat] ChatGPT account hit the tool round limit; stopping",
             );
+            // Say what actually ran. The old line - "stopped after several
+            // steps without finishing" - left the user with changes on disk and
+            // no way to know which ones, or what was left undone.
+            emit(&loop_state.limit_report(), None);
             emit(
-                "I stopped after several steps without finishing; ask again if you want to continue.",
+                "\n\nAsk again and I will carry on from here; I will not repeat the steps listed above.",
                 None,
             );
             return Ok(());
@@ -1362,7 +1366,7 @@ fn stream_chatgpt_native(
             };
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
-                    emit(&format!("Stopping here: {reason}."), None);
+                    emit(&reason, None);
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
@@ -1373,7 +1377,7 @@ fn stream_chatgpt_native(
                             tool.name(),
                             tool.target(),
                             format!(
-                                "the user did not answer within {} minutes, so nothing ran.                                  Do not retry automatically; ask again if it is still wanted.",
+                                "the user did not answer within {}, so nothing ran. Do not retry automatically; ask again if it is still wanted.",
                                 confirm_wait_words()
                             ),
                         );
@@ -1384,7 +1388,7 @@ fn stream_chatgpt_native(
                                 request_id,
                                 "chatNotice",
                                 json!(format!(
-                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    "The confirmation for this action expired after {}, so nothing ran.",
                                     confirm_wait_words()
                                 )),
                             ),

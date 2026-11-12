@@ -15,3 +15,5 @@ nul
 .claude/skills/
 agent/
 skills-lock.json
+big-test.log
+injection-test.txt

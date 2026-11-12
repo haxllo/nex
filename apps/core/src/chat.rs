@@ -967,9 +967,20 @@ fn stream_openai(
                     continue;
                 }
             };
+            // Counted before the decision, so an action refused twice and then
+            // asked for a third time is caught as repetition.
+            loop_state.note_attempt(&tool);
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
                     emit(&reason, None);
+                    push_chat_update(
+                        sink,
+                        request_update(
+                            request_id,
+                            "chatNotice",
+                            serde_json::json!({ "text": reason }),
+                        ),
+                    );
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
@@ -1428,9 +1439,20 @@ fn stream_chatgpt_native(
                     continue;
                 }
             };
+            // Counted before the decision, so an action refused twice and then
+            // asked for a third time is caught as repetition.
+            loop_state.note_attempt(&tool);
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
                     emit(&reason, None);
+                    push_chat_update(
+                        sink,
+                        request_update(
+                            request_id,
+                            "chatNotice",
+                            serde_json::json!({ "text": reason }),
+                        ),
+                    );
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {

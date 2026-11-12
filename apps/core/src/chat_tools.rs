@@ -474,7 +474,30 @@ fn validate_name(tool: &'static str, name: &str) -> Result<(), ToolError> {
 ///
 /// Kept next to the enum so a new tool cannot be added without appearing
 /// here — the test below fails if the two drift apart.
-pub(crate) const MAX_TOOL_ROUNDS: usize = 4;
+/// Backstop against a model that never stops calling tools.
+///
+/// This is deliberately generous. It is not the thing that catches a stuck
+/// model - [`REPEAT_LIMIT`] is - because a round count cannot tell a productive
+/// agent from a spinning one. Four was chosen originally as a placeholder and
+/// stopped legitimate requests; comparable tools allow 10-25 or no limit at all.
+pub(crate) const MAX_TOOL_ROUNDS: usize = 25;
+
+/// How many times the same action may be attempted before the loop gives up.
+///
+/// Two: enough to retry a call that failed for an environmental reason, not
+/// enough to sit in a loop. A refusal counts as an attempt, because asking again
+/// after "no" is the specific case that wastes the user's time.
+pub(crate) const REPEAT_LIMIT: usize = 3;
+
+/// Identity of an action for the purposes of "has this already been tried".
+///
+/// Deliberately not the JSON arguments: whitespace or key-order differences
+/// would make the same action look new. Tool plus target is what the user sees
+/// on the confirmation card and what the filesystem sees, so it is the right
+/// granularity.
+fn attempt_key(tool: &ChatTool) -> String {
+    format!("{}|{}", tool.name(), tool.target())
+}
 
 /// Where the tool loop is, as a value rather than as control flow.
 ///
@@ -516,6 +539,16 @@ pub(crate) struct ToolLoop {
     /// Kept so the round limit can say what was done instead of only that it
     /// stopped. A user left with half a folder tree needs to know which half.
     done: Vec<String>,
+    /// How many times each (tool, target, accepted) signature has been seen.
+    ///
+    /// This is the no-progress guard. A round count stops a model that is
+    /// productive as well as one that is stuck: four exchanges is nothing for a
+    /// legitimate request, so the limit had to be low enough to be a nuisance.
+    /// Repetition is a better signal than volume — a model asking for the same
+    /// folder five times has stopped making progress, while a model asking for
+    /// five different folders has not. The cap now exists only as a backstop
+    /// for the unlikely case where everything looks new forever.
+    attempts: std::collections::BTreeMap<String, usize>,
 }
 
 impl ToolLoop {
@@ -525,6 +558,7 @@ impl ToolLoop {
             seeded_hosts: std::collections::BTreeSet::new(),
             user_hosts: std::collections::BTreeSet::new(),
             done: Vec::new(),
+            attempts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -587,6 +621,16 @@ impl ToolLoop {
     /// the call runs now, waits for the user, or is refused for running on too
     /// long.
     pub(crate) fn on_tool_call(&mut self, tool: ChatTool) -> LoopStep {
+        // Repetition is the signal that matters. This is checked before the
+        // round count because a stuck model should be stopped when it is stuck,
+        // not after an arbitrary number of productive rounds.
+        if let Some(repeats) = self.repeat_count(&tool) {
+            if repeats >= REPEAT_LIMIT {
+                return LoopStep::Stop {
+                    reason: self.repeat_report(&tool),
+                };
+            }
+        }
         if self.rounds >= MAX_TOOL_ROUNDS {
             return LoopStep::Stop {
                 reason: self.limit_report(),
@@ -602,6 +646,50 @@ impl ToolLoop {
         } else {
             LoopStep::RunTool { tool }
         }
+    }
+
+    /// How many times this exact action has already been attempted, if it is
+    /// being repeated rather than done for the first time.
+    ///
+    /// Keyed on tool, target and whether it was accepted. A refusal and a run
+    /// are different outcomes and must not be conflated: declining the same
+    /// folder twice is the user saying no twice, which is a reason to stop
+    /// asking, while running the same folder twice is a model that has lost
+    /// track.
+    fn repeat_count(&self, tool: &ChatTool) -> Option<usize> {
+        self.attempts.get(&attempt_key(tool)).copied()
+    }
+
+    /// Record that an action was attempted.
+    ///
+    /// Called for every call the loop decides on, before it runs, so that a
+    /// model which asks again after being refused is counted as repeating.
+    pub(crate) fn note_attempt(&mut self, tool: &ChatTool) {
+        *self.attempts.entry(attempt_key(tool)).or_insert(0) += 1;
+    }
+
+    /// What to say when the loop stopped because the model kept asking for the
+    /// same thing.
+    ///
+    /// Naming the repeated action is the point. "Stopped: no progress" leaves
+    /// the user unable to tell a model bug from their own ambiguous request.
+    pub(crate) fn repeat_report(&self, tool: &ChatTool) -> String {
+        let done = if self.done.is_empty() {
+            String::new()
+        } else {
+            let mut list = String::from("
+These actions did run:");
+            for (index, line) in self.done.iter().enumerate() {
+                list.push_str(&format!("
+{}. {}", index + 1, line));
+            }
+            list
+        };
+        format!(
+            "I stopped because I kept asking to {} {} - the same action {REPEAT_LIMIT} times - and repeating it will not change the result.{done}",
+            tool.name().replace('_', " "),
+            tool.target(),
+        )
     }
 
     /// Record that the loop completed an exchange with the model.
@@ -2307,6 +2395,79 @@ mod tests {
             );
         }
         assert_eq!(l.rounds(), 1);
+    }
+
+    fn folder(name: &str) -> ChatTool {
+        ChatTool::CreateFolder {
+            name: name.to_string(),
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn a_model_asking_for_distinct_folders_is_not_stopped() {
+        // The bug the guard must not introduce: many different actions is
+        // progress, however many rounds it takes.
+        let mut l = ToolLoop::new();
+        l.begin_round();
+        for n in 0..30 {
+            let tool = folder(&format!("dir{n}"));
+            l.note_attempt(&tool);
+            assert!(
+                !matches!(l.on_tool_call(tool), LoopStep::Stop { .. }),
+                "distinct folder {n} must not be treated as repetition"
+            );
+        }
+    }
+
+    #[test]
+    fn asking_for_the_same_folder_three_times_stops() {
+        let mut l = ToolLoop::new();
+        l.begin_round();
+        let tool = folder("docs");
+        // The first two identical attempts are allowed through: a call can fail
+        // for an environmental reason and deserve one retry.
+        for attempt in 0..REPEAT_LIMIT - 1 {
+            l.note_attempt(&tool);
+            assert!(
+                !matches!(l.on_tool_call(tool.clone()), LoopStep::Stop { .. }),
+                "attempt {attempt} should still run"
+            );
+        }
+        // The third ends the turn.
+        l.note_attempt(&tool);
+        match l.on_tool_call(tool.clone()) {
+            LoopStep::Stop { reason } => {
+                // Must name the action, or the user cannot tell a model bug
+                // from their own ambiguous request.
+                assert!(reason.contains("docs"), "{reason}");
+                assert!(reason.contains("create folder"), "{reason}");
+            }
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn different_targets_do_not_share_a_repeat_count() {
+        // Same tool, different target, is not repetition.
+        let mut l = ToolLoop::new();
+        l.begin_round();
+        for _ in 0..REPEAT_LIMIT - 1 {
+            let tool = folder("a");
+            l.note_attempt(&tool);
+            let _ = l.on_tool_call(tool);
+        }
+        let other = folder("b");
+        l.note_attempt(&other);
+        assert!(!matches!(l.on_tool_call(other), LoopStep::Stop { .. }));
+    }
+
+    #[test]
+    fn the_round_limit_is_now_generous_enough_for_real_work() {
+        // Four exchanges was below every comparable tool and stopped ordinary
+        // requests. The backstop must not be the thing users meet first.
+        assert!(MAX_TOOL_ROUNDS >= 20, "got {MAX_TOOL_ROUNDS}");
+        assert!(REPEAT_LIMIT < MAX_TOOL_ROUNDS);
     }
 
     // --- declarations stay in sync with the enum ---

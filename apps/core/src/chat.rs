@@ -25,7 +25,26 @@ type ChatUpdateSink = Arc<Mutex<Box<dyn FnMut(Value) + Send>>>;
 /// Deliberately generous: the user may have walked away, and discarding a
 /// pending action is safe, whereas running one after they forgot about it is
 /// not. On timeout nothing runs.
-const CONFIRM_TIMEOUT: Duration = Duration::from_secs(300);
+/// The wait, worded so a non-whole number of minutes still reads correctly.
+///
+/// The message used to divide by 60, which turns 90 seconds into "1 minutes".
+fn confirm_wait_words() -> String {
+    let secs = CONFIRM_TIMEOUT.as_secs();
+    if secs % 60 == 0 {
+        let minutes = secs / 60;
+        if minutes == 1 { "1 minute".to_string() } else { format!("{minutes} minutes") }
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
+/// How long a confirmation prompt waits for an answer.
+///
+/// Five minutes held a turn open long past the point the user was still
+/// looking, and an abandoned prompt blocked the loop for the rest of that time.
+/// Ninety seconds is long enough to read a target and decide, short enough that
+/// walking away does not wedge the conversation.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The user's answer to a suspended action, delivered to the waiting worker.
 type ConfirmReply = std::sync::mpsc::Sender<bool>;
@@ -917,14 +936,14 @@ fn stream_openai(
                                 "chatNotice",
                                 json!(format!(
                                     "The confirmation for this action expired after {} minutes, so nothing ran.",
-                                    CONFIRM_TIMEOUT.as_secs() / 60
+                                    confirm_wait_words()
                                 )),
                             ),
                         );
                         emit(
                             &format!(
                                 "No answer after {} minutes, so I did not run it.",
-                                CONFIRM_TIMEOUT.as_secs() / 60
+                                confirm_wait_words()
                             ),
                             None,
                         );
@@ -1355,7 +1374,7 @@ fn stream_chatgpt_native(
                             tool.target(),
                             format!(
                                 "the user did not answer within {} minutes, so nothing ran.                                  Do not retry automatically; ask again if it is still wanted.",
-                                CONFIRM_TIMEOUT.as_secs() / 60
+                                confirm_wait_words()
                             ),
                         );
                         push_action_outcome(sink, request_id, &outcome);
@@ -1366,7 +1385,7 @@ fn stream_chatgpt_native(
                                 "chatNotice",
                                 json!(format!(
                                     "The confirmation for this action expired after {} minutes, so nothing ran.",
-                                    CONFIRM_TIMEOUT.as_secs() / 60
+                                    confirm_wait_words()
                                 )),
                             ),
                         );

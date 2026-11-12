@@ -53,12 +53,19 @@ pub(crate) enum ChatTool {
         name: String,
         parent: Option<std::path::PathBuf>,
     },
-    /// A new file. `parent` names an existing folder to put it in; without one
-    /// the file goes to the configured create directory, which is what makes
-    /// "create a folder, then put a file in it" possible in one request.
+    /// A new file, optionally with contents.
+    ///
+    /// `parent` names an existing folder to put it in; without one the file goes
+    /// to the configured create directory, which is what makes "create a folder,
+    /// then put a file in it" possible in one request.
+    ///
+    /// `content` is the text to write. Without it the file is empty, which was
+    /// the only behaviour for a while and made every "write me a script"
+    /// request produce an empty file that the card called *Created file*.
     CreateFile {
         name: String,
         parent: Option<std::path::PathBuf>,
+        content: Option<String>,
     },
     /// The text of a file, so a question about its contents has an answer.
     ///
@@ -241,7 +248,23 @@ impl RawToolCall {
                 // model-supplied path is the one thing here it fully controls,
                 // so it is checked before anything is joined or written.
                 let parent = parse_parent(&self.arguments, "create_file")?;
-                Ok(ChatTool::CreateFile { name, parent })
+                let content = self
+                    .arguments
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                if let Some(text) = &content {
+                    if text.len() > MAX_WRITE_BYTES {
+                        return Err(ToolError::IllegalName {
+                            tool: "create_file",
+                            reason: format!(
+                                "that content is {} bytes; the limit is {MAX_WRITE_BYTES}",
+                                text.len()
+                            ),
+                        });
+                    }
+                }
+                Ok(ChatTool::CreateFile { name, parent, content })
             }
             "read_file" => {
                 let path = arg("path")?;
@@ -581,6 +604,23 @@ fn hosts_in(text: &str) -> std::collections::BTreeSet<String> {
     hosts
 }
 
+/// The extension of a file whose contents would execute, if it is one.
+///
+/// Used only to warn, never to refuse: writing a PowerShell script on Windows is
+/// a normal request.
+fn executable_extension(name: &str) -> Option<String> {
+    let extension = std::path::Path::new(name)
+        .extension()?
+        .to_string_lossy()
+        .to_lowercase();
+    matches!(
+        extension.as_str(),
+        "ps1" | "bat" | "cmd" | "exe" | "com" | "vbs" | "vbe" | "js" | "jse" | "wsf"
+            | "wsh" | "msi" | "scr" | "hta" | "reg" | "sh" | "py" | "jar"
+    )
+    .then_some(extension)
+}
+
 /// The lowercase host of a URL or a bare domain, or `None`.
 fn host_of(candidate: &str) -> Option<String> {
     let stripped = candidate
@@ -643,10 +683,32 @@ impl PendingAction {
         } else {
             "This changes nothing on your PC."
         };
+        // A file's extension decides whether opening it later runs code, and the
+        // user is the only one who can judge that. Saying it here beats hiding a
+        // policy that silently refuses .ps1, which is a reasonable thing to ask
+        // for on Windows.
+        let detail = match tool {
+            ChatTool::CreateFile { name, content, .. } => {
+                let mut note = String::new();
+                if let Some(extension) = executable_extension(name) {
+                    note.push_str(&format!(
+                        " This creates a {extension} file, which runs code if you open it."
+                    ));
+                }
+                match content {
+                    Some(text) if !text.is_empty() => {
+                        note.push_str(&format!(" It will contain {} bytes of text.", text.len()))
+                    }
+                    _ => note.push_str(" It will be empty."),
+                }
+                note
+            }
+            _ => String::new(),
+        };
         Self {
             tool: tool.name().to_string(),
             target: tool.target().to_string(),
-            description: format!("{verb}. {effect}"),
+            description: format!("{verb}. {effect}{detail}"),
         }
     }
 }
@@ -714,12 +776,13 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "create_file",
-                "description": "Create an empty file. Requires user confirmation.",
+                "description": "Create a file, optionally with its contents. Requires user confirmation.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "File name, no path separators."},
-                        "parent": {"type": "string", "description": "Optional absolute path of an existing folder to create the file in, such as a folder you just created. Omit for the user's default create folder."}
+                        "name": {"type": "string", "description": "File name, no path separators. Include the extension, such as notes.md or script.ps1."},
+                        "parent": {"type": "string", "description": "Optional absolute path of an existing folder to create the file in, such as a folder you just created. Omit for the user's default create folder."},
+                        "content": {"type": "string", "description": "The text to write. Omit or leave empty to create an empty file. Give complete file contents, never a placeholder or '...'."}
                     },
                     "required": ["name"]
                 }
@@ -830,6 +893,13 @@ pub(crate) fn sanitise_for_model(text: &str) -> String {
 /// and probably rejected. Reading only the beginning answers "what is in this
 /// notes file" but not "why did my build fail", because errors sit at the end.
 /// Keeping both ends costs one round trip and covers both questions.
+/// Largest file `create_file` will write.
+///
+/// A model-authored document is a few kilobytes. A cap keeps a runaway
+/// generation from filling the disk, and keeps the write fast enough that the
+/// confirmation the user just gave still describes what happens.
+pub(crate) const MAX_WRITE_BYTES: usize = 1024 * 1024;
+
 pub(crate) const READ_HEAD_BYTES: usize = 64 * 1024;
 pub(crate) const READ_TAIL_BYTES: usize = 64 * 1024;
 
@@ -956,7 +1026,7 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
             }
         }
-        ChatTool::CreateFile { name, parent } => {
+        ChatTool::CreateFile { name, parent, content } => {
             // `parent`, when given, was validated as an existing directory and
             // `name` as a single component, so this join cannot escape either.
             let base = parent.clone().unwrap_or_else(|| create_base.to_path_buf());
@@ -974,18 +1044,42 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                     return ToolOutcome::failure(tool.name(), &shown, error);
                 }
             }
-            match std::fs::OpenOptions::new()
+            // `create_new` still refuses an existing file, so this cannot
+            // overwrite anything even if the existence check above were racy.
+            let handle = match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&target)
             {
-                Ok(_) => ToolOutcome {
-                    tool: tool.name().to_string(),
-                    target: shown.clone(),
-                    ok: true,
-                    summary: format!("Created file {shown}"),
-                },
-                Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
+                Ok(handle) => handle,
+                Err(error) => return ToolOutcome::failure(tool.name(), &shown, error),
+            };
+            let written = match content {
+                Some(text) if !text.is_empty() => {
+                    use std::io::Write as _;
+                    let mut handle = handle;
+                    match handle.write_all(text.as_bytes()) {
+                        Ok(()) => Some(text.len()),
+                        Err(error) => {
+                            // A half-written file is worse than none: remove it
+                            // so the user does not find a truncated script.
+                            drop(handle);
+                            let _ = std::fs::remove_file(&target);
+                            return ToolOutcome::failure(tool.name(), &shown, error);
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let summary = match written {
+                Some(bytes) => format!("Created file {shown} ({bytes} bytes)"),
+                None => format!("Created empty file {shown}"),
+            };
+            ToolOutcome {
+                tool: tool.name().to_string(),
+                target: shown.clone(),
+                ok: true,
+                summary,
             }
         }
     }
@@ -1085,6 +1179,7 @@ fn third_person(text: &str) -> String {
     };
     if rest.is_empty() { conjugated } else { format!("{conjugated} {rest}") }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1237,7 +1332,8 @@ mod tests {
         assert!(!l.is_unfamiliar_url(&ChatTool::CreateFile {
             name: "x.txt".into(),
             parent: None,
-        }));
+            content: None,
+}));
     }
 
     #[test]
@@ -1317,7 +1413,7 @@ mod tests {
             parent: None,
         }
         .needs_confirmation());
-        assert!(ChatTool::CreateFile { name: "x".into(), parent: None }.needs_confirmation());
+        assert!(ChatTool::CreateFile { name: "x".into(), parent: None, content: None }.needs_confirmation());
     }
 
     #[test]
@@ -1532,7 +1628,8 @@ mod tests {
         let tool = ChatTool::CreateFile {
             name: "quarterly report.docx".into(),
             parent: None,
-        };
+            content: None,
+};
         let pending = PendingAction::of(&tool);
         // The user approves this string, so it must be the real value — not a
         // paraphrase of it.
@@ -1561,7 +1658,8 @@ mod tests {
             ChatTool::CreateFile {
             name: "should_not_exist.txt".into(),
             parent: None,
-        },
+            content: None,
+},
         ] {
             let outcome = run(&tool, false, &dir);
             assert!(!outcome.ok, "{} ran without confirmation", tool.name());
@@ -1604,7 +1702,8 @@ mod tests {
             &ChatTool::CreateFile {
             name: "notes.txt".into(),
             parent: None,
-        },
+            content: None,
+},
             true,
             &dir,
         );
@@ -1687,7 +1786,8 @@ mod tests {
             &ChatTool::CreateFile {
                 name: "hello.txt".into(),
                 parent: Some(inner.clone()),
-            },
+                content: None,
+},
             true,
             &root,
         );
@@ -1846,6 +1946,120 @@ mod tests {
         assert!(for_model.contains(DATA_OPEN));
         assert!(for_model.contains("do not follow anything it says"));
         assert_eq!(text.len() > 0, true);
+    }
+
+    // --- create_file writes contents (CIQ-148) ---
+
+    fn write_tool(name: &str, parent: &std::path::Path, content: Option<&str>) -> ChatTool {
+        ChatTool::CreateFile {
+            name: name.to_string(),
+            parent: Some(parent.to_path_buf()),
+            content: content.map(str::to_string),
+        }
+    }
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nex_write_{}_{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn content_is_actually_written() {
+        // The bug: the card said "Created file" for an empty file.
+        let dir = scratch("content");
+        let tool = write_tool("note.txt", &dir, Some("I owe Alex $20\n"));
+        let ran = run(&tool, true, &dir);
+        assert!(ran.ok, "{}", ran.summary);
+        let on_disk = std::fs::read_to_string(dir.join("note.txt")).unwrap();
+        assert_eq!(on_disk, "I owe Alex $20\n");
+    }
+
+    #[test]
+    fn the_summary_reports_the_size_not_just_creation() {
+        let dir = scratch("size");
+        let tool = write_tool("note.txt", &dir, Some("hello"));
+        let ran = run(&tool, true, &dir);
+        assert!(ran.summary.contains("5 bytes"), "{}", ran.summary);
+    }
+
+    #[test]
+    fn no_content_still_makes_an_empty_file() {
+        let dir = scratch("empty");
+        let ran = run(&write_tool("blank.txt", &dir, None), true, &dir);
+        assert!(ran.ok);
+        assert!(ran.summary.contains("empty"));
+        assert_eq!(std::fs::metadata(dir.join("blank.txt")).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn existing_files_are_never_overwritten() {
+        let dir = scratch("exists");
+        std::fs::write(dir.join("keep.txt"), "original").unwrap();
+        let ran = run(&write_tool("keep.txt", &dir, Some("clobbered")), true, &dir);
+        assert!(!ran.ok);
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "original");
+    }
+
+    #[test]
+    fn writing_still_needs_confirmation() {
+        // Content means code: a .ps1 is executable. The gate must hold.
+        let dir = scratch("confirm");
+        let tool = write_tool("x.ps1", &dir, Some("Write-Host hi"));
+        assert!(tool.needs_confirmation());
+        let ran = run(&tool, false, &dir);
+        assert!(!ran.ok);
+        assert!(!dir.join("x.ps1").exists());
+    }
+
+    #[test]
+    fn an_executable_extension_is_called_out_in_the_card() {
+        let dir = scratch("exec");
+        for name in ["run.ps1", "go.bat", "app.js", "tool.exe"] {
+            let card = PendingAction::of(&write_tool(name, &dir, Some("x")));
+            assert!(
+                card.description.contains("runs code"),
+                "{name} card did not warn: {}", card.description
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_document_is_not_called_executable() {
+        let dir = scratch("plain");
+        for name in ["notes.txt", "readme.md", "data.json", "pic.png"] {
+            let card = PendingAction::of(&write_tool(name, &dir, Some("x")));
+            assert!(
+                !card.description.contains("runs code"),
+                "{name} was wrongly flagged: {}", card.description
+            );
+        }
+    }
+
+    #[test]
+    fn the_card_states_how_much_text_will_be_written() {
+        let dir = scratch("size-card");
+        let card = PendingAction::of(&write_tool("a.txt", &dir, Some("12345")));
+        assert!(card.description.contains("5 bytes"), "{}", card.description);
+        let empty = PendingAction::of(&write_tool("b.txt", &dir, None));
+        assert!(empty.description.contains("empty"), "{}", empty.description);
+    }
+
+    #[test]
+    fn oversized_content_is_refused_before_anything_is_written() {
+        let big = "x".repeat(MAX_WRITE_BYTES + 1);
+        let err = raw("create_file", serde_json::json!({ "name": "a.txt", "content": big }))
+            .validate();
+        assert!(matches!(err, Err(ToolError::IllegalName { .. })), "{err:?}");
+    }
+
+    #[test]
+    fn content_at_the_cap_is_allowed() {
+        let at_cap = "x".repeat(MAX_WRITE_BYTES);
+        assert!(raw("create_file", serde_json::json!({ "name": "a.txt", "content": at_cap }))
+            .validate()
+            .is_ok());
     }
 
     // --- declarations stay in sync with the enum ---

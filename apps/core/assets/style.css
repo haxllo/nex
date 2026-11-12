@@ -3608,11 +3608,17 @@ html[data-native-material="acrylic"] .chat-history {
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
+/* Centred optically, not by box. The row is a flex column, so without
+   `flex: 0 0 auto` this button shrank to ~4px wide, and the grid centring put
+   the 12px glyph 6px below the button's centre. Explicit centring plus a small
+   upward nudge lands the trash glyph on the date's optical line. */
 .chat-history-item .chat-delete {
+  flex: 0 0 20px;
   display: grid;
   place-items: center;
   width: 20px;
   height: 20px;
+  padding: 0;
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
@@ -3622,8 +3628,12 @@ html[data-native-material="acrylic"] .chat-history {
   transition: opacity var(--dur) var(--ease), background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 .chat-history-item .chat-delete svg {
+  display: block;
   width: 12px;
   height: 12px;
+  /* The path sits 0.5px low in its own 24-unit box; compensate so the glyph
+     reads as centred rather than 1px sunk. */
+  margin-top: -1px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;

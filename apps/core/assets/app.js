@@ -2210,9 +2210,12 @@
   function renderChatMessages(streamOnly = false) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
-    // The empty state is centred in the panel rather than parked under the
-    // header, so a new user's first screen is balanced instead of top-heavy.
     chatScroll.classList.toggle("is-empty", chatMessages.length === 0);
+    // The floating cluster carries history, new and copy. With nothing said yet
+    // there is nothing to navigate or copy, so it stays out of the first screen
+    // entirely rather than sitting there disabled.
+    const floating = $("chat-floating-controls");
+    if (floating) floating.classList.toggle("visible", chatMessages.length > 0);
     $("chat-copy-button").disabled = chatMessages.length === 0;
     $("chat-new-button").disabled = chatMessages.length === 0;
     if (!streamOnly) {
@@ -2340,11 +2343,15 @@
         : "Connect your ChatGPT account to Nex in your browser. If you're reconnecting after an app update, sign in again.");
     $("chat-provider-label").textContent = chatProviderName(provider);
     $("chat-model-label").textContent = chatConfig.model || "Choose a model";
+    // The chip is the settings trigger, so it reports whether the sheet is open.
+    const modelButton = $("chat-model-button");
+    if (modelButton) modelButton.setAttribute("aria-expanded", String(!chatSettings.hidden));
   }
 
   function setChatSettingsOpen(open) {
     chatSettings.hidden = !open;
     panel.classList.toggle("chat-settings-open", open);
+    $("chat-model-button").setAttribute("aria-expanded", String(open));
     if (open) setChatHistoryOpen(false);
     else { closeChatModelOptions(); closeChatProviderOptions(); }
     chatMenuScrim.hidden = chatSettings.hidden && chatHistory.hidden;

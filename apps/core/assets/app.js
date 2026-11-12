@@ -2211,11 +2211,9 @@
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
     chatScroll.classList.toggle("is-empty", chatMessages.length === 0);
-    // The floating cluster carries history, new and copy. With nothing said yet
-    // there is nothing to navigate or copy, so it stays out of the first screen
-    // entirely rather than sitting there disabled.
-    const floating = $("chat-floating-controls");
-    if (floating) floating.classList.toggle("visible", chatMessages.length > 0);
+    // History is always reachable; copy and new need a transcript. The state
+    // lives on the view so the stylesheet decides which of the three show.
+    chatView.classList.toggle("has-transcript", chatMessages.length > 0);
     $("chat-copy-button").disabled = chatMessages.length === 0;
     $("chat-new-button").disabled = chatMessages.length === 0;
     if (!streamOnly) {

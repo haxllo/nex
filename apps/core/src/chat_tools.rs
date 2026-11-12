@@ -2309,6 +2309,19 @@ mod tests {
         assert_eq!(l.rounds(), 1);
     }
 
+    #[test]
+    fn the_limit_event_is_shaped_for_a_card() {
+        // The card reads `limit` and `done`; a rename here would silently leave
+        // the UI showing an empty list rather than failing to compile.
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/a"));
+        let payload = l.limit_payload();
+        assert!(payload.get("limit").and_then(serde_json::Value::as_u64).is_some());
+        assert!(payload.get("done").and_then(serde_json::Value::as_array).is_some());
+        // Nothing beyond what the card needs.
+        assert_eq!(payload.as_object().unwrap().len(), 2);
+    }
+
     // --- declarations stay in sync with the enum ---
 
     #[test]

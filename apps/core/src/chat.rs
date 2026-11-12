@@ -1336,9 +1336,15 @@ fn stream_chatgpt_native(
             // steps without finishing" - left the user with changes on disk and
             // no way to know which ones, or what was left undone.
             emit(&loop_state.limit_report(), None);
-            emit(
-                "\n\nAsk again and I will carry on from here; I will not repeat the steps listed above.",
-                None,
+            // A card with a Continue button, rather than a sentence asking the
+            // user to type a word the model might read as a task.
+            push_chat_update(
+                sink,
+                request_update(
+                    request_id,
+                    "chatLimitReached",
+                    loop_state.limit_payload(),
+                ),
             );
             return Ok(());
         }

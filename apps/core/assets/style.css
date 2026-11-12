@@ -3331,6 +3331,92 @@ html[data-native-material="acrylic"] .chat-composer-shell {
   .chat-pending-cancel:active { transform: none; }
 }
 
+/* Step-limit card.
+   Shown when a request needed more steps than the loop allows. It lists what
+   actually ran and offers a Continue control: telling the user to type
+   "continue" invites a word models have been known to read as a task rather
+   than as an instruction, so the control says what it means and the
+   continuation is sent as a request of its own. */
+.chat-limit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  padding: 12px 13px;
+  margin: 2px 0;
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  animation: chatActionIn 180ms var(--ease-out) both;
+}
+.chat-limit-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -0.008em;
+  color: var(--text);
+}
+.chat-limit-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.chat-limit-list li::marker {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.chat-limit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.chat-limit-continue,
+.chat-limit-dismiss {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  padding: 6px 14px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease-out);
+}
+.chat-limit-continue {
+  background: var(--accent);
+  border: 1px solid transparent;
+  color: var(--accent-fg);
+}
+.chat-limit-dismiss {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  margin-left: auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat-limit-continue:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+  .chat-limit-dismiss:hover { background: var(--hover-strong); color: var(--text); }
+}
+.chat-limit-continue:active,
+.chat-limit-dismiss:active { transform: scale(0.97); }
+.chat-limit-continue:focus-visible,
+.chat-limit-dismiss:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-limit-card { animation: none; }
+  .chat-limit-continue:active,
+  .chat-limit-dismiss:active { transform: none; }
+}
+
 @keyframes chatActionIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }

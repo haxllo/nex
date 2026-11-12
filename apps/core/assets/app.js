@@ -113,6 +113,9 @@
   // from chatStreaming because the two look identical in the UI but behave
   // differently: streaming ends on its own, this does not.
   let chatPendingAction = null;
+  // Set when the step limit stopped a request, so the transcript can offer a
+  // Continue control instead of asking the user to type "continue".
+  let chatLimitReached = null;
   let chatActiveRequest = null;
   let chatSelectedFiles = [];
   let chatIncludePcInfo = true;
@@ -2540,6 +2543,86 @@
     updateChatStreamingState(true);
   }
 
+  /**
+   * The step limit was reached. Show what ran and offer to carry on.
+   *
+   * Other agent tools solve this by telling the user to type "continue", and
+   * models have been observed treating that word as a task to search for. A
+   * button says what it means without becoming part of the conversation, and
+   * the continuation is sent as a fresh request rather than as chat text.
+   */
+  function renderChatLimitReached() {
+    const existing = $("chat-limit-reached");
+    if (existing) existing.remove();
+    if (!chatLimitReached) return;
+    const card = document.createElement("div");
+    card.id = "chat-limit-reached";
+    card.className = "chat-limit-card";
+    card.setAttribute("role", "status");
+
+    const title = document.createElement("div");
+    title.className = "chat-limit-title";
+    const done = Array.isArray(chatLimitReached.done) ? chatLimitReached.done.length : 0;
+    title.textContent = done
+      ? `Stopped after ${chatLimitReached.limit} steps · ${done} done, the rest not started`
+      : `Stopped after ${chatLimitReached.limit} steps · nothing was run`;
+    card.appendChild(title);
+
+    if (done) {
+      const list = document.createElement("ol");
+      list.className = "chat-limit-list";
+      for (const line of chatLimitReached.done) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.appendChild(item);
+      }
+      card.appendChild(list);
+    }
+
+    const row = document.createElement("div");
+    row.className = "chat-limit-actions";
+    const again = document.createElement("button");
+    again.type = "button";
+    again.className = "chat-limit-continue";
+    again.textContent = "Continue";
+    again.addEventListener("click", () => continueAfterLimit());
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "chat-limit-dismiss";
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", () => {
+      chatLimitReached = null;
+      const stale = $("chat-limit-reached");
+      if (stale) stale.remove();
+    });
+    row.appendChild(again);
+    row.appendChild(dismiss);
+    card.appendChild(row);
+
+    chatMessagesEl.appendChild(card);
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  }
+
+  /**
+   * Carry on from the step limit.
+   *
+   * Sent as a request with an explicit instruction rather than as the bare word
+   * "continue", so the model cannot read it as something to search for. The
+   * actions already taken are named in the text, which is what stops it from
+   * repeating them.
+   */
+  function continueAfterLimit() {
+    const state = chatLimitReached;
+    chatLimitReached = null;
+    const card = $("chat-limit-reached");
+    if (card) card.remove();
+    const already = state && Array.isArray(state.done) ? state.done : [];
+    const instruction = already.length
+      ? `Carry on with the previous request from where it stopped. These steps are already done and must not be repeated: ${already.join("; ")}. Do the remaining work now.`
+      : "Carry on with the previous request and do the remaining work now.";
+    startChatRequest(instruction, true);
+  }
+
   function createChatRequestId() {
     const cryptoApi = window.crypto;
     if (typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
@@ -3461,6 +3544,10 @@
         flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
       }
     }
+    if (state.chatLimitReached && (!hasRequestId || requestMatches)) {
+      chatLimitReached = { ...state.chatLimitReached };
+      renderChatLimitReached();
+    }
     if (state.chatActionPending && (!hasRequestId || requestMatches)) {
       // The model proposed an action. Nothing runs until the user clicks.
       chatPendingAction = { ...state.chatActionPending, requestId: state.requestId || chatActiveRequest?.requestId || null };
@@ -3537,6 +3624,9 @@
       const stale = $("chat-pending-action");
       if (stale) stale.remove();
     }
+    // The limit card survives chatDone on purpose: the turn has ended and the
+    // Continue button is the only way forward, so clearing it would remove the
+    // control exactly when it becomes useful.
     if (state.chatCancelled && requestMatches) {
       chatActiveRequest = null;
       chatLiveStatus.textContent = "Response stopped";
@@ -3549,7 +3639,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatLimitReached || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

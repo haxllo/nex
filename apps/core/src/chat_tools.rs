@@ -619,6 +619,19 @@ impl ToolLoop {
         report
     }
 
+    /// The same facts as [`limit_report`], for a card rather than a paragraph.
+    ///
+    /// Sent as structured data so the UI can put a Continue control beside it.
+    /// Telling the user to "ask again" invited them to type "continue", which
+    /// is exactly the word other agents have been known to mistake for a task to
+    /// search the codebase for. A button carries its own meaning.
+    pub(crate) fn limit_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "limit": MAX_TOOL_ROUNDS,
+            "done": self.done,
+        })
+    }
+
     /// Whether this call is being held only because its destination came from
     /// tool output. Used to word the confirmation honestly rather than claiming
     /// the link itself is dangerous.
@@ -2230,6 +2243,24 @@ mod tests {
         assert!(l.limit_report().contains("before running anything"));
         l.observe_output(&ran("Created folder C:/one"));
         assert!(l.limit_report().contains("These 1 action"));
+    }
+
+    #[test]
+    fn the_limit_payload_lists_what_ran() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/a"));
+        l.observe_output(&ran("Created folder C:/b"));
+        let payload = l.limit_payload();
+        assert_eq!(payload["limit"], MAX_TOOL_ROUNDS);
+        let done = payload["done"].as_array().unwrap();
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0], "Created folder C:/a");
+    }
+
+    #[test]
+    fn the_limit_payload_is_empty_when_nothing_ran() {
+        let l = ToolLoop::new();
+        assert_eq!(l.limit_payload()["done"].as_array().unwrap().len(), 0);
     }
 
     // --- declarations stay in sync with the enum ---

@@ -2646,20 +2646,23 @@ html.glass-native .row .icon.placeholder {
   white-space: nowrap;
 }
 
-/* Controls join the context bar once there is a transcript to navigate or
-   copy. They cannot be absolutely positioned at the top right: the model chip
-   already owns that corner, and the two collided. In flow they simply sit
-   before the chip, which is where a thumb expects a back/history pair. */
+/* Navigation controls sit in the context bar, before the model chip, rather
+   than absolutely positioned: the chip already owns the top-right corner and
+   the two collided when both were pinned there.
+
+   History is always present. It is the only way back to a previous
+   conversation, so hiding it on a fresh one left no route to history at all.
+   Copy and New do need a transcript, and stay hidden until there is one. */
 .chat-floating-controls {
   flex: 0 0 auto;
-  display: none;
+  display: flex;
   align-items: center;
   gap: 1px;
 }
-/* Shown only when there is something to navigate; it never reserves space, so
-   the bar stays one row whether or not a transcript exists. */
-.chat-floating-controls.visible { display: flex; }
-.chat-floating-controls.visible + .chat-model-chip { margin-left: 0; }
+.chat-floating-controls + .chat-model-chip { margin-left: 0; }
+/* Copy and New appear only once there is something to copy or clear. */
+#chat-view:not(.has-transcript) #chat-new-button,
+#chat-view:not(.has-transcript) #chat-copy-button { display: none; }
 
 .chat-mini-button {
   width: 28px;
@@ -2793,6 +2796,12 @@ html[data-native-material="acrylic"] .chat-composer-shell {
 }
 #chat-view.is-streaming .chat-send-icon { display: none; }
 #chat-view.is-streaming .chat-stop-icon { display: block; }
+/* Voice input is not a planned feature yet. The button and its recognition
+   wiring stay in the markup behind `hidden` for a later pass, but several
+   button base classes set `display`, which beats the attribute — so the
+   hidden rule has to be explicit or the button reappears in the composer. */
+#chat-voice-button[hidden],
+#chat-voice-entry[hidden] { display: none !important; }
 #chat-view.is-listening #chat-voice-button {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -3241,7 +3250,10 @@ html[data-native-material="acrylic"] .chat-composer-shell {
   right: 14px;
   width: 420px;
   padding: 0;
-  overflow: hidden;
+  /* Not `hidden`: the provider and model menus are absolutely positioned
+     inside this sheet, and clipping here cut them off at the sheet's bottom
+     edge. The head and body carry no background of their own, so nothing
+     actually needs clipping to keep the rounded corners clean. */
   border: 1px solid var(--border-strong);
   border-radius: var(--r-xl);
   background: var(--bg-raised);

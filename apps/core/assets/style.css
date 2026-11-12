@@ -2659,8 +2659,9 @@ html.glass-native .row .icon.placeholder {
   align-items: center;
   gap: 1px;
 }
-.chat-floating-controls + .chat-model-chip { margin-left: 0; }
-/* Copy and New appear only once there is something to copy or clear. */
+.chat-floating-controls + .chat-model-chip { margin-left: auto; }
+/* The settings trigger is the bar's right anchor. Its own margin-left: auto
+   does the work; the icons that precede it sit tight to the left edge. *//* Copy and New appear only once there is something to copy or clear. */
 #chat-view:not(.has-transcript) #chat-new-button,
 #chat-view:not(.has-transcript) #chat-copy-button { display: none; }
 

@@ -91,7 +91,14 @@ impl std::fmt::Display for ToolError {
         match self {
             Self::UnknownTool { name } => write!(f, "unknown tool: {name}"),
             Self::EmptyArgument { tool, field } => {
-                write!(f, "{tool} requires a non-empty {field}")
+                // Name the field and show the shape. "requires a non-empty name"
+                // told the model what was wrong but not what to send, and it
+                // repeated the same empty call five times before giving up.
+                write!(
+                    f,
+                    "{tool}: the `{field}` argument was missing or empty. Send it as a \
+                     JSON object, for example {{\"{field}\": \"value\"}}."
+                )
             }
             Self::IllegalName { tool, reason } => write!(f, "{tool}: {reason}"),
             Self::IllegalUrl { scheme } => {
@@ -504,6 +511,11 @@ pub(crate) struct ToolLoop {
     seeded_hosts: std::collections::BTreeSet<String>,
     /// Hosts the user named in the text that started the request.
     user_hosts: std::collections::BTreeSet<String>,
+    /// A one-line account of each action that actually ran, in order.
+    ///
+    /// Kept so the round limit can say what was done instead of only that it
+    /// stopped. A user left with half a folder tree needs to know which half.
+    done: Vec<String>,
 }
 
 impl ToolLoop {
@@ -512,6 +524,7 @@ impl ToolLoop {
             rounds: 0,
             seeded_hosts: std::collections::BTreeSet::new(),
             user_hosts: std::collections::BTreeSet::new(),
+            done: Vec::new(),
         }
     }
 
@@ -546,6 +559,7 @@ impl ToolLoop {
                 self.seeded_hosts.insert(host);
             }
         }
+        self.done.push(outcome.summary.clone());
     }
 
     /// True when the destination came from tool output rather than the user.
@@ -575,15 +589,66 @@ impl ToolLoop {
     pub(crate) fn on_tool_call(&mut self, tool: ChatTool) -> LoopStep {
         if self.rounds >= MAX_TOOL_ROUNDS {
             return LoopStep::Stop {
-                reason: format!("stopped after {MAX_TOOL_ROUNDS} action rounds"),
+                reason: self.limit_report(),
             };
         }
-        self.rounds += 1;
+        // `rounds` counts exchanges with the model, not individual calls: a
+        // model that asks for five folders in one reply has taken one step, and
+        // counting each call separately spent the whole budget on a single
+        // batch. The outer loop bounded by MAX_TOOL_ROUNDS is what stops a
+        // runaway, so this only has to decide the call in front of it.
         if tool.needs_confirmation() || self.url_is_unfamiliar(&tool) {
             LoopStep::AwaitConfirmation { tool }
         } else {
             LoopStep::RunTool { tool }
         }
+    }
+
+    /// Record that the loop completed an exchange with the model.
+    ///
+    /// Called once per round from the stream worker, so a batch of calls in one
+    /// reply counts as one step rather than as many.
+    pub(crate) fn begin_round(&mut self) {
+        self.rounds += 1;
+    }
+
+    /// What happened before the round limit stopped the loop.
+    ///
+    /// "Stopped after 4 rounds" told the user nothing they could act on: the
+    /// first four actions had already changed the disk, and there was no way to
+    /// tell how much of the request was done. Naming the actions that ran, and
+    /// saying plainly that the rest did not, is the difference between a
+    /// usable half-finished job and a mystery.
+    pub(crate) fn limit_report(&self) -> String {
+        let count = self.done.len();
+        if count == 0 {
+            return format!(
+                "I reached the {MAX_TOOL_ROUNDS}-step limit before running anything"
+            );
+        }
+        // "1 actions" is the kind of small wrongness that makes a message read
+        // as machine output rather than as a report.
+        let plural = if count == 1 { "action" } else { "actions" };
+        let mut report = format!(
+            "I reached the {MAX_TOOL_ROUNDS}-step limit. These {count} {plural} did run, and anything after them did NOT:"
+        );
+        for (index, line) in self.done.iter().enumerate() {
+            report.push_str(&format!("\n{}. {}", index + 1, line));
+        }
+        report
+    }
+
+    /// The same facts as [`limit_report`], for a card rather than a paragraph.
+    ///
+    /// Sent as structured data so the UI can put a Continue control beside it.
+    /// Telling the user to "ask again" invited them to type "continue", which
+    /// is exactly the word other agents have been known to mistake for a task to
+    /// search the codebase for. A button carries its own meaning.
+    pub(crate) fn limit_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "limit": MAX_TOOL_ROUNDS,
+            "done": self.done,
+        })
     }
 
     /// Whether this call is being held only because its destination came from
@@ -1206,6 +1271,7 @@ fn third_person(text: &str) -> String {
 }
 
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1598,6 +1664,9 @@ mod tests {
             LoopStep::RunTool { tool } => assert_eq!(tool.name(), "open_path"),
             other => panic!("expected RunTool, got {other:?}"),
         }
+        // A call alone does not consume a round; only an exchange does.
+        assert_eq!(loop_state.rounds(), 0);
+        loop_state.begin_round();
         assert_eq!(loop_state.rounds(), 1);
     }
 
@@ -1624,15 +1693,20 @@ mod tests {
     fn the_round_bound_stops_a_repeating_model() {
         let mut loop_state = ToolLoop::new();
         let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
-        for _ in 0..MAX_TOOL_ROUNDS {
+        // A full budget of rounds works normally.
+        for round in 0..MAX_TOOL_ROUNDS {
             assert!(matches!(
                 loop_state.on_tool_call(ChatTool::OpenPath { path: exe.clone() }),
                 LoopStep::RunTool { .. }
-            ));
+            ), "round {round} should still run");
+            loop_state.begin_round();
         }
         // One past the bound ends the turn instead of looping forever.
         match loop_state.on_tool_call(ChatTool::OpenPath { path: exe }) {
-            LoopStep::Stop { reason } => assert!(reason.contains("action rounds")),
+            LoopStep::Stop { reason } => {
+                // The report must name the limit rather than only that it stopped.
+                assert!(reason.contains("step limit"), "{reason}");
+            }
             other => panic!("expected Stop, got {other:?}"),
         }
     }
@@ -2125,6 +2199,114 @@ mod tests {
         assert!(is_drive_root(std::path::Path::new("C:\\")));
         assert!(!is_drive_root(std::path::Path::new("G:\\scripts")));
         assert!(!is_drive_root(std::path::Path::new("C:\\Windows")));
+    }
+
+    // --- round limit reports what happened (CIQ-149) ---
+
+    fn ran(summary: &str) -> ToolOutcome {
+        ToolOutcome {
+            tool: "create_folder".to_string(),
+            target: "C:/x".to_string(),
+            ok: true,
+            summary: summary.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_limit_report_names_the_work_that_ran() {
+        // A user left with half a folder tree must be able to see which half.
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/projects"));
+        l.observe_output(&ran("Created folder C:/projects/web"));
+        let report = l.limit_report();
+        assert!(report.contains("C:/projects"), "{report}");
+        assert!(report.contains("C:/projects/web"), "{report}");
+        assert!(report.contains("2 actions"), "{report}");
+    }
+
+    #[test]
+    fn the_limit_report_says_the_rest_did_not_run() {
+        // The important half: partial work must not look like finished work.
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/a"));
+        let report = l.limit_report();
+        assert!(report.contains("did NOT"), "{report}");
+    }
+
+    #[test]
+    fn the_limit_report_orders_the_actions() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("first thing"));
+        l.observe_output(&ran("second thing"));
+        let report = l.limit_report();
+        let first = report.find("first thing").unwrap();
+        let second = report.find("second thing").unwrap();
+        assert!(first < second, "report lost the order: {report}");
+    }
+
+    #[test]
+    fn a_limit_reached_with_nothing_run_says_so() {
+        let l = ToolLoop::new();
+        let report = l.limit_report();
+        assert!(report.contains("before running anything"), "{report}");
+    }
+
+    #[test]
+    fn the_report_reads_naturally_for_one_action() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/one"));
+        let report = l.limit_report();
+        assert!(report.contains("These 1 action did run"), "{report}");
+        assert!(!report.contains("1 actions"), "{report}");
+    }
+
+    #[test]
+    fn the_report_counts_only_actions_that_ran() {
+        // observe_output is fed from run(), so a refused action never lands.
+        let mut l = ToolLoop::new();
+        assert!(l.limit_report().contains("before running anything"));
+        l.observe_output(&ran("Created folder C:/one"));
+        assert!(l.limit_report().contains("These 1 action"));
+    }
+
+    #[test]
+    fn the_limit_payload_lists_what_ran() {
+        let mut l = ToolLoop::new();
+        l.observe_output(&ran("Created folder C:/a"));
+        l.observe_output(&ran("Created folder C:/b"));
+        let payload = l.limit_payload();
+        assert_eq!(payload["limit"], MAX_TOOL_ROUNDS);
+        let done = payload["done"].as_array().unwrap();
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0], "Created folder C:/a");
+    }
+
+    #[test]
+    fn the_limit_payload_is_empty_when_nothing_ran() {
+        let l = ToolLoop::new();
+        assert_eq!(l.limit_payload()["done"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_batch_of_calls_in_one_reply_costs_one_round() {
+        // The reported bug: one reply asked for a parent folder plus five
+        // subfolders, each call incremented the counter, and the budget was
+        // spent before the batch finished.
+        let mut l = ToolLoop::new();
+        l.begin_round();
+        for _ in 0..6 {
+            assert!(
+                !matches!(
+                    l.on_tool_call(ChatTool::CreateFolder {
+                        name: "sub".into(),
+                        parent: None,
+                    }),
+                    LoopStep::Stop { .. }
+                ),
+                "a call inside round 1 must not be refused"
+            );
+        }
+        assert_eq!(l.rounds(), 1);
     }
 
     // --- declarations stay in sync with the enum ---

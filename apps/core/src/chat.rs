@@ -827,6 +827,33 @@ impl ToolCallAccumulator {
         }
     }
 
+    /// Replace a call's arguments with the finished value.
+    ///
+    /// `response.output_item.done` carries the whole argument string, so this is
+    /// the authoritative source. Deltas are only a streaming convenience: if any
+    /// of them went unmatched, the call would otherwise finish with partial or
+    /// empty arguments and the tool would be refused for a reason the model
+    /// cannot see.
+    fn settle(&mut self, index: i64, arguments: &str) {
+        if arguments.trim().is_empty() {
+            return;
+        }
+        let entry = self.by_index.entry(index).or_default();
+        entry.1 = arguments.to_string();
+    }
+
+    /// Replace a call's name with the finished value.
+    ///
+    /// Names arrive a fragment at a time on some providers and wholly on others;
+    /// the finished item is the one to trust.
+    fn set_name(&mut self, index: i64, name: &str) {
+        if name.trim().is_empty() {
+            return;
+        }
+        let entry = self.by_index.entry(index).or_default();
+        entry.0 = name.to_string();
+    }
+
     fn is_empty(&self) -> bool {
         self.by_index.is_empty()
     }
@@ -837,8 +864,15 @@ impl ToolCallAccumulator {
             .filter(|(_, (name, _))| !name.trim().is_empty())
             .map(|(index, (name, arguments))| crate::chat_tools::RawToolCall {
                 name,
-                arguments: serde_json::from_str(&arguments)
-                    .unwrap_or(serde_json::Value::Null),
+                arguments: serde_json::from_str(&arguments).unwrap_or_else(|error| {
+                    // Never a silent Null: a call that reached us with broken
+                    // arguments should say so, in the log if nowhere else.
+                    crate::runtime::log_info(&format!(
+                        "[nex][chat] unparseable tool arguments ({error}): {}",
+                        arguments.chars().take(200).collect::<String>()
+                    ));
+                    serde_json::Value::Null
+                }),
                 id: self.id_by_index.get(&index).cloned(),
             })
             .collect()
@@ -885,6 +919,21 @@ fn stream_openai(
             "stream": true,
             "tools": crate::chat_tools::tool_declarations(),
         });
+        // This loop had no bound at all, so a model that kept calling tools
+        // could spin indefinitely. Same limit as the other path.
+        if loop_state.rounds() >= crate::chat_tools::MAX_TOOL_ROUNDS {
+            emit(&loop_state.limit_report(), None);
+            push_chat_update(
+                sink,
+                request_update(
+                    request_id,
+                    "chatLimitReached",
+                    loop_state.limit_payload(),
+                ),
+            );
+            return Ok(());
+        }
+        loop_state.begin_round();
         let turn = stream_openai_once(config, &agent, &body, id, &mut emit_with_break)?;
         if turn.calls.is_empty() {
             return Ok(());
@@ -920,7 +969,7 @@ fn stream_openai(
             };
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
-                    emit(&format!("Stopping here: {reason}."), None);
+                    emit(&reason, None);
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
@@ -935,7 +984,7 @@ fn stream_openai(
                                 request_id,
                                 "chatNotice",
                                 json!(format!(
-                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    "The confirmation for this action expired after {}, so nothing ran.",
                                     confirm_wait_words()
                                 )),
                             ),
@@ -1292,6 +1341,8 @@ fn stream_chatgpt_native(
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             return Ok(());
         }
+        // One step, however many calls this reply contains.
+        loop_state.begin_round();
         let round_started = Instant::now();
         let streamed = match stream_chatgpt_once(
             config,
@@ -1325,6 +1376,13 @@ fn stream_chatgpt_native(
             "[nex][chat] ChatGPT account requested {} action(s) in round {round}",
             streamed.requested.len()
         ));
+        for call in &streamed.requested {
+            crate::runtime::log_info(&format!(
+                "[nex][chat] call name={} args={}",
+                call.name,
+                call.arguments
+            ));
+        }
 
         // The last allowed round is for answering, not for more actions: stop
         // rather than run tools we will never get to report on.
@@ -1332,9 +1390,19 @@ fn stream_chatgpt_native(
             crate::runtime::log_info(
                 "[nex][chat] ChatGPT account hit the tool round limit; stopping",
             );
-            emit(
-                "I stopped after several steps without finishing; ask again if you want to continue.",
-                None,
+            // Say what actually ran. The old line - "stopped after several
+            // steps without finishing" - left the user with changes on disk and
+            // no way to know which ones, or what was left undone.
+            emit(&loop_state.limit_report(), None);
+            // A card with a Continue button, rather than a sentence asking the
+            // user to type a word the model might read as a task.
+            push_chat_update(
+                sink,
+                request_update(
+                    request_id,
+                    "chatLimitReached",
+                    loop_state.limit_payload(),
+                ),
             );
             return Ok(());
         }
@@ -1362,7 +1430,7 @@ fn stream_chatgpt_native(
             };
             match loop_state.on_tool_call(tool.clone()) {
                 crate::chat_tools::LoopStep::Stop { reason } => {
-                    emit(&format!("Stopping here: {reason}."), None);
+                    emit(&reason, None);
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
@@ -1373,7 +1441,7 @@ fn stream_chatgpt_native(
                             tool.name(),
                             tool.target(),
                             format!(
-                                "the user did not answer within {} minutes, so nothing ran.                                  Do not retry automatically; ask again if it is still wanted.",
+                                "the user did not answer within {}, so nothing ran. Do not retry automatically; ask again if it is still wanted.",
                                 confirm_wait_words()
                             ),
                         );
@@ -1384,7 +1452,7 @@ fn stream_chatgpt_native(
                                 request_id,
                                 "chatNotice",
                                 json!(format!(
-                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    "The confirmation for this action expired after {}, so nothing ran.",
                                     confirm_wait_words()
                                 )),
                             ),
@@ -1609,17 +1677,49 @@ fn stream_chatgpt_once(
                     }
                 }
             }
+        } else if event == "response.output_item.done" {
+            // Authoritative: the finished item carries the complete arguments.
+            // Trusting the streamed deltas alone meant a call whose deltas went
+            // unmatched arrived with empty arguments and was refused.
+            if let Some(item) = data.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                        if let Some(index) = calls.index_of_item(item_id) {
+                            if let Some(args) =
+                                item.get("arguments").and_then(Value::as_str)
+                            {
+                                calls.settle(index, args);
+                            }
+                            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                                calls.set_name(index, name);
+                            }
+                        }
+                    }
+                }
+            }
         } else if event == "response.function_call_arguments.delta" {
-            let index = data
+            // Never fall back to index 0. With one call it looks fine; with
+            // several - a parent folder plus five subfolders in one reply - every
+            // delta whose item_id we failed to match was appended to call 0, and
+            // the real calls ended with empty arguments. That is exactly the
+            // "name argument was missing" failure the user saw five times over.
+            let matched = data
                 .get("item_id")
                 .and_then(Value::as_str)
-                .and_then(|id| calls.index_of_item(id))
-                .unwrap_or(0);
-            if let Some(delta) = data.get("delta").and_then(Value::as_str) {
-                calls.absorb(&json!({
-                    "index": index,
-                    "function": {"arguments": delta}
-                }));
+                .and_then(|id| calls.index_of_item(id));
+            match matched {
+                Some(index) => {
+                    if let Some(delta) = data.get("delta").and_then(Value::as_str) {
+                        calls.absorb(&json!({
+                            "index": index,
+                            "function": {"arguments": delta}
+                        }));
+                    }
+                }
+                None => crate::runtime::log_info(&format!(
+                    "[nex][chat] argument delta for an unknown item_id; dropping: {}",
+                    data.get("item_id").and_then(Value::as_str).unwrap_or("<none>")
+                )),
             }
         }
         if let Some(error) = data
@@ -2606,6 +2706,55 @@ mod tests {
         assert_eq!(finished[0].name, "open_path");
         // Raw strings so the Windows backslash is data, not an escape.
         assert_eq!(finished[0].arguments["path"], "C:/Windows");
+    }
+
+    #[test]
+    fn parallel_calls_do_not_share_arguments() {
+        // The reported bug: a parent folder plus five subfolders in one reply.
+        // Every argument delta whose item_id failed to match was appended to
+        // call 0, so the real calls finished with no arguments at all.
+        let mut calls = ToolCallAccumulator::default();
+        let indexes: Vec<i64> = (0..5)
+            .map(|n| {
+                let index = calls.next_index();
+                calls.bind_item(index, &format!("item_{n}"));
+                calls.absorb(&json!({
+                    "index": index,
+                    "function": {"name": "create_folder", "arguments": ""}
+                }));
+                index
+            })
+            .collect();
+        for (n, index) in indexes.iter().enumerate() {
+            calls.absorb(&json!({
+                "index": index,
+                "function": {"arguments": format!("{{\"name\":\"sub{n}\"}}")}
+            }));
+        }
+        let finished = calls.finish();
+        assert_eq!(finished.len(), 5);
+        for (n, call) in finished.iter().enumerate() {
+            assert_eq!(
+                call.arguments["name"], format!("sub{n}"),
+                "call {n} got the wrong arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_item_overrides_partial_deltas() {
+        // output_item.done carries the whole argument string, so a delta that
+        // was lost while streaming cannot leave the call empty.
+        let mut calls = ToolCallAccumulator::default();
+        let index = calls.next_index();
+        calls.bind_item(index, "item_x");
+        calls.absorb(&json!({
+            "index": index,
+            "function": {"name": "create_folder", "arguments": ""}
+        }));
+        calls.settle(index, "{\"name\":\"docs\"}");
+        let finished = calls.finish();
+        assert_eq!(finished[0].arguments["name"], "docs");
     }
 
     #[test]

@@ -1006,6 +1006,18 @@ const DATA_OPEN: &str = "<<<TOOL_DATA";
 const DATA_CLOSE: &str = ">>>";
 
 impl ToolOutcome {
+    /// An action that ran. The summary is what the user reads on the card and
+    /// what the loop later reports as done, so it is built here rather than at
+    /// each call site.
+    pub(crate) fn success(tool: &str, target: &str, detail: impl std::fmt::Display) -> Self {
+        Self {
+            tool: tool.to_string(),
+            target: target.to_string(),
+            ok: true,
+            summary: detail.to_string(),
+        }
+    }
+
     pub(crate) fn failure(tool: &str, target: &str, reason: impl std::fmt::Display) -> Self {
         Self {
             tool: tool.to_string(),

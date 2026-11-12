@@ -324,9 +324,16 @@ fn parse_parent(
                 });
             }
             if is_system_path(&path) {
+                // Name the actual rule. "system folder" for a drive root sent the
+                // model looking for another folder on a drive that was fine.
+                let reason = if is_drive_root(&path) {
+                    "that is the root of the Windows drive; choose a folder"
+                } else {
+                    "parent is a system folder"
+                };
                 return Err(ToolError::IllegalName {
                     tool,
-                    reason: "parent is a system folder".into(),
+                    reason: reason.into(),
                 });
             }
             Ok(path)
@@ -409,9 +416,11 @@ fn is_system_path(path: &std::path::Path) -> bool {
         "\\recovery",
     ];
     BLOCKED.iter().any(|prefix| text.contains(prefix))
-        // A drive root is not a folder anyone should drop a file into.
-        || text.trim_end_matches('\\').ends_with(':')
-        || text == "c:\\"
+        // A system drive root is not somewhere to drop a file. Other drive
+        // roots are ordinary places: a user with a G: drive asks for
+        // "G:\scripts" and "G:\" is the folder they mean, so refusing every
+        // drive root rejected a reasonable request as a "system folder".
+        || is_windows_drive_root(&text)
 }
 
 fn validate_name(tool: &'static str, name: &str) -> Result<(), ToolError> {
@@ -619,6 +628,22 @@ fn executable_extension(name: &str) -> Option<String> {
             | "wsh" | "msi" | "scr" | "hta" | "reg" | "sh" | "py" | "jar"
     )
     .then_some(extension)
+}
+
+/// True when the path is a drive root such as `G:\`.
+fn is_drive_root(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy();
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    trimmed.len() == 2 && trimmed.ends_with(':')
+}
+
+/// True for the root of the drive Windows is installed on.
+///
+/// Accepts either separator, because `C:/` names the same folder as `C:\` and
+/// blocking only the backslash form would leave a way around the rule.
+fn is_windows_drive_root(lowered: &str) -> bool {
+    let trimmed = lowered.trim_end_matches(['\\', '/']);
+    trimmed == "c:" || trimmed == "c"
 }
 
 /// The lowercase host of a URL or a bare domain, or `None`.
@@ -2060,6 +2085,46 @@ mod tests {
         assert!(raw("create_file", serde_json::json!({ "name": "a.txt", "content": at_cap }))
             .validate()
             .is_ok());
+    }
+
+    // --- drive roots (reported bug: G:\ rejected as a system folder) ---
+
+    #[test]
+    fn a_secondary_drive_root_is_not_a_system_folder() {
+        // A user asking for "a script in my G drive" means G:\, and that is an
+        // ordinary place; the old rule blocked every drive root.
+        for root in ["G:\\", "D:\\", "E:\\"] {
+            assert!(
+                !is_system_path(std::path::Path::new(root)),
+                "{root} was wrongly treated as a system path"
+            );
+        }
+    }
+
+    #[test]
+    fn the_windows_drive_root_is_still_refused() {
+        for root in ["C:\\", "c:\\", "C:/"] {
+            assert!(
+                is_system_path(std::path::Path::new(root)),
+                "{root} should stay blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_system_folders_stay_blocked() {
+        for p in ["C:\\Windows", "C:\\Program Files\\x", "C:\\ProgramData"] {
+            assert!(is_system_path(std::path::Path::new(p)), "{p} should stay blocked");
+        }
+    }
+
+    #[test]
+    fn a_drive_root_error_names_the_real_rule() {
+        // Telling the model "system folder" sent it hunting for another folder
+        // on a drive that was perfectly usable.
+        assert!(is_drive_root(std::path::Path::new("C:\\")));
+        assert!(!is_drive_root(std::path::Path::new("G:\\scripts")));
+        assert!(!is_drive_root(std::path::Path::new("C:\\Windows")));
     }
 
     // --- declarations stay in sync with the enum ---

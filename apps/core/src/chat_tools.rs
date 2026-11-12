@@ -731,6 +731,73 @@ pub(crate) fn responses_tool_declarations() -> serde_json::Value {
     serde_json::Value::Array(flat)
 }
 
+/// The capability sentence the system prompt uses, built from the tool
+/// declarations rather than written by hand.
+///
+/// The prompt used to spell the tools out in prose, and prose drifts: it still
+/// said `create_file makes an empty file` while the tool had gained a `parent`
+/// argument, so the model told users it could not choose a parent folder. One
+/// source means a tool cannot be declared and forgotten, or removed and left
+/// described.
+///
+pub(crate) fn capability_sentence() -> String {
+    let declarations = tool_declarations();
+    let list = declarations
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    let f = tool.get("function")?;
+                    let name = f.get("name")?.as_str()?;
+                    let description = f.get("description")?.as_str()?.trim();
+                    // Each declaration's own description is already written for
+                    // the model, so quoting it keeps the two in step without a
+                    // second wording to maintain.
+                    // "Requires user confirmation" is true of several tools;
+                    // saying it per tool repeats the same clause four times.
+                    let text = description
+                        .trim_end_matches('.')
+                        .trim_end_matches(". Requires user confirmation")
+                        .trim_end_matches(" Requires user confirmation")
+                        .trim_end_matches('.');
+                    Some(format!("`{name}` {}", third_person(text)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if list.is_empty() {
+        return "You cannot change anything on this PC in this request: no tools are available to you."
+            .to_string();
+    }
+    format!(
+        "You can act on this PC with these tools, and nothing else: {}. Creating a folder or file asks you for confirmation first.",
+        list.join("; ")
+    )
+}
+
+/// Turns a declaration's imperative description ("Open a file") into the third
+/// person the sentence needs ("opens a file"). Only the leading verb changes, so
+/// acronyms, paths and the rest of the wording are left alone.
+fn third_person(text: &str) -> String {
+    let mut words = text.splitn(2, ' ');
+    let verb = match words.next() {
+        Some(v) => v,
+        None => return String::new(),
+    };
+    let rest = words.next().unwrap_or("");
+    let lower = verb.to_lowercase();
+    let conjugated = if lower.ends_with('s') || lower.ends_with("sh") || lower.ends_with("ch") {
+        format!("{lower}es")
+    } else if lower.ends_with('y') && !lower.ends_with("ay") && !lower.ends_with("oy") {
+        format!("{}ies", &lower[..lower.len() - 1])
+    } else {
+        format!("{lower}s")
+    };
+    if rest.is_empty() { conjugated } else { format!("{conjugated} {rest}") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

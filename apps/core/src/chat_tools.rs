@@ -91,7 +91,14 @@ impl std::fmt::Display for ToolError {
         match self {
             Self::UnknownTool { name } => write!(f, "unknown tool: {name}"),
             Self::EmptyArgument { tool, field } => {
-                write!(f, "{tool} requires a non-empty {field}")
+                // Name the field and show the shape. "requires a non-empty name"
+                // told the model what was wrong but not what to send, and it
+                // repeated the same empty call five times before giving up.
+                write!(
+                    f,
+                    "{tool}: the `{field}` argument was missing or empty. Send it as a \
+                     JSON object, for example {{\"{field}\": \"value\"}}."
+                )
             }
             Self::IllegalName { tool, reason } => write!(f, "{tool}: {reason}"),
             Self::IllegalUrl { scheme } => {
@@ -585,12 +592,24 @@ impl ToolLoop {
                 reason: self.limit_report(),
             };
         }
-        self.rounds += 1;
+        // `rounds` counts exchanges with the model, not individual calls: a
+        // model that asks for five folders in one reply has taken one step, and
+        // counting each call separately spent the whole budget on a single
+        // batch. The outer loop bounded by MAX_TOOL_ROUNDS is what stops a
+        // runaway, so this only has to decide the call in front of it.
         if tool.needs_confirmation() || self.url_is_unfamiliar(&tool) {
             LoopStep::AwaitConfirmation { tool }
         } else {
             LoopStep::RunTool { tool }
         }
+    }
+
+    /// Record that the loop completed an exchange with the model.
+    ///
+    /// Called once per round from the stream worker, so a batch of calls in one
+    /// reply counts as one step rather than as many.
+    pub(crate) fn begin_round(&mut self) {
+        self.rounds += 1;
     }
 
     /// What happened before the round limit stopped the loop.
@@ -1645,6 +1664,9 @@ mod tests {
             LoopStep::RunTool { tool } => assert_eq!(tool.name(), "open_path"),
             other => panic!("expected RunTool, got {other:?}"),
         }
+        // A call alone does not consume a round; only an exchange does.
+        assert_eq!(loop_state.rounds(), 0);
+        loop_state.begin_round();
         assert_eq!(loop_state.rounds(), 1);
     }
 
@@ -1671,11 +1693,13 @@ mod tests {
     fn the_round_bound_stops_a_repeating_model() {
         let mut loop_state = ToolLoop::new();
         let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
-        for _ in 0..MAX_TOOL_ROUNDS {
+        // A full budget of rounds works normally.
+        for round in 0..MAX_TOOL_ROUNDS {
             assert!(matches!(
                 loop_state.on_tool_call(ChatTool::OpenPath { path: exe.clone() }),
                 LoopStep::RunTool { .. }
-            ));
+            ), "round {round} should still run");
+            loop_state.begin_round();
         }
         // One past the bound ends the turn instead of looping forever.
         match loop_state.on_tool_call(ChatTool::OpenPath { path: exe }) {
@@ -2261,6 +2285,28 @@ mod tests {
     fn the_limit_payload_is_empty_when_nothing_ran() {
         let l = ToolLoop::new();
         assert_eq!(l.limit_payload()["done"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_batch_of_calls_in_one_reply_costs_one_round() {
+        // The reported bug: one reply asked for a parent folder plus five
+        // subfolders, each call incremented the counter, and the budget was
+        // spent before the batch finished.
+        let mut l = ToolLoop::new();
+        l.begin_round();
+        for _ in 0..6 {
+            assert!(
+                !matches!(
+                    l.on_tool_call(ChatTool::CreateFolder {
+                        name: "sub".into(),
+                        parent: None,
+                    }),
+                    LoopStep::Stop { .. }
+                ),
+                "a call inside round 1 must not be refused"
+            );
+        }
+        assert_eq!(l.rounds(), 1);
     }
 
     // --- declarations stay in sync with the enum ---

@@ -885,6 +885,21 @@ fn stream_openai(
             "stream": true,
             "tools": crate::chat_tools::tool_declarations(),
         });
+        // This loop had no bound at all, so a model that kept calling tools
+        // could spin indefinitely. Same limit as the other path.
+        if loop_state.rounds() >= crate::chat_tools::MAX_TOOL_ROUNDS {
+            emit(&loop_state.limit_report(), None);
+            push_chat_update(
+                sink,
+                request_update(
+                    request_id,
+                    "chatLimitReached",
+                    loop_state.limit_payload(),
+                ),
+            );
+            return Ok(());
+        }
+        loop_state.begin_round();
         let turn = stream_openai_once(config, &agent, &body, id, &mut emit_with_break)?;
         if turn.calls.is_empty() {
             return Ok(());
@@ -1292,6 +1307,8 @@ fn stream_chatgpt_native(
         if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
             return Ok(());
         }
+        // One step, however many calls this reply contains.
+        loop_state.begin_round();
         let round_started = Instant::now();
         let streamed = match stream_chatgpt_once(
             config,

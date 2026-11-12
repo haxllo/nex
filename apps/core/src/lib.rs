@@ -7,6 +7,8 @@ pub(crate) mod calculator;
 pub(crate) mod chat;
 #[cfg(target_os = "windows")]
 pub(crate) mod chat_tools;
+#[cfg(test)]
+mod chat_eval;
 pub mod clipboard_history;
 #[cfg(target_os = "windows")]
 pub(crate) mod codex_auth;

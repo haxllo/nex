@@ -22,15 +22,59 @@
 
 **Cargo target location**: Use `G:\nex-target` for Cargo commands when available. Set `$env:CARGO_TARGET_DIR='G:\nex-target'` before `cargo build`, `cargo check`, or `cargo test` to avoid C: drive pressure.
 
+**Toolchain location (this machine)**: the default `C:\Users\<user>\.rustup`
+`rustc` **crashes** on this crate (`STATUS_STACK_BUFFER_OVERRUN`, exit
+`0xc0000409`) when emit-warnings runs out of memory — the machine has 7.9 GB
+RAM and a pagefile capped by a full C: drive. A working 1.93.0 toolchain and
+`CARGO_HOME` live on G:. Build with all three paths on G:, and **one job**
+(`CARGO_BUILD_JOBS=1`); parallel jobs hit `LNK1102: out of memory` and leave
+corrupt rlibs behind, which then fail as bogus `E0786` invalid-metadata errors
+— if that happens, `rm -rf G:\nex-target\release` before retrying.
+
+```powershell
+$env:RUSTUP_HOME='G:\rustup-home'
+$env:CARGO_HOME='G:\cargo-home'
+$env:CARGO_TARGET_DIR='G:\nex-target'
+$env:CARGO_BUILD_JOBS=1
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+```
+
+```bash
+# same thing from bash (Git Bash)
+export RUSTUP_HOME='G:\rustup-home' CARGO_HOME='G:\cargo-home' \
+       CARGO_TARGET_DIR='G:\nex-target' CARGO_BUILD_JOBS=1
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+```
+
+A cold release build takes ~10 minutes here; the output binary is at
+`G:\nex-target\release\`. `NexUIProcess.exe` locks itself while running, so
+`taskkill //F //IM NexUIProcess.exe` before rebuilding. Web assets are
+`include_str!`-embedded at compile time, so **any change to `style.css`,
+`app.js` or `index.html` needs a rebuild** to appear in the app — editing them
+alone changes nothing at runtime.
+
+Long builds get killed by the tool timeout, so run them detached with a log
+(`nohup … > /g/build.log 2>&1 &`) and poll, rather than blocking on one call.
+
 ```bash
 cargo build --bin NexUIProcess         # debug build (UI only)
-cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess  # release build
 cargo build --release -p nex-helper      # release build (helper only)
+cargo test -p nex --lib chat             # chat/tool-loop tests (fast, reliable)
 cargo test -p nex                        # all unit tests (Windows)
 cargo test -p nex-indexer --test process_isolation_test  # IPC/process-isolation e2e
 cargo test -p nex --test perf_query_latency_test -- --exact warm_query_p95_under_15ms
 cargo test -p nex --test windows_runtime_smoke_test  # CI-only smoke test
 ```
+
+**Verifying UI work**: the chat/overlay HTML+CSS+JS can be rendered and
+measured outside the app with Playwright driving the Chrome already installed
+(`playwright-core` in `G:\nex-test`, `executablePath:
+C:\Program Files\Google\Chrome\Application\chrome.exe`). Stub the panel at
+760x520, then assert on `getBoundingClientRect()` values and take screenshots.
+This is how layout and contrast claims should be made — measuring, not reading
+the stylesheet. Keep scratch files out of the repo and delete them before
+committing.
+
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 

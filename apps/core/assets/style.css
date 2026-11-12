@@ -3236,6 +3236,101 @@ html[data-native-material="acrylic"] .chat-composer-shell {
 }
 .chat-pending-buttons button:active { transform: scale(.98); }
 
+/* Confirmation card.
+   Rendering shipped before the styles did, so the Allow/Cancel buttons appeared
+   as raw browser buttons. The card is a decision, not a message: it gets a warn
+   border to separate it from ordinary transcript, and the two buttons sit apart
+   from each other so Allow is not adjacent to Cancel by muscle memory. */
+.chat-pending-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  padding: 12px 13px;
+  margin: 2px 0;
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+  border: 1px solid var(--warn-border);
+  animation: chatActionIn 180ms var(--ease-out) both;
+}
+.chat-pending-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: -0.008em;
+  color: var(--text);
+}
+.chat-pending-target {
+  display: block;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-opaque);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.chat-pending-effect {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.chat-pending-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+.chat-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+.chat-pending-confirm,
+.chat-pending-cancel {
+  appearance: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  padding: 6px 14px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease-out);
+}
+.chat-pending-confirm {
+  background: var(--accent);
+  border: 1px solid transparent;
+  color: var(--accent-fg);
+}
+.chat-pending-cancel {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+/* Cancel is pushed away from Allow so the two do not sit under one finger. */
+.chat-pending-cancel { margin-left: auto; }
+@media (hover: hover) and (pointer: fine) {
+  .chat-pending-confirm:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+  .chat-pending-cancel:hover { background: var(--hover-strong); color: var(--text); }
+}
+.chat-pending-confirm:active,
+.chat-pending-cancel:active { transform: scale(0.97); }
+.chat-pending-confirm:focus-visible,
+.chat-pending-cancel:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-pending-action { animation: none; }
+  .chat-pending-confirm:active,
+  .chat-pending-cancel:active { transform: none; }
+}
+
 @keyframes chatActionIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }

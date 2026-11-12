@@ -504,16 +504,37 @@ fn reject_pending_confirmation() {
     }
 }
 
+/// What became of a confirmation prompt.
+///
+/// A timeout used to be indistinguishable from a decline, so the card vanished,
+/// the turn ended, and nothing told the user the dialog had expired rather than
+/// being answered. The distinction is kept so the UI can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmationOutcome {
+    Approved,
+    Declined,
+    /// Nobody answered before `CONFIRM_TIMEOUT`. Not a refusal: the user may
+    /// simply have walked away.
+    TimedOut,
+    /// A newer request took the slot, or this one was cancelled.
+    Superseded,
+}
+
+impl ConfirmationOutcome {
+    pub(crate) fn approved(self) -> bool {
+        matches!(self, Self::Approved)
+    }
+}
+
 /// Block until the user answers, the request is superseded, or the timeout
-/// elapses. Every non-confirm path returns false, so the caller cannot run the
-/// action by accident.
+/// elapses. Only `Approved` permits the caller to run the action.
 fn await_confirmation(
     id: u64,
     request_id: Option<&str>,
     sink: &ChatUpdateSink,
     tool: &crate::chat_tools::ChatTool,
     unfamiliar_url: bool,
-) -> bool {
+) -> ConfirmationOutcome {
     let (sender, receiver) = std::sync::mpsc::channel::<bool>();
     {
         let mut pending = PENDING_CONFIRM
@@ -536,10 +557,15 @@ fn await_confirmation(
             }),
         ),
     );
-    let accepted = matches!(
-        receiver.recv_timeout(CONFIRM_TIMEOUT),
-        Ok(true)
-    );
+    let outcome = match receiver.recv_timeout(CONFIRM_TIMEOUT) {
+        Ok(true) => ConfirmationOutcome::Approved,
+        Ok(false) => ConfirmationOutcome::Declined,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ConfirmationOutcome::TimedOut,
+        // The sender dropped without answering: a newer request replaced it.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            ConfirmationOutcome::Superseded
+        }
+    };
     // Only clear the slot if it is still ours; a newer request may have taken it.
     {
         let mut pending = PENDING_CONFIRM
@@ -550,7 +576,32 @@ fn await_confirmation(
         }
     }
     // Superseded requests must not run their action even if they were approved.
-    accepted && ACTIVE_REQUEST.load(Ordering::SeqCst) == id
+    if ACTIVE_REQUEST.load(Ordering::SeqCst) != id {
+        return ConfirmationOutcome::Superseded;
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::ConfirmationOutcome;
+
+    #[test]
+    fn only_approval_permits_the_action() {
+        // Every other outcome must leave the action unrun. This is the property
+        // the whole confirmation mechanism rests on.
+        assert!(ConfirmationOutcome::Approved.approved());
+        assert!(!ConfirmationOutcome::Declined.approved());
+        assert!(!ConfirmationOutcome::TimedOut.approved());
+        assert!(!ConfirmationOutcome::Superseded.approved());
+    }
+
+    #[test]
+    fn a_timeout_is_not_a_decline() {
+        // They were one value before, which is why an expired dialog ended the
+        // turn in silence with a dead card still on screen.
+        assert_ne!(ConfirmationOutcome::TimedOut, ConfirmationOutcome::Declined);
+    }
 }
 
 fn request_update(request_id: Option<&str>, key: &str, value: Value) -> Value {
@@ -854,10 +905,33 @@ fn stream_openai(
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
-                    let confirmed = await_confirmation(id, request_id, sink, &tool, loop_state.is_unfamiliar_url(&tool));
-                    if confirmed {
+                    let answer =
+                        await_confirmation(id, request_id, sink, &tool, loop_state.is_unfamiliar_url(&tool));
+                    if answer == ConfirmationOutcome::TimedOut {
+                        // The dialog expired rather than being answered. Ending
+                        // the turn silently left a dead card and no explanation.
+                        push_chat_update(
+                            sink,
+                            request_update(
+                                request_id,
+                                "chatNotice",
+                                json!(format!(
+                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    CONFIRM_TIMEOUT.as_secs() / 60
+                                )),
+                            ),
+                        );
+                        emit(
+                            &format!(
+                                "No answer after {} minutes, so I did not run it.",
+                                CONFIRM_TIMEOUT.as_secs() / 60
+                            ),
+                            None,
+                        );
+                        return Ok(());
+                    }
+                    if answer.approved() {
                         let outcome = crate::chat_tools::run(&tool, true, &create_base);
-                    loop_state.observe_output(&outcome);
                         // Before the model can read it: anything this output
                         // mentions is now tainted and will prompt if opened.
                         loop_state.observe_output(&outcome);
@@ -1273,8 +1347,33 @@ fn stream_chatgpt_native(
                     return Ok(());
                 }
                 crate::chat_tools::LoopStep::AwaitConfirmation { tool } => {
-                    let confirmed = await_confirmation(id, request_id, sink, &tool, loop_state.is_unfamiliar_url(&tool));
-                    if !confirmed {
+                    let answer =
+                        await_confirmation(id, request_id, sink, &tool, loop_state.is_unfamiliar_url(&tool));
+                    if answer == ConfirmationOutcome::TimedOut {
+                        let outcome = crate::chat_tools::ToolOutcome::failure(
+                            tool.name(),
+                            tool.target(),
+                            format!(
+                                "the user did not answer within {} minutes, so nothing ran.                                  Do not retry automatically; ask again if it is still wanted.",
+                                CONFIRM_TIMEOUT.as_secs() / 60
+                            ),
+                        );
+                        push_action_outcome(sink, request_id, &outcome);
+                        push_chat_update(
+                            sink,
+                            request_update(
+                                request_id,
+                                "chatNotice",
+                                json!(format!(
+                                    "The confirmation for this action expired after {} minutes, so nothing ran.",
+                                    CONFIRM_TIMEOUT.as_secs() / 60
+                                )),
+                            ),
+                        );
+                        outcomes.push((call_id, call_name, call_args, outcome));
+                        continue;
+                    }
+                    if !answer.approved() {
                         // Tell the model plainly it was declined, so it does not
                         // retry or narrate work it did not do.
                         let outcome = crate::chat_tools::ToolOutcome::failure(

@@ -3529,6 +3529,14 @@
       renderChatMessages();
       persistChat();
     }
+    // A dialog that expired is no longer answerable. Leaving it on screen meant
+    // the user could still click Allow after the wait was over, and nothing
+    // would happen - the turn had already ended.
+    if (state.chatDone && chatPendingAction) {
+      chatPendingAction = null;
+      const stale = $("chat-pending-action");
+      if (stale) stale.remove();
+    }
     if (state.chatCancelled && requestMatches) {
       chatActiveRequest = null;
       chatLiveStatus.textContent = "Response stopped";

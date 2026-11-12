@@ -857,6 +857,10 @@ fn stream_openai(
                     let confirmed = await_confirmation(id, request_id, sink, &tool, loop_state.is_unfamiliar_url(&tool));
                     if confirmed {
                         let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                    loop_state.observe_output(&outcome);
+                        // Before the model can read it: anything this output
+                        // mentions is now tainted and will prompt if opened.
+                        loop_state.observe_output(&outcome);
                         // Show the user what happened, not just the model.
                         push_action_outcome(sink, request_id, &outcome);
                         needs_break.set(true);
@@ -878,6 +882,7 @@ fn stream_openai(
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);
                     messages.push(json!({"role":"user","content": outcome.for_model()}));
@@ -1283,6 +1288,7 @@ fn stream_chatgpt_native(
                         continue;
                     }
                     let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                    loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);
                     ran_any = true;
@@ -1290,6 +1296,7 @@ fn stream_chatgpt_native(
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
                     let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);
                     ran_any = true;

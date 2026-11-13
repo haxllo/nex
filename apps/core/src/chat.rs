@@ -277,6 +277,15 @@ pub(crate) fn fetch_models(raw: &str) -> Result<Value, String> {
     Ok(json!({"chatModels":{"provider":request.provider,"models":models}}))
 }
 
+/// How many models the picker will list.
+///
+/// Providers differ enormously: OpenAI returns a dozen ids, OpenRouter returns
+/// several hundred. A cap keeps the picker usable, but 80 was cutting real
+/// models out of OpenRouter's catalogue with nothing to say so - a model the
+/// user had been told to look for was simply absent. Large enough to keep whole
+/// catalogues, small enough that the list stays a list.
+const MAX_LISTED_MODELS: usize = 400;
+
 fn fetch_compatible_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, String> {
     let endpoint = format!("{base_url}/models");
     let agent = ureq::AgentBuilder::new()
@@ -313,7 +322,7 @@ fn fetch_compatible_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, 
         .map(|id| json!({"id":id,"name":id,"description":"Available from this provider."}))
         .collect::<Vec<_>>();
     sort_model_recommendations(&mut models);
-    models.truncate(80);
+    models.truncate(MAX_LISTED_MODELS);
     Ok(models)
 }
 
@@ -420,7 +429,7 @@ fn parse_chatgpt_model_list(payload: &Value) -> Result<Vec<Value>, String> {
         })
         .collect::<Vec<_>>();
     sort_model_recommendations(&mut models);
-    models.truncate(80);
+    models.truncate(MAX_LISTED_MODELS);
     Ok(models)
 }
 
@@ -640,6 +649,18 @@ mod confirm_tests {
         // They were one value before, which is why an expired dialog ended the
         // turn in silence with a dead card still on screen.
         assert_ne!(ConfirmationOutcome::TimedOut, ConfirmationOutcome::Declined);
+    }
+
+    #[test]
+    fn being_replaced_is_not_a_decline() {
+        // A newer message taking over the request is not the user refusing the
+        // action. Treating it as a decline told the model "do not retry it" for
+        // something the user had meant to allow, and surfaced nothing at all to
+        // the user - the action simply vanished from the transcript.
+        assert_ne!(
+            ConfirmationOutcome::Superseded,
+            ConfirmationOutcome::Declined
+        );
     }
 }
 
@@ -1036,6 +1057,30 @@ fn stream_openai(
                         loop_state.observe_output(&outcome);
                         // Show the user what happened, not just the model.
                         push_action_outcome(sink, request_id, &outcome);
+                        needs_break.set(true);
+                        messages.push(json!({"role":"user","content": outcome.for_model()}));
+                    } else if answer == ConfirmationOutcome::Superseded {
+                        // Not a decline. A newer message replaced this request
+                        // while its card was open, so the action was never
+                        // answered. Saying "the user did not approve" was false
+                        // and told the model not to retry something the user
+                        // fully intended to allow.
+                        let outcome = crate::chat_tools::ToolOutcome::failure(
+                            tool.name(),
+                            tool.target(),
+                            "a newer message replaced this request before it was answered, so nothing ran",
+                        );
+                        push_action_outcome(sink, request_id, &outcome);
+                        push_chat_update(
+                            sink,
+                            request_update(
+                                request_id,
+                                "chatNotice",
+                                json!(
+                                    "This request was replaced by a newer message before that action was answered, so it did not run."
+                                ),
+                            ),
+                        );
                         needs_break.set(true);
                         messages.push(json!({"role":"user","content": outcome.for_model()}));
                     } else {
@@ -1499,6 +1544,29 @@ fn stream_chatgpt_native(
                                 )),
                             ),
                         );
+                        outcomes.push((call_id, call_name, call_args, outcome));
+                        continue;
+                    }
+                    if answer == ConfirmationOutcome::Superseded {
+                        // Not a decline: a newer message replaced this request
+                        // while its card was open, so nothing was answered.
+                        let outcome = crate::chat_tools::ToolOutcome::failure(
+                            tool.name(),
+                            tool.target(),
+                            "a newer message replaced this request before it was answered, so nothing ran",
+                        );
+                        push_action_outcome(sink, request_id, &outcome);
+                        push_chat_update(
+                            sink,
+                            request_update(
+                                request_id,
+                                "chatNotice",
+                                json!(
+                                    "This request was replaced by a newer message before that action was answered, so it did not run."
+                                ),
+                            ),
+                        );
+                        needs_break.set(true);
                         outcomes.push((call_id, call_name, call_args, outcome));
                         continue;
                     }

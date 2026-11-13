@@ -220,7 +220,7 @@
                   <input id="chat-base-url" type="url" maxlength="2048" autocomplete="url" placeholder="https://api.openai.com/v1" />
                 </label>
                 <label id="chat-key-field">API key
-                  <input id="chat-api-key" type="password" maxlength="4096" autocomplete="off" placeholder="Saved securely on this device" />
+                  <input id="chat-api-key" type="password" maxlength="4096" autocomplete="off" aria-describedby="chat-connection-hint" placeholder="Enter an API key" />
                 </label>
               </div>
             </div>
@@ -230,6 +230,8 @@
             <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
             <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
             <button type="button" id="chat-disconnect-button" class="chat-secondary-button" hidden>Log out</button>
+            <div id="chat-save-status" class="chat-connection-hint" role="status" aria-live="polite"></div>
+            <button type="button" id="chat-remove-key-button" class="chat-secondary-button" hidden>Remove saved key</button>
             <button type="button" id="chat-save-button" class="chat-secondary-button">Save</button>
           </div>
         </div>

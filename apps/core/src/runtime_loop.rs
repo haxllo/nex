@@ -1955,8 +1955,8 @@ impl RuntimeWorker {
             }
             OverlayEvent::ChatConfigure(raw) => {
                 let update = match crate::chat::configure(&raw) {
-                    Ok(config) => serde_json::json!({ "chatConfig": config, "chatNotice": "Provider settings saved securely." }),
-                    Err(error) => serde_json::json!({ "chatError": error }),
+                    Ok(config) => serde_json::json!({ "chatConfig": config, "chatConfigureResult": { "ok": true } }),
+                    Err(error) => serde_json::json!({ "chatConfigureResult": { "ok": false, "error": error } }),
                 };
                 self.overlay.push_chat(update.to_string());
             }

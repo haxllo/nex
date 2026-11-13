@@ -72,6 +72,19 @@ pub(crate) enum ChatTool {
     /// Read-only, and the only tool that brings arbitrary file content into
     /// the conversation — which is why its output is delimited as data.
     ReadFile { path: String },
+    /// Move or rename. `to` is a whole path, not a name: "rename this to
+    /// notes.txt" and "move that into documents" are the same operation with
+    /// different destinations, and a name-only field cannot express the second.
+    MovePath { path: String, to: String },
+    /// Copy, leaving the source in place.
+    CopyPath { path: String, to: String },
+    /// Remove a file or folder.
+    ///
+    /// The first irreversible tool. `recursive` is explicit rather than
+    /// inferred: a folder delete that quietly removes a tree is a different
+    /// act from removing an empty directory, and the user is entitled to see
+    /// which one they are approving.
+    DeletePath { path: String, recursive: bool },
 }
 
 /// Why a call was refused before it ran.
@@ -119,6 +132,9 @@ impl ChatTool {
             Self::CreateFolder { .. } => "create_folder",
             Self::CreateFile { .. } => "create_file",
             Self::ReadFile { .. } => "read_file",
+            Self::MovePath { .. } => "move_path",
+            Self::CopyPath { .. } => "copy_path",
+            Self::DeletePath { .. } => "delete_path",
         }
     }
 
@@ -132,6 +148,12 @@ impl ChatTool {
             // Reading is the safest thing the loop can do: it changes nothing
             // and reaches nothing outside the machine.
             Self::ReadFile { .. } => Annotations::read_only(),
+            // Moving and copying change the disk but destroy nothing, so they
+            // are destructive in the MCP sense and get a confirmation.
+            Self::MovePath { .. } | Self::CopyPath { .. } => Annotations::destructive(),
+            // Delete is the one that cannot be undone. It is annotated the same
+            // way, but the card says so in words; see `PendingAction::of`.
+            Self::DeletePath { .. } => Annotations::destructive(),
         }
     }
 
@@ -154,6 +176,9 @@ impl ChatTool {
             | Self::ReadFile { path } => path,
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
+            Self::MovePath { path, .. }
+            | Self::CopyPath { path, .. }
+            | Self::DeletePath { path, .. } => path,
         }
     }
 }
@@ -296,6 +321,84 @@ impl RawToolCall {
                 }
                 Ok(ChatTool::ReadFile { path })
             }
+            "move_path" | "copy_path" => {
+                let path = arg("path")?;
+                let to = arg("to")?;
+                // The source must exist, or the model is acting on a guess.
+                let from = std::path::Path::new(&path);
+                if !from.exists() {
+                    return Err(ToolError::MissingPath { path });
+                }
+                if is_system_path(from) {
+                    return Err(ToolError::IllegalName {
+                        tool: leak_name(&self.name),
+                        reason: "the source is a system location".to_string(),
+                    });
+                }
+                // `to` need not exist; it is the destination name. A
+                // destination inside a system folder is still refused, because
+                // copying into Windows is never what the user meant.
+                let dest = std::path::Path::new(&to);
+                if is_system_path(dest) {
+                    return Err(ToolError::IllegalName {
+                        tool: leak_name(&self.name),
+                        reason: "the destination is a system location".to_string(),
+                    });
+                }
+                if self.name == "move_path" {
+                    Ok(ChatTool::MovePath { path, to })
+                } else {
+                    Ok(ChatTool::CopyPath { path, to })
+                }
+            }
+            "delete_path" => {
+                let path = arg("path")?;
+                let target = std::path::Path::new(&path);
+                // Protection is checked before existence. A system path that
+                // does not happen to exist on this machine must not be reported
+                // as "no such path": that wording invites the model to try a
+                // variant of it, and the rule being enforced is not "it is
+                // absent" but "this is never yours to delete".
+                if is_system_path(target) {
+                    return Err(ToolError::IllegalName {
+                        tool: "delete_path",
+                        reason: "that is a system location, and deleting it would break this PC"
+                            .to_string(),
+                    });
+                }
+                if is_windows_drive_root(&path) || is_drive_root(target) {
+                    return Err(ToolError::IllegalName {
+                        tool: "delete_path",
+                        reason: "a whole drive cannot be deleted".to_string(),
+                    });
+                }
+                if !target.exists() {
+                    return Err(ToolError::MissingPath { path });
+                }
+                // A directory needs recursive permission framed as a decision,
+                // not defaulted. Reading it from the arguments lets the model
+                // ask for a tree delete only by saying so.
+                let recursive = self
+                    .arguments
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if target.is_dir() && !recursive {
+                    // An empty directory can go without the flag; a populated
+                    // one must not be emptied by accident.
+                    let has_entries = std::fs::read_dir(target)
+                        .map(|mut d| d.next().is_some())
+                        .unwrap_or(true);
+                    if has_entries {
+                        return Err(ToolError::IllegalName {
+                            tool: "delete_path",
+                            reason: "that folder is not empty. Set \"recursive\": true to delete it and everything inside"
+                                .to_string(),
+                        });
+                    }
+                }
+                Ok(ChatTool::DeletePath { path, recursive })
+            }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
     }
@@ -359,6 +462,10 @@ fn leak_name(name: &str) -> &'static str {
         "open_url" => "open_url",
         "create_folder" => "create_folder",
         "create_file" => "create_file",
+        "read_file" => "read_file",
+        "move_path" => "move_path",
+        "copy_path" => "copy_path",
+        "delete_path" => "delete_path",
         _ => "tool",
     }
 }
@@ -855,11 +962,18 @@ impl PendingAction {
             ChatTool::CreateFolder { .. } => "Create folder",
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
+            ChatTool::MovePath { .. } => "Move",
+            ChatTool::CopyPath { .. } => "Copy",
+            ChatTool::DeletePath { .. } => "Delete",
         };
-        let effect = if tool.needs_confirmation() {
-            "This will change something on your PC."
-        } else {
-            "This changes nothing on your PC."
+        // Delete is the only act here that cannot be undone, and the card is the
+        // last place that fact can be stated plainly. Saying "this will change
+        // something" is true of creating a folder too, which would make the one
+        // irreversible action look like the reversible ones.
+        let effect = match tool {
+            ChatTool::DeletePath { .. } => "This cannot be undone.",
+            _ if tool.needs_confirmation() => "This will change something on your PC.",
+            _ => "This changes nothing on your PC.",
         };
         // A file's extension decides whether opening it later runs code, and the
         // user is the only one who can judge that. Saying it here beats hiding a
@@ -881,6 +995,24 @@ impl PendingAction {
                 }
                 note
             }
+            ChatTool::MovePath { to, .. } | ChatTool::CopyPath { to, .. } => {
+                format!(" It goes to {to}.")
+            }
+            ChatTool::DeletePath { path, recursive } => {
+                // Saying how much is inside turns an abstract "delete this
+                // folder" into a number the user can judge.
+                let mut note = String::new();
+                if let Some(count) = entry_count(std::path::Path::new(path)) {
+                    note.push_str(&format!(
+                        " It contains {count} {}.",
+                        if count == 1 { "item" } else { "items" }
+                    ));
+                }
+                if *recursive {
+                    note.push_str(" Everything inside it goes too.");
+                }
+                note
+            }
             _ => String::new(),
         };
         Self {
@@ -889,6 +1021,64 @@ impl PendingAction {
             description: format!("{verb}. {effect}{detail}"),
         }
     }
+}
+
+/// A minimally valid call for a tool name, for tests that need a `ChatTool`.
+#[cfg(test)]
+fn sample_call(name: &str) -> ChatTool {
+    let existing = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "C:/Windows".to_string());
+    match name {
+        "open_path" => ChatTool::OpenPath { path: existing },
+        "reveal_path" => ChatTool::RevealPath { path: existing },
+        "open_url" => ChatTool::OpenUrl {
+            url: "https://example.com".to_string(),
+        },
+        "create_folder" => ChatTool::CreateFolder {
+            name: "new-folder".to_string(),
+            parent: None,
+        },
+        "create_file" => ChatTool::CreateFile {
+            name: "new.txt".to_string(),
+            parent: None,
+            content: None,
+        },
+        "read_file" => ChatTool::ReadFile { path: existing },
+        "move_path" => ChatTool::MovePath {
+            path: existing.clone(),
+            to: format!("{existing}.moved"),
+        },
+        "copy_path" => ChatTool::CopyPath {
+            path: existing.clone(),
+            to: format!("{existing}.copied"),
+        },
+        "delete_path" => ChatTool::DeletePath {
+            path: existing,
+            recursive: false,
+        },
+        other => panic!("no sample call for {other}"),
+    }
+}
+
+/// Every tool name, in one place.
+///
+/// The enum is the real source of truth, but it cannot be iterated without
+/// adding a derive dependency. Keeping the names here means the count in the
+/// drift test is derived rather than a literal someone forgets to edit — which
+/// is exactly what happened when this list said six while nine were declared.
+pub(crate) fn all_tool_names() -> &'static [&'static str] {
+    &[
+        "open_path",
+        "reveal_path",
+        "open_url",
+        "create_folder",
+        "create_file",
+        "read_file",
+        "move_path",
+        "copy_path",
+        "delete_path",
+    ]
 }
 
 pub(crate) fn tool_declarations() -> serde_json::Value {
@@ -975,6 +1165,51 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Absolute path of an existing text file."}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_path",
+                "description": "Move a file or folder to a new location, which also renames it. Use this for both \"move that into documents\" and \"rename this to notes.txt\". Requires user confirmation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path of the file or folder to move."},
+                        "to": {"type": "string", "description": "Absolute destination path, including the new name. The parent folder must already exist and nothing may already be there."}
+                    },
+                    "required": ["path", "to"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "copy_path",
+                "description": "Copy a file or folder, leaving the original in place. Requires user confirmation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path of the file or folder to copy."},
+                        "to": {"type": "string", "description": "Absolute destination path. Nothing may already be there."}
+                    },
+                    "required": ["path", "to"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_path",
+                "description": "Delete a file or folder. This cannot be undone. Requires user confirmation, and refuses system locations and drive roots.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path of the file or folder to delete."},
+                        "recursive": {"type": "boolean", "description": "Required to be true to delete a folder that still has anything inside it. Omit for files and empty folders."}
                     },
                     "required": ["path"]
                 }
@@ -1272,6 +1507,142 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 summary,
             }
         }
+        ChatTool::MovePath { path, to } => {
+            let from = std::path::Path::new(path);
+            let dest = std::path::Path::new(to);
+            // Refuse a silent overwrite. std::fs::rename replaces the
+            // destination on Windows, so a move onto an existing file would
+            // destroy it while reporting success.
+            if dest.exists() {
+                return ToolOutcome::failure(
+                    tool.name(),
+                    to,
+                    "something already exists at the destination",
+                );
+            }
+            if let Some(parent) = dest.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    return ToolOutcome::failure(
+                        tool.name(),
+                        to,
+                        "the destination folder does not exist",
+                    );
+                }
+            }
+            match std::fs::rename(from, dest) {
+                Ok(()) => ToolOutcome::success(tool.name(), to, format!("Moved {path} to {to}")),
+                // A rename cannot cross volumes. Copying then deleting is the
+                // only way to honour "move it to my USB drive", and doing it
+                // here means the model does not have to know that rule.
+                Err(_) => match copy_tree(from, dest) {
+                    Ok(()) => match remove_target(from) {
+                        Ok(()) => ToolOutcome::success(
+                            tool.name(),
+                            to,
+                            format!("Moved {path} to {to}"),
+                        ),
+                        Err(error) => ToolOutcome::failure(tool.name(), to, error),
+                    },
+                    Err(error) => ToolOutcome::failure(tool.name(), to, error),
+                },
+            }
+        }
+        ChatTool::CopyPath { path, to } => {
+            let from = std::path::Path::new(path);
+            let dest = std::path::Path::new(to);
+            if dest.exists() {
+                return ToolOutcome::failure(
+                    tool.name(),
+                    to,
+                    "something already exists at the destination",
+                );
+            }
+            match copy_tree(from, dest) {
+                Ok(()) => ToolOutcome::success(tool.name(), to, format!("Copied {path} to {to}")),
+                Err(error) => ToolOutcome::failure(tool.name(), to, error),
+            }
+        }
+        ChatTool::DeletePath { path, recursive } => {
+            let target = std::path::Path::new(path);
+            // Re-checked here as well as in validation. Validation happens when
+            // the call arrives; the confirmation may be answered seconds later,
+            // and this is the step that actually destroys something.
+            if is_system_path(target) || is_drive_root(target) {
+                return ToolOutcome::failure(tool.name(), path, "that path is protected");
+            }
+            if !target.exists() {
+                return ToolOutcome::failure(tool.name(), path, "that no longer exists");
+            }
+            let result = if target.is_dir() {
+                if *recursive {
+                    std::fs::remove_dir_all(target)
+                } else {
+                    std::fs::remove_dir(target)
+                }
+            } else {
+                std::fs::remove_file(target)
+            };
+            match result {
+                Ok(()) => ToolOutcome::success(tool.name(), path, format!("Deleted {path}")),
+                Err(error) => ToolOutcome::failure(tool.name(), path, error),
+            }
+        }
+    }
+}
+
+/// How many entries a folder holds, or `None` for a file or an unreadable dir.
+///
+/// Only the top level is counted. A full recursive count on a large tree could
+/// take long enough to make the confirmation card feel broken, and the point is
+/// to tell the user whether they are deleting something empty or not.
+fn entry_count(path: &std::path::Path) -> Option<usize> {
+    if !path.is_dir() {
+        return None;
+    }
+    std::fs::read_dir(path)
+        .ok()
+        .map(|entries| entries.filter(|e| e.is_ok()).count())
+}
+
+/// Remove a file or folder, choosing the right call for the kind.
+fn remove_target(path: &std::path::Path) -> Result<(), String> {
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    result.map_err(|error| format!("could not remove {}: {error}", path.display()))
+}
+
+/// Copy a file or a whole tree.
+///
+/// Written out rather than pulled from a crate because the only requirement is
+/// "the source and everything under it now also exists at the destination", and
+/// a recursive walk is short enough to read.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if from.is_file() {
+        if let Some(parent) = to.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("could not create {}: {error}", parent.display())
+                })?;
+            }
+        }
+        std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|error| format!("could not copy {}: {error}", from.display()))
+    } else if from.is_dir() {
+        std::fs::create_dir_all(to)
+            .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+        for entry in std::fs::read_dir(from)
+            .map_err(|error| format!("could not read {}: {error}", from.display()))?
+        {
+            let entry = entry.map_err(|error| format!("could not read entry: {error}"))?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        Err(format!("{} is neither a file nor a folder", from.display()))
     }
 }
 
@@ -2482,6 +2853,218 @@ mod tests {
         assert!(REPEAT_LIMIT < MAX_TOOL_ROUNDS);
     }
 
+    const DRIVE_ROOT_G: &str = "G:\\";
+    const DRIVE_ROOT_G_SLASH: &str = "G:/";
+    const DRIVE_ROOT_C: &str = "C:\\";
+    const SYS_WINDOWS: &str = "C:\\Windows\\System32";
+    const SYS_PROGRAM_FILES: &str = "C:\\Program Files\\thing";
+
+    fn call(name: &str, args: serde_json::Value) -> Result<ChatTool, ToolError> {
+        raw(name, args).validate()
+    }
+
+    #[test]
+    fn moving_renames_in_place() {
+        let dir = scratch("move");
+        let from = dir.join("a.txt");
+        std::fs::write(&from, "hello").unwrap();
+        let to = dir.join("b.txt");
+        let tool = call(
+            "move_path",
+            serde_json::json!({"path": from.to_string_lossy(), "to": to.to_string_lossy()}),
+        )
+        .unwrap();
+        let outcome = run(&tool, true, &dir);
+        assert!(outcome.ok, "{}", outcome.summary);
+        assert!(!from.exists(), "source should be gone");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_onto_an_existing_file_refuses_instead_of_overwriting() {
+        // std::fs::rename replaces the destination on Windows. Without the
+        // guard, a move could destroy a file and still report success.
+        let dir = scratch("move-clobber");
+        let from = dir.join("a.txt");
+        let to = dir.join("b.txt");
+        std::fs::write(&from, "source").unwrap();
+        std::fs::write(&to, "keep me").unwrap();
+        let tool = call(
+            "move_path",
+            serde_json::json!({"path": from.to_string_lossy(), "to": to.to_string_lossy()}),
+        )
+        .unwrap();
+        let outcome = run(&tool, true, &dir);
+        assert!(!outcome.ok);
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "keep me");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copying_leaves_the_original() {
+        let dir = scratch("copy");
+        let from = dir.join("a.txt");
+        std::fs::write(&from, "data").unwrap();
+        let to = dir.join("copy.txt");
+        let tool = call(
+            "copy_path",
+            serde_json::json!({"path": from.to_string_lossy(), "to": to.to_string_lossy()}),
+        )
+        .unwrap();
+        let outcome = run(&tool, true, &dir);
+        assert!(outcome.ok, "{}", outcome.summary);
+        assert!(from.exists(), "a copy must not remove the source");
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "data");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copying_a_folder_copies_what_is_inside() {
+        let dir = scratch("copy-tree");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("one.txt"), "1").unwrap();
+        std::fs::write(src.join("nested").join("two.txt"), "2").unwrap();
+        let dest = dir.join("dest");
+        let tool = call(
+            "copy_path",
+            serde_json::json!({"path": src.to_string_lossy(), "to": dest.to_string_lossy()}),
+        )
+        .unwrap();
+        assert!(run(&tool, true, &dir).ok);
+        assert_eq!(std::fs::read_to_string(dest.join("one.txt")).unwrap(), "1");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("nested").join("two.txt")).unwrap(),
+            "2"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_file_removes_it() {
+        let dir = scratch("del-file");
+        let file = dir.join("gone.txt");
+        std::fs::write(&file, "x").unwrap();
+        let tool = call("delete_path", serde_json::json!({"path": file.to_string_lossy()})).unwrap();
+        assert!(run(&tool, true, &dir).ok);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_with_contents_needs_recursive() {
+        // The flag is the difference between an empty directory and a tree.
+        let dir = scratch("del-recursive");
+        let folder = dir.join("full");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("inside.txt"), "x").unwrap();
+        let err = call(
+            "delete_path",
+            serde_json::json!({"path": folder.to_string_lossy()}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::IllegalName { .. }), "{err:?}");
+        assert!(folder.exists(), "nothing should have been removed");
+
+        let tool = call(
+            "delete_path",
+            serde_json::json!({"path": folder.to_string_lossy(), "recursive": true}),
+        )
+        .unwrap();
+        assert!(run(&tool, true, &dir).ok);
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_folder_deletes_without_recursive() {
+        let dir = scratch("del-empty");
+        let folder = dir.join("empty");
+        std::fs::create_dir_all(&folder).unwrap();
+        let tool = call(
+            "delete_path",
+            serde_json::json!({"path": folder.to_string_lossy()}),
+        )
+        .unwrap();
+        assert!(run(&tool, true, &dir).ok);
+        assert!(!folder.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_refuses_a_drive_root() {
+        // The most expensive possible mistake. Refused in validation, before
+        // anything can touch the filesystem.
+        for root in [DRIVE_ROOT_G, DRIVE_ROOT_G_SLASH, DRIVE_ROOT_C] {
+            let err = call("delete_path", serde_json::json!({"path": root})).unwrap_err();
+            assert!(matches!(err, ToolError::IllegalName { .. }), "{root} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn delete_refuses_windows_and_program_files() {
+        for path in [SYS_WINDOWS, SYS_PROGRAM_FILES] {
+            let err = call("delete_path", serde_json::json!({"path": path})).unwrap_err();
+            assert!(matches!(err, ToolError::IllegalName { .. }), "{path} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn move_and_copy_refuse_a_system_destination() {
+        let existing = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        for name in ["move_path", "copy_path"] {
+            let err = call(
+                name,
+                serde_json::json!({"path": existing, "to": SYS_PROGRAM_FILES}),
+            )
+            .unwrap_err();
+            assert!(matches!(err, ToolError::IllegalName { .. }), "{name} -> {err:?}");
+        }
+    }
+
+    #[test]
+    fn the_delete_card_says_it_cannot_be_undone() {
+        // Creating a folder also "changes something"; delete is the only act
+        // that cannot be taken back, and the card is the last place to say so.
+        let dir = scratch("del-card");
+        let folder = dir.join("tree");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), "x").unwrap();
+        let card = PendingAction::of(&ChatTool::DeletePath {
+            path: folder.to_string_lossy().to_string(),
+            recursive: true,
+        });
+        assert!(card.description.contains("cannot be undone"), "{}", card.description);
+        assert!(card.description.contains("1 item"), "{}", card.description);
+        assert!(card.description.contains("Everything inside"), "{}", card.description);
+
+        let create = PendingAction::of(&ChatTool::CreateFolder {
+            name: "x".to_string(),
+            parent: None,
+        });
+        assert!(
+            !create.description.contains("cannot be undone"),
+            "creating is reversible; only delete says this"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_tools_are_all_declared_and_confirmable() {
+        for name in ["move_path", "copy_path", "delete_path"] {
+            assert!(all_tool_names().contains(&name), "{name} missing from the list");
+            assert!(sample_call(name).needs_confirmation(), "{name} must confirm");
+            let decl = tool_declarations();
+            let found = decl
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d.pointer("/function/name").and_then(|v| v.as_str()) == Some(name));
+            assert!(found, "{name} is not declared to the model");
+        }
+    }
+
     // --- declarations stay in sync with the enum ---
 
     #[test]
@@ -2496,11 +3079,11 @@ mod tests {
         // The enum is the source of truth for how many tools exist; a fixed
         // number here only had to be edited by hand on every addition, which is
         // the drift this test exists to catch.
-        let enum_count = [
-            "open_path", "reveal_path", "open_url", "create_folder", "create_file",
-            "read_file",
-        ]
-        .len();
+        // Run every declared tool through the same match the model's calls go
+        // through, so a variant added to the enum but forgotten in the parser is
+        // caught here. Listing names by hand is what this list got wrong: it
+        // said six while nine were declared.
+        let enum_count = all_tool_names().len();
         assert_eq!(names.len(), enum_count);
         for name in names {
             let err = raw(name, serde_json::json!({})).validate();
@@ -2522,10 +3105,11 @@ mod tests {
                 .unwrap()
                 .as_str()
                 .unwrap();
-            let needs = match name {
-                "create_folder" | "create_file" => true,
-                _ => false,
-            };
+            // A tool that changes the disk must say "confirmation" in its
+            // description; a read-only one must not. Built from a minimal valid
+            // call so validation succeeds, rather than from an empty object
+            // that every tool with a required argument rejects.
+            let needs = needs_confirmation(sample_call(name).annotations());
             assert_eq!(
                 description.contains("confirmation"),
                 needs,

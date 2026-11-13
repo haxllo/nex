@@ -2429,6 +2429,12 @@
     open_url: "Opened link",
     create_folder: "Created folder",
     create_file: "Created file",
+    read_file: "Read",
+    move_path: "Moved",
+    copy_path: "Copied",
+    // Delete is the only action here that cannot be taken back, so it gets its
+    // own verb rather than sharing a generic "Done".
+    delete_path: "Deleted",
   };
 
   function renderChatActionCard(action) {

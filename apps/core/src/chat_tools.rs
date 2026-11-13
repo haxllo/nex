@@ -1807,11 +1807,75 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
         .spawn()
         .map_err(|error| format!("could not start PowerShell: {error}"))?;
 
+    // Drain the pipes on their own threads, from the moment the process starts.
+    //
+    // This is not an optimisation. A pipe holds roughly 64 KB, and a child that
+    // writes more blocks on the write syscall until a reader takes it. The
+    // previous version did not read until after `try_wait` reported exit, so a
+    // command with real output - a recursive file listing is about 1 MB - wedged
+    // on a full pipe and was killed at the deadline. It then reported "still
+    // running after 30s" for a command that had finished in three seconds: the
+    // process was blocked writing, not working.
+    //
+    // Only the head and tail are kept, so a command that prints megabytes
+    // cannot allocate megabytes.
+    let stdout_reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut head = Vec::new();
+            let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+            let mut buf = [0u8; 8192];
+            let mut total = 0usize;
+            let keep = COMMAND_OUTPUT_LIMIT / 2;
+            while let Ok(read) = pipe.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                total += read;
+                let chunk = &buf[..read];
+                if head.len() < keep {
+                    let take = (keep - head.len()).min(chunk.len());
+                    head.extend_from_slice(&chunk[..take]);
+                    let rest = &chunk[take..];
+                    if !rest.is_empty() {
+                        tail.extend(rest);
+                    }
+                } else {
+                    tail.extend(chunk);
+                }
+                while tail.len() > keep {
+                    tail.pop_front();
+                }
+            }
+            let mut combined = head;
+            combined.extend(tail.into_iter());
+            (combined, total)
+        })
+    });
+
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut kept = Vec::new();
+            let mut buf = [0u8; 8192];
+            let mut total = 0usize;
+            while let Ok(read) = pipe.read(&mut buf) {
+                if read == 0 {
+                    break;
+                }
+                total += read;
+                if kept.len() < COMMAND_OUTPUT_LIMIT {
+                    let room = COMMAND_OUTPUT_LIMIT - kept.len();
+                    kept.extend_from_slice(&buf[..read.min(room)]);
+                }
+            }
+            (kept, total)
+        })
+    });
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
 
-    // Poll rather than `wait_with_output`, so the deadline applies to the whole
-    // run. Reading piped output to completion first would block forever on a
-    // command that never exits.
+    let mut timed_out = false;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -1819,9 +1883,8 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!(
-                        "the command was still running after {timeout_seconds}s, so it was stopped"
-                    ));
+                    timed_out = true;
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
@@ -1833,13 +1896,43 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
         }
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("could not read the command output: {error}"))?;
+    let (stdout_bytes, stdout_total) = match stdout_reader {
+        Some(handle) => handle.join().unwrap_or_else(|_| (Vec::new(), 0)),
+        None => (Vec::new(), 0),
+    };
+    let (stderr_bytes, stderr_total) = match stderr_reader {
+        Some(handle) => handle.join().unwrap_or_else(|_| (Vec::new(), 0)),
+        None => (Vec::new(), 0),
+    };
 
-    let exit_code = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    if timed_out {
+        return Err(format!(
+            "the command was still running after {timeout_seconds}s, so it was stopped"
+        ));
+    }
+
+    let exit_code = child
+        .wait()
+        .ok()
+        .and_then(|status| status.code())
+        .unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+    // The reader keeps a capped head and tail; say so, with the real total, so
+    // the model knows the difference between "that was everything" and "that
+    // was a fraction of it".
+    let cut_note = |total: usize| {
+        if total > COMMAND_OUTPUT_LIMIT {
+            format!(
+                "\n[... {total} bytes of output in total; only the beginning and the end are shown. \
+                 If you needed a count or a total, it may be missing - run a command that computes \
+                 it instead. ...]\n"
+            )
+        } else {
+            String::new()
+        }
+    };
 
     // Exit code first: a failure with empty stdout must not read as success,
     // and there is nowhere else for the model to learn the exit status.
@@ -1849,18 +1942,22 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
         (false, true) => {
             summary.push_str("Stdout:\n");
             summary.push_str(&cap_command_output(&stdout));
+            summary.push_str(&cut_note(stdout_total));
             summary.push('\n');
         }
         (true, false) => {
             summary.push_str("Stderr:\n");
             summary.push_str(&cap_command_output(&stderr));
+            summary.push_str(&cut_note(stderr_total));
             summary.push('\n');
         }
         (false, false) => {
             summary.push_str("Stdout:\n");
             summary.push_str(&cap_command_output(&stdout));
+            summary.push_str(&cut_note(stdout_total));
             summary.push_str("\nStderr:\n");
             summary.push_str(&cap_command_output(&stderr));
+            summary.push_str(&cut_note(stderr_total));
             summary.push('\n');
         }
     }
@@ -3635,11 +3732,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_command_that_prints_a_lot_is_capped() {
+    fn a_command_that_prints_a_lot_completes_and_is_capped() {
+        // The regression this guards: with a piped child, output above the pipe
+        // buffer (~64 KB) blocked the process on its write syscall, so a command
+        // that finished in milliseconds was killed at the deadline and reported
+        // as "still running after 30s".
+        let started = std::time::Instant::now();
         let out = run_powershell("1..4000 | ForEach-Object { 'line ' + $_ }", 30)
-            .expect("command runs");
+            .expect("a large-output command must complete, not be killed");
+        let elapsed = started.elapsed();
+
         assert_eq!(out.exit_code, 0);
-        assert!(out.summary.contains("bytes omitted"), "output should be capped");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "this command is not slow; {elapsed:?} means the pipe blocked: {}",
+            out.summary
+        );
+        assert!(
+            out.summary.contains("bytes of output in total"),
+            "a cut must be stated, with the real total: {}",
+            out.summary
+        );
         assert!(
             out.summary.len() < COMMAND_OUTPUT_LIMIT + 1024,
             "the cap must hold, got {} bytes",

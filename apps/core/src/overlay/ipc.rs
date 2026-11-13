@@ -916,7 +916,10 @@ mod tests {
     }
 
     #[test]
-    fn chat_pc_info_is_opt_in() {
+    fn chat_pc_info_flag_still_parses() {
+        // The composer no longer offers this toggle - facts are always
+        // collected - but old payloads and any other writer must still
+        // parse, so the field stays on the wire with a default.
         let OverlayMessage::ChatSend(without_opt_in) =
             parse_overlay(r#"{"t":"chatSend","requestId":"request-1","message":"hello"}"#).unwrap()
         else {

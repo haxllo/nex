@@ -81,7 +81,6 @@
   const chatFilePickerCancel = $("chat-file-picker-cancel");
   const chatFilePickerAdd = $("chat-file-picker-add");
   const chatMenuScrim = $("chat-menu-scrim");
-  const chatPcInfoButton = $("chat-pc-info-button");
   const chatContextSelection = $("chat-context-selection");
   const chatNotice = $("chat-notice");
   const chatLiveStatus = $("chat-live-status");
@@ -124,7 +123,6 @@
   let chatLimitReached = null;
   let chatActiveRequest = null;
   let chatSelectedFiles = [];
-  let chatIncludePcInfo = true;
   let chatFilesLoading = false;
   let chatContextSelectionEpoch = 0;
   let chatFilePickerOpen = false;
@@ -2706,13 +2704,7 @@
       chatSelectedFiles.splice(index, 1);
       renderChatContextSelection();
     }));
-    if (chatIncludePcInfo) addChip("PC basics", () => {
-      chatIncludePcInfo = false;
-      renderChatContextSelection();
-    });
-    const hasContext = chatSelectedFiles.length > 0 || chatIncludePcInfo;
-    chatContextSelection.hidden = !hasContext;
-    chatPcInfoButton.setAttribute("aria-pressed", String(chatIncludePcInfo));
+    chatContextSelection.hidden = chatSelectedFiles.length === 0;
     chatInput.placeholder = chatSelectedFiles.length ? "Ask about selected files…" : "Message Nex…";
     postChatResize();
   }
@@ -2721,10 +2713,6 @@
     chatContextSelectionEpoch++;
     chatFilesLoading = false;
     chatSelectedFiles = [];
-    // Kept on: the assistant needs to know the machine it is acting on. Turning
-    // this off after every send meant "my desktop" had no real location behind
-    // it and the model guessed the path.
-    chatIncludePcInfo = true;
     chatAttachButton.disabled = false;
     renderChatContextSelection();
   }
@@ -2818,7 +2806,10 @@
       return false;
     }
     const attachments = reuseUserTurn ? [] : chatSelectedFiles.map(({ name, content }) => ({ name, content }));
-    const includePcInfo = !reuseUserTurn && chatIncludePcInfo;
+    // Always on. A per-message opt-in reset after every send, so the model had
+    // no stable picture of the machine it acts on; the specs are cheap and no
+    // more sensitive than the folder paths already sent unconditionally.
+    const includePcInfo = true;
     if (!chatMessageFits(message, request.requestId, attachments, includePcInfo)) {
       chatNotice.textContent = "This message and selected context exceed the chat size limit. Remove a file or shorten the message.";
       chatNotice.classList.add("error");
@@ -2828,10 +2819,10 @@
     invalidateChatRequest();
     chatActiveRequest = request;
     if (!reuseUserTurn) {
-      const localContext = [
-        ...attachments.map((attachment) => attachment.name),
-        ...(includePcInfo ? ["PC basics"] : []),
-      ];
+      // Only what the user chose to attach. "PC basics" used to appear here
+      // too, but it is no longer an opt-in: labelling every message with it
+      // would be noise about a default.
+      const localContext = attachments.map((attachment) => attachment.name);
       chatMessages.push({
         id: "m-" + Date.now() + "-u",
         role: "user",
@@ -3448,10 +3439,6 @@
     renderChatFilePicker();
     chatFilePickerClose.focus();
     post("chatPickerAdd", { entries: selectedIds });
-  });
-  chatPcInfoButton.addEventListener("click", () => {
-    chatIncludePcInfo = !chatIncludePcInfo;
-    renderChatContextSelection();
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? stopChatRequest() : sendChatMessage());
   // Model links open in the default browser (WebView2 blocks target=_blank).

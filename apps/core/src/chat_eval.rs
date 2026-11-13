@@ -210,6 +210,45 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_asked_for_twice_is_caught_even_though_the_tools_differ() {
+        // "rename this to notes.txt" then "move it to documents" are two
+        // legitimate steps on the same path. The guard keys on tool AND target,
+        // so move and copy of the same file are not repetition - but asking for
+        // the same move twice is.
+        let path = "/scratch/a.txt".to_string();
+        let once = ChatTool::MovePath {
+            path: path.clone(),
+            to: "/scratch/b.txt".to_string(),
+        };
+        let record = run(
+            Script::new()
+                .round(vec![Ask::Do(once.clone())])
+                .round(vec![Ask::Do(once.clone())])
+                .round(vec![Ask::Do(once.clone())])
+                .round(vec![Ask::Do(once)]),
+        );
+        let reason = record.stop.expect("the same move four times must stop");
+        assert!(reason.contains("a.txt"), "{reason}");
+    }
+
+    #[test]
+    fn a_delete_followed_by_a_copy_of_another_file_is_progress() {
+        // Different tool and different target: nothing here is repetition.
+        let record = run(Script::new().round(vec![
+            Ask::Do(ChatTool::DeletePath {
+                path: "/scratch/old.txt".to_string(),
+                recursive: false,
+            }),
+            Ask::Do(ChatTool::CopyPath {
+                path: "/scratch/new.txt".to_string(),
+                to: "/scratch/keep.txt".to_string(),
+            }),
+        ]));
+        assert_eq!(record.ran().len(), 2);
+        assert!(record.stop.is_none());
+    }
+
+    #[test]
     fn a_long_ordinary_request_completes_without_a_limit_message() {
         // Creating a project: a parent folder, subfolders, then files.
         let record = run(

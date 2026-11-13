@@ -1328,7 +1328,7 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path'; Output is cut at 16 KB, keeping the start and the end, so aggregate in the command: when the user asks how many files something has, return the count, not every path, or the answer is lost in the truncation."},
+                        "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. Return the answer, never the evidence: if the user asks how many, print the count alone, not the count plus every path - piping a million paths through only to count them takes minutes and the paths are then cut off anyway. Output is cut at 16 KB, keeping the start and the end. If it must run in a particular folder, begin it with cd 'C:\\path';"},
                         "slow": {"type": "boolean", "description": "Set true only for a command that is known to take minutes, such as scanning a whole drive. Commands are stopped after 30 seconds unless this is true, which allows 5 minutes; the confirmation card shows which. Prefer a fast command that aggregates (a count, a total) over a slow one that lists."}
                     },
                     "required": ["command"]

@@ -79,6 +79,8 @@ pub(crate) struct ConfigureRequest {
     pub model: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub clear_api_key: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,7 +127,12 @@ impl Default for StoredConfig {
 pub(crate) fn public_config() -> Value {
     let config = load_config().unwrap_or_default();
     let account_connected = config.provider == "codex" && chatgpt_authenticated();
+    public_config_for(&config, account_connected)
+}
+
+fn public_config_for(config: &StoredConfig, account_connected: bool) -> Value {
     json!({
+        "hasKey": !config.api_key.trim().is_empty(),
         "provider": config.provider,
         "baseUrl": config.base_url,
         "model": config.model,
@@ -135,8 +142,23 @@ pub(crate) fn public_config() -> Value {
 }
 
 pub(crate) fn configure(raw: &str) -> Result<Value, String> {
-    let mut request: ConfigureRequest = serde_json::from_str(raw)
+    let request: ConfigureRequest = serde_json::from_str(raw)
         .map_err(|_| "Those chat settings could not be read.".to_string())?;
+    let config = prepare_config(request, load_config().unwrap_or_default())?;
+    store_config(&config)?;
+    Ok(public_config())
+}
+
+fn prepare_config(
+    mut request: ConfigureRequest,
+    mut previous: StoredConfig,
+) -> Result<StoredConfig, String> {
+    // Removal is an explicit operation on the saved credential, not a save of
+    // unfinished form fields. Keep the existing provider, URL and model.
+    if request.clear_api_key {
+        previous.api_key.clear();
+        return Ok(previous);
+    }
     request.provider = request.provider.trim().to_ascii_lowercase();
     if !matches!(request.provider.as_str(), "openai-compatible" | "codex") {
         return Err("Choose a supported chat provider.".into());
@@ -155,7 +177,7 @@ pub(crate) fn configure(raw: &str) -> Result<Value, String> {
         }
     }
     if request.api_key.trim().is_empty() {
-        request.api_key = load_config().unwrap_or_default().api_key;
+        request.api_key = previous.api_key;
     }
     if request.provider == "openai-compatible" && request.api_key.trim().is_empty() {
         return Err("Add an API key before saving this provider.".into());
@@ -164,14 +186,12 @@ pub(crate) fn configure(raw: &str) -> Result<Value, String> {
         return Err("One of the provider settings is too long.".into());
     }
 
-    let config = StoredConfig {
+    Ok(StoredConfig {
         provider: request.provider,
         base_url: request.base_url.trim().trim_end_matches('/').to_string(),
         model: request.model.trim().to_string(),
         api_key: request.api_key,
-    };
-    store_config(&config)?;
-    Ok(public_config())
+    })
 }
 
 pub(crate) fn connect(provider: &str, mut push: impl FnMut(Value) + Send + 'static) {
@@ -2237,6 +2257,71 @@ fn dpapi_decrypt(input: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider_config() -> StoredConfig {
+        StoredConfig {
+            provider: "openai-compatible".into(),
+            base_url: "https://example.test/v1".into(),
+            model: "endpoint-model".into(),
+            api_key: "test-secret".into(),
+        }
+    }
+
+    #[test]
+    fn provider_key_keep_replace_remove_and_public_status() {
+        let request = |key: &str, clear: bool| serde_json::from_value::<ConfigureRequest>(json!({
+            "provider": "openai-compatible", "baseUrl": "https://example.test/v1",
+            "model": "endpoint-model", "apiKey": key, "clearApiKey": clear,
+        })).unwrap();
+        let kept = prepare_config(request("  ", false), provider_config()).unwrap();
+        assert_eq!(kept.api_key, "test-secret");
+        let replaced = prepare_config(request("replacement", false), kept).unwrap();
+        assert_eq!(replaced.api_key, "replacement");
+        let public = public_config_for(&replaced, false);
+        assert_eq!(public["hasKey"], true);
+        assert_eq!(public["configured"], true);
+        assert!(public.get("apiKey").is_none());
+        assert!(!public.to_string().contains("replacement"));
+        let removed = prepare_config(request("", true), replaced).unwrap();
+        assert!(removed.api_key.is_empty());
+        assert_eq!(removed.model, "endpoint-model");
+        assert_eq!(public_config_for(&removed, false)["hasKey"], false);
+        assert_eq!(public_config_for(&removed, false)["configured"], false);
+        assert!(prepare_config(request("", false), removed).is_err());
+    }
+
+    #[test]
+    fn provider_key_status_is_independent_of_chatgpt_connection() {
+        let mut config = provider_config();
+        config.provider = "codex".into();
+        let public = public_config_for(&config, false);
+        assert_eq!(public["configured"], false);
+        assert_eq!(public["hasKey"], true);
+    }
+
+    #[test]
+    fn provider_key_removal_does_not_require_valid_unsaved_fields() {
+        let request = serde_json::from_value(json!({
+            "provider": "openai-compatible", "baseUrl": "invalid", "clearApiKey": true,
+        })).unwrap();
+        let removed = prepare_config(request, provider_config()).unwrap();
+        assert!(removed.api_key.is_empty());
+        assert_eq!(removed.base_url, "https://example.test/v1");
+        assert_eq!(removed.model, "endpoint-model");
+    }
+
+    #[test]
+    fn provider_key_survives_encrypted_serialization_roundtrip() {
+        let original = provider_config();
+        let bytes = serde_json::to_vec(&original).unwrap();
+        let encrypted = dpapi_encrypt(&bytes).expect("encrypt test configuration");
+        assert!(!encrypted.windows(original.api_key.len()).any(|part| part == original.api_key.as_bytes()));
+        let decoded = dpapi_decrypt(&encrypted).expect("decrypt test configuration");
+        let restored: StoredConfig = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(restored.api_key, original.api_key);
+        assert_eq!(public_config_for(&restored, false)["hasKey"], true);
+    }
+
 
     /// The codex path used to run an action and stop, so the model never learned
     /// whether it worked. A result has to come back as a `function_call_output`

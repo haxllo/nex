@@ -6,7 +6,12 @@ const source = readFileSync(new URL("../apps/core/assets/app.js", import.meta.ur
 function harness() {
   const element = () => ({ value: "", textContent: "", disabled: false, hidden: false });
   const context: any = {
-    chatSavePending: null, chatSettingsDirty: true, chatSaveButton: element(), chatRemoveKeyButton: element(),
+    chatSavePending: null, chatSaveTimer: 0, chatSettingsDirty: true,
+    window: {
+      setTimeout(callback: () => void) { context.timeout = callback; return 1; },
+      clearTimeout() { context.timeout = null; },
+    },
+    chatSaveButton: element(), chatRemoveKeyButton: element(),
     chatApiKeyInput: { ...element(), value: "new-secret" }, chatSaveStatus: element(),
     chatProviderInput: { value: "openai-compatible" },
     chatBaseUrlInput: { value: "https://example.test/v1" }, chatModelInput: { value: "endpoint-model" },
@@ -43,6 +48,17 @@ describe("provider settings acknowledgment", () => {
     expect(ui.chatSaveStatus.textContent).toBe("Could not write provider settings.");
     expect(ui.settingsOpen).toBe(true);
     expect(ui.chatApiKeyInput.disabled).toBe(false);
+  });
+  it("unlocks editing and retains the key when no save result arrives", () => {
+    const ui = harness(); ui.save(); ui.timeout();
+    expect(ui.chatSavePending).toBeNull();
+    expect(ui.chatSaveButton.disabled).toBe(false);
+    expect(ui.chatRemoveKeyButton.disabled).toBe(false);
+    expect(ui.chatApiKeyInput.disabled).toBe(false);
+    expect(ui.chatApiKeyInput.value).toBe("new-secret");
+    expect(ui.chatSaveStatus.textContent).toContain("did not confirm");
+    ui.save();
+    expect(ui.posted).toHaveLength(2);
   });
   it("sends explicit removal without the typed secret", () => {
     const ui = harness(); ui.save(true);

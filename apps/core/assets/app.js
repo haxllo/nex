@@ -102,6 +102,7 @@
   const chatRemoveKeyButton = $("chat-remove-key-button");
   const chatSaveStatus = $("chat-save-status");
   let chatSavePending = null;
+  let chatSaveTimer = 0;
   let chatSettingsDirty = false;
   const chatEndpointField = $("chat-endpoint-field");
   const chatKeyField = $("chat-key-field");
@@ -2937,6 +2938,13 @@
       apiKey: clearApiKey ? "" : chatApiKeyInput.value,
       clearApiKey,
     };
+    chatSaveTimer = window.setTimeout(() => {
+      chatSavePending = null;
+      chatSaveTimer = 0;
+      chatSaveButton.disabled = chatRemoveKeyButton.disabled = false;
+      chatApiKeyInput.disabled = false;
+      chatSaveStatus.textContent = "Nex did not confirm the save. Your entered key is still here. Edit the settings or try saving again.";
+    }, 10000);
     post("chatConfigure", payload);
   }
 
@@ -3508,6 +3516,8 @@
       }
     }
     if (state.chatConfigureResult && chatSavePending) {
+      window.clearTimeout(chatSaveTimer);
+      chatSaveTimer = 0;
       const { clearApiKey } = chatSavePending;
       chatSavePending = null;
       chatSaveButton.disabled = chatRemoveKeyButton.disabled = false;

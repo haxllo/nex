@@ -2272,9 +2272,35 @@ fn bounded_history(history: &[ChatTurn], max_turns: usize, max_chars: usize) -> 
     selected
 }
 
+/// The provider's own explanation, when it gave one and it is short enough to
+/// show. Used verbatim rather than summarised: the reason matters more than
+/// the wording, and paraphrasing a model-availability message into "check your
+/// key" is how this went wrong before.
+fn provider_message(body: &str) -> Option<String> {
+    let detail = serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/error/message")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
+    if detail.is_empty() || detail.len() > 400 {
+        return None;
+    }
+    Some(detail)
+}
+
 fn http_error(code: u16, body: String, secret: &str) -> String {
     match code {
-        401 | 403 => {
+        // 401 is a credential problem and nothing else. 403 is not: OpenRouter
+        // returns 403 for "this model is only available on agentic harnesses"
+        // and other availability refusals, and reporting those as an auth
+        // failure sends the user to re-enter a key that is perfectly valid.
+        // When the provider explains itself, say what it said.
+        401 => {
+            "Provider authentication failed. Check the saved API key or account connection.".into()
+        }
+        403 if provider_message(&body).is_some() => provider_message(&body).unwrap_or_default(),
+        403 => {
             "Provider authentication failed. Check the saved API key or account connection.".into()
         }
         429 => "The provider is rate limiting requests. Wait a moment and try again.".into(),
@@ -2403,6 +2429,26 @@ mod tests {
         .unwrap();
         let error = prepare_config(request, provider_config()).unwrap_err();
         assert!(error.contains("provider URL"), "got: {error}");
+    }
+
+    #[test]
+    fn a_forbidden_model_says_why_rather_than_blaming_the_key() {
+        // OpenRouter answers 403 when a model is not available to this account,
+        // for example "only available on agentic harnesses". Reporting every
+        // 403 as an authentication failure sent the user to re-enter a key that
+        // was never wrong, twice.
+        let body = r#"{"error":{"message":"thinkingmachines/inkling-2-small:free is only available on agentic harnesses.","code":403}}"#;
+        let message = http_error(403, body.to_string(), "");
+        assert!(message.contains("agentic harnesses"), "got: {message}");
+        assert!(!message.contains("authentication"), "got: {message}");
+    }
+
+    #[test]
+    fn a_401_without_a_body_still_reads_as_authentication() {
+        // The common case must not regress: a genuinely bad key has no useful
+        // provider prose, so the plain explanation is the right one.
+        let message = http_error(401, String::new(), "");
+        assert!(message.contains("authentication"), "got: {message}");
     }
 
     #[test]

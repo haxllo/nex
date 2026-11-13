@@ -1083,7 +1083,12 @@ fn stream_openai(
                         return Ok(());
                     }
                     if answer.approved() {
-                        let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                        let outcome = crate::chat_tools::run_cancellable(
+                            &tool,
+                            true,
+                            &create_base,
+                            &|| ACTIVE_REQUEST.load(Ordering::SeqCst) != id,
+                        );
                         // Before the model can read it: anything this output
                         // mentions is now tainted and will prompt if opened.
                         loop_state.observe_output(&outcome);
@@ -1131,7 +1136,12 @@ fn stream_openai(
                     }
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
-                    let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    let outcome = crate::chat_tools::run_cancellable(
+                        &tool,
+                        false,
+                        &create_base,
+                        &|| ACTIVE_REQUEST.load(Ordering::SeqCst) != id,
+                    );
                     loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);
@@ -1615,7 +1625,12 @@ fn stream_chatgpt_native(
                         outcomes.push((call_id, call_name, call_args, outcome));
                         continue;
                     }
-                    let outcome = crate::chat_tools::run(&tool, true, &create_base);
+                    let outcome = crate::chat_tools::run_cancellable(
+                        &tool,
+                        true,
+                        &create_base,
+                        &|| ACTIVE_REQUEST.load(Ordering::SeqCst) != id,
+                    );
                     loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);
@@ -1623,7 +1638,12 @@ fn stream_chatgpt_native(
                     outcomes.push((call_id, call_name, call_args, outcome));
                 }
                 crate::chat_tools::LoopStep::RunTool { tool } => {
-                    let outcome = crate::chat_tools::run(&tool, false, &create_base);
+                    let outcome = crate::chat_tools::run_cancellable(
+                        &tool,
+                        false,
+                        &create_base,
+                        &|| ACTIVE_REQUEST.load(Ordering::SeqCst) != id,
+                    );
                     loop_state.observe_output(&outcome);
                     push_action_outcome(sink, request_id, &outcome);
                     needs_break.set(true);

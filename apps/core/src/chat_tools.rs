@@ -1500,6 +1500,21 @@ fn ceil_char_boundary(bytes: &[u8], mut index: usize) -> usize {
 }
 
 pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Path) -> ToolOutcome {
+    run_cancellable(tool, confirmed, create_base, &|| false)
+}
+
+/// As [`run`], but a long action can be stopped while it is in progress.
+///
+/// Without this, pressing Stop changed the request id and the loop stopped
+/// reading - but a PowerShell process already running kept going for up to its
+/// full allowance with nobody watching. A stopped chat must not leave a command
+/// running on the machine.
+pub(crate) fn run_cancellable(
+    tool: &ChatTool,
+    confirmed: bool,
+    create_base: &std::path::Path,
+    cancelled: &dyn Fn() -> bool,
+) -> ToolOutcome {
     if tool.needs_confirmation() && !confirmed {
         return ToolOutcome::failure(
             tool.name(),
@@ -1713,7 +1728,7 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
             } else {
                 COMMAND_TIMEOUT_DEFAULT
             };
-            match run_powershell(command, budget.as_secs()) {
+            match run_powershell_cancellable(command, budget.as_secs(), cancelled) {
             Ok(output) => ToolOutcome {
                 tool: tool.name().to_string(),
                 target: command.clone(),
@@ -1774,6 +1789,15 @@ struct CommandOutput {
 /// the user could from their own terminal. That is the whole security argument
 /// for this tool, and it only holds while the process is unprivileged.
 fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, String> {
+    run_powershell_cancellable(command, timeout_seconds, &|| false)
+}
+
+/// As [`run_powershell`], but stops the process if `cancelled` turns true.
+fn run_powershell_cancellable(
+    command: &str,
+    timeout_seconds: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CommandOutput, String> {
     use std::process::{Command, Stdio};
 
     let mut command_builder = Command::new("powershell.exe");
@@ -1880,6 +1904,11 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
+                if cancelled() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("the command was stopped because the request was cancelled".to_string());
+                }
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -3728,6 +3757,39 @@ mod tests {
             waited < std::time::Duration::from_secs(20),
             "the deadline should have fired near 1s, waited {waited:?}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelling_stops_a_running_command() {
+        // Stopping a chat used to leave the process running: the loop stopped
+        // reading at the next round boundary, but a command already inside the
+        // poll loop had no way to learn about it and ran to its full allowance.
+        let started = std::time::Instant::now();
+        let err = run_powershell_cancellable("Start-Sleep -Seconds 120", 300, &|| {
+            // Cancelled almost immediately, as pressing Stop would be.
+            started.elapsed() > std::time::Duration::from_millis(300)
+        })
+        .unwrap_err();
+
+        assert!(
+            err.contains("cancelled"),
+            "the reason must say it was cancelled, not timed out: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "cancellation must not wait for the allowance, waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_uncancelled_command_is_left_alone() {
+        // The predicate must not be what kills ordinary runs.
+        let out = run_powershell("Write-Output 'fine'", 30).expect("command runs");
+        assert_eq!(out.exit_code, 0);
+        assert!(out.summary.contains("fine"));
     }
 
     #[cfg(windows)]

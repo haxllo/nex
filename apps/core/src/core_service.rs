@@ -3184,6 +3184,53 @@ mod tests {
     use crate::search::SearchFilter;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// A service whose SQLite and Tantivy both live in a temp dir.
+    ///
+    /// `Config::default()` resolves `index_db_path` to the real
+    /// `%APPDATA%\Nex\index.sqlite3`, and `CoreService` opens the Tantivy
+    /// index beside it. A test using a default config therefore reads and
+    /// writes the developer's live production index, which is why a different
+    /// test failed on each full-suite run. Every test that mutates or reads
+    /// the index must go through this instead.
+    fn isolated_service() -> (CoreService, tempfile::TempDir) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let index_dir = tempfile::tempdir().expect("temp index dir");
+        let db_path = index_dir.path().join(format!("test-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = index_dir.path().join(format!("cfg-{unique}.toml"));
+        cfg.index_db_path = db_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+        let db = open_memory().expect("memory db");
+        let service = CoreService::with_connection(cfg, db).expect("service should initialize");
+        // TempDir dropped after the service, so the returned handle keeps the
+        // files alive for the test's lifetime.
+        (service, index_dir)
+    }
+
+    /// Isolated service, index path returned separately for assertions that
+    /// need it.
+    fn isolated_service_with_paths() -> (CoreService, std::path::PathBuf, std::path::PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let index_dir = tempfile::tempdir().expect("temp index dir");
+        let db_path = index_dir.path().join(format!("test-{unique}.sqlite3"));
+        let cfg_path = index_dir.path().join(format!("cfg-{unique}.toml"));
+        let mut cfg = Config::default();
+        cfg.config_path = cfg_path.clone();
+        cfg.index_db_path = db_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+        let db = open_memory().expect("memory db");
+        let service = CoreService::with_connection(cfg, db).expect("service should initialize");
+        (service, cfg_path, db_path)
+    }
+
     #[test]
     fn polling_writer_lets_new_readers_in_while_it_waits() {
         use std::sync::{mpsc, Arc, RwLock};
@@ -3595,8 +3642,7 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app path should exist");
         std::fs::write(&file_path, b"ok").expect("file path should exist");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
-            .expect("service should initialize");
+        let (service, _index_dir) = isolated_service();
         service
             .upsert_item(&SearchItem::new(
                 "app-vivaldi",
@@ -3637,8 +3683,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nex-app-cache-kind-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should exist");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
-            .expect("service should initialize");
+        let (service, _index_dir) = isolated_service();
         service
             .upsert_item(&SearchItem::new(
                 "entry-1",
@@ -3743,8 +3788,7 @@ mod tests {
 
     #[test]
     fn cached_snapshot_is_generation_stamped_and_consistent() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
-            .expect("service should initialize");
+        let (service, _index_dir) = isolated_service();
         let before = service.search_generation();
         service
             .upsert_item(&SearchItem::new(
@@ -3775,8 +3819,7 @@ mod tests {
         // never an empty Vec from lock contention. Exercise the read side
         // under contention: hold a read guard (blocking writers) and confirm
         // the snapshot still returns the full pre-swap contents.
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
-            .expect("service should initialize");
+        let (service, _index_dir) = isolated_service();
         service
             .upsert_item(&SearchItem::new(
                 "swap-1",

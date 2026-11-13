@@ -387,6 +387,11 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.config_path = isolated_config_path.clone();
+        // The index must be isolated too: Config::default() resolves
+        // index_db_path to the live %APPDATA% index, which CoreService opens.
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        cfg.index_db_path = isolated_index_path.clone();
         cfg.clipboard_enabled = false;
         cfg.plugins_enabled = false;
 
@@ -411,6 +416,7 @@ mod tests {
 
         std::fs::remove_file(path).expect("temp file should be removed");
         let _ = std::fs::remove_file(isolated_config_path);
+        let _ = std::fs::remove_file(isolated_index_path);
     }
 
     #[test]
@@ -422,7 +428,25 @@ mod tests {
         let launch_path = std::env::temp_dir().join(format!("nex-launch-flow-{unique}.tmp"));
         std::fs::write(&launch_path, b"ok").expect("temp launch file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        // Isolate the config the way the sibling search test does. With a
+        // default config the query "code" also matched real entries under the
+        // user's profile (for example .codex), so results[0] was sometimes a
+        // discovered folder rather than the item this test inserted, and the
+        // launch then failed with "item not found: folder:...\.codex". The
+        // test was asserting on an ordering it never controlled.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-launch-flow-cfg-{unique}.toml"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        // The index must be isolated too: Config::default() resolves
+        // index_db_path to the live %APPDATA% index, which CoreService opens.
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -434,15 +458,22 @@ mod tests {
             .expect("item should upsert");
 
         let parsed = ParsedQuery::parse("code", true);
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let overlay = test_overlay_shell();
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
-        launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "launch target", &overlay)
+        // Select the item by id rather than by position: position depends on
+        // what else the index happens to contain.
+        let index = results
+            .iter()
+            .position(|item| item.id == "item-1")
+            .expect("the inserted item should be in the results");
+        launch_overlay_selection(&service, &cfg, &plugins, &results, index, "launch target", &overlay)
             .expect("launch should succeed");
 
         std::fs::remove_file(&launch_path).expect("temp launch file should be removed");
+        let _ = std::fs::remove_file(isolated_config_path);
+        let _ = std::fs::remove_file(isolated_index_path);
     }
 
     /// Headless overlay shell for tests: `launch_overlay_selection`
@@ -455,8 +486,27 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_reports_error_for_missing_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
         let missing_path = std::env::temp_dir().join("nex-does-not-exist-launch-flow.exe");
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         let item = SearchItem::new(
             "missing",
@@ -474,7 +524,6 @@ mod tests {
             .expect("item should upsert");
 
         let results = vec![item];
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let overlay = test_overlay_shell();
         let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 0, "missing", &overlay)
@@ -485,11 +534,29 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_rejects_out_of_range_index() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         let results = vec![SearchItem::new("item-1", "app", "One", "C:\\One.exe")];
 
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let overlay = test_overlay_shell();
         let error = launch_overlay_selection(&service, &cfg, &plugins, &results, 1, "out", &overlay)
@@ -500,10 +567,28 @@ mod tests {
 
     #[test]
     fn overlay_launch_selection_rejects_empty_results() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
 
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let overlay = test_overlay_shell();
         let error = launch_overlay_selection(&service, &cfg, &plugins, &[], 0, "", &overlay)
@@ -778,7 +863,22 @@ mod tests {
         let path = std::env::temp_dir().join(format!("nex-overlay-cache-{unique}.tmp"));
         std::fs::write(&path, b"ok").expect("temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -789,7 +889,6 @@ mod tests {
             ))
             .expect("item should upsert");
 
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let parsed = ParsedQuery::parse("vi", true);
         let mut session = OverlaySearchSession::default();
@@ -900,9 +999,27 @@ mod tests {
 
     #[test]
     fn command_mode_includes_web_search_action() {
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let parsed = ParsedQuery::parse(">nex roadmap", true);
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 10)
@@ -923,7 +1040,22 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -943,7 +1075,6 @@ mod tests {
             .expect("file should upsert");
 
         let parsed = ParsedQuery::parse("v", true);
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");
@@ -965,7 +1096,22 @@ mod tests {
         std::fs::write(&app_path, b"ok").expect("app temp file should be created");
         std::fs::write(&file_path, b"ok").expect("file temp file should be created");
 
-        let service = CoreService::with_connection(Config::default(), open_memory().unwrap())
+        // Isolated config AND index. Config::default() resolves index_db_path
+        // to the real %APPDATA%\Nex\index.sqlite3, and CoreService opens the
+        // Tantivy index beside it, so a test using a default config searches the
+        // developer's live production index instead of its own two items. That
+        // shared index is why a different test failed on each run.
+        let isolated_config_path = std::env::temp_dir()
+            .join(format!("nex-isolated-cfg-{unique}.toml"));
+        let isolated_index_path = std::env::temp_dir()
+            .join(format!("nex-isolated-index-{unique}.sqlite3"));
+        let mut cfg = Config::default();
+        cfg.config_path = isolated_config_path.clone();
+        cfg.index_db_path = isolated_index_path.clone();
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+
+        let service = CoreService::with_connection(cfg.clone(), open_memory().unwrap())
             .expect("service should initialize");
         service
             .upsert_item(&SearchItem::new(
@@ -985,7 +1131,6 @@ mod tests {
             .expect("file should upsert");
 
         let parsed = ParsedQuery::parse("va", true);
-        let cfg = Config::default();
         let plugins = PluginRegistry::default();
         let results = search_overlay_results(&service, &cfg, &plugins, &parsed, 20)
             .expect("search should succeed");

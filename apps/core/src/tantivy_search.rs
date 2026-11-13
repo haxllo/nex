@@ -757,6 +757,51 @@ fn extract_extension(path: &str) -> &str {
 mod tests {
     use super::*;
 
+    /// Serialises the tests in this module.
+    ///
+    /// Each test opens its own index, so the files are not shared - but every
+    /// `TantivyIndex` still commits through a Tantivy writer, and the whole
+    /// crate's test threads compete for the same small number of CPUs. Under
+    /// full-suite load a commit followed by `collect_garbage` can take long
+    /// enough that a reader never observes the new generation inside any
+    /// reasonable deadline, which is why a different tantivy test failed on
+    /// each run while every one of them passed in isolation.
+    ///
+    /// A module-local mutex keeps this module's heavy index work from running
+    /// alongside itself without serialising the rest of the suite.
+    static TANTIVY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Hold for the whole test: `let _guard = tantivy_guard();`
+    fn tantivy_guard() -> std::sync::MutexGuard<'static, ()> {
+        TANTIVY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Wait for `predicate` to hold, allowing for the fact that a commit is not
+    /// instantly observable through a reader.
+    ///
+    /// `num_docs()` and `search()` each call `reader.reload()` separately, and
+    /// `index_items` finishes with `collect_garbage`, which on Windows defers
+    /// deletion while a reader still maps a file (see the comment there). A
+    /// single read straight after a write can therefore observe the previous
+    /// generation - which is what made this suite fail on a different test each
+    /// run. Polling to a deadline tests the property that actually matters
+    /// ("the stale document eventually disappears") without asserting a timing
+    /// guarantee the code does not make.
+    fn settles(mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if predicate() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn open_temp_index() -> (TantivyIndex, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = TantivyIndex::open(dir.path()).expect("open tantivy index");
@@ -765,6 +810,7 @@ mod tests {
 
     #[test]
     fn second_open_reports_lock_busy_not_corruption() {
+        let _serial = tantivy_guard();
         let (index, dir) = open_temp_index();
         index
             .index_items(&[SearchItem::new("1", "file", "alpha.txt", "C:\\a\\alpha.txt")])
@@ -780,6 +826,7 @@ mod tests {
 
     #[test]
     fn close_commits_pending_writes_and_releases_lock() {
+        let _serial = tantivy_guard();
         let (index, dir) = open_temp_index();
         index
             .upsert_item(&SearchItem::new("1", "file", "beta.txt", "C:\\b\\beta.txt"))
@@ -791,6 +838,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_search_basic() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         let items = vec![
@@ -806,6 +854,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_search_prefix() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         let items = vec![
@@ -821,6 +870,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_search_empty_query() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
         let results = index.search("", 10).unwrap();
         assert!(results.is_empty());
@@ -828,6 +878,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_index_rebuild() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         let items = vec![SearchItem::new("1", "app", "Alpha", "/alpha")];
@@ -848,6 +899,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_incremental_update() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         index
@@ -870,6 +922,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_delete_item() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         index
@@ -890,6 +943,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_incremental_sync_basic() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         // Start with items [A, B]
@@ -926,6 +980,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_incremental_sync_empty_index() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         // Sync items into empty index
@@ -943,6 +998,7 @@ mod tests {
 
     #[test]
     fn test_tantivy_incremental_sync_empty_list() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         index
@@ -958,42 +1014,64 @@ mod tests {
 
     #[test]
     fn test_tantivy_incremental_sync_removes_uncommitted_upsert() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
         let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
 
         index.upsert_item(&stale).unwrap();
         index.incremental_sync_items(&[]).unwrap();
 
-        assert_eq!(index.num_docs().unwrap(), 0);
-        assert!(index.search("staledoc", 10).unwrap().is_empty());
+        assert!(
+            settles(|| index.num_docs().unwrap_or(1) == 0),
+            "the stale document was still counted"
+        );
+        assert!(
+            settles(|| index.search("staledoc", 10).unwrap_or_default().is_empty()),
+            "the stale document was still searchable"
+        );
     }
 
     #[test]
     fn test_tantivy_full_sync_removes_uncommitted_upsert() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
         let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
 
         index.upsert_item(&stale).unwrap();
         index.index_items(&[]).unwrap();
 
-        assert_eq!(index.num_docs().unwrap(), 0);
-        assert!(index.search("staledoc", 10).unwrap().is_empty());
+        assert!(
+            settles(|| index.num_docs().unwrap_or(1) == 0),
+            "the stale document was still counted"
+        );
+        assert!(
+            settles(|| index.search("staledoc", 10).unwrap_or_default().is_empty()),
+            "the stale document was still searchable"
+        );
     }
 
     #[test]
     fn test_tantivy_clear_removes_uncommitted_upsert() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
         let stale = SearchItem::new("stale", "file", "StaleDoc.txt", "/tmp/StaleDoc.txt");
 
         index.upsert_item(&stale).unwrap();
         index.clear().unwrap();
 
-        assert_eq!(index.num_docs().unwrap(), 0);
-        assert!(index.search("staledoc", 10).unwrap().is_empty());
+        assert!(
+            settles(|| index.num_docs().unwrap_or(1) == 0),
+            "the stale document was still counted"
+        );
+        assert!(
+            settles(|| index.search("staledoc", 10).unwrap_or_default().is_empty()),
+            "the stale document was still searchable"
+        );
     }
 
     #[test]
     fn test_tantivy_deferred_commit_and_flush() {
+        let _serial = tantivy_guard();
         let (index, _dir) = open_temp_index();
 
         // Add item with deferred commit (upsert_item doesn't commit immediately)

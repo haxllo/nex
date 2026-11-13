@@ -735,9 +735,22 @@ mod tests {
 
     fn memory_service() -> Arc<RwLock<CoreService>> {
         let db = crate::index_store::open_memory().unwrap();
-        Arc::new(RwLock::new(
-            CoreService::with_connection(crate::config::Config::default(), db).unwrap(),
-        ))
+        // Config::default() resolves index_db_path to the live
+        // %APPDATA%\Nex\index.sqlite3 and CoreService opens the Tantivy index
+        // beside it, so this helper used to read and write the developer's real
+        // index. Test services must own a throwaway one.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("nex-ipc-test-{unique}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = crate::config::Config::default();
+        cfg.config_path = dir.join("cfg.toml");
+        cfg.index_db_path = dir.join("index.sqlite3");
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+        Arc::new(RwLock::new(CoreService::with_connection(cfg, db).unwrap()))
     }
 
     fn sync_request(known: &Value, wait_ms: u64) -> IpcRequest {

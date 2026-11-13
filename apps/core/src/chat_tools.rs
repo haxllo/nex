@@ -85,6 +85,21 @@ pub(crate) enum ChatTool {
     /// act from removing an empty directory, and the user is entitled to see
     /// which one they are approving.
     DeletePath { path: String, recursive: bool },
+    /// A shell command, run through PowerShell as the current user.
+    ///
+    /// The most powerful and most dangerous tool here: it deletes nothing by
+    /// itself, but it can do anything the user can do. It is always confirmed,
+    /// and the card shows the exact command line rather than a description of
+    /// it, because the user is approving that string.
+    ///
+    /// There is no elevation. The process runs at the UI's integrity level, so
+    /// a command cannot do more than the user could from their own terminal.
+    RunCommand {
+        command: String,
+        /// Seconds before the process is killed. Bounded by the caller; a long
+        /// build and a hung command both look like "still running" otherwise.
+        timeout_seconds: u64,
+    },
 }
 
 /// Why a call was refused before it ran.
@@ -135,6 +150,7 @@ impl ChatTool {
             Self::MovePath { .. } => "move_path",
             Self::CopyPath { .. } => "copy_path",
             Self::DeletePath { .. } => "delete_path",
+            Self::RunCommand { .. } => "run_command",
         }
     }
 
@@ -154,6 +170,10 @@ impl ChatTool {
             // Delete is the one that cannot be undone. It is annotated the same
             // way, but the card says so in words; see `PendingAction::of`.
             Self::DeletePath { .. } => Annotations::destructive(),
+            // A command can create, delete or overwrite anything the user can
+            // reach, so it is destructive in the strongest sense: it is never
+            // allowed to run without an explicit approval of its exact text.
+            Self::RunCommand { .. } => Annotations::destructive(),
         }
     }
 
@@ -179,6 +199,9 @@ impl ChatTool {
             Self::MovePath { path, .. }
             | Self::CopyPath { path, .. }
             | Self::DeletePath { path, .. } => path,
+            // The command line itself, not a summary: the card must show the
+            // text that will actually be executed.
+            Self::RunCommand { command, .. } => command,
         }
     }
 }
@@ -399,6 +422,31 @@ impl RawToolCall {
                 }
                 Ok(ChatTool::DeletePath { path, recursive })
             }
+            "run_command" => {
+                let command = arg("command")?;
+                // Control characters would let a command smuggle a second line
+                // past a reader who sees only the first, and NUL cannot be
+                // passed to a process at all.
+                if command.chars().any(|c| c.is_control() && c != '\t') {
+                    return Err(ToolError::IllegalName {
+                        tool: "run_command",
+                        reason: "the command contains a control character or a line break; send one command per call".to_string(),
+                    });
+                }
+                // The timeout is the caller's promise about how long it may
+                // hang. Clamped here rather than trusted, so a model that asks
+                // for an hour gets the documented maximum instead.
+                let timeout_seconds = self
+                    .arguments
+                    .get("timeout_seconds")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(COMMAND_TIMEOUT_DEFAULT.as_secs())
+                    .clamp(1, COMMAND_TIMEOUT_MAX.as_secs());
+                Ok(ChatTool::RunCommand {
+                    command,
+                    timeout_seconds,
+                })
+            }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
     }
@@ -595,6 +643,31 @@ pub(crate) const MAX_TOOL_ROUNDS: usize = 25;
 /// enough to sit in a loop. A refusal counts as an attempt, because asking again
 /// after "no" is the specific case that wastes the user's time.
 pub(crate) const REPEAT_LIMIT: usize = 3;
+
+/// How long a `run_command` may run before it is killed.
+///
+/// Thirty seconds covers the questions this tool exists for — disk space, an IP
+/// address, a process list, a network check — and is short enough that a hung
+/// command does not leave the user staring at a spinner. A build asks for more
+/// via `timeout_seconds`, up to [`COMMAND_TIMEOUT_MAX`].
+pub(crate) const COMMAND_TIMEOUT_DEFAULT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// The longest a `run_command` may be allowed to run.
+///
+/// Five minutes, not unlimited: the confirmation card is the user's only
+/// control, and a command that can run for an hour is one they cannot take
+/// back. Installs and cold builds fit inside this; a task that does not is a
+/// task the user should run in their own terminal.
+pub(crate) const COMMAND_TIMEOUT_MAX: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How much of a command's output is handed to the model, in bytes.
+///
+/// A capped total rather than head-and-tail alone: `Get-ChildItem -Recurse C:\`
+/// produces megabytes of paths, and the useful part of that is the count, not
+/// the list. Keeping the head and the tail covers both the "what did it say"
+/// and the "how did it end" questions.
+const COMMAND_OUTPUT_LIMIT: usize = 16 * 1024;
 
 /// Identity of an action for the purposes of "has this already been tried".
 ///
@@ -965,6 +1038,7 @@ impl PendingAction {
             ChatTool::MovePath { .. } => "Move",
             ChatTool::CopyPath { .. } => "Copy",
             ChatTool::DeletePath { .. } => "Delete",
+            ChatTool::RunCommand { .. } => "Run command",
         };
         // Delete is the only act here that cannot be undone, and the card is the
         // last place that fact can be stated plainly. Saying "this will change
@@ -972,6 +1046,12 @@ impl PendingAction {
         // irreversible action look like the reversible ones.
         let effect = match tool {
             ChatTool::DeletePath { .. } => "This cannot be undone.",
+            // Stronger than delete on purpose: one command can delete a whole
+            // tree, install software, or send data out. Ranking it below delete
+            // because it is only one line would be the wrong lesson.
+            ChatTool::RunCommand { .. } => {
+                "This runs as you, and can do anything you could do in a terminal."
+            }
             _ if tool.needs_confirmation() => "This will change something on your PC.",
             _ => "This changes nothing on your PC.",
         };
@@ -1057,6 +1137,10 @@ fn sample_call(name: &str) -> ChatTool {
             path: existing,
             recursive: false,
         },
+        "run_command" => ChatTool::RunCommand {
+            command: "Get-Date".to_string(),
+            timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
+        },
         other => panic!("no sample call for {other}"),
     }
 }
@@ -1078,6 +1162,7 @@ pub(crate) fn all_tool_names() -> &'static [&'static str] {
         "move_path",
         "copy_path",
         "delete_path",
+        "run_command",
     ]
 }
 
@@ -1212,6 +1297,21 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                         "recursive": {"type": "boolean", "description": "Required to be true to delete a folder that still has anything inside it. Omit for files and empty folders."}
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "description": "Run a PowerShell command as the current user and return its output. This is how you answer questions about the machine or do work that needs a program: disk space, IP address, running processes, builds, network checks. Requires user confirmation: the exact command line is shown and must be approved before it runs, so write the one command you actually need and do not ask the user to run it themselves. Runs without elevation, so it cannot do more than the user could in their own terminal.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The complete PowerShell command line, such as Get-PSDrive C | Select-Object Used,Free. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path';"},
+                        "timeout_seconds": {"type": "integer", "description": "How long to allow, in seconds, between 1 and 300. Omit for 30. Use a larger value for builds and installs."}
+                    },
+                    "required": ["command"]
                 }
             }
         }
@@ -1587,6 +1687,21 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
             }
         }
+        ChatTool::RunCommand {
+            command,
+            timeout_seconds,
+        } => match run_powershell(command, *timeout_seconds) {
+            Ok(output) => ToolOutcome {
+                tool: tool.name().to_string(),
+                target: command.clone(),
+                // A command that exits non-zero ran, but it failed. Reporting it
+                // as success because the process started is how "the build
+                // failed" becomes "the build is done".
+                ok: output.exit_code == 0,
+                summary: output.summary,
+            },
+            Err(reason) => ToolOutcome::failure(tool.name(), command, reason),
+        },
     }
 }
 
@@ -1612,6 +1727,128 @@ fn remove_target(path: &std::path::Path) -> Result<(), String> {
         std::fs::remove_file(path)
     };
     result.map_err(|error| format!("could not remove {}: {error}", path.display()))
+}
+
+/// What a finished command produced.
+#[derive(Debug)]
+struct CommandOutput {
+    exit_code: i32,
+    /// The user-facing report: exit code, stdout and stderr, capped and
+    /// delimited as data.
+    summary: String,
+}
+
+/// Run one PowerShell command and report what happened.
+///
+/// Deliberately not `cmd.exe`: every question this tool exists for — disk
+/// space, IP address, process lists, `Get-CimInstance` — is natural PowerShell,
+/// and `-NoProfile -NonInteractive` keeps a user profile script from injecting
+/// output or a prompt nobody can answer.
+///
+/// There is no elevation path here and there will not be one. The child
+/// inherits this process's integrity level, so a command cannot do more than
+/// the user could from their own terminal. That is the whole security argument
+/// for this tool, and it only holds while the process is unprivileged.
+fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, String> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ])
+        // No stdin: an interactive prompt would block until the timeout, and
+        // the answer could only make the command more powerful.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start PowerShell: {error}"))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+
+    // Poll rather than `wait_with_output`, so the deadline applies to the whole
+    // run. Reading piped output to completion first would block forever on a
+    // command that never exits.
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "the command was still running after {timeout_seconds}s, so it was stopped"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not wait for the command: {error}"));
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not read the command output: {error}"))?;
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Exit code first: a failure with empty stdout must not read as success,
+    // and there is nowhere else for the model to learn the exit status.
+    let mut summary = format!("Exit code {exit_code}.\n");
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => summary.push_str("The command printed nothing.\n"),
+        (false, true) => {
+            summary.push_str("Stdout:\n");
+            summary.push_str(&cap_command_output(&stdout));
+            summary.push('\n');
+        }
+        (true, false) => {
+            summary.push_str("Stderr:\n");
+            summary.push_str(&cap_command_output(&stderr));
+            summary.push('\n');
+        }
+        (false, false) => {
+            summary.push_str("Stdout:\n");
+            summary.push_str(&cap_command_output(&stdout));
+            summary.push_str("\nStderr:\n");
+            summary.push_str(&cap_command_output(&stderr));
+            summary.push('\n');
+        }
+    }
+
+    Ok(CommandOutput { exit_code, summary })
+}
+
+/// Cap command output, keeping the beginning and the end.
+///
+/// Both ends matter and for different reasons: the start usually holds the
+/// answer, the end holds the errors. Dropping the middle and saying so is
+/// honest; silently truncating invites the model to claim it saw everything.
+fn cap_command_output(text: &str) -> String {
+    let bytes = text.as_bytes();
+    if bytes.len() <= COMMAND_OUTPUT_LIMIT {
+        return text.to_string();
+    }
+    let head_end = floor_char_boundary(bytes, COMMAND_OUTPUT_LIMIT / 2);
+    let tail_start = ceil_char_boundary(bytes, bytes.len() - COMMAND_OUTPUT_LIMIT / 2);
+    let omitted = tail_start.saturating_sub(head_end);
+    format!(
+        "{}\n[... {omitted} bytes omitted from the middle of the output. You are seeing the \
+         beginning and the end, not all of it. ...]\n{}",
+        String::from_utf8_lossy(&bytes[..head_end]),
+        String::from_utf8_lossy(&bytes[tail_start..])
+    )
 }
 
 /// Copy a file or a whole tree.
@@ -2018,7 +2255,9 @@ mod tests {
 
     #[test]
     fn unknown_tool_is_rejected_not_coerced() {
-        let err = raw("run_command", serde_json::json!({"cmd": "del /s /q C:\\"}))
+        // This used to use run_command, which was unknown then. It is a real
+        // tool now, so the test needs a name that will never be one.
+        let err = raw("format_drive", serde_json::json!({"cmd": "del /s /q C:\\"}))
             .validate()
             .unwrap_err();
         assert!(matches!(err, ToolError::UnknownTool { .. }));
@@ -3116,5 +3355,253 @@ mod tests {
                 "{name} confirmation hint is wrong"
             );
         }
+    }
+
+    // --- run_command (CIQ-151) ---
+
+    #[test]
+    fn run_command_always_needs_confirmation() {
+        // There is no allowlist in v1 on purpose: deciding "Get-* is read-only"
+        // by string matching lets `Get-ChildItem | Remove-Item` through a
+        // prefix check. A shell is only safe when a human reads every line.
+        let tool = raw("run_command", serde_json::json!({ "command": "Get-Date" }))
+            .validate()
+            .expect("a plain command should validate");
+        assert!(tool.needs_confirmation());
+        assert_eq!(tool.name(), "run_command");
+        assert_eq!(tool.target(), "Get-Date");
+    }
+
+    #[test]
+    fn the_card_shows_the_exact_command_not_a_description() {
+        let command = "Get-PSDrive C | Select-Object Used,Free";
+        let tool = raw("run_command", serde_json::json!({ "command": command }))
+            .validate()
+            .unwrap();
+        let card = PendingAction::of(&tool);
+        // The user is approving this string, so it has to be the string.
+        assert_eq!(card.target, command);
+        assert!(
+            card.description.contains("as you"),
+            "the card must say the command runs with the user's own powers: {}",
+            card.description
+        );
+    }
+
+    #[test]
+    fn a_command_with_a_line_break_is_refused() {
+        // A second line is invisible on a card that shows the first one, which
+        // is the whole reason this is checked.
+        for bad in [
+            "Get-Date\nRemove-Item -Recurse C:\\Users",
+            "Get-Date\r\nformat c:",
+            "Get-Date\u{0}",
+        ] {
+            let err = raw("run_command", serde_json::json!({ "command": bad }))
+                .validate()
+                .unwrap_err();
+            assert!(
+                matches!(err, ToolError::IllegalName { .. }),
+                "{bad:?} should be refused, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_timeout_is_clamped_rather_than_trusted() {
+        let too_long = raw(
+            "run_command",
+            serde_json::json!({ "command": "Get-Date", "timeout_seconds": 99999 }),
+        )
+        .validate()
+        .unwrap();
+        assert_eq!(
+            too_long,
+            ChatTool::RunCommand {
+                command: "Get-Date".to_string(),
+                timeout_seconds: COMMAND_TIMEOUT_MAX.as_secs(),
+            }
+        );
+
+        let default = raw("run_command", serde_json::json!({ "command": "Get-Date" }))
+            .validate()
+            .unwrap();
+        assert_eq!(
+            default,
+            ChatTool::RunCommand {
+                command: "Get-Date".to_string(),
+                timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
+            }
+        );
+
+        let zero = raw(
+            "run_command",
+            serde_json::json!({ "command": "Get-Date", "timeout_seconds": 0 }),
+        )
+        .validate()
+        .unwrap();
+        assert_eq!(
+            zero,
+            ChatTool::RunCommand {
+                command: "Get-Date".to_string(),
+                timeout_seconds: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_command_is_refused() {
+        let err = raw("run_command", serde_json::json!({ "command": "   " }))
+            .validate()
+            .unwrap_err();
+        assert!(matches!(err, ToolError::EmptyArgument { .. }));
+    }
+
+    #[test]
+    fn output_capping_keeps_both_ends_and_says_what_it_dropped() {
+        // A recursive listing is the realistic case: megabytes of paths where
+        // the answer is the count, and the errors are at the end.
+        let head = "FIRST-LINE\n".to_string();
+        let middle = "x".repeat(COMMAND_OUTPUT_LIMIT * 2);
+        let tail = "\nLAST-LINE";
+        let capped = cap_command_output(&format!("{head}{middle}{tail}"));
+
+        assert!(capped.starts_with("FIRST-LINE"), "the beginning is kept");
+        assert!(capped.ends_with("LAST-LINE"), "the end is kept");
+        assert!(capped.contains("bytes omitted"), "the cut is stated");
+        assert!(
+            capped.len() < COMMAND_OUTPUT_LIMIT + 512,
+            "the cap actually caps, got {} bytes",
+            capped.len()
+        );
+    }
+
+    #[test]
+    fn short_output_is_passed_through_untouched() {
+        let text = "Used Free\n123  456\n";
+        assert_eq!(cap_command_output(text), text);
+    }
+
+    // The tests above check parsing and capping; these actually run a process.
+    // A shell tool that is only proven to parse is not proven to work.
+
+    #[cfg(windows)]
+    #[test]
+    fn a_real_command_returns_its_output_and_zero_exit() {
+        let out = run_powershell("Write-Output 'hello from a shell'", 30).expect("command runs");
+        assert_eq!(out.exit_code, 0, "summary was: {}", out.summary);
+        assert!(out.summary.contains("hello from a shell"), "{}", out.summary);
+        assert!(out.summary.starts_with("Exit code 0."), "{}", out.summary);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failing_command_reports_its_non_zero_exit() {
+        // The whole point of surfacing the exit code: this prints nothing and
+        // exits non-zero, and must not be reported as success.
+        let out = run_powershell("exit 3", 30).expect("command runs");
+        assert_eq!(out.exit_code, 3);
+        assert!(out.summary.starts_with("Exit code 3."), "{}", out.summary);
+
+        let tool = raw("run_command", serde_json::json!({ "command": "exit 3" }))
+            .validate()
+            .unwrap();
+        let outcome = run(&tool, true, std::path::Path::new("."));
+        assert!(
+            !outcome.ok,
+            "a non-zero exit must not be reported as success"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unconfirmed_command_never_runs() {
+        // The gate in front of the shell. If this ever passes, every other
+        // safety statement about run_command is false.
+        let marker = std::env::temp_dir().join(format!(
+            "nex-unconfirmed-{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let command = format!("New-Item -Path '{}' -ItemType File -Force | Out-Null", marker.display());
+        let tool = raw("run_command", serde_json::json!({ "command": command }))
+            .validate()
+            .unwrap();
+        let outcome = run(&tool, false, std::path::Path::new("."));
+        assert!(!outcome.ok, "an unconfirmed command must not report success");
+        assert!(
+            !marker.exists(),
+            "an unconfirmed command must not have executed at all"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stderr_is_surfaced_not_dropped() {
+        let out = run_powershell(
+            "[Console]::Error.WriteLine('something went wrong')",
+            30,
+        )
+        .expect("command runs");
+        assert!(
+            out.summary.contains("something went wrong"),
+            "stderr must reach the model: {}",
+            out.summary
+        );
+        assert!(out.summary.contains("Stderr:"), "{}", out.summary);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_hung_command_is_killed_at_the_deadline() {
+        // One second, because the default is 30 and this test is not a place to
+        // wait. The important part is that it returns at all rather than
+        // blocking forever.
+        let started = std::time::Instant::now();
+        let err = run_powershell("Start-Sleep -Seconds 30", 1).unwrap_err();
+        let waited = started.elapsed();
+        assert!(err.contains("still running after 1s"), "{err}");
+        assert!(
+            waited < std::time::Duration::from_secs(20),
+            "the deadline should have fired near 1s, waited {waited:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_command_that_prints_a_lot_is_capped() {
+        let out = run_powershell("1..4000 | ForEach-Object { 'line ' + $_ }", 30)
+            .expect("command runs");
+        assert_eq!(out.exit_code, 0);
+        assert!(out.summary.contains("bytes omitted"), "output should be capped");
+        assert!(
+            out.summary.len() < COMMAND_OUTPUT_LIMIT + 1024,
+            "the cap must hold, got {} bytes",
+            out.summary.len()
+        );
+        // Both ends survive: the start has the first line, the end the last.
+        assert!(out.summary.contains("line 1"), "head is kept");
+        assert!(out.summary.contains("line 4000"), "tail is kept");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_working_directory_is_not_a_tool_input() {
+        // cwd was dropped deliberately: a command that needs a folder starts
+        // with `cd`, which the user then sees on the card. An unexpected cwd
+        // key must not silently change where something runs.
+        let tool = raw(
+            "run_command",
+            serde_json::json!({ "command": "Get-Date", "cwd": "C:\\Windows\\System32" }),
+        )
+        .validate()
+        .unwrap();
+        assert_eq!(tool, ChatTool::RunCommand {
+            command: "Get-Date".to_string(),
+            timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
+        });
     }
 }

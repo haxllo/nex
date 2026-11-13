@@ -96,6 +96,9 @@ pub(crate) enum ChatTool {
     /// a command cannot do more than the user could from their own terminal.
     RunCommand {
         command: String,
+        /// Whether the model declared this a slow command. The allowance is
+        /// chosen from this, never handed in as a number.
+        slow: bool,
     },
 }
 
@@ -430,15 +433,18 @@ impl RawToolCall {
                         reason: "the command contains a control character or a line break; send one command per call".to_string(),
                     });
                 }
-                // The model does not set its own deadline.
+                // A flag, not a duration.
                 //
-                // It could, and did: asked to run a command that sleeps 120
-                // seconds, it sent `timeout_seconds: 130` and the command ran
-                // for two minutes. A limit the subject of the limit can raise
-                // is not a limit. Every command gets COMMAND_TIMEOUT_DEFAULT,
-                // and a command that needs longer is one the user should run in
-                // their own terminal.
-                Ok(ChatTool::RunCommand { command })
+                // Asked to run a command that sleeps 120 seconds, this model
+                // sent timeout_seconds: 130 and ran it for two minutes. A
+                // number it chooses is not a limit; a choice between two
+                // stated allowances is, and the card says which one applies.
+                let slow = self
+                    .arguments
+                    .get("slow")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok(ChatTool::RunCommand { command, slow })
             }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
@@ -645,6 +651,18 @@ pub(crate) const REPEAT_LIMIT: usize = 3;
 /// via `timeout_seconds`, up to [`COMMAND_TIMEOUT_MAX`].
 pub(crate) const COMMAND_TIMEOUT_DEFAULT: std::time::Duration =
     std::time::Duration::from_secs(30);
+
+/// How long a command may run when the model declares it is a slow one.
+///
+/// The user is shown this on the card, so a long allowance is something they
+/// agree to, not something granted quietly. Two tiers rather than a free
+/// number because a limit the model can set to any value is not a limit - it
+/// already extended its own deadline once, to 130 seconds.
+///
+/// Five minutes rather than more: counting the files on a system drive took
+/// 2m8s on this machine, and a task that does not fit in five minutes is one
+/// the user should run in their own terminal.
+pub(crate) const COMMAND_TIMEOUT_LONG: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How much of a command's output is handed to the model, in bytes.
 ///
@@ -1078,6 +1096,23 @@ impl PendingAction {
                 }
                 note
             }
+            ChatTool::RunCommand { slow, .. } => {
+                // Which budget applies is the one thing about this call the
+                // user cannot guess from the command line, and it decides how
+                // long they may be waiting. Saying it is what makes a five
+                // minute allowance something they agreed to.
+                if *slow {
+                    format!(
+                        " It may run for up to {} minutes before it is stopped.",
+                        COMMAND_TIMEOUT_LONG.as_secs() / 60
+                    )
+                } else {
+                    format!(
+                        " It is stopped after {} seconds.",
+                        COMMAND_TIMEOUT_DEFAULT.as_secs()
+                    )
+                }
+            }
             _ => String::new(),
         };
         Self {
@@ -1124,6 +1159,7 @@ fn sample_call(name: &str) -> ChatTool {
         },
         "run_command" => ChatTool::RunCommand {
             command: "Get-Date".to_string(),
+            slow: false,
         },
         other => panic!("no sample call for {other}"),
     }
@@ -1292,7 +1328,8 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path'; Output is cut at 16 KB, keeping the start and the end, so aggregate in the command: when the user asks how many files something has, return the count, not every path, or the answer is lost in the truncation. Commands are stopped after 30 seconds; if something needs longer, tell the user to run it themselves."}
+                        "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path'; Output is cut at 16 KB, keeping the start and the end, so aggregate in the command: when the user asks how many files something has, return the count, not every path, or the answer is lost in the truncation."},
+                        "slow": {"type": "boolean", "description": "Set true only for a command that is known to take minutes, such as scanning a whole drive. Commands are stopped after 30 seconds unless this is true, which allows 5 minutes; the confirmation card shows which. Prefer a fast command that aggregates (a count, a total) over a slow one that lists."}
                     },
                     "required": ["command"]
                 }
@@ -1670,8 +1707,13 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
             }
         }
-        ChatTool::RunCommand { command } => {
-            match run_powershell(command, COMMAND_TIMEOUT_DEFAULT.as_secs()) {
+        ChatTool::RunCommand { command, slow } => {
+            let budget = if *slow {
+                COMMAND_TIMEOUT_LONG
+            } else {
+                COMMAND_TIMEOUT_DEFAULT
+            };
+            match run_powershell(command, budget.as_secs()) {
             Ok(output) => ToolOutcome {
                 tool: tool.name().to_string(),
                 target: command.clone(),
@@ -3404,26 +3446,70 @@ mod tests {
     }
 
     #[test]
-    fn the_model_cannot_set_its_own_timeout() {
+    fn the_model_cannot_set_an_arbitrary_timeout() {
         // Live failure this pins: asked to "run a command that sleeps for 120
         // seconds", the model sent `timeout_seconds: 130` and the command ran
         // for two minutes, defeating the deadline it was supposed to obey. A
-        // limit the subject can raise is not a limit, so the field is gone
-        // rather than merely clamped. An extra key is ignored.
+        // number the caller chooses is not a limit. There are exactly two
+        // allowances, chosen by a boolean, and the card names the one in use.
         for args in [
             serde_json::json!({ "command": "Get-Date" }),
             serde_json::json!({ "command": "Get-Date", "timeout_seconds": 130 }),
             serde_json::json!({ "command": "Get-Date", "timeout_seconds": 99999 }),
             serde_json::json!({ "command": "Get-Date", "timeout_seconds": 0 }),
+            serde_json::json!({ "command": "Get-Date", "slow": false }),
         ] {
             assert_eq!(
                 raw("run_command", args).validate().unwrap(),
                 ChatTool::RunCommand {
                     command: "Get-Date".to_string(),
+                    slow: false,
                 },
-                "the parsed tool must not vary with a caller-supplied timeout"
+                "an arbitrary timeout must not survive parsing"
             );
         }
+
+        // The long allowance is requestable, but only as the named tier.
+        assert_eq!(
+            raw(
+                "run_command",
+                serde_json::json!({ "command": "Get-Date", "slow": true })
+            )
+            .validate()
+            .unwrap(),
+            ChatTool::RunCommand {
+                command: "Get-Date".to_string(),
+                slow: true,
+            }
+        );
+    }
+
+    #[test]
+    fn the_card_states_the_timeout_that_applies() {
+        // The user cannot infer the budget from the command line, and it decides
+        // how long they may wait.
+        let quick = raw("run_command", serde_json::json!({ "command": "Get-Date" }))
+            .validate()
+            .unwrap();
+        assert!(
+            PendingAction::of(&quick)
+                .description
+                .contains("stopped after 30 seconds"),
+            "the default budget must be stated"
+        );
+
+        let slow = raw(
+            "run_command",
+            serde_json::json!({ "command": "Get-ChildItem C:\\ -Recurse", "slow": true }),
+        )
+        .validate()
+        .unwrap();
+        assert!(
+            PendingAction::of(&slow)
+                .description
+                .contains("up to 5 minutes"),
+            "a slow command must say so before it is approved"
+        );
     }
 
     #[test]
@@ -3578,6 +3664,7 @@ mod tests {
         .unwrap();
         assert_eq!(tool, ChatTool::RunCommand {
             command: "Get-Date".to_string(),
+            slow: false,
         });
     }
 }

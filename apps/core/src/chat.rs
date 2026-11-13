@@ -2173,6 +2173,41 @@ fn user_folder_facts() -> Option<String> {
     for drive in available_drives() {
         parts.push(format!("Drive: {drive}"));
     }
+    // The folders directly inside the profile.
+    //
+    // Asked for "the nex folder inside project folder in my user", the model
+    // guessed C:\Users\mshab\project\nex and had no way to check: the facts
+    // named the profile itself but none of what is in it, so "Projects" was
+    // unknowable and it invented a singular "project" and then appended a
+    // folder to it. Naming the real subfolders is what lets a guessed path be
+    // corrected instead of reported as missing.
+    if let Some(profile) = crate::action_executor::known_folder_path(&FOLDERID_Profile) {
+        if let Ok(entries) = std::fs::read_dir(profile.trim_end_matches('\\')) {
+            let mut names: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                // Hidden and system folders (AppData, Application Data) are
+                // noise the user did not name and the model should not be
+                // pointed at.
+                .filter(|name| !name.starts_with('.'))
+                .filter(|name| !matches!(name.as_str(), "AppData" | "Application Data" | "Cookies" | "Local Settings" | "My Documents" | "NetHood" | "PrintHood" | "Recent" | "SendTo" | "Templates" | "Start Menu" | "Local Settings"))
+                .collect();
+            names.sort_by_key(|name| name.to_lowercase());
+            if !names.is_empty() {
+                // One fact per folder, matching the "label: path" shape the
+                // rest of the list uses, and capped: a profile with hundreds of
+                // folders must not become hundreds of prompt lines.
+                const MAX_PROFILE_FOLDERS: usize = 40;
+                let listed = names.len().min(MAX_PROFILE_FOLDERS);
+                parts.push(format!(
+                    "Folders in your user profile ({listed} of {}): {}",
+                    names.len(),
+                    names[..listed].join(", ")
+                ));
+            }
+        }
+    }
     if parts.is_empty() {
         return None;
     }
@@ -2893,6 +2928,52 @@ mod tests {
     /// This is the same failure CIQ-150 fixed for creating files: a prompt that
     /// says the app "waits" makes a small model ask the user to run the command
     /// themselves, which wastes the turn and answers nothing.
+    /// A folder the user names in passing ("the nex folder in Projects") has to
+    /// be discoverable, or the model invents a spelling for it.
+    ///
+    /// Live failure this pins: asked for "the nex folder inside project folder
+    /// in my user", the model sent C:\Users\mshab\project\nex, was told the
+    /// path did not exist, and could only guess at "Projects" in its reply. The
+    /// facts named the profile but nothing inside it.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_folders_inside_the_profile_are_in_the_facts() {
+        let facts = user_folder_facts().expect("facts should exist on Windows");
+
+        // Whatever this machine actually has, the fact must be built from the
+        // real directory listing rather than a fixed list.
+        let profile = crate::action_executor::known_folder_path(
+            &windows_sys::Win32::UI::Shell::FOLDERID_Profile,
+        )
+        .expect("a profile path");
+        let mut real: Vec<String> = std::fs::read_dir(profile.trim_end_matches('\\'))
+            .expect("profile should be readable")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| !n.starts_with('.') && !matches!(n.as_str(), "AppData" | "Local Settings" | "Application Data"))
+            .collect();
+        real.sort_by_key(|n| n.to_lowercase());
+
+        if real.is_empty() {
+            return;
+        }
+        let probe = &real[real.len() - 1];
+        assert!(
+            facts.contains(probe.as_str()),
+            "the profile's folders must be listed, {probe:?} is missing from: {facts}"
+        );
+        assert!(
+            facts.contains("Folders in your user profile"),
+            "the fact must be labelled so the model knows what the names are: {facts}"
+        );
+        // Hidden and system folders are not things to point a model at.
+        assert!(
+            !facts.contains("AppData,"),
+            "AppData should not be offered as a place to look: {facts}"
+        );
+    }
+
     #[test]
     fn the_prompt_says_to_call_run_command_rather_than_asking() {
         let prompt = system_prompt();

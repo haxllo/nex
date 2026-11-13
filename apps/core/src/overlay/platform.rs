@@ -269,6 +269,17 @@ mod tests {
 
     #[test]
     fn instance_signal_handles_absent_window() {
+        // This asserted !is_instance_window_present() unconditionally, which
+        // made it fail whenever a Nex window existed anywhere on the machine -
+        // including the app the developer had open, and any sibling test
+        // process that registered the class. The property worth holding is that
+        // signalling reports "nothing was signalled" when no window is there,
+        // so check the absence first and skip rather than assert the
+        // environment.
+        if is_instance_window_present() {
+            eprintln!("skipping: a Nex overlay window exists on this machine");
+            return;
+        }
         assert!(!is_instance_window_present());
         let result = signal_existing_instance_show(&[]);
         assert!(matches!(result, Ok(false)));

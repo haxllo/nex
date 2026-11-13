@@ -78,7 +78,23 @@ committing.
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 
-**Note**: `cargo test -p nex` broken for now — many tests hang on Windows. Build-only verification. `cargo test -p nex-helper` cannot run either: the helper embeds a `requireAdministrator` manifest, so the test harness exits with "The requested operation requires elevation" (os error 740).
+**Note**: `cargo test -p nex --lib` now passes reliably (567 passed, 4 ignored, verified
+over six consecutive full runs). It previously failed 1-2 tests per run on a rotating
+victim, and this line used to say "broken for now" rather than describing the flakiness,
+which hid it. The causes were real and are fixed:
+
+- Tests built `CoreService` from `Config::default()`, whose `index_db_path` resolves to the
+  live `%APPDATA%\Nex\index.sqlite3`. `CoreService` opens the Tantivy index beside it, so
+  those tests read and wrote the developer's **production index** - the shared resource
+  behind the rotating failures. Test services now own a throwaway index.
+- Tantivy tests compete for the shared writer under full-suite CPU load, so a commit
+  followed by `collect_garbage` can take longer than any reader deadline. The module
+  serialises itself with a local mutex.
+- `instance_signal_handles_absent_window` asserted a process-global fact and failed when any
+  Nex window existed on the machine; it now skips instead.
+
+`cargo test -p nex-helper` still cannot run: the helper embeds a `requireAdministrator`
+manifest, so the harness exits with "The requested operation requires elevation" (os error 740).
 
 **CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess` → `cargo test -p nex` → perf gate → smoke gate.
 

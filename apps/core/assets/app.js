@@ -3054,10 +3054,15 @@
       return;
     }
     if (chatProviderInput.value === "openai-compatible" && !chatApiKeyInput.value && !chatConfig.hasKey) {
-      chatNotice.textContent = "Add and save an API key before loading models.";
-      chatNotice.classList.add("error");
-      if (!chatModelOptions.hidden) renderChatModelOptions();
-      return;
+      // Listing models is normally public, so a missing key is not a reason to
+      // refuse: the form could not be saved without a model, and the model list
+      // could not load without a saved key. Only the URL is actually required.
+      if (!chatBaseUrlInput.value.trim()) {
+        chatNotice.textContent = "Enter the provider URL before loading models.";
+        chatNotice.classList.add("error");
+        if (!chatModelOptions.hidden) renderChatModelOptions();
+        return;
+      }
     }
     const payload = {
       provider: chatProviderInput.value,

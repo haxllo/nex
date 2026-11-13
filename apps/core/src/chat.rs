@@ -279,11 +279,19 @@ pub(crate) fn fetch_models(raw: &str) -> Result<Value, String> {
     let models = match request.provider.as_str() {
         "codex" => fetch_chatgpt_models()?,
         "openai-compatible" => {
+            // Deliberately not requiring a key. Listing models is normally a
+            // public endpoint, and demanding a saved key deadlocked the form:
+            // saving needs a model, and the model list needed a save. Try the
+            // key the user just typed, fall back to the saved one, and only
+            // fail if the provider actually refuses the anonymous request.
             if request.api_key.trim().is_empty() {
                 request.api_key = load_config().unwrap_or_default().api_key;
             }
-            if request.api_key.trim().is_empty() {
-                return Err("Add and save your API key before loading models.".into());
+            if request.base_url.trim().is_empty() {
+                return Err(
+                    "Enter the provider URL before loading models, for example https://openrouter.ai/api/v1."
+                        .into(),
+                );
             }
             let base_url = url::Url::parse(request.base_url.trim())
                 .map_err(|_| "Enter a valid provider URL before loading models.".to_string())?;
@@ -312,11 +320,15 @@ fn fetch_compatible_models(base_url: &str, api_key: &str) -> Result<Vec<Value>, 
         .timeout_connect(Duration::from_secs(12))
         .timeout_read(Duration::from_secs(12))
         .build();
-    let response = match agent
-        .get(&endpoint)
-        .set("Authorization", &format!("Bearer {api_key}"))
-        .call()
-    {
+    let request = agent.get(&endpoint);
+    // An empty bearer token is a malformed credential, not an absent one;
+    // omitting the header lets the public listing through.
+    let request = if api_key.trim().is_empty() {
+        request
+    } else {
+        request.set("Authorization", &format!("Bearer {api_key}"))
+    };
+    let response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(code, response)) => {
             return Err(http_error(

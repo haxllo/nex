@@ -157,6 +157,17 @@ fn prepare_config(
     // unfinished form fields. Keep the existing provider, URL and model.
     if request.clear_api_key {
         previous.api_key.clear();
+        // Returning `previous` unchecked let a config with an empty base_url
+        // survive: the URL field was never validated on this path, so removing
+        // the key also crystallised whatever empty URL the form happened to
+        // have. Every later request then failed as "authentication failed",
+        // pointing at the key rather than the missing URL.
+        if previous.base_url.trim().is_empty() {
+            return Err(
+                "Enter the provider URL before removing the key, for example https://openrouter.ai/api/v1."
+                    .into(),
+            );
+        }
         return Ok(previous);
     }
     request.provider = request.provider.trim().to_ascii_lowercase();
@@ -170,6 +181,15 @@ fn prepare_config(
         return Err("Enter a model name under 128 characters.".into());
     }
     if request.provider == "openai-compatible" {
+        // An empty URL is not a malformed URL, so it reached the parse below as
+        // a generic "Enter a valid provider URL" that did not say which field,
+        // and a stored config with base_url "" then produced "authentication
+        // failed" on every request. Name the field and refuse the save.
+        if request.base_url.trim().is_empty() {
+            return Err(
+                "Enter the provider URL, for example https://openrouter.ai/api/v1.".into(),
+            );
+        }
         let url = url::Url::parse(request.base_url.trim())
             .map_err(|_| "Enter a valid provider URL.".to_string())?;
         if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
@@ -2356,6 +2376,21 @@ mod tests {
         assert_eq!(public_config_for(&removed, false)["hasKey"], false);
         assert_eq!(public_config_for(&removed, false)["configured"], false);
         assert!(prepare_config(request("", false), removed).is_err());
+    }
+
+    #[test]
+    fn an_empty_provider_url_is_refused_by_name() {
+        // A stored config with base_url "" turned every later request into
+        // "Provider authentication failed", which pointed at the key and sent
+        // the user off to re-enter a key that was fine. Say which field is
+        // actually missing, and do not store the config at all.
+        let request: ConfigureRequest = serde_json::from_value(json!({
+            "provider": "openai-compatible", "baseUrl": "   ",
+            "model": "endpoint-model", "apiKey": "some-key", "clearApiKey": false,
+        }))
+        .unwrap();
+        let error = prepare_config(request, provider_config()).unwrap_err();
+        assert!(error.contains("provider URL"), "got: {error}");
     }
 
     #[test]

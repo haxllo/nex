@@ -98,6 +98,12 @@
   const chatModelResults = $("chat-model-results");
   const chatBaseUrlInput = $("chat-base-url");
   const chatApiKeyInput = $("chat-api-key");
+  const chatSaveButton = $("chat-save-button");
+  const chatRemoveKeyButton = $("chat-remove-key-button");
+  const chatSaveStatus = $("chat-save-status");
+  let chatSavePending = null;
+  let chatSaveTimer = 0;
+  let chatSettingsDirty = false;
   const chatEndpointField = $("chat-endpoint-field");
   const chatKeyField = $("chat-key-field");
   const chatConnectButton = $("chat-connect-button");
@@ -131,7 +137,7 @@
   let chatPickerErrorMessage = "";
   let chatPickerFocusAfterListing = false;
   const chatPickerSelectedIds = new Set();
-  let chatConfig = { provider: "codex", baseUrl: "https://api.openai.com/v1", model: "gpt-6-luna", configured: false, accountConnected: false };
+  let chatConfig = { provider: "codex", baseUrl: "https://api.openai.com/v1", model: "gpt-6-luna", configured: false, hasKey: false, accountConnected: false };
   let chatModels = [];
   let chatModelsProvider = "";
   let chatModelsLoading = false;
@@ -2324,7 +2330,7 @@
       option.setAttribute("aria-selected", String(option.dataset.chatProvider === provider));
     }
     chatProviderButton.setAttribute("aria-expanded", String(!chatProviderOptions.hidden));
-    chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "gpt-4o-mini");
+    chatModelInput.value = chatConfig.model || (provider === "codex" ? (chatModels[0]?.id || "gpt-6-luna") : "");
     syncChatModelChoice();
     chatBaseUrlInput.value = chatConfig.baseUrl || "https://api.openai.com/v1";
     // The custom-endpoint section exists only for the API provider; hiding the
@@ -2337,8 +2343,10 @@
     chatDisconnectButton.hidden = provider !== "codex" || !chatConfig.accountConnected;
     chatCheckButton.hidden = provider !== "codex";
     chatCheckButton.textContent = chatConfig.accountConnected ? "Refresh status" : "Check connection";
+    chatApiKeyInput.placeholder = chatConfig.hasKey ? "Saved — leave blank to keep" : "Enter an API key";
+    chatRemoveKeyButton.hidden = provider !== "openai-compatible" || !chatConfig.hasKey;
     chatConnectionHint.textContent = provider === "openai-compatible"
-      ? (chatConfig.configured ? "A key is saved securely on this device. Leave blank to keep it." : "The API key is encrypted for your Windows account and cleared from the page after saving.")
+      ? (chatConfig.hasKey ? "A key is saved securely on this device. Leave blank to keep it, or enter a replacement." : "No API key is saved. Enter a key, then save. It is encrypted for your Windows account.")
       : (chatConfig.accountConnected
         ? "Nex is connected to ChatGPT. Your sign-in is stored securely in Nex's app data."
         : "Connect your ChatGPT account to Nex in your browser. If you're reconnecting after an app update, sign in again.");
@@ -2923,16 +2931,27 @@
     }, 3500);
   }
 
-  function saveChatProvider() {
+  function saveChatProvider(clearApiKey = false) {
+    if (chatSavePending) return;
+    chatSavePending = { clearApiKey };
+    chatSaveButton.disabled = chatRemoveKeyButton.disabled = true;
+    chatApiKeyInput.disabled = true;
+    chatSaveStatus.textContent = clearApiKey ? "Removing saved key…" : "Saving provider settings…";
     const payload = {
       provider: chatProviderInput.value,
       baseUrl: chatBaseUrlInput.value.trim(),
       model: chatModelInput.value.trim(),
-      apiKey: chatApiKeyInput.value,
+      apiKey: clearApiKey ? "" : chatApiKeyInput.value,
+      clearApiKey,
     };
+    chatSaveTimer = window.setTimeout(() => {
+      chatSavePending = null;
+      chatSaveTimer = 0;
+      chatSaveButton.disabled = chatRemoveKeyButton.disabled = false;
+      chatApiKeyInput.disabled = false;
+      chatSaveStatus.textContent = "Nex did not confirm the save. Your entered key is still here. Edit the settings or try saving again.";
+    }, 10000);
     post("chatConfigure", payload);
-    chatApiKeyInput.value = "";
-    flashChatNotice("Saving provider settings…");
   }
 
   // Closed-field label: friendly name when listed, raw id for custom
@@ -2961,7 +2980,7 @@
       const empty = document.createElement("div");
       empty.className = "chat-model-empty";
       // Custom model IDs stay supported: offer the raw query as an entry.
-      if (query && chatModels.length) {
+      if (query) {
         const custom = document.createElement("button");
         custom.type = "button";
         custom.className = "chat-model-option";
@@ -2969,6 +2988,7 @@
         custom.setAttribute("aria-selected", "false");
         custom.textContent = `Use "${chatModelSearch.value.trim()}"`;
         custom.addEventListener("click", () => {
+          chatSettingsDirty = true;
           chatModelInput.value = chatModelSearch.value.trim();
           chatConfig.model = chatModelInput.value;
           syncChatModelChoice();
@@ -2996,6 +3016,7 @@
       option.setAttribute("aria-selected", String(chatModelInput.value === model.id));
       option.textContent = model.name || model.id;
       option.addEventListener("click", () => {
+        chatSettingsDirty = true;
         chatModelInput.value = model.id;
         chatConfig.model = model.id;
         syncChatModelChoice();
@@ -3032,7 +3053,7 @@
       renderChatModelOptions(showMenu);
       return;
     }
-    if (chatProviderInput.value === "openai-compatible" && !chatApiKeyInput.value && !chatConfig.configured) {
+    if (chatProviderInput.value === "openai-compatible" && !chatApiKeyInput.value && !chatConfig.hasKey) {
       chatNotice.textContent = "Add and save an API key before loading models.";
       chatNotice.classList.add("error");
       if (!chatModelOptions.hidden) renderChatModelOptions();
@@ -3077,6 +3098,7 @@
 
   function setChatModelsLoading(loading) {
     chatModelsLoading = loading;
+    if (!loading) lastModelsPayload = null;
     window.clearTimeout(chatModelsTimer);
     chatModelsTimer = 0;
     chatProviderInput.disabled = loading;
@@ -3119,18 +3141,18 @@
     }
     postChatResize();
   });
-  $("chat-save-button").addEventListener("click", () => {
-    saveChatProvider();
-    setChatSettingsOpen(false);
-    postChatResize();
-  });
+  chatSaveButton.addEventListener("click", () => saveChatProvider());
+  chatRemoveKeyButton.addEventListener("click", () => saveChatProvider(true));
+  chatBaseUrlInput.addEventListener("input", () => { chatSettingsDirty = true; });
+  chatApiKeyInput.addEventListener("input", () => { chatSettingsDirty = true; });
   chatProviderInput.addEventListener("change", () => {
+    chatSettingsDirty = true;
     closeChatProviderOptions();
     chatModels = [];
     chatModelsProvider = "";
     chatModelInput.value = chatProviderInput.value === "codex"
       ? (chatModels.find((model) => model.default)?.id || chatModels[0]?.id || "gpt-6-luna")
-      : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "gpt-4o-mini") : "gpt-4o-mini");
+      : (chatConfig.provider === "openai-compatible" ? (chatConfig.model || "") : "");
     syncChatModelChoice();
     chatConfig.provider = chatProviderInput.value;
     chatConfig.model = chatModelInput.value;
@@ -3499,9 +3521,36 @@
         });
       }
     }
+    if (state.chatConfigureResult && chatSavePending) {
+      window.clearTimeout(chatSaveTimer);
+      chatSaveTimer = 0;
+      const { clearApiKey } = chatSavePending;
+      chatSavePending = null;
+      chatSaveButton.disabled = chatRemoveKeyButton.disabled = false;
+      chatApiKeyInput.disabled = false;
+      if (state.chatConfigureResult.ok) {
+        chatSettingsDirty = false;
+        chatApiKeyInput.value = "";
+        chatSaveStatus.textContent = clearApiKey
+          ? "Saved key removed. Add a key before using the API provider."
+          : "Provider settings saved securely.";
+      } else {
+        chatSaveStatus.textContent = state.chatConfigureResult.error || "Provider settings could not be saved.";
+        setChatSettingsOpen(true);
+      }
+    }
     if (state.chatConfig) {
       const wasChatGPTConnected = chatConfig.provider === "codex" && chatConfig.accountConnected;
+      // A background status refresh must not replace an open, unsaved form.
+      const draft = chatSettingsDirty && !state.chatConfigureResult ? {
+        provider: chatProviderInput.value, model: chatModelInput.value, baseUrl: chatBaseUrlInput.value,
+      } : null;
       chatConfig = { ...chatConfig, ...state.chatConfig };
+      if (draft) {
+        chatConfig.provider = draft.provider;
+        chatConfig.model = draft.model;
+        chatConfig.baseUrl = draft.baseUrl;
+      }
       syncChatConfig();
       if (chatConnectionCheckPending) {
         window.clearTimeout(chatConnectionTimer);
@@ -3544,7 +3593,10 @@
           chatModelInput.value = recommended.id;
           chatConfig.model = recommended.id;
           post("chatConfigure", { provider: "codex", baseUrl: chatBaseUrlInput.value, model: recommended.id, apiKey: "" });
-        } else if (!chatModelInput.value && chatModels.length) chatModelInput.value = chatModels[0].id;
+        } else if (!chatModelInput.value && chatModels.length) {
+          chatModelInput.value = chatModels[0].id;
+          chatConfig.model = chatModelInput.value;
+        }
         syncChatModelChoice();
         renderChatModelOptions();
         flashChatNotice(chatModels.length ? `${chatModels.length} models loaded.` : "No models were returned by this provider.");
@@ -3645,7 +3697,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatLimitReached || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatConfigureResult || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatLimitReached || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

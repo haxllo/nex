@@ -153,6 +153,8 @@ pub(crate) struct ChatConfigPayload {
     pub model: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub clear_api_key: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -639,6 +641,36 @@ pub(crate) fn parse_settings(body: &str) -> Result<SettingsMessage, IpcReject> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_provider_save_crosses_strict_ipc_boundary() {
+        for clear in [false, true] {
+            let body = serde_json::json!({
+                "t": "chatConfigure", "provider": "openai-compatible",
+                "baseUrl": "https://api.subq.ai/v1", "model": "subq-savant-1.4",
+                "apiKey": "test-only-key", "clearApiKey": clear,
+            }).to_string();
+            let OverlayMessage::ChatConfigure(payload) = parse_overlay(&body).unwrap() else {
+                panic!("expected chatConfigure");
+            };
+            assert_eq!(payload.clear_api_key, clear);
+            // The host serializes the strict payload before forwarding it to chat.
+            let forwarded = serde_json::to_string(&payload).unwrap();
+            let request: crate::chat::ConfigureRequest = serde_json::from_str(&forwarded).unwrap();
+            assert_eq!(request.clear_api_key, clear);
+            assert_eq!(request.api_key, "test-only-key");
+            assert_eq!(request.base_url, "https://api.subq.ai/v1");
+        }
+    }
+
+    #[test]
+    fn chat_provider_legacy_payload_keeps_key_by_default() {
+        let body = r#"{"t":"chatConfigure","provider":"openai-compatible","apiKey":""}"#;
+        let OverlayMessage::ChatConfigure(payload) = parse_overlay(body).unwrap() else {
+            panic!("expected chatConfigure");
+        };
+        assert!(!payload.clear_api_key);
+    }
 
     #[test]
     fn rejects_malformed_json() {

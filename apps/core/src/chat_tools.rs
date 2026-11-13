@@ -96,9 +96,6 @@ pub(crate) enum ChatTool {
     /// a command cannot do more than the user could from their own terminal.
     RunCommand {
         command: String,
-        /// Seconds before the process is killed. Bounded by the caller; a long
-        /// build and a hung command both look like "still running" otherwise.
-        timeout_seconds: u64,
     },
 }
 
@@ -433,19 +430,15 @@ impl RawToolCall {
                         reason: "the command contains a control character or a line break; send one command per call".to_string(),
                     });
                 }
-                // The timeout is the caller's promise about how long it may
-                // hang. Clamped here rather than trusted, so a model that asks
-                // for an hour gets the documented maximum instead.
-                let timeout_seconds = self
-                    .arguments
-                    .get("timeout_seconds")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(COMMAND_TIMEOUT_DEFAULT.as_secs())
-                    .clamp(1, COMMAND_TIMEOUT_MAX.as_secs());
-                Ok(ChatTool::RunCommand {
-                    command,
-                    timeout_seconds,
-                })
+                // The model does not set its own deadline.
+                //
+                // It could, and did: asked to run a command that sleeps 120
+                // seconds, it sent `timeout_seconds: 130` and the command ran
+                // for two minutes. A limit the subject of the limit can raise
+                // is not a limit. Every command gets COMMAND_TIMEOUT_DEFAULT,
+                // and a command that needs longer is one the user should run in
+                // their own terminal.
+                Ok(ChatTool::RunCommand { command })
             }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
@@ -652,14 +645,6 @@ pub(crate) const REPEAT_LIMIT: usize = 3;
 /// via `timeout_seconds`, up to [`COMMAND_TIMEOUT_MAX`].
 pub(crate) const COMMAND_TIMEOUT_DEFAULT: std::time::Duration =
     std::time::Duration::from_secs(30);
-
-/// The longest a `run_command` may be allowed to run.
-///
-/// Five minutes, not unlimited: the confirmation card is the user's only
-/// control, and a command that can run for an hour is one they cannot take
-/// back. Installs and cold builds fit inside this; a task that does not is a
-/// task the user should run in their own terminal.
-pub(crate) const COMMAND_TIMEOUT_MAX: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// How much of a command's output is handed to the model, in bytes.
 ///
@@ -1139,7 +1124,6 @@ fn sample_call(name: &str) -> ChatTool {
         },
         "run_command" => ChatTool::RunCommand {
             command: "Get-Date".to_string(),
-            timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
         },
         other => panic!("no sample call for {other}"),
     }
@@ -1308,8 +1292,7 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "The complete PowerShell command line, such as Get-PSDrive C | Select-Object Used,Free. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path';"},
-                        "timeout_seconds": {"type": "integer", "description": "How long to allow, in seconds, between 1 and 300. Omit for 30. Use a larger value for builds and installs."}
+                        "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. If it must run in a particular folder, begin it with cd 'C:\\path'; Output is cut at 16 KB, keeping the start and the end, so aggregate in the command: when the user asks how many files something has, return the count, not every path, or the answer is lost in the truncation. Commands are stopped after 30 seconds; if something needs longer, tell the user to run it themselves."}
                     },
                     "required": ["command"]
                 }
@@ -1687,10 +1670,8 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
             }
         }
-        ChatTool::RunCommand {
-            command,
-            timeout_seconds,
-        } => match run_powershell(command, *timeout_seconds) {
+        ChatTool::RunCommand { command } => {
+            match run_powershell(command, COMMAND_TIMEOUT_DEFAULT.as_secs()) {
             Ok(output) => ToolOutcome {
                 tool: tool.name().to_string(),
                 target: command.clone(),
@@ -1701,6 +1682,7 @@ pub(crate) fn run(tool: &ChatTool, confirmed: bool, create_base: &std::path::Pat
                 summary: output.summary,
             },
             Err(reason) => ToolOutcome::failure(tool.name(), command, reason),
+            }
         },
     }
 }
@@ -1752,7 +1734,8 @@ struct CommandOutput {
 fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, String> {
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new("powershell.exe")
+    let mut command_builder = Command::new("powershell.exe");
+    command_builder
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -1765,7 +1748,20 @@ fn run_powershell(command: &str, timeout_seconds: u64) -> Result<CommandOutput, 
         // the answer could only make the command more powerful.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Without this Windows gives the console child its own console window, so
+    // every command flashed a black PowerShell window onto the screen — and
+    // closing that window killed the command mid-run. This process has no
+    // console for the child to inherit.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command_builder.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command_builder
         .spawn()
         .map_err(|error| format!("could not start PowerShell: {error}"))?;
 
@@ -3408,45 +3404,26 @@ mod tests {
     }
 
     #[test]
-    fn the_timeout_is_clamped_rather_than_trusted() {
-        let too_long = raw(
-            "run_command",
+    fn the_model_cannot_set_its_own_timeout() {
+        // Live failure this pins: asked to "run a command that sleeps for 120
+        // seconds", the model sent `timeout_seconds: 130` and the command ran
+        // for two minutes, defeating the deadline it was supposed to obey. A
+        // limit the subject can raise is not a limit, so the field is gone
+        // rather than merely clamped. An extra key is ignored.
+        for args in [
+            serde_json::json!({ "command": "Get-Date" }),
+            serde_json::json!({ "command": "Get-Date", "timeout_seconds": 130 }),
             serde_json::json!({ "command": "Get-Date", "timeout_seconds": 99999 }),
-        )
-        .validate()
-        .unwrap();
-        assert_eq!(
-            too_long,
-            ChatTool::RunCommand {
-                command: "Get-Date".to_string(),
-                timeout_seconds: COMMAND_TIMEOUT_MAX.as_secs(),
-            }
-        );
-
-        let default = raw("run_command", serde_json::json!({ "command": "Get-Date" }))
-            .validate()
-            .unwrap();
-        assert_eq!(
-            default,
-            ChatTool::RunCommand {
-                command: "Get-Date".to_string(),
-                timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
-            }
-        );
-
-        let zero = raw(
-            "run_command",
             serde_json::json!({ "command": "Get-Date", "timeout_seconds": 0 }),
-        )
-        .validate()
-        .unwrap();
-        assert_eq!(
-            zero,
-            ChatTool::RunCommand {
-                command: "Get-Date".to_string(),
-                timeout_seconds: 1,
-            }
-        );
+        ] {
+            assert_eq!(
+                raw("run_command", args).validate().unwrap(),
+                ChatTool::RunCommand {
+                    command: "Get-Date".to_string(),
+                },
+                "the parsed tool must not vary with a caller-supplied timeout"
+            );
+        }
     }
 
     #[test]
@@ -3601,7 +3578,6 @@ mod tests {
         .unwrap();
         assert_eq!(tool, ChatTool::RunCommand {
             command: "Get-Date".to_string(),
-            timeout_seconds: COMMAND_TIMEOUT_DEFAULT.as_secs(),
         });
     }
 }

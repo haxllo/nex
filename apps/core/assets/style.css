@@ -154,6 +154,19 @@ html[data-theme="light"][data-native-material="acrylic"] {
   user-select: none;
 }
 
+/* Selection is on for the chat transcript and everything in it.
+   `user-select` does not inherit against the `*` rule above, which matches every
+   element in its own right, so a descendant cannot re-enable it: each element
+   needs a rule that outranks `*`. That is why this is `#chat-view *` and not a
+   single declaration on the container - measured, not assumed: with a rule only
+   on `#chat-view`, the container computed `text` while every child computed
+   `none`, and a command's output could not be copied. */
+#chat-view,
+#chat-view * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* Form controls do not inherit the page font by default: without this the
    power tiles, pills and menu items fall back to the UA face. */
 button,

@@ -2240,6 +2240,15 @@
           article.classList.add("has-surface");
         }
         article.dataset.messageId = message.id;
+        // The prompt marker is the only thing that says this turn is yours; the
+        // role already carries that, so it stays out of the accessibility tree.
+        if (message.role === "user") {
+          const prompt = document.createElement("span");
+          prompt.className = "chat-prompt-glyph";
+          prompt.setAttribute("aria-hidden", "true");
+          prompt.textContent = ">";
+          article.appendChild(prompt);
+        }
         if (Array.isArray(message.actions) && message.actions.length) {
           const list = document.createElement("div");
           list.className = "chat-actions";
@@ -2456,19 +2465,22 @@
     const body = document.createElement("div");
     body.className = "chat-action-body";
 
-    const label = document.createElement("span");
-    label.className = "chat-action-label";
-    label.textContent = action.ok
-      ? (CHAT_ACTION_LABELS[action.tool] || "Done")
-      : "Not done";
-    body.appendChild(label);
+    // A failure says what went wrong instead of repeating its status: the glyph
+    // in the gutter already says it did not run.
+    const verb = action.ok ? (CHAT_ACTION_LABELS[action.tool] || "Done") : "";
+    if (verb) {
+      const label = document.createElement("span");
+      label.className = "chat-action-label";
+      label.textContent = verb;
+      body.appendChild(label);
+    }
 
-    // The label already says what happened, so the text is the name alone.
-    // Rendering the whole summary put the sentence there too and the card read
-    // "Created folder created folder C:\\...\sasa".
+    // A step that names a path shows only the verb and the path: the tail of the
+    // path already is the file name. Rendering the summary as well made the row
+    // read "Created folder created folder C:\...\sasa".
     const summary = (action.summary || "").trim();
     const ok = action.ok && !!action.target;
-    const name = ok ? action.target.split(/[\\/]/).filter(Boolean).pop() || "" : summary;
+    const name = ok ? "" : summary;
     if (name) {
       const text = document.createElement("span");
       text.className = "chat-action-text";
@@ -2477,8 +2489,8 @@
     }
     card.appendChild(body);
 
-    // The path, dimmed and truncated from the left so the useful end stays
-    // visible. Skipped when the text above already is the whole answer.
+    // The path is the tail of the line, cut from the start so the file name
+    // survives. It carries the full text in its title.
     if (ok) {
       const target = document.createElement("code");
       target.className = "chat-action-target";

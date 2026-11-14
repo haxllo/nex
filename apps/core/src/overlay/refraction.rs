@@ -240,13 +240,17 @@ const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
 /// if the surface it is drawn on reaches past its own edges, so the glass
 /// window, its backbuffer and the visual all carry this margin; the material
 /// still starts at `(SHADOW_MARGIN, SHADOW_MARGIN)` so the panel stays
-/// aligned with the page's client area.
+/// aligned with the page's client area. Covers the spread lobe's 3 sigma.
 const SHADOW_MARGIN: u32 = 44;
-/// Contact shadow falloff radius and peak alpha, symmetric on all four
-/// sides. Physical px, like BLUR_PAD, so the cue reads the same at every
-/// display scale.
-const SHADOW_BLUR: f32 = 26.0;
-const SHADOW_STRENGTH: f32 = 0.30;
+/// Contact shadow: a tight band under the edge plus a wide, faint spread.
+/// Two Gaussian lobes, physical px, symmetric on all four sides — the pane
+/// has no light direction. One smoothstep lobe cannot be tight and soft at
+/// once, and it ended on a visible ring: its slope is not zero where its
+/// alpha is.
+const SHADOW_CONTACT_ALPHA: f32 = 0.16;
+const SHADOW_CONTACT_SIGMA: f32 = 3.5;
+const SHADOW_SPREAD_ALPHA: f32 = 0.06;
+const SHADOW_SPREAD_SIGMA: f32 = 10.0;
 
 /// Render cap when the display's refresh is unknown: one 60 Hz frame.
 const MIN_FRAME_MS: u128 = 16;
@@ -2108,7 +2112,6 @@ fn shadow_bytes(
         .min(panel_w as f32 * 0.5)
         .min(panel_h as f32 * 0.5)
         .max(0.0);
-    let blur = SHADOW_BLUR.max(1.0);
     let cx = margin as f32 + panel_w as f32 * 0.5;
     let cy = margin as f32 + panel_h as f32 * 0.5;
     let half_w = panel_w as f32 * 0.5;
@@ -2132,9 +2135,15 @@ fn shadow_bytes(
             if d <= 0.0 {
                 continue;
             }
-            let t = (d / blur).min(1.0);
-            let falloff = 1.0 - t * t * (3.0 - 2.0 * t);
-            let alpha = (SHADOW_STRENGTH * falloff * 255.0).round().clamp(0.0, 255.0) as u8;
+            // Both lobes reach zero with zero slope, so the halo has no outer
+            // edge to catch the eye; the tight one carries the contact, the
+            // wide one the spread. Together they peak lower than the old
+            // single lobe, so the edge is felt rather than seen.
+            let alpha = (255.0
+                * (SHADOW_CONTACT_ALPHA * (-(d / SHADOW_CONTACT_SIGMA).powi(2)).exp()
+                    + SHADOW_SPREAD_ALPHA * (-(d / SHADOW_SPREAD_SIGMA).powi(2)).exp()))
+            .round()
+            .clamp(0.0, 255.0) as u8;
             if alpha > 0 {
                 out[(y * w + x) * 4 + 3] = alpha;
             }
@@ -4113,6 +4122,18 @@ mod tests {
         let (mx, my) = (margin + pw / 2, margin + ph / 2);
         assert_eq!(alpha(mx - pw / 2 - 2, my), alpha(mx + pw / 2 + 1, my), "left/right differ");
         assert_eq!(alpha(mx, my - ph / 2 - 2), alpha(mx, my + ph / 2 + 1), "top/bottom differ");
+        // The old curve clipped at its blur radius and left a faint ring
+        // there; a Gaussian is monotonic all the way out, so nothing may rise.
+        let below = |d: usize| alpha(margin + pw / 2, margin + ph + d);
+        let profile: Vec<u8> = (0..margin).map(below).collect();
+        assert!(
+            profile.windows(2).all(|w| w[0] >= w[1]),
+            "shadow must not rise on its way out: {profile:?}"
+        );
+        // Reduced on purpose: felt at the edge, not seen as a band. The old
+        // single 0.30 lobe peaked at 77; the two lobes peak at 55.
+        assert!(profile[0] <= 60, "shadow still too strong: {}", profile[0]);
+        assert!(profile[4] < profile[0], "no falloff inside the contact band");
     }
 
     /// The region polygon spans the whole panel box, so translating it onto

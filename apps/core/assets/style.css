@@ -2733,11 +2733,13 @@ html.glass-native .row .icon.placeholder {
    frame, so the page toggles the mode after first paint. */
 html[data-native-material="acrylic"] .chat-composer-shell,
 html.glass-native .chat-composer-shell {
-  /* The composer stacks above the transcript, so it needs no masking fill -
-     72% read as a heavy dark band over the glass. 60% keeps the input text
-     at 9.3:1 over a normal desktop and 3.3:1 even over a bright wallpaper,
-     which is the same trade the rest of the overlay already accepts. */
-  background: color-mix(in srgb, var(--bg-opaque) 60%, transparent);
+  /* The composer stacks above the transcript, so it needs no masking fill at
+     all - 72% read as a heavy dark band, 60% still read heavy. 55% is close to
+     the glass weight the overlay's other interactive surfaces use (52% footer
+     chips) with a touch more presence for the box you type into. Input text
+     stays 9.0:1 over a normal desktop; over a bright wallpaper it drops to
+     2.9:1, the same trade the rest of the overlay accepts. */
+  background: color-mix(in srgb, var(--bg-opaque) 55%, transparent);
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
   backdrop-filter: blur(18px) saturate(1.1);
 }

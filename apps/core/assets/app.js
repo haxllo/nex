@@ -2214,6 +2214,24 @@
     }
   }
 
+  // The waiting state for an answer: three dots and a line for assistive tech.
+  // The dots are decoration; the status is what gets read out.
+  function renderChatLoading() {
+    const loading = document.createElement("div");
+    loading.className = "chat-loading";
+    loading.setAttribute("role", "status");
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement("span");
+      dot.setAttribute("aria-hidden", "true");
+      loading.appendChild(dot);
+    }
+    const label = document.createElement("span");
+    label.className = "chat-visually-hidden";
+    label.textContent = "Nex is responding";
+    loading.appendChild(label);
+    return loading;
+  }
+
   function renderChatMessages(streamOnly = false) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
@@ -2247,8 +2265,18 @@
           article.appendChild(list);
         }
         const content = document.createElement("div"); content.className = "chat-message-content";
-        renderChatMarkdown(content, message.content);
-        if (!message.content) content.hidden = true;
+        // An answer that has not produced a token yet shows the waiting dots
+        // instead of an empty block. The stream replaces them on the first
+        // chunk; a stopped or cancelled turn drops `chatActiveRequest`, so the
+        // dots cannot outlive the request that owns them.
+        const awaitingFirstToken = message.role === "assistant" && message.incomplete
+          && !message.content && chatActiveRequest;
+        if (awaitingFirstToken) {
+          content.appendChild(renderChatLoading());
+        } else {
+          renderChatMarkdown(content, message.content);
+          if (!message.content) content.hidden = true;
+        }
         article.appendChild(content);
         if (Array.isArray(message.localContext) && message.localContext.length) {
           const context = document.createElement("div");

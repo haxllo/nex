@@ -2726,8 +2726,17 @@ html.glass-native .row .icon.placeholder {
   box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 10px 24px -14px rgba(0, 0, 0, .5);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-html[data-native-material="acrylic"] .chat-composer-shell {
-  background: color-mix(in srgb, var(--bg-opaque) 55%, transparent);
+/* The composer is the surface the user looks at most, so it follows the
+   material in both cases. Under acrylic only, it went solid the moment native
+   glass took over, which is why the input box appeared to change appearance
+   mid-session: `glassNative` is gated on the refraction layer having produced a
+   frame, so the page toggles the mode after first paint. */
+html[data-native-material="acrylic"] .chat-composer-shell,
+html.glass-native .chat-composer-shell {
+  /* 72%, not 55%: measured on a bright backdrop, 55% gave the input text
+     2.86:1 and 70% is where it first clears AA at 4.66:1. A box you type
+     into has to be readable over whatever is behind the glass. */
+  background: color-mix(in srgb, var(--bg-opaque) 72%, transparent);
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
   backdrop-filter: blur(18px) saturate(1.1);
 }
@@ -3455,12 +3464,17 @@ html[data-native-material="acrylic"] .chat-composer-shell {
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .45);
   animation: chatMenuIn 160ms var(--ease-out);
 }
-/* A form you type into must not let the transcript show through it. The panel
-   keeps its own blur, but this surface is opaque in both materials. */
-html[data-native-material="acrylic"] .chat-settings {
-  background: var(--bg-raised);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
+/* A sheet floating over the transcript is frosted, not sheet-of-paper.
+   It was forced opaque under acrylic, which made it the one chat surface that
+   ignored the material; and because it had no glass rule at all, native glass
+   left it opaque too. 55% is the weight the footer chips already use over the
+   refracted layer - enough fill that text keeps its contrast, transparent
+   enough that the material reads as glass. */
+html[data-native-material="acrylic"] .chat-settings,
+html.glass-native .chat-settings {
+  background: color-mix(in srgb, var(--bg-opaque) 72%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
 }
 .chat-settings[hidden],
 .chat-settings [hidden],
@@ -3709,10 +3723,11 @@ html[data-native-material="acrylic"] .chat-model-options {
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .45);
   animation: chatMenuIn 150ms var(--ease-out);
 }
-html[data-native-material="acrylic"] .chat-history {
-  background: var(--bg-raised);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
+html[data-native-material="acrylic"] .chat-history,
+html.glass-native .chat-history {
+  background: color-mix(in srgb, var(--bg-opaque) 72%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  backdrop-filter: blur(20px) saturate(1.3);
 }
 .chat-history-head {
   flex: 0 0 auto;

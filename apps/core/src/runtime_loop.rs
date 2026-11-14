@@ -1384,7 +1384,7 @@ impl RuntimeWorker {
             }
             "uninstall" => {
                 if _title.is_empty() { return; }
-                let items = crate::uninstall_registry::search_uninstall_actions(_title, 5);
+                let items = crate::uninstall_registry::search_uninstall_actions_for_title(_title, 5);
                 if let Some(item) = items.first() {
                     log_info(&format!("[nex] uninstalling '{}' via command '{}'", _title, item.id));
                     match crate::uninstall_registry::execute_uninstall_action(&item.id) {
@@ -1420,9 +1420,31 @@ impl RuntimeWorker {
                         }
                     }
                 } else {
-                    let msg = format!("No uninstall entry found for '{}'", _title);
-                    log_info(&format!("[nex] {msg}"));
-                    self.overlay.set_status_text(&msg);
+                    // No uninstall command for this row. The user still asked
+                    // to remove it, so take them to the page that can, instead
+                    // of a status line that goes nowhere.
+                    log_info(&format!(
+                        "[nex] no uninstall entry for '{}'; opening installed apps",
+                        _title
+                    ));
+                    self.overlay.hide_sync();
+                    self.overlay_state.on_escape();
+                    match crate::action_executor::launch_open_target("ms-settings:appsfeatures") {
+                        Ok(()) => {
+                            reset_overlay_session(
+                                &self.overlay,
+                                &mut self.current_results,
+                                &mut self.selected_index,
+                            );
+                            self.last_query.clear();
+                            self.search_session.clear();
+                            self.search_worker.clear_session();
+                        }
+                        Err(error) => {
+                            self.overlay
+                                .set_status_text(&format!("Could not open installed apps: {error}"));
+                        }
+                    }
                 }
             }
             "pin" => {

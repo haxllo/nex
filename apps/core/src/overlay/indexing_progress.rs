@@ -26,30 +26,30 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::indexing_progress::FullPassSnapshot;
 
 const WINDOW_WIDTH: f64 = 340.0;
-const WINDOW_HEIGHT: f64 = 112.0;
+const WINDOW_HEIGHT: f64 = 104.0;
 const EDGE_MARGIN: i32 = 16;
 
 const PROGRESS_PAGE: &str = r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Nex Indexing</title>
 <style>
-:root{--bg:rgba(18,18,18,0.86);--text:#ededed;--muted:#888888;--bar-bg:rgba(255,255,255,0.08);--bar-fg:#ededed;--border:rgba(255,255,255,0.09)}
-@media (prefers-color-scheme:light){:root{--bg:rgba(250,250,250,0.9);--text:#171717;--muted:#737373;--bar-bg:rgba(0,0,0,0.08);--bar-fg:#171717;--border:rgba(0,0,0,0.09)}}
+:root{--bg:rgba(20,20,22,0.78);--text:#f4f4f5;--muted:#bcbcc4;--track:rgba(255,255,255,0.16);--fill:#f4f4f5}
+:root[data-theme="light"]{--bg:rgba(250,250,251,0.82);--text:#151518;--muted:#55555c;--track:rgba(0,0,0,0.14);--fill:#151518}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:transparent;font-family:"Inter","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;user-select:none;cursor:default}
+html,body{background:transparent;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;user-select:none;cursor:default}
 body{height:100vh}
-#panel{width:100%;height:100%;background:var(--bg);border:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;gap:10px;padding:16px 20px}
-#label{font-size:13px;font-weight:600}
-#track{height:4px;background:var(--bar-bg);border-radius:2px;overflow:hidden;position:relative}
-#bar{position:absolute;top:0;bottom:0;width:35%;background:var(--bar-fg);border-radius:2px;animation:slide 1.4s ease-in-out infinite}
-@keyframes slide{0%{left:-35%}100%{left:100%}}
+#panel{width:100%;height:100%;background:var(--bg);display:flex;flex-direction:column;justify-content:center;gap:12px;padding:18px 20px}
+#label{font-size:13px;font-weight:600;letter-spacing:-.01em}
+#track{height:3px;background:var(--track);border-radius:2px;overflow:hidden;position:relative}
+#bar{position:absolute;top:0;bottom:0;width:38%;background:var(--fill);border-radius:2px;animation:slide 1.4s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes slide{0%{left:-38%}100%{left:100%}}
 .done #bar{animation:none;left:0;width:100%}
 #detail{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 </style></head>
 <body>
 <main id="panel">
-  <div id="label">Indexing your files…</div>
+  <div id="label">Indexing your files</div>
   <div id="track"><div id="bar"></div></div>
   <div id="detail">Starting…</div>
 </main>
@@ -58,13 +58,13 @@ function fmtCount(n){return Number(n).toLocaleString()}
 function fmtTime(ms){var s=Math.floor(ms/1000);var m=Math.floor(s/60);s=s%60;return m+":"+(s<10?"0":"")+s}
 window.updateProgress=function(p){
   document.body.classList.remove("done");
-  document.getElementById("label").textContent="Indexing your files…";
-  document.getElementById("detail").textContent=fmtCount(p.indexed)+" of "+fmtCount(p.discovered)+" found indexed · "+fmtTime(p.elapsed_ms);
+  document.getElementById("label").textContent="Indexing your files";
+  document.getElementById("detail").textContent=fmtCount(p.discovered)+" files · "+fmtTime(p.elapsed_ms);
 };
 window.finishProgress=function(p){
   document.body.classList.add("done");
   document.getElementById("label").textContent="Indexing complete";
-  document.getElementById("detail").textContent=fmtCount(p.discovered)+" items · "+fmtTime(p.elapsed_ms);
+  document.getElementById("detail").textContent=fmtCount(p.discovered)+" files · "+fmtTime(p.elapsed_ms);
 };
 </script>
 </body>
@@ -103,7 +103,7 @@ impl ProgressWindow {
                 std::mem::size_of::<i32>() as u32,
             );
         }
-        let _ = window_vibrancy::apply_acrylic(&window, Some((18, 18, 20, 130)));
+        let _ = window_vibrancy::apply_acrylic(&window, Some((20, 20, 22, 140)));
 
         let webview = WebViewBuilder::new()
             .with_transparent(true)
@@ -114,6 +114,7 @@ impl ProgressWindow {
     }
 
     pub(crate) fn show(&self, progress: FullPassSnapshot) {
+        self.apply_theme();
         self.update(progress);
         let size = self.window.outer_size();
         if let Some((x, y)) = bottom_right_position(size.width as i32, size.height as i32) {
@@ -122,6 +123,25 @@ impl ProgressWindow {
         unsafe {
             ShowWindow(self.window.hwnd() as HWND, SW_SHOWNOACTIVATE);
         }
+    }
+
+    /// Theme the panel and the acrylic tint from the same answer the launcher
+    /// uses. The page cannot ask `prefers-color-scheme`: WebView2 answers that
+    /// from its own default, not from what Nex resolved for the overlay, so a
+    /// light desktop could still get the dark panel.
+    fn apply_theme(&self) {
+        let (_, theme) = crate::overlay::platform::detect_look();
+        let light = theme == crate::overlay::model::Theme::Light;
+        let tint = if light {
+            (248, 248, 250, 160)
+        } else {
+            (20, 20, 22, 140)
+        };
+        let _ = window_vibrancy::apply_acrylic(&self.window, Some(tint));
+        let name = if light { "light" } else { "dark" };
+        let _ = self
+            .webview
+            .evaluate_script(&format!("document.documentElement.dataset.theme='{name}'"));
     }
 
     pub(crate) fn update(&self, progress: FullPassSnapshot) {
@@ -142,6 +162,12 @@ impl ProgressWindow {
         unsafe {
             ShowWindow(self.window.hwnd() as HWND, SW_HIDE);
         }
+    }
+
+    /// Native handle, so the overlay's focus handler can tell this window
+    /// apart from a real dismissal.
+    pub(crate) fn hwnd(&self) -> HWND {
+        self.window.hwnd() as HWND
     }
 }
 

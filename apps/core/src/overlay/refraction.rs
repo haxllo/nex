@@ -183,7 +183,14 @@ const SLAB_DECAY: f32 = 35.0;
 /// Device-pixel growth for the main window's native region. The page's
 /// own clip-path is antialiased; letting the region sit a pixel outside
 /// it keeps GDI's hard polygon edge from shaving that antialiasing off.
-const SILHOUETTE_GROW_PX: f64 = 1.0;
+/// GDI regions are integer-rounded and hard-edged, so a 1 px growth is
+/// not enough: a vertex can round inward by up to 0.5 px and the chord
+/// between samples sags below the true arc, letting the hard edge cut the
+/// page's semi-transparent AA ramp -> pixels poking out at the corners.
+/// 3 px leaves the region clear of the ~1 px AA band even after worst-case
+/// integer rounding, so the visible silhouette stays the CSS clip-path's
+/// smooth arc. (CIQ-169)
+const SILHOUETTE_GROW_PX: f64 = 3.0;
 pub(crate) const CORNER_RADIUS: f32 = 12.0;
 /// Statistics downsample size: enough for the 4x4 tint grid and a stable
 /// luminance average, small enough that the readback is noise.
@@ -2031,7 +2038,7 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
 /// diagonal. The earlier sqrt-cos profile removed only 0.159R there,
 /// which read as a nearly square corner despite the radius.
 fn corner_offsets() -> Vec<(f32, f32)> {
-    const SAMPLES: u32 = 24;
+    const SAMPLES: u32 = 48;
     (0..=SAMPLES).map(|i| {
         let angle = i as f32 / SAMPLES as f32 * std::f32::consts::FRAC_PI_2;
         let (sin, cos) = angle.sin_cos();
@@ -4078,7 +4085,14 @@ mod tests {
                 (after - before - super::SILHOUETTE_GROW_PX).abs() < 0.001,
                 "corner {i} grew {before} -> {after}"
             );
-            assert!(*gx >= -1.0 && *gy >= -1.0 && *gx <= 701.0 && *gy <= 442.0);
+            // The grown region may poke slightly past the panel box (grow is
+            // a device-pixel margin), so allow SILHOUETTE_GROW_PX + a pixel of
+            // rounding on every side.
+            let m = super::SILHOUETTE_GROW_PX + 1.0;
+            assert!(
+                *gx >= -m && *gy >= -m && *gx <= 700.0 + m && *gy <= 441.0 + m,
+                "grown point {gx},{gy} escaped the panel box by more than {m}"
+            );
         }
     }
 

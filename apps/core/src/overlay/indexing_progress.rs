@@ -83,6 +83,12 @@ impl ProgressWindow {
         let window = WindowBuilder::new()
             .with_title("Nex Indexing")
             .with_decorations(false)
+            // tao reserves the DWM shadow inset (SM_CXSIZEFRAME + SM_CXPADDEDBORDER,
+            // 8 px left/right/bottom and 1 px top on Windows 11) outside the client
+            // area of an undecorated window. There is no shadow here - the window is
+            // acrylic over its whole surface - so the inset only painted an 8 px
+            // translucent frame around the panel.
+            .with_undecorated_shadow(false)
             .with_transparent(true)
             .with_visible(false)
             .with_focused(false)
@@ -110,6 +116,17 @@ impl ProgressWindow {
 
         let webview = WebViewBuilder::new()
             .with_transparent(true)
+            // Before the page's own scripts: the first `show` runs its
+            // `evaluate_script` while the document is still loading, so a theme
+            // set there can be discarded with the navigation.
+            .with_initialization_script(format!(
+                "document.documentElement.dataset.theme='{}'",
+                if crate::overlay::platform::detect_look().1 == crate::overlay::model::Theme::Light {
+                    "light"
+                } else {
+                    "dark"
+                }
+            ))
             .with_html(PROGRESS_PAGE)
             .build(&window)
             .map_err(|e| format!("progress webview: {e}"))?;

@@ -2959,6 +2959,32 @@ html.glass-native .chat-composer-shell {
 }
 .chat-message.assistant.has-surface { padding: 0; background: none; }
 
+/* Waiting for the first token. Dots sit on the answer's own line and the block
+   reserves exactly one line, so the reply lands where they were. */
+.chat-loading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 21.9px;
+}
+.chat-loading span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: chatLoadingPulse 1.15s var(--ease) infinite;
+}
+.chat-loading span:nth-child(2) { animation-delay: 160ms; }
+.chat-loading span:nth-child(3) { animation-delay: 320ms; }
+@keyframes chatLoadingPulse {
+  0%, 70%, 100% { opacity: .22; }
+  35% { opacity: .9; }
+}
+/* Reduced motion: the dots stay, they just stop breathing. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-loading span { animation: none; opacity: .55; }
+}
+
 .chat-message-content > :first-child { margin-top: 0; }
 .chat-message-content > :last-child { margin-bottom: 0; }
 .chat-message-content p { margin: 0 0 10px; }

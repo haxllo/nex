@@ -149,8 +149,48 @@ pub struct ProgressWindowGate {
     shown: Option<FullPassSnapshot>,
 }
 
+/// `NEX_TEST_PROGRESS_WINDOW=1` opens the window at a fixed snapshot and holds
+/// it there, so the panel can be inspected without waiting for a real large
+/// pass. Read once: the value cannot change inside a process.
+fn preview_active() -> bool {
+    static PREVIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PREVIEW.get_or_init(|| {
+        matches!(
+            std::env::var("NEX_TEST_PROGRESS_WINDOW").as_deref(),
+            Ok("1") | Ok("true")
+        )
+    })
+}
+
+/// What the preview shows: a plausible mid-pass count, held still. The bar
+/// animates on its own, so a frozen count still reads as live work.
+const PREVIEW_PASS: FullPassSnapshot = FullPassSnapshot {
+    discovered: 13_031,
+    indexed: 9_821,
+    elapsed_ms: 42_000,
+};
+
 impl ProgressWindowGate {
     pub fn observe(&mut self, report: IndexerProgressReport) -> ProgressWindowAction {
+        self.observe_with(report, preview_active())
+    }
+
+    /// Split from [`Self::observe`] so the state machine is testable without
+    /// setting a process-wide env var.
+    fn observe_with(
+        &mut self,
+        report: IndexerProgressReport,
+        preview: bool,
+    ) -> ProgressWindowAction {
+        if preview {
+            return match self.shown {
+                Some(_) => ProgressWindowAction::Update(PREVIEW_PASS),
+                None => {
+                    self.shown = Some(PREVIEW_PASS);
+                    ProgressWindowAction::Show(PREVIEW_PASS)
+                }
+            };
+        }
         match (self.shown, report.full_pass) {
             (None, Some(progress)) if progress.is_large() => {
                 self.shown = Some(progress);
@@ -255,6 +295,29 @@ mod tests {
             full_pass: None,
         };
         assert_eq!(gate.observe(lost), ProgressWindowAction::Close);
+    }
+
+    #[test]
+    fn preview_holds_the_window_open() {
+        let mut gate = ProgressWindowGate::default();
+        assert_eq!(
+            gate.observe_with(report(None), true),
+            ProgressWindowAction::Show(PREVIEW_PASS)
+        );
+        // Re-sends the snapshot every tick: the first `show` races the page
+        // load, and a pass ending must not close a preview.
+        assert_eq!(
+            gate.observe_with(report(None), true),
+            ProgressWindowAction::Update(PREVIEW_PASS)
+        );
+        let lost = IndexerProgressReport {
+            reachable: false,
+            full_pass: None,
+        };
+        assert_eq!(
+            gate.observe_with(lost, true),
+            ProgressWindowAction::Update(PREVIEW_PASS)
+        );
     }
 
     #[test]

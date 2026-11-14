@@ -1,0 +1,98 @@
+name: Release
+
+# Publishing a release is: bump the version in all three crates, commit, then
+# push a `v<version>` tag. This workflow builds the binaries on the tag, packs
+# the zip and the Inno Setup installer, and opens the GitHub release with the
+# notes for that version.
+#
+# It does not re-run the test suite: `ci.yml` already runs on every push, so tag
+# a commit that is green on master. If that has to be enforced, make `release`
+# a required check on master first.
+#
+# Signing is skipped. `package-windows-artifact.ps1 -Sign` needs a certificate;
+# wire `CERT_PFX_BASE64` / `CERT_PASSWORD` secrets in when one exists, otherwise
+# the setup.exe and binaries ship unsigned and SmartScreen warns on them.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag matches every crate version
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = $tag.TrimStart('v')
+          $problems = foreach ($file in 'apps/core/Cargo.toml', 'apps/ui/Cargo.toml', 'apps/indexer/Cargo.toml') {
+            $match = Select-String -Path $file -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            $found = $match.Matches[0].Groups[1].Value
+            if ($found -ne $version) { "$file is $found" }
+          }
+          if ($problems) {
+            throw "Tag $tag does not match: $($problems -join '; '). Bump all three crates before tagging."
+          }
+          Write-Host "Version $version confirmed."
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the release binaries
+        timeout-minutes: 60
+        run: cargo build --locked --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+
+      - name: Package the zip and manifest
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Package the installer
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
+
+      - name: Resolve the release notes
+        id: notes
+        run: |
+          $file = "docs/releases/v${env:VERSION}-notes.md"
+          if (-not (Test-Path $file)) {
+            Write-Host "::warning::No hand-written notes at $file. Generating a draft from the commit log."
+            pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION -OutputPath $file
+          }
+          if (-not (Test-Path $file)) { throw "Release notes are missing and could not be generated." }
+          "path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Open the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $base = "artifacts/windows/nex-${env:VERSION}-windows-x64"
+          foreach ($file in "$base.zip", "$base-setup.exe", "$base-manifest.json") {
+            if (-not (Test-Path $file)) { throw "Expected artifact $file was not produced." }
+          }
+          gh release create $tag `
+            --title $tag `
+            --notes-file '${{ steps.notes.outputs.path }}' `
+            "$base.zip" "$base-setup.exe" "$base-manifest.json"
+          Write-Host "Release $tag created."

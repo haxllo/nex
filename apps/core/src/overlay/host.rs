@@ -3489,7 +3489,7 @@ fn clear_webview_window_region(window: &Window) -> bool {
 /// (tao re-derives styles on its own state syncs, but the only pre-show
 /// sync happens at creation — after that the host goes cloak-on-hide,
 /// which DWM does not compose.)
-fn strip_caption_frame(hwnd: HWND) {
+pub(super) fn strip_caption_frame(hwnd: HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GWL_STYLE, GetWindowLongW, SetWindowPos, SetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
         SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,

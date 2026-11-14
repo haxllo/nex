@@ -14,7 +14,10 @@ use tao::window::{Window, WindowBuilder};
 use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
-use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+use windows_sys::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
@@ -120,6 +123,10 @@ impl ProgressWindow {
         if let Some((x, y)) = bottom_right_position(size.width as i32, size.height as i32) {
             self.window.set_outer_position(PhysicalPosition::new(x, y));
         }
+        // After the position sync, because tao re-derives the window styles
+        // there and puts WS_CAPTION back. Without this DWM composes a ~2px
+        // frame around the panel, thin at the rounded corners.
+        crate::overlay::host::strip_caption_frame(self.window.hwnd() as HWND);
         unsafe {
             ShowWindow(self.window.hwnd() as HWND, SW_SHOWNOACTIVATE);
         }
@@ -138,6 +145,7 @@ impl ProgressWindow {
             (20, 20, 22, 140)
         };
         let _ = window_vibrancy::apply_acrylic(&self.window, Some(tint));
+        apply_frame(self.window.hwnd() as HWND, !light);
         let name = if light { "light" } else { "dark" };
         let _ = self
             .webview
@@ -168,6 +176,30 @@ impl ProgressWindow {
     /// apart from a real dismissal.
     pub(crate) fn hwnd(&self) -> HWND {
         self.window.hwnd() as HWND
+    }
+}
+
+/// Turn off the native window frame. tao forces `WS_CAPTION` on every window,
+/// and DWM composes a rounded ring around it even with acrylic — the ring is
+/// thin at the corners and ~2px on the straight edges, which reads as a border
+/// the panel does not draw. The caption strip in `show` removes the frame
+/// itself; this removes the accent border DWM draws over the glass.
+fn apply_frame(hwnd: HWND, dark: bool) {
+    let no_border: u32 = 0xFFFFFFFE; // DWMWA_COLOR_NONE
+    let dark_mode = i32::from(dark);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            &no_border as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &dark_mode as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
     }
 }
 

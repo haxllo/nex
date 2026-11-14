@@ -3040,12 +3040,85 @@ html.glass-native .chat-composer-shell {
 /* Markdown surfaces inside an assistant reply: code blocks, tables and the
    inline-code chip. These are content, not layout, so they keep their own
    styling regardless of how the transcript is composed. */
-.chat-code-block { position: relative; margin: 7px 0; overflow: hidden; border-radius: 7px; background: rgba(0,0,0,0.17); box-shadow: 0 1px 0 rgba(255,255,255,0.07) inset; }
-[data-theme="light"] .chat-code-block { background: rgba(0,0,0,0.045); }
-.chat-code-header { height: 29px; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; color: var(--text-faint); font-size: 10px; }
-.chat-code-header button { min-width: 40px; min-height: 25px; border: 0; border-radius: 5px; background: transparent; color: var(--text-faint); font: 10px var(--font); cursor: pointer; }
-.chat-code-header button:hover { background: var(--hover); color: var(--text); }
-.chat-code-block pre { max-height: 280px; overflow: auto; margin: 0; padding: 1px 11px 11px; font: 11px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre; }
+.chat-code-block {
+  position: relative;
+  margin: 8px 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(0, 0, 0, .17);
+}
+[data-theme="light"] .chat-code-block { background: rgba(0, 0, 0, .045); }
+.chat-code-block:focus-within { border-color: var(--border-strong); }
+.chat-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 5px 4px 10px;
+  border-bottom: 1px solid var(--divider);
+}
+.chat-code-lang {
+  color: var(--text-dim);
+  font: 500 10px/1 var(--font);
+  letter-spacing: .05em;
+  text-transform: lowercase;
+}
+.chat-code-lang::before { content: "// "; color: var(--text-faint); }
+/* The button is chrome for an occasional job, so it waits for the pointer and
+   is always there where there is no pointer to wait for. */
+.chat-code-copy {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.chat-code-copy svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (hover: none), (pointer: coarse) { .chat-code-copy { opacity: 1; } }
+.chat-code-block:hover .chat-code-copy,
+.chat-code-block:focus-within .chat-code-copy { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .chat-code-copy:hover { background: var(--hover); color: var(--text); }
+}
+.chat-code-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.chat-code-copy.is-done { color: var(--text); opacity: 1; }
+.chat-code-copy.is-failed { color: var(--danger); opacity: 1; }
+/* Scrolls sideways and down; focusable so the keyboard can scroll it, which is
+   why the block draws the ring. */
+.chat-code-block pre {
+  max-height: 280px;
+  margin: 0;
+  padding: 9px 11px 10px;
+  overflow: auto;
+  /* The block is one surface: the inner pre carries no fill of its own. */
+  background: transparent;
+  border: 0;
+  font: 11px/1.6 var(--font-mono);
+  white-space: pre;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+/* The code box scrolls, so it takes focus; ring on the box, not on an invisible
+   inner element. */
+.chat-code-block pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .chat-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
 .chat-table { border-collapse: collapse; font-size: 11px; }
 .chat-table th { color: var(--text-dim); font-weight: 600; }
@@ -3188,23 +3261,38 @@ html.glass-native .chat-composer-shell {
 .chat-action {
   position: relative;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 7px;
   padding: 2px 0;
   animation: chatActionIn 180ms var(--ease-out) both;
 }
+/* What ran, not how it went: the icon says folder, move, delete, and the colour
+   says whether it worked. A tick in the gutter said the same thing for every
+   step and nothing about the step. */
 .chat-action-glyph {
   position: absolute;
   left: -17px;
-  top: 2px;
-  font: 400 12px/1.62 var(--font-mono);
+  top: 5px;
+  display: block;
+  width: 13px;
+  height: 13px;
   color: var(--text-faint);
+}
+.chat-action-glyph svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .chat-action.ok .chat-action-glyph { color: var(--text-dim); }
 .chat-action.failed .chat-action-glyph { color: var(--danger); }
 .chat-action-body { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex: 0 1 auto; }
 .chat-action-label { flex: 0 0 auto; font-size: 12.5px; font-weight: 400; color: var(--text); }
 .chat-action-text { min-width: 0; color: var(--text); font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }
+.chat-action.failed .chat-action-text { color: var(--danger); }
 /* The path is the tail of the line: plain mono, cut from the start so the file
    name survives. A pill around it made it the loudest thing in the transcript. */
 .chat-action-target {
@@ -3219,6 +3307,54 @@ html.glass-native .chat-composer-shell {
   font: 11px/1.7 var(--font-mono);
   direction: rtl;
   text-align: left;
+}
+
+/* What the run is doing right now. The title shimmers so a long step reads as
+   work in progress rather than as a line that arrived and stopped. */
+.chat-trace {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  animation: chatActionIn 180ms var(--ease-out) both;
+}
+.chat-trace-icon {
+  flex: 0 0 auto;
+  display: block;
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
+}
+.chat-trace-icon svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-trace-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: linear-gradient(90deg, var(--text-dim) 0%, var(--text-dim) 30%, var(--text) 50%, var(--text-dim) 70%, var(--text-dim) 100%);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: chatShimmer 1.6s linear infinite;
+}
+@keyframes chatShimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+/* Reduced motion: the line still changes, it just stops moving. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-trace-title { animation: none; background: none; color: var(--text-dim); }
 }
 
 /* A blocking confirmation: the one inset in the transcript. The rule marks it

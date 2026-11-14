@@ -2936,21 +2936,15 @@ html.glass-native .chat-composer-shell {
   overflow-wrap: anywhere;
 }
 
-/* What you said is a prompt: the glyph hangs in the gutter and the words are
-   prose. A bubble put your own sentence in a box the answer never had. */
+/* What you said sits right, the answer sits left: the side is what says which
+   voice it is, so your turn needs no glyph and no bubble. The block is bounded
+   (not text-align) so code and lists inside it still read left to right. */
 .chat-message.user {
-  position: relative;
-  align-self: stretch;
+  align-self: flex-end;
+  max-width: min(76%, 470px);
   padding: 0;
   background: none;
   box-shadow: none;
-}
-.chat-prompt-glyph {
-  position: absolute;
-  left: -17px;
-  top: 0;
-  color: var(--text-faint);
-  font: 400 12.5px/1.62 var(--font-mono);
 }
 .chat-message.user .chat-message-content { font-size: 13.5px; }
 

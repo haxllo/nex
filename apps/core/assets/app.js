@@ -2240,15 +2240,6 @@
           article.classList.add("has-surface");
         }
         article.dataset.messageId = message.id;
-        // The prompt marker is the only thing that says this turn is yours; the
-        // role already carries that, so it stays out of the accessibility tree.
-        if (message.role === "user") {
-          const prompt = document.createElement("span");
-          prompt.className = "chat-prompt-glyph";
-          prompt.setAttribute("aria-hidden", "true");
-          prompt.textContent = ">";
-          article.appendChild(prompt);
-        }
         if (Array.isArray(message.actions) && message.actions.length) {
           const list = document.createElement("div");
           list.className = "chat-actions";

@@ -1950,6 +1950,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 // sleep, the epoch will have advanced —
                                 // skip firing Escape.
                                 if epoch_clone.load(Ordering::SeqCst) != my_epoch {
+                                    // A Show raced this arm. Release the latch
+                                    // too: leaving it set skips every later
+                                    // deferred hide for the life of the process.
+                                    armed.store(false, Ordering::SeqCst);
                                     return;
                                 }
                                 let dismiss_picker = state_clone.lock().ok().and_then(|s| {

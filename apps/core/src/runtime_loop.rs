@@ -1395,9 +1395,10 @@ impl RuntimeWorker {
                             );
                             let lookup = if !path.is_empty() { path.to_string() } else { _title.to_string() };
                             if let Ok(guard) = self.service.write() {
-                                if let Ok(Some((stale_id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&guard.db_ref(), &lookup) {
-                                    let _ = guard.delete_item_by_id(&stale_id);
-                                }
+                                // One method, one connection lock. Looking the
+                                // row up through `db_ref()` and then deleting
+                                // it locked the same mutex twice.
+                                let _ = guard.delete_item_by_path_or_title(&lookup);
                             }
                             filter_suppressed_uninstall_results(&mut self.current_results, &self.suppressed_uninstall_titles);
                             if self.current_results.is_empty() {
@@ -2501,9 +2502,10 @@ impl RuntimeWorker {
                                         );
                                         if let Some(target_title) = uninstall_target_title_from_action_title(uninstall_action.title.as_str()) {
                                             if let Ok(guard) = self.service.write() {
-                                                if let Ok(Some((stale_id, _, _, _, _))) = crate::index_store::find_item_by_path_or_title(&guard.db_ref(), &target_title) {
-                                                    let _ = guard.delete_item_by_id(&stale_id);
-                                                }
+                                                // Same double-lock trap as the
+                                                // context-menu path: the lookup
+                                                // must not outlive its guard.
+                                                let _ = guard.delete_item_by_path_or_title(&target_title);
                                             }
                                         }
                                         self.overlay.set_status_text("");

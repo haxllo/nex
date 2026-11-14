@@ -2089,14 +2089,46 @@
         if (i < lines.length) i++;
         const block = document.createElement("div"); block.className = "chat-code-block";
         const head = document.createElement("div"); head.className = "chat-code-header";
-        const lang = document.createElement("span"); lang.textContent = language;
-        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy code";
+        const lang = document.createElement("span"); lang.className = "chat-code-lang"; lang.textContent = language;
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "chat-code-copy";
+        copy.setAttribute("aria-label", "Copy code");
+        copy.dataset.tip = "Copy code";
+        copy.appendChild(chatIcon("copy"));
+        // The button carries an icon, so the result has to be spoken: it swaps
+        // to a tick or a cross and the live region says which, then resets.
+        const copyStatus = document.createElement("span");
+        copyStatus.className = "chat-visually-hidden";
+        copyStatus.setAttribute("aria-live", "polite");
         copy.addEventListener("click", async () => {
-          try { await navigator.clipboard.writeText(source.join("\n")); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
-          catch (_) { copy.textContent = "Unavailable"; }
+          let name = "copy";
+          let label = "Copy code";
+          try {
+            await navigator.clipboard.writeText(source.join("\n"));
+            name = "check"; label = "Copied";
+          } catch (_) {
+            name = "fail"; label = "Could not copy";
+          }
+          copy.replaceChildren(chatIcon(name));
+          copy.classList.add(name === "check" ? "is-done" : "is-failed");
+          copy.setAttribute("aria-label", label);
+          copyStatus.textContent = label;
+          setTimeout(() => {
+            copy.replaceChildren(chatIcon("copy"));
+            copy.classList.remove("is-done", "is-failed");
+            copy.setAttribute("aria-label", "Copy code");
+            copyStatus.textContent = "";
+          }, 1600);
         });
-        head.append(lang, copy);
-        const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = source.join("\n"); pre.appendChild(code);
+        head.append(lang, copy, copyStatus);
+        const pre = document.createElement("pre");
+        // Scrollable, so the keyboard has to be able to reach and scroll it.
+        pre.tabIndex = 0;
+        pre.setAttribute("aria-label", language + " code");
+        const code = document.createElement("code");
+        code.textContent = source.join("\n");
+        pre.appendChild(code);
         block.append(head, pre); target.appendChild(block); continue;
       }
       if (i + 1 < lines.length && line.includes("|") && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
@@ -2214,6 +2246,44 @@
     }
   }
 
+  // What the run is doing, as a line in the transcript instead of a status that
+  // nothing renders. The composer's live region stays in step for screen
+  // readers; the line is the visible half.
+  function renderChatTraceLine(text) {
+    const line = document.createElement("div");
+    line.className = "chat-trace";
+    line.setAttribute("role", "status");
+    const icon = document.createElement("span");
+    icon.className = "chat-trace-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.appendChild(chatIcon("terminal"));
+    const title = document.createElement("span");
+    title.className = "chat-trace-title";
+    title.textContent = text;
+    line.append(icon, title);
+    return line;
+  }
+
+  function setChatLiveStatus(text) {
+    chatLiveStatus.textContent = text;
+    const last = chatMessages[chatMessages.length - 1];
+    const article = last && last.role === "assistant"
+      ? chatMessagesEl.querySelector('[data-message-id="' + CSS.escape(last.id) + '"]')
+      : null;
+    const line = article && article.querySelector(".chat-trace");
+    // A status with no request behind it is the composer talking ("Listening."),
+    // not the answer working, so it does not belong in the transcript.
+    if (!article || !chatActiveRequest || !text.trim()) {
+      if (line) line.remove();
+      return;
+    }
+    if (line) {
+      line.querySelector(".chat-trace-title").textContent = text;
+      return;
+    }
+    article.appendChild(renderChatTraceLine(text));
+  }
+
   // The waiting state for an answer: three dots and a line for assistive tech.
   // The dots are decoration; the status is what gets read out.
   function renderChatLoading() {
@@ -2285,6 +2355,12 @@
           article.appendChild(context);
         }
         chatMessagesEl.appendChild(article);
+        // The running line belongs to the answer being written, so it is drawn
+        // with it and survives the re-render that a step triggers.
+        if (message === chatMessages[chatMessages.length - 1] && message.role === "assistant"
+          && chatActiveRequest && chatLiveStatus.textContent.trim()) {
+          article.appendChild(renderChatTraceLine(chatLiveStatus.textContent.trim()));
+        }
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
           const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy response";
@@ -2470,6 +2546,40 @@
     // own verb rather than sharing a generic "Done".
     delete_path: "Deleted",
   };
+  // 24x24 stroke icons. The gutter shows what the step touched; the row colour
+  // shows whether it worked, so a tick is not needed for every row.
+  const CHAT_ICON_PATHS = {
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    move: '<path d="M5 12h13"/><path d="M13 7l5 5-5 5"/>',
+    open: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
+    read: '<path d="M12 7v14"/><path d="M3 5h6a3 3 0 0 1 3 2 3 3 0 0 1 3-2h6v14h-6a3 3 0 0 0-3 2 3 3 0 0 0-3-2H3z"/>',
+    copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+    delete: '<path d="M3 6h18"/><path d="M9 6V4h6v2"/><path d="M6 6l1 14h10l1-14"/>',
+    terminal: '<path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>',
+    check: '<path d="M4 12.5 9 17.5 20 6.5"/>',
+    fail: '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
+  };
+  const CHAT_ACTION_ICONS = {
+    open_path: "open",
+    reveal_path: "folder",
+    open_url: "link",
+    create_folder: "folder",
+    create_file: "file",
+    read_file: "read",
+    move_path: "move",
+    copy_path: "copy",
+    delete_path: "delete",
+  };
+
+  function chatIcon(name) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.innerHTML = CHAT_ICON_PATHS[name] || CHAT_ICON_PATHS.file;
+    return svg;
+  }
 
   function renderChatActionCard(action) {
     const card = document.createElement("div");
@@ -2478,7 +2588,7 @@
     const glyph = document.createElement("span");
     glyph.className = "chat-action-glyph";
     glyph.setAttribute("aria-hidden", "true");
-    glyph.textContent = action.ok ? "\u2713" : "\u00d7";
+    glyph.appendChild(chatIcon(CHAT_ACTION_ICONS[action.tool] || "terminal"));
     card.appendChild(glyph);
 
     const body = document.createElement("div");
@@ -2867,6 +2977,8 @@
     saveChatTitle(); persistChat();
     renderChatMessages();
     chatLiveStatus.textContent = "Thinking…";
+    // The same text is a trace row under the answer, not just a live region.
+    setChatLiveStatus("Thinking…");
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
     post("chatSend", { ...request, message, history, attachments, includePcInfo });
@@ -3676,7 +3788,7 @@
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") {
         if (state.chatDelta.text) last.content += state.chatDelta.text;
-        if (state.chatDelta.status !== undefined) chatLiveStatus.textContent = state.chatDelta.status || "";
+        if (state.chatDelta.status !== undefined) setChatLiveStatus(state.chatDelta.status || "");
         if (state.chatDelta.text && !chatRenderFrame) {
           const request = chatActiveRequest;
           chatRenderFrame = requestAnimationFrame(() => {

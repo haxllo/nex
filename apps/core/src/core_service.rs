@@ -1581,6 +1581,22 @@ impl CoreService {
         Ok(true)
     }
 
+    /// Delete the stored row that matches `key` by path or title, if any.
+    ///
+    /// Callers used to hold `db_ref()` and then call `delete_item_by_id`,
+    /// which locks the same connection again: a std mutex does not re-enter,
+    /// so the UI thread deadlocked mid-uninstall and stopped draining overlay
+    /// events for good. The lookup guard is confined to its own statement
+    /// here, so the two locks are never nested.
+    pub fn delete_item_by_path_or_title(&self, key: &str) -> Result<bool, ServiceError> {
+        let found = index_store::find_item_by_path_or_title(&*self.db(), key)?;
+        let Some((id, _, _, _, _)) = found else {
+            return Ok(false);
+        };
+        self.delete_item_by_id(&id)?;
+        Ok(true)
+    }
+
     /// True when `id` is in the in-memory cache or the SQLite store.
     ///
     /// The cache answers for everything a search can return, so it is checked
@@ -3436,6 +3452,31 @@ mod tests {
             .launch(super::LaunchTarget::Id(&needle.id))
             .unwrap_err();
         assert!(!matches!(err, super::ServiceError::ItemNotFound(_)));
+    }
+
+    #[test]
+    fn deletes_a_row_by_title_without_relocking_the_connection() {
+        let service =
+            CoreService::with_connection(isolated_config("delete-by-title"), open_memory().unwrap())
+                .expect("service should initialize");
+        let item = SearchItem::new(
+            "app:libreoffice",
+            "app",
+            "LibreOffice",
+            r"C:\Program Files\LibreOffice\soffice.exe",
+        );
+        service.upsert_item(&item).expect("item should upsert");
+
+        // The uninstall path passes the row title, not an id. This used to
+        // deadlock: the caller held `db_ref()` while `delete_item_by_id`
+        // locked the same connection again.
+        assert!(service
+            .delete_item_by_path_or_title("LibreOffice")
+            .expect("delete should succeed"));
+        assert!(!service.item_exists(&item.id));
+        assert!(!service
+            .delete_item_by_path_or_title("Not Installed Here")
+            .expect("missing row is not an error"));
     }
 
     #[test]

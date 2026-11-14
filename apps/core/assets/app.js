@@ -2089,14 +2089,46 @@
         if (i < lines.length) i++;
         const block = document.createElement("div"); block.className = "chat-code-block";
         const head = document.createElement("div"); head.className = "chat-code-header";
-        const lang = document.createElement("span"); lang.textContent = language;
-        const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy code";
+        const lang = document.createElement("span"); lang.className = "chat-code-lang"; lang.textContent = language;
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "chat-code-copy";
+        copy.setAttribute("aria-label", "Copy code");
+        copy.dataset.tip = "Copy code";
+        copy.appendChild(chatIcon("copy"));
+        // The button carries an icon, so the result has to be spoken: it swaps
+        // to a tick or a cross and the live region says which, then resets.
+        const copyStatus = document.createElement("span");
+        copyStatus.className = "chat-visually-hidden";
+        copyStatus.setAttribute("aria-live", "polite");
         copy.addEventListener("click", async () => {
-          try { await navigator.clipboard.writeText(source.join("\n")); copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy"; }, 1100); }
-          catch (_) { copy.textContent = "Unavailable"; }
+          let name = "copy";
+          let label = "Copy code";
+          try {
+            await navigator.clipboard.writeText(source.join("\n"));
+            name = "check"; label = "Copied";
+          } catch (_) {
+            name = "fail"; label = "Could not copy";
+          }
+          copy.replaceChildren(chatIcon(name));
+          copy.classList.add(name === "check" ? "is-done" : "is-failed");
+          copy.setAttribute("aria-label", label);
+          copyStatus.textContent = label;
+          setTimeout(() => {
+            copy.replaceChildren(chatIcon("copy"));
+            copy.classList.remove("is-done", "is-failed");
+            copy.setAttribute("aria-label", "Copy code");
+            copyStatus.textContent = "";
+          }, 1600);
         });
-        head.append(lang, copy);
-        const pre = document.createElement("pre"); const code = document.createElement("code"); code.textContent = source.join("\n"); pre.appendChild(code);
+        head.append(lang, copy, copyStatus);
+        const pre = document.createElement("pre");
+        // Scrollable, so the keyboard has to be able to reach and scroll it.
+        pre.tabIndex = 0;
+        pre.setAttribute("aria-label", language + " code");
+        const code = document.createElement("code");
+        code.appendChild(highlightChatCode(source.join("\n"), language));
+        pre.appendChild(code);
         block.append(head, pre); target.appendChild(block); continue;
       }
       if (i + 1 < lines.length && line.includes("|") && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
@@ -2214,6 +2246,62 @@
     }
   }
 
+  // What the run is doing, as a line in the transcript instead of a status that
+  // nothing renders. The composer's live region stays in step for screen
+  // readers; the line is the visible half.
+  function renderChatTraceLine(text) {
+    const line = document.createElement("div");
+    line.className = "chat-trace";
+    line.setAttribute("role", "status");
+    const icon = document.createElement("span");
+    icon.className = "chat-trace-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.appendChild(chatIcon("terminal"));
+    const title = document.createElement("span");
+    title.className = "chat-trace-title";
+    title.textContent = text;
+    line.append(icon, title);
+    return line;
+  }
+
+  function setChatLiveStatus(text) {
+    chatLiveStatus.textContent = text;
+    const last = chatMessages[chatMessages.length - 1];
+    const article = last && last.role === "assistant"
+      ? chatMessagesEl.querySelector('[data-message-id="' + CSS.escape(last.id) + '"]')
+      : null;
+    const line = article && article.querySelector(".chat-trace");
+    // A status with no request behind it is the composer talking ("Listening."),
+    // not the answer working, so it does not belong in the transcript.
+    if (!article || !chatActiveRequest || !text.trim()) {
+      if (line) line.remove();
+      return;
+    }
+    if (line) {
+      line.querySelector(".chat-trace-title").textContent = text;
+      return;
+    }
+    article.appendChild(renderChatTraceLine(text));
+  }
+
+  // The waiting state for an answer: three dots and a line for assistive tech.
+  // The dots are decoration; the status is what gets read out.
+  function renderChatLoading() {
+    const loading = document.createElement("div");
+    loading.className = "chat-loading";
+    loading.setAttribute("role", "status");
+    for (let i = 0; i < 3; i++) {
+      const dot = document.createElement("span");
+      dot.setAttribute("aria-hidden", "true");
+      loading.appendChild(dot);
+    }
+    const label = document.createElement("span");
+    label.className = "chat-visually-hidden";
+    label.textContent = "Nex is responding";
+    loading.appendChild(label);
+    return loading;
+  }
+
   function renderChatMessages(streamOnly = false) {
     const atBottom = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
     chatEmpty.hidden = chatMessages.length > 0;
@@ -2247,8 +2335,18 @@
           article.appendChild(list);
         }
         const content = document.createElement("div"); content.className = "chat-message-content";
-        renderChatMarkdown(content, message.content);
-        if (!message.content) content.hidden = true;
+        // An answer that has not produced a token yet shows the waiting dots
+        // instead of an empty block. The stream replaces them on the first
+        // chunk; a stopped or cancelled turn drops `chatActiveRequest`, so the
+        // dots cannot outlive the request that owns them.
+        const awaitingFirstToken = message.role === "assistant" && message.incomplete
+          && !message.content && chatActiveRequest;
+        if (awaitingFirstToken) {
+          content.appendChild(renderChatLoading());
+        } else {
+          renderChatMarkdown(content, message.content);
+          if (!message.content) content.hidden = true;
+        }
         article.appendChild(content);
         if (Array.isArray(message.localContext) && message.localContext.length) {
           const context = document.createElement("div");
@@ -2257,6 +2355,12 @@
           article.appendChild(context);
         }
         chatMessagesEl.appendChild(article);
+        // The running line belongs to the answer being written, so it is drawn
+        // with it and survives the re-render that a step triggers.
+        if (message === chatMessages[chatMessages.length - 1] && message.role === "assistant"
+          && chatActiveRequest && chatLiveStatus.textContent.trim()) {
+          article.appendChild(renderChatTraceLine(chatLiveStatus.textContent.trim()));
+        }
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
           const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy"; copy.dataset.tip = "Copy response";
@@ -2442,6 +2546,107 @@
     // own verb rather than sharing a generic "Done".
     delete_path: "Deleted",
   };
+  // 24x24 stroke icons. The gutter shows what the step touched; the row colour
+  // shows whether it worked, so a tick is not needed for every row.
+  const CHAT_ICON_PATHS = {
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    move: '<path d="M5 12h13"/><path d="M13 7l5 5-5 5"/>',
+    open: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    link: '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
+    read: '<path d="M12 7v14"/><path d="M3 5h6a3 3 0 0 1 3 2 3 3 0 0 1 3-2h6v14h-6a3 3 0 0 0-3 2 3 3 0 0 0-3-2H3z"/>',
+    copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
+    delete: '<path d="M3 6h18"/><path d="M9 6V4h6v2"/><path d="M6 6l1 14h10l1-14"/>',
+    terminal: '<path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>',
+    check: '<path d="M4 12.5 9 17.5 20 6.5"/>',
+    fail: '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
+  };
+  const CHAT_ACTION_ICONS = {
+    open_path: "open",
+    reveal_path: "folder",
+    open_url: "link",
+    create_folder: "folder",
+    create_file: "file",
+    read_file: "read",
+    move_path: "move",
+    copy_path: "copy",
+    delete_path: "delete",
+  };
+
+  function chatIcon(name) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.innerHTML = CHAT_ICON_PATHS[name] || CHAT_ICON_PATHS.file;
+    return svg;
+  }
+
+  // A tokeniser, not a parser. Comments, strings, numbers and keywords are
+  // enough to make a snippet readable, and it only ever builds text nodes, so
+  // the source cannot turn into markup.
+  const CHAT_CODE_SYNTAX = {
+    clike: {
+      line: ["//"],
+      block: ["/*", "*/"],
+      keywords: "as async await break case catch class const continue default delete do else enum export extends false finally fn for from function if impl import in instanceof interface let loop match mod mut new null or pub readonly ref return self static struct super switch this throw trait true try type typeof undefined unsafe use var void where while",
+    },
+    python: {
+      line: ["#"],
+      keywords: "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield",
+    },
+    shell: {
+      line: ["#"],
+      keywords: "case do done elif else esac export fi for function if in local return set then until while echo exit",
+    },
+    json: {
+      keywords: "true false null",
+    },
+    css: {
+      block: ["/*", "*/"],
+    },
+  };
+  const CHAT_CODE_LANGUAGES = {
+    js: "clike", javascript: "clike", ts: "clike", typescript: "clike", jsx: "clike", tsx: "clike",
+    rs: "clike", rust: "clike", go: "clike", java: "clike", c: "clike", cpp: "clike", cs: "clike",
+    swift: "clike", kt: "clike", toml: "clike", ini: "clike",
+    py: "python", python: "python",
+    sh: "shell", bash: "shell", zsh: "shell", ps1: "shell", powershell: "shell", bat: "shell", cmd: "shell",
+    json: "json", json5: "json",
+    css: "css",
+  };
+
+  function highlightChatCode(source, language) {
+    const fragment = document.createDocumentFragment();
+    const syntax = CHAT_CODE_SYNTAX[CHAT_CODE_LANGUAGES[String(language).toLowerCase()]];
+    if (!syntax) { fragment.append(document.createTextNode(source)); return fragment; }
+    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const parts = [];
+    if (syntax.block) parts.push(escape(syntax.block[0]) + "[\\s\\S]*?" + escape(syntax.block[1]));
+    if (syntax.line) parts.push("(?:" + syntax.line.map((start) => escape(start) + "[^\\n]*").join("|") + ")");
+    parts.push('"(?:\\\\.|[^"\\\\\\n])*"', "'(?:\\\\.|[^'\\\\\\n])*'", "`(?:\\\\.|[^`\\\\])*`");
+    parts.push("\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b");
+    if (syntax.keywords) parts.push("\\b(?:" + syntax.keywords.trim().split(/\s+/).join("|") + ")\\b");
+    const pattern = new RegExp(parts.join("|"), "g");
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(source))) {
+      const text = match[0];
+      if (!text) { pattern.lastIndex++; continue; }
+      if (match.index > last) fragment.append(document.createTextNode(source.slice(last, match.index)));
+      const isComment = (syntax.block && text.startsWith(syntax.block[0]))
+        || (syntax.line && syntax.line.some((start) => text.startsWith(start)));
+      const span = document.createElement("span");
+      span.className = isComment ? "tok-comment"
+        : /^["'`]/.test(text) ? "tok-string"
+        : /^\d/.test(text) ? "tok-number"
+        : "tok-keyword";
+      span.textContent = text;
+      fragment.append(span);
+      last = match.index + text.length;
+    }
+    if (last < source.length) fragment.append(document.createTextNode(source.slice(last)));
+    return fragment;
+  }
 
   function renderChatActionCard(action) {
     const card = document.createElement("div");
@@ -2450,25 +2655,28 @@
     const glyph = document.createElement("span");
     glyph.className = "chat-action-glyph";
     glyph.setAttribute("aria-hidden", "true");
-    glyph.textContent = action.ok ? "\u2713" : "\u00d7";
+    glyph.appendChild(chatIcon(CHAT_ACTION_ICONS[action.tool] || "terminal"));
     card.appendChild(glyph);
 
     const body = document.createElement("div");
     body.className = "chat-action-body";
 
-    const label = document.createElement("span");
-    label.className = "chat-action-label";
-    label.textContent = action.ok
-      ? (CHAT_ACTION_LABELS[action.tool] || "Done")
-      : "Not done";
-    body.appendChild(label);
+    // A failure says what went wrong instead of repeating its status: the glyph
+    // in the gutter already says it did not run.
+    const verb = action.ok ? (CHAT_ACTION_LABELS[action.tool] || "Done") : "";
+    if (verb) {
+      const label = document.createElement("span");
+      label.className = "chat-action-label";
+      label.textContent = verb;
+      body.appendChild(label);
+    }
 
-    // The label already says what happened, so the text is the name alone.
-    // Rendering the whole summary put the sentence there too and the card read
-    // "Created folder created folder C:\\...\sasa".
+    // A step that names a path shows only the verb and the path: the tail of the
+    // path already is the file name. Rendering the summary as well made the row
+    // read "Created folder created folder C:\...\sasa".
     const summary = (action.summary || "").trim();
     const ok = action.ok && !!action.target;
-    const name = ok ? action.target.split(/[\\/]/).filter(Boolean).pop() || "" : summary;
+    const name = ok ? "" : summary;
     if (name) {
       const text = document.createElement("span");
       text.className = "chat-action-text";
@@ -2477,8 +2685,8 @@
     }
     card.appendChild(body);
 
-    // The path, dimmed and truncated from the left so the useful end stays
-    // visible. Skipped when the text above already is the whole answer.
+    // The path is the tail of the line, cut from the start so the file name
+    // survives. It carries the full text in its title.
     if (ok) {
       const target = document.createElement("code");
       target.className = "chat-action-target";
@@ -2835,7 +3043,6 @@
     if (!reuseUserTurn) clearChatContextSelection();
     saveChatTitle(); persistChat();
     renderChatMessages();
-    chatLiveStatus.textContent = "Thinking…";
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
     post("chatSend", { ...request, message, history, attachments, includePcInfo });
@@ -3645,7 +3852,7 @@
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") {
         if (state.chatDelta.text) last.content += state.chatDelta.text;
-        if (state.chatDelta.status !== undefined) chatLiveStatus.textContent = state.chatDelta.status || "";
+        if (state.chatDelta.status !== undefined) setChatLiveStatus(state.chatDelta.status || "");
         if (state.chatDelta.text && !chatRenderFrame) {
           const request = chatActiveRequest;
           chatRenderFrame = requestAnimationFrame(() => {

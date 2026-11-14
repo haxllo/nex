@@ -433,6 +433,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     let mut settings_ui: Option<(tao::window::Window, wry::WebView)> = None;
     let mut progress_window: Option<super::indexing_progress::ProgressWindow> = None;
     let mut progress_window_gen: u64 = 0;
+    // The progress window is shown without activation, but Windows still hands
+    // it the foreground for one beat. The focus handler needs to know that so
+    // it does not read the hand-off as the user dismissing the overlay.
+    let mut progress_window_visible = false;
     let mut settings_window_id: Option<tao::window::WindowId> = None;
     let last_settings_snapshot: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1699,6 +1703,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             }
                             if let Some(window) = &progress_window {
                                 window.show(progress);
+                                progress_window_visible = true;
                                 crate::logging::info(&format!(
                                     "[nex] indexing_progress_window shown discovered={} elapsed_ms={}",
                                     progress.discovered, progress.elapsed_ms
@@ -1729,6 +1734,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         ProgressWindowAction::Close => {
                             if let Some(window) = &progress_window {
                                 window.hide();
+                                progress_window_visible = false;
                             }
                         }
                     }
@@ -1737,6 +1743,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     if generation == progress_window_gen {
                         if let Some(window) = &progress_window {
                             window.hide();
+                            progress_window_visible = false;
                         }
                     }
                 }
@@ -1909,6 +1916,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     was_focused = true;
                 }
                 if !focused {
+                    // The progress window is shown without activation, but
+                    // Windows still hands it the foreground for one beat. Treat
+                    // that as the hand-off it is: take the foreground back and
+                    // leave the restore stack and the hide alone. A real
+                    // dismissal arrives as an outside click instead.
+                    let foreground = unsafe { GetForegroundWindow() };
+                    let progress_took_focus = progress_window_visible
+                        && progress_window
+                            .as_ref()
+                            .is_some_and(|window| window.hwnd() == foreground);
+                    if progress_took_focus
+                        && state.lock().map(|s| s.visible).unwrap_or(false)
+                    {
+                        crate::runtime::log_info(
+                            "[nex::debug] Focused(false): indexing window took the foreground; keeping the overlay",
+                        );
+                        request_foreground(hwnd);
+                        focus_input(&webview);
+                        return;
+                    }
                     // Track the window that took foreground for the restore
                     // stack (newest-live-first foreground history). Filtered to
                     // foreign live non-shell windows inside.

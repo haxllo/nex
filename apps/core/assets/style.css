@@ -3704,6 +3704,21 @@ html[data-native-material="acrylic"] .chat-model-options {
 .chat-menu-scrim { position: absolute; z-index: 5; inset: 0; }
 .chat-menu-scrim[hidden] { display: none !important; }
 
+/* A chat popup must sit on the glass, not on the transcript. The page's own
+   DWM glass lives behind the transparent WebView (`html.glass-native #panel`
+   paints nothing), while the transcript is page content painted on top of it.
+   A popup's backdrop-filter can only sample what is painted in the page behind
+   it - the transcript - never the glass behind the window, so any painted
+   transcript reads through the blur at every fill short of fully opaque, and
+   fully opaque is the flat sheet this feature replaced. The only way to show
+   the background glass through the popup is to stop painting the transcript
+   while a popup is open. `visibility`, not `display`: the scroll element keeps
+   its layout and scroll position so closing the sheet restores the view. */
+#panel.chat-settings-open #chat-scroll,
+#panel.chat-history-open #chat-scroll {
+  visibility: hidden;
+}
+
 /* ── history ────────────────────────────────────────────────────────────────
    Anchored under the cluster that opens it. */
 .chat-history {

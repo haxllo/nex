@@ -2738,7 +2738,7 @@ html.glass-native .chat-composer-shell {
      as a hint of surface, not a slab. Input text stays readable over a
      normal desktop; over a bright wallpaper the fill thins out, so the blur
      carries the readability. */
-  background: color-mix(in srgb, var(--bg-opaque) 25%, transparent);
+  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
   backdrop-filter: blur(18px) saturate(1.1);
 }
@@ -3469,12 +3469,12 @@ html.glass-native .chat-composer-shell {
 /* A sheet floating over the transcript is frosted, not sheet-of-paper.
    It was forced opaque under acrylic, which made it the one chat surface that
    ignored the material; and because it had no glass rule at all, native glass
-   left it opaque too. 55% is the weight the footer chips already use over the
-   refracted layer - enough fill that text keeps its contrast, transparent
-   enough that the material reads as glass. */
+   left it opaque too. The fill is kept light (20%): the transcript is
+   unpainted while this sheet is open, so there is nothing behind it that
+   needs masking - the sheet reads as glass, and the blur does the rest. */
 html[data-native-material="acrylic"] .chat-settings,
 html.glass-native .chat-settings {
-  background: color-mix(in srgb, var(--bg-opaque) 72%, transparent);
+  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(1.3);
   backdrop-filter: blur(20px) saturate(1.3);
 }
@@ -3742,7 +3742,7 @@ html[data-native-material="acrylic"] .chat-model-options {
 }
 html[data-native-material="acrylic"] .chat-history,
 html.glass-native .chat-history {
-  background: color-mix(in srgb, var(--bg-opaque) 72%, transparent);
+  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(1.3);
   backdrop-filter: blur(20px) saturate(1.3);
 }

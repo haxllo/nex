@@ -80,6 +80,12 @@
   --danger: #e06a6a;
   --danger-wash: rgba(224, 106, 106, 0.09);
   --danger-border: rgba(224, 106, 106, 0.30);
+  /* Code is the one place with colour: four muted hues, no primary. */
+  /* AA-checked against the code plate: 11px mono needs 4.5:1. */
+  --code-comment: #b3b3b3;
+  --code-keyword: #c0aee2;
+  --code-string: #a6c992;
+  --code-number: #e0b87f;
   --font-mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
 }
 
@@ -103,6 +109,10 @@ html[data-theme="light"] {
   --danger: #b4342f;
   --danger-wash: rgba(180, 52, 47, 0.07);
   --danger-border: rgba(180, 52, 47, 0.24);
+  --code-comment: #565656;
+  --code-keyword: #5b4a86;
+  --code-string: #2b5f34;
+  --code-number: #744c0e;
   --hover: rgba(0, 0, 0, 0.035);
   --sel: rgba(0, 0, 0, 0.06);
   --sel-border: rgba(0, 0, 0, 0.04);
@@ -3119,6 +3129,10 @@ html.glass-native .chat-composer-shell {
 /* The code box scrolls, so it takes focus; ring on the box, not on an invisible
    inner element. */
 .chat-code-block pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.chat-code-block .tok-comment { color: var(--code-comment); font-style: italic; }
+.chat-code-block .tok-keyword { color: var(--code-keyword); }
+.chat-code-block .tok-string { color: var(--code-string); }
+.chat-code-block .tok-number { color: var(--code-number); }
 .chat-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
 .chat-table { border-collapse: collapse; font-size: 11px; }
 .chat-table th { color: var(--text-dim); font-weight: 600; }

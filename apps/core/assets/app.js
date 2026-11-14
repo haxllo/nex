@@ -2127,7 +2127,7 @@
         pre.tabIndex = 0;
         pre.setAttribute("aria-label", language + " code");
         const code = document.createElement("code");
-        code.textContent = source.join("\n");
+        code.appendChild(highlightChatCode(source.join("\n"), language));
         pre.appendChild(code);
         block.append(head, pre); target.appendChild(block); continue;
       }
@@ -2581,6 +2581,73 @@
     return svg;
   }
 
+  // A tokeniser, not a parser. Comments, strings, numbers and keywords are
+  // enough to make a snippet readable, and it only ever builds text nodes, so
+  // the source cannot turn into markup.
+  const CHAT_CODE_SYNTAX = {
+    clike: {
+      line: ["//"],
+      block: ["/*", "*/"],
+      keywords: "as async await break case catch class const continue default delete do else enum export extends false finally fn for from function if impl import in instanceof interface let loop match mod mut new null or pub readonly ref return self static struct super switch this throw trait true try type typeof undefined unsafe use var void where while",
+    },
+    python: {
+      line: ["#"],
+      keywords: "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield",
+    },
+    shell: {
+      line: ["#"],
+      keywords: "case do done elif else esac export fi for function if in local return set then until while echo exit",
+    },
+    json: {
+      keywords: "true false null",
+    },
+    css: {
+      block: ["/*", "*/"],
+    },
+  };
+  const CHAT_CODE_LANGUAGES = {
+    js: "clike", javascript: "clike", ts: "clike", typescript: "clike", jsx: "clike", tsx: "clike",
+    rs: "clike", rust: "clike", go: "clike", java: "clike", c: "clike", cpp: "clike", cs: "clike",
+    swift: "clike", kt: "clike", toml: "clike", ini: "clike",
+    py: "python", python: "python",
+    sh: "shell", bash: "shell", zsh: "shell", ps1: "shell", powershell: "shell", bat: "shell", cmd: "shell",
+    json: "json", json5: "json",
+    css: "css",
+  };
+
+  function highlightChatCode(source, language) {
+    const fragment = document.createDocumentFragment();
+    const syntax = CHAT_CODE_SYNTAX[CHAT_CODE_LANGUAGES[String(language).toLowerCase()]];
+    if (!syntax) { fragment.append(document.createTextNode(source)); return fragment; }
+    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const parts = [];
+    if (syntax.block) parts.push(escape(syntax.block[0]) + "[\\s\\S]*?" + escape(syntax.block[1]));
+    if (syntax.line) parts.push("(?:" + syntax.line.map((start) => escape(start) + "[^\\n]*").join("|") + ")");
+    parts.push('"(?:\\\\.|[^"\\\\\\n])*"', "'(?:\\\\.|[^'\\\\\\n])*'", "`(?:\\\\.|[^`\\\\])*`");
+    parts.push("\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b");
+    if (syntax.keywords) parts.push("\\b(?:" + syntax.keywords.trim().split(/\s+/).join("|") + ")\\b");
+    const pattern = new RegExp(parts.join("|"), "g");
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(source))) {
+      const text = match[0];
+      if (!text) { pattern.lastIndex++; continue; }
+      if (match.index > last) fragment.append(document.createTextNode(source.slice(last, match.index)));
+      const isComment = (syntax.block && text.startsWith(syntax.block[0]))
+        || (syntax.line && syntax.line.some((start) => text.startsWith(start)));
+      const span = document.createElement("span");
+      span.className = isComment ? "tok-comment"
+        : /^["'`]/.test(text) ? "tok-string"
+        : /^\d/.test(text) ? "tok-number"
+        : "tok-keyword";
+      span.textContent = text;
+      fragment.append(span);
+      last = match.index + text.length;
+    }
+    if (last < source.length) fragment.append(document.createTextNode(source.slice(last)));
+    return fragment;
+  }
+
   function renderChatActionCard(action) {
     const card = document.createElement("div");
     card.className = "chat-action" + (action.ok ? " ok" : " failed");
@@ -2976,9 +3043,6 @@
     if (!reuseUserTurn) clearChatContextSelection();
     saveChatTitle(); persistChat();
     renderChatMessages();
-    chatLiveStatus.textContent = "Thinking…";
-    // The same text is a trace row under the answer, not just a live region.
-    setChatLiveStatus("Thinking…");
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
     post("chatSend", { ...request, message, history, attachments, includePcInfo });

@@ -46,6 +46,29 @@ pub fn has_uninstall_intent(query: &str) -> bool {
     extract_uninstall_search_term(query).is_some()
 }
 
+/// Resolve an installed app from the title the caller already has. The result
+/// context menu knows which app the user picked, so its title must not go
+/// through `search_uninstall_actions`, which only accepts a typed
+/// "uninstall <app>" query and returns nothing for a bare name.
+pub fn search_uninstall_actions_for_title(title: &str, limit: usize) -> Vec<SearchItem> {
+    let entries = match load_cached_entries(false) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    title_actions_with_entries(title, limit, &entries)
+}
+
+fn title_actions_with_entries(
+    title: &str,
+    limit: usize,
+    entries: &[UninstallEntry],
+) -> Vec<SearchItem> {
+    if limit == 0 || title.trim().is_empty() {
+        return Vec::new();
+    }
+    search_uninstall_actions_with_entries(title.trim(), limit, entries)
+}
+
 pub fn execute_uninstall_action(action_id: &str) -> Result<(), String> {
     let token = action_id
         .strip_prefix(ACTION_UNINSTALL_PREFIX)
@@ -1061,8 +1084,39 @@ fn to_wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::{
         extract_uninstall_search_term, rewrite_msiexec_install_to_uninstall,
-        search_uninstall_actions_with_entries, split_unquoted_path_with_extension, UninstallEntry,
+        search_uninstall_actions_with_entries, split_unquoted_path_with_extension,
+        title_actions_with_entries, UninstallEntry,
     };
+
+    fn spotify_entry() -> UninstallEntry {
+        UninstallEntry {
+            token: "spotify".to_string(),
+            display_name: "Spotify".to_string(),
+            publisher: "Spotify AB".to_string(),
+            uninstall_command: "C:\\Program Files\\Spotify\\uninstall.exe".to_string(),
+            fallback_uninstall_command: None,
+            display_icon: String::new(),
+            install_location: String::new(),
+        }
+    }
+
+    #[test]
+    fn resolves_a_context_menu_title_that_is_not_an_uninstall_query() {
+        let entries = [spotify_entry()];
+        // The context menu only has the row title. The typed-query parser
+        // refuses a bare name, which is why the button used to find nothing.
+        assert_eq!(extract_uninstall_search_term("Spotify"), None);
+        let actions = title_actions_with_entries("Spotify", 5, &entries);
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].id.ends_with("spotify"));
+    }
+
+    #[test]
+    fn an_unknown_title_resolves_to_no_action() {
+        let entries = [spotify_entry()];
+        assert!(title_actions_with_entries("Not Installed Here", 5, &entries).is_empty());
+        assert!(title_actions_with_entries("   ", 5, &entries).is_empty());
+    }
 
     #[test]
     fn parses_uninstall_intent_prefixes() {

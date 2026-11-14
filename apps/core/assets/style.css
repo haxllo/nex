@@ -2466,9 +2466,19 @@ html.glass-fading {
 
 /* Curved lighting, inner shade and fine dither now live in D2D beneath
    the page. No second, stationary specular layer over the text. */
-html.glass-native #panel::before,
-html.glass-native #panel::after {
+html.glass-native #panel::before {
   content: none;
+}
+
+/* 1px border matching opaque themes. The border follows the clip-path
+   since it's drawn on the same element. */
+html.glass-native #panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius);
+  pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

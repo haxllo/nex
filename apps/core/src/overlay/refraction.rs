@@ -187,11 +187,10 @@ const SLAB_DECAY: f32 = 35.0;
 /// not enough: a vertex can round inward by up to 0.5 px and the chord
 /// between samples sags below the true arc, letting the hard edge cut the
 /// page's semi-transparent AA ramp -> pixels poking out at the corners.
-/// 3 px leaves the region clear of the ~1 px AA band even after worst-case
-/// integer rounding, so the visible silhouette stays the CSS clip-path's
-/// smooth arc. (CIQ-169)
-const SILHOUETTE_GROW_PX: f64 = 3.0;
-pub(crate) const CORNER_RADIUS: f32 = 12.0;
+/// 2 px leaves the region clear of the ~1 px AA band even after worst-case
+/// integer rounding while avoiding the black line artifact that 3 px causes.
+const SILHOUETTE_GROW_PX: f64 = 2.0;
+pub(crate) const CORNER_RADIUS: f32 = 8.0;
 /// Statistics downsample size: enough for the 4x4 tint grid and a stable
 /// luminance average, small enough that the readback is noise.
 const SAMPLE_W: u32 = 16;

@@ -3301,6 +3301,14 @@ fn sync_window_frame_style(
         // skip restoring it. The WebView child is separate and may still
         // carry an opaque-mode clip, so clear only that child region.
         clear_webview_window_region(window);
+        // tao re-applies the caption frame on the first set_visible (its
+        // window_state sync forces WS_CAPTION), and nothing after that ever
+        // re-strips it. DWM then composes a rectangular frame with square
+        // corners outside the rounded glass silhouette — the ghosted
+        // straight border that keeps reaching the old corner. Re-strip the
+        // caption bits here so every show/resize leaves the host
+        // decoration-less (strip_caption_frame no-ops when already clean).
+        strip_caption_frame(hwnd);
         false
     } else {
         sync_opaque_window_region(window, opaque_panel);
@@ -3460,6 +3468,11 @@ fn strip_caption_frame(hwnd: HWND) {
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let stripped = (style & !(WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX))
             | WS_POPUP;
+        if stripped == style {
+            // Already decoration-less: no frame to remove. Avoid the
+            // SetWindowPos(FRAMECHANGED) churn on every frame sync.
+            return;
+        }
         SetWindowLongW(hwnd, GWL_STYLE, stripped as i32);
         let _ = SetWindowPos(
             hwnd,

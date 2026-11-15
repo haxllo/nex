@@ -2503,6 +2503,7 @@
     create_folder: "Created folder",
     create_file: "Created file",
     read_file: "Read",
+    search_paths: "Searched",
     move_path: "Moved",
     copy_path: "Copied",
     // Delete is the only action here that cannot be taken back, so it gets its
@@ -2518,6 +2519,7 @@
     open: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     link: '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
     read: '<path d="M12 7v14"/><path d="M3 5h6a3 3 0 0 1 3 2 3 3 0 0 1 3-2h6v14h-6a3 3 0 0 0-3 2 3 3 0 0 0-3-2H3z"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>',
     copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
     delete: '<path d="M3 6h18"/><path d="M9 6V4h6v2"/><path d="M6 6l1 14h10l1-14"/>',
     terminal: '<path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>',
@@ -2531,6 +2533,7 @@
     create_folder: "folder",
     create_file: "file",
     read_file: "read",
+    search_paths: "search",
     move_path: "move",
     copy_path: "copy",
     delete_path: "delete",

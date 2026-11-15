@@ -1500,7 +1500,10 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the text of a file on this PC, so you can answer questions about its contents. One call returns one page: 2000 lines or 50 KB, whichever comes first. The page says which lines it showed; for a longer file call again with offset, and never claim you read a whole file from one page.",
+                // No ";" anywhere in a description: the capability sentence
+                // joins descriptions with "; ", so one here splits this tool
+                // into two entries that the prompt audit cannot resolve.
+                "description": "Read the text of a file on this PC, so you can answer questions about its contents. One call returns one page: 2000 lines or 50 KB, whichever comes first. The page says which lines it showed. For a longer file call again with offset, and never claim you read a whole file from one page.",
                 "parameters": {
                     "type": "object",
                     "properties": {

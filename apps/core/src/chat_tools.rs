@@ -471,11 +471,54 @@ impl RawToolCall {
                     .get("slow")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                if is_recursive_drive_scan(&command) {
+                    return Err(ToolError::IllegalName {
+                        tool: "run_command",
+                        reason: "a recursive scan from a drive root is refused: it takes minutes and its output is cut off anyway. Name the folder to search, or a path from the conversation, instead".to_string(),
+                    });
+                }
                 Ok(ChatTool::RunCommand { command, slow })
             }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
     }
+}
+
+/// Whether a command recurses from a whole drive rather than a folder.
+///
+/// A live log had `Get-ChildItem -Path 'G:\' -Directory -Recurse` spend 43
+/// seconds to rediscover a path the previous turn had created, then hand back
+/// 16 KB of truncated listing. The history fix means the model rarely needs
+/// this, but "rarely" is not "cannot": one model that ignores the prompt costs
+/// the user a minute of a blocked request and thousands of tokens of output
+/// that is cut off mid-tree. The refusal names the folder-shaped alternative.
+///
+/// Only `-Recurse` and a drive-letter root are matched, which is what the tool
+/// is asked for here. `C:\Windows` and every folder path stay allowed.
+fn is_recursive_drive_scan(command: &str) -> bool {
+    if !command.to_ascii_lowercase().contains("-recurse") {
+        return false;
+    }
+    let chars: Vec<char> = command.chars().collect();
+    for index in 0..chars.len().saturating_sub(2) {
+        if !chars[index].is_ascii_alphabetic()
+            || chars[index + 1] != ':'
+            || !matches!(chars[index + 2], '\\' | '/')
+        {
+            continue;
+        }
+        // A drive letter inside another token (a URL, a variable name) is not
+        // a path; a root is one that ends at the separator.
+        if index > 0 && (chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_') {
+            continue;
+        }
+        match chars.get(index + 3) {
+            None
+            | Some('\'' | '"' | ' ' | '\t' | ')' | ']' | '|' | ';' | '&' | '*' | ',') => return true,
+            Some(_) => {}
+        }
+    }
+    false
 }
 
 /// Read and validate the optional `parent` argument shared by the create tools.
@@ -1371,7 +1414,7 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "The complete PowerShell command line, such as (Get-PSDrive C).Free/1GB. One command per call. Return the answer, never the evidence: if the user asks how many, print the count alone, not the count plus every path - piping a million paths through only to count them takes minutes and the paths are then cut off anyway. Output is cut at 16 KB, keeping the start and the end. If it must run in a particular folder, begin it with cd 'C:\\path';"},
-                        "slow": {"type": "boolean", "description": "Set true only for a command that is known to take minutes, such as scanning a whole drive. Commands are stopped after 30 seconds unless this is true, which allows 5 minutes; the confirmation card shows which. Prefer a fast command that aggregates (a count, a total) over a slow one that lists."}
+                        "slow": {"type": "boolean", "description": "Set true only for a command that is known to take minutes, such as searching a large folder tree. Commands are stopped after 30 seconds unless this is true, which allows 5 minutes; the confirmation card shows which. Prefer a fast command that aggregates (a count, a total) over a slow one that lists. A recursive scan from a drive root (Get-ChildItem 'G:\\' -Recurse) is refused: name the folder to search instead."}
                     },
                     "required": ["command"]
                 }
@@ -3724,6 +3767,50 @@ mod tests {
         }
     }
 
+    /// Live log: a follow-up became `Get-ChildItem -Path 'G:\' -Directory
+    /// -Recurse`, which ran for 43 seconds and handed back 16 KB of listing
+    /// cut off mid-tree. A path shaped like a folder is never refused.
+    #[test]
+    fn a_recursive_scan_from_a_drive_root_is_refused() {
+        for bad in [
+            "Get-ChildItem -Path 'G:\\' -Directory -Recurse -ErrorAction SilentlyContinue",
+            "Get-ChildItem G:\\ -Recurse",
+            "Get-ChildItem 'C:/' -Recurse",
+            "dir D:\\* -Recurse",
+        ] {
+            let err = raw("run_command", serde_json::json!({ "command": bad }))
+                .validate()
+                .unwrap_err();
+            assert!(
+                matches!(err, ToolError::IllegalName { .. }),
+                "{bad:?} should be refused, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("Name the folder"),
+                "the refusal must say what to do instead: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recursive_scan_of_a_named_folder_is_allowed() {
+        for good in [
+            "Get-ChildItem C:\\Windows -Recurse",
+            "Get-ChildItem -Path 'G:\\Projects\\nex' -Recurse",
+            "Get-ChildItem 'G:\\Projects' -Recurse | Select-Object -First 20",
+            // Not recursive: a one-level listing of a drive is a normal question.
+            "Get-ChildItem G:\\ -Directory",
+            "Get-Content C:\\Users\\me\\notes.txt",
+        ] {
+            assert!(
+                raw("run_command", serde_json::json!({ "command": good }))
+                    .validate()
+                    .is_ok(),
+                "{good:?} should be allowed"
+            );
+        }
+    }
+
     #[test]
     fn the_model_cannot_set_an_arbitrary_timeout() {
         // Live failure this pins: asked to "run a command that sleeps for 120
@@ -3779,7 +3866,7 @@ mod tests {
 
         let slow = raw(
             "run_command",
-            serde_json::json!({ "command": "Get-ChildItem C:\\ -Recurse", "slow": true }),
+            serde_json::json!({ "command": "Get-ChildItem C:\\Windows -Recurse", "slow": true }),
         )
         .validate()
         .unwrap();

@@ -3293,6 +3293,12 @@ fn sync_window_frame_style(
     suppress_border: bool,
 ) {
     let hwnd = window.hwnd() as HWND;
+    if opaque_panel {
+        // Glass leaves the host decoration-less; DWM then puts its rounded
+        // frame on the outer window rather than the panel. Put the bits back
+        // before the attributes below so this matches a fresh opaque start.
+        restore_caption_frame(hwnd);
+    }
     let immersive_dark = i32::from(dark);
     let rounded_corners = if glass_native && !opaque_panel {
         windows_sys::Win32::Graphics::Dwm::DWMWCP_DONOTROUND
@@ -3505,6 +3511,45 @@ pub(super) fn strip_caption_frame(hwnd: HWND) {
             return;
         }
         SetWindowLongW(hwnd, GWL_STYLE, stripped as i32);
+        let _ = SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Put back the frame tao installs on a shown window. Glass strips it (see
+/// `strip_caption_frame`); an opaque panel needs it, because DWM places its
+/// rounded corner, border and shadow on the window frame, and without the
+/// caption bits that frame is the whole outer window - 8 px outside the panel,
+/// inside the transparent shadow inset - so the ring floats on the wallpaper
+/// around a square panel corner. A fresh opaque start has the bits (tao
+/// re-adds them on the first `set_visible`); a live switch from glass only
+/// needs the same state re-applied.
+pub(super) fn restore_caption_frame(hwnd: HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongW, SetWindowPos, SetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU,
+    };
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let restored = (style & !WS_POPUP)
+            | WS_CAPTION
+            | WS_SYSMENU
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX;
+        if restored == style {
+            // Already framed: no frame to put back, and no
+            // SetWindowPos(FRAMECHANGED) churn on every frame sync.
+            return;
+        }
+        SetWindowLongW(hwnd, GWL_STYLE, restored as i32);
         let _ = SetWindowPos(
             hwnd,
             std::ptr::null_mut(),

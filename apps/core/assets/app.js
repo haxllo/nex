@@ -2325,12 +2325,13 @@
         chatMessagesEl.appendChild(article);
         // The running line belongs to the answer being written, so it is drawn
         // with it and survives the re-render that a step triggers. A stopped
-        // answer has to say so after the request is gone: otherwise the turn
-        // just stops mid-sentence with nothing to explain it.
-        if (message === chatMessages[chatMessages.length - 1] && message.role === "assistant") {
+        // answer has to say so after the request is gone, so the mark lives on
+        // the message and is drawn wherever that message ends up.
+        if (message.role === "assistant") {
           if (message.stopped) {
             article.appendChild(renderChatTraceLine("Response stopped", true));
-          } else if (chatActiveRequest && chatLiveStatus.textContent.trim()) {
+          } else if (message === chatMessages[chatMessages.length - 1] && chatActiveRequest
+            && chatLiveStatus.textContent.trim()) {
             article.appendChild(renderChatTraceLine(chatLiveStatus.textContent.trim()));
           }
         }
@@ -3236,7 +3237,12 @@
   // outlives the request and the reload, where a composer status does not.
   function markChatStopped() {
     const last = chatMessages[chatMessages.length - 1];
-    if (last && last.role === "assistant") last.stopped = true;
+    if (last && last.role === "assistant") {
+      last.stopped = true;
+      // The turn is over. Leaving it set shows the waiting dots on the old
+      // answer again as soon as the next request sets chatActiveRequest.
+      delete last.incomplete;
+    }
   }
 
   function stopChatRequest() {
@@ -3284,6 +3290,9 @@
     const assistant = { id: "m-" + Date.now() + "-a", role: "assistant", content: "", incomplete: true };
     chatMessages.push(assistant);
     if (!reuseUserTurn) clearChatContextSelection();
+    // A status left over from a stopped turn would be drawn as this answer's
+    // own line, which reads as the new reply having stopped too.
+    chatLiveStatus.textContent = "";
     saveChatTitle(); persistChat();
     renderChatMessages();
     chatNotice.textContent = ""; chatNotice.classList.remove("error");

@@ -1,18 +1,16 @@
 <div align="center">
 
-<img src="https://cdn.nexapp.live/512.png" alt="Nex" height="80" />
+<img src="https://cdn.nexapp.live/nex.png" alt="UI" height="80"/><br>
 
-A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.
 
-[![Platform](https://img.shields.io/badge/Platform-Windows-green)](#)
-[![License](https://img.shields.io/github/license/haxllo/nex?color=yellow)](LICENSE)
-[![GitHub](https://img.shields.io/badge/GitHub-haxllo/nex-blue?logo=github)](https://github.com/haxllo/nex)
-[![Built with Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
+A keyboard-first launcher for Windows. Press a global hotkey to summon a floating search bar and quickly find and launch applications, files, folders, and custom actions.<br><br>
 
-![Stars](https://img.shields.io/github/stars/haxllo/nex?color=white)
-
-<img src="https://cdn.nexapp.live/nobg.png" alt="UI" />
-
+  <a href="https://github.com/haxllo/nex"><img src="https://www.shieldcn.dev/github/stars/haxllo/nex.svg?variant=secondary&size=xs&theme=zinc" alt="GitHub Stars" /></a>
+  <a href="https://x.com/haxllo_"><img src="https://www.shieldcn.dev/x/follow/haxllo_.svg?variant=branded&size=xs&theme=zinc" alt="X Follow" /></a>
+  <a href="https://github.com/haxllo/nex/actions"><img src="https://www.shieldcn.dev/github/ci/haxllo/nex.svg?variant=secondary&size=xs&theme=zinc" alt="CI" /></a><br>
+  <a href="https://github.com/haxllo/nex/blob/master/LICENSE"><img src="https://www.shieldcn.dev/github/license/haxllo/nex.svg?variant=secondary&size=xs&theme=zinc" alt="MIT License"/></a>
+  <a href="https://github.com/haxllo/nex/actions"><img src="https://www.shieldcn.dev/github/merged-prs/haxllo/nex.svg?variant=secondary&size=xs&theme=zinc" alt="Merged PR"/></a>
+  <a href="https://www.rust-lang.org/"><img src="https://www.shieldcn.dev/badge/-Rust-000000.svg?logo=rust&variant=secondary&size=xs&theme=zinc" alt="Rust"/></a>
 </div>
 
 ## Features

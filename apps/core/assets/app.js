@@ -3512,8 +3512,11 @@
   function fetchChatModels(showMenu = true) {
     if (chatModelsLoading) return;
     if (chatProviderInput.value === "codex" && !chatConfig.accountConnected) {
-      chatNotice.textContent = "Connect your ChatGPT account before loading models.";
-      chatNotice.classList.add("error");
+      // The model menu already says this in its empty state. Writing it to the
+      // footer as an error made a plain provider switch read as a failure: the
+      // draft provider is codex while accountConnected still describes the
+      // *saved* provider, so the line appeared even for a connected account
+      // and stayed until Save round-tripped chatConfig.
       renderChatModelOptions(showMenu);
       return;
     }
@@ -3617,6 +3620,13 @@
   chatProviderInput.addEventListener("change", () => {
     chatSettingsDirty = true;
     closeChatProviderOptions();
+    // A notice from the previous provider describes settings that no longer
+    // apply. "Connect your ChatGPT account…" or a failed model load for the
+    // API provider outlived the switch and only Save cleared it.
+    chatNotice.textContent = "";
+    chatNotice.classList.remove("error");
+    window.clearTimeout(chatNoticeTimer);
+    setChatModelsLoading(false);
     chatModels = [];
     chatModelsProvider = "";
     chatModelInput.value = chatProviderInput.value === "codex"
@@ -3625,7 +3635,12 @@
     syncChatModelChoice();
     chatConfig.provider = chatProviderInput.value;
     chatConfig.model = chatModelInput.value;
-    syncChatConfig(); fetchChatModels(false); postChatResize();
+    syncChatConfig();
+    // accountConnected describes the saved provider, so the selection change
+    // needs a fresh server frame before the guard above is trustworthy.
+    post("chatState");
+    fetchChatModels(false);
+    postChatResize();
   });
   chatProviderButton.addEventListener("click", () => {
     const open = chatProviderOptions.hidden;

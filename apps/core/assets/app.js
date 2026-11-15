@@ -2217,9 +2217,9 @@
   // What the run is doing, as a line in the transcript instead of a status that
   // nothing renders. The composer's live region stays in step for screen
   // readers; the line is the visible half.
-  function renderChatTraceLine(text) {
+  function renderChatTraceLine(text, stopped = false) {
     const line = document.createElement("div");
-    line.className = "chat-trace";
+    line.className = stopped ? "chat-trace chat-trace-stopped" : "chat-trace";
     line.setAttribute("role", "status");
     const icon = document.createElement("span");
     icon.className = "chat-trace-icon";
@@ -2324,10 +2324,15 @@
         }
         chatMessagesEl.appendChild(article);
         // The running line belongs to the answer being written, so it is drawn
-        // with it and survives the re-render that a step triggers.
-        if (message === chatMessages[chatMessages.length - 1] && message.role === "assistant"
-          && chatActiveRequest && chatLiveStatus.textContent.trim()) {
-          article.appendChild(renderChatTraceLine(chatLiveStatus.textContent.trim()));
+        // with it and survives the re-render that a step triggers. A stopped
+        // answer has to say so after the request is gone: otherwise the turn
+        // just stops mid-sentence with nothing to explain it.
+        if (message === chatMessages[chatMessages.length - 1] && message.role === "assistant") {
+          if (message.stopped) {
+            article.appendChild(renderChatTraceLine("Response stopped", true));
+          } else if (chatActiveRequest && chatLiveStatus.textContent.trim()) {
+            article.appendChild(renderChatTraceLine(chatLiveStatus.textContent.trim()));
+          }
         }
         if (message.role === "assistant" && message.content && !message.error) {
           const actions = document.createElement("div"); actions.className = "chat-message-actions";
@@ -3227,9 +3232,17 @@
       && (state.conversationId === undefined || state.conversationId === active.conversationId);
   }
 
+  // A stop leaves no card and no token, so mark the answer itself: the mark
+  // outlives the request and the reload, where a composer status does not.
+  function markChatStopped() {
+    const last = chatMessages[chatMessages.length - 1];
+    if (last && last.role === "assistant") last.stopped = true;
+  }
+
   function stopChatRequest() {
     invalidateChatRequest();
     chatLiveStatus.textContent = "Response stopped";
+    markChatStopped();
     clearChatRunningAction();
     updateChatStreamingState(false);
     renderChatMessages();
@@ -4124,6 +4137,7 @@
     if (state.chatCancelled && requestMatches) {
       chatActiveRequest = null;
       chatLiveStatus.textContent = "Response stopped";
+      markChatStopped();
       // A stopped command is not still running: the loop stopped reading, and
       // the card that would have replaced this row will not arrive.
       clearChatRunningAction();

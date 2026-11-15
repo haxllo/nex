@@ -1768,7 +1768,11 @@
       conversation.model = chatConfig.model;
     }
     chatConversations = chatConversations.slice(0, 30);
-    try { localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatConversations)); } catch (_) {}
+    try {
+      // A preview is a copy of content that already sits on disk, so it is not
+      // worth the storage: a long file per step would fill the history quota.
+      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatConversations, (key, value) => key === "preview" ? undefined : value));
+    } catch (_) {}
   }
 
   function newChatConversation() {
@@ -2087,49 +2091,8 @@
         i++;
         while (i < lines.length && !lines[i].trim().startsWith("```")) source.push(lines[i++]);
         if (i < lines.length) i++;
-        const block = document.createElement("div"); block.className = "chat-code-block";
-        const head = document.createElement("div"); head.className = "chat-code-header";
-        const lang = document.createElement("span"); lang.className = "chat-code-lang"; lang.textContent = language;
-        const copy = document.createElement("button");
-        copy.type = "button";
-        copy.className = "chat-code-copy";
-        copy.setAttribute("aria-label", "Copy code");
-        copy.dataset.tip = "Copy code";
-        copy.appendChild(chatIcon("copy"));
-        // The button carries an icon, so the result has to be spoken: it swaps
-        // to a tick or a cross and the live region says which, then resets.
-        const copyStatus = document.createElement("span");
-        copyStatus.className = "chat-visually-hidden";
-        copyStatus.setAttribute("aria-live", "polite");
-        copy.addEventListener("click", async () => {
-          let name = "copy";
-          let label = "Copy code";
-          try {
-            await navigator.clipboard.writeText(source.join("\n"));
-            name = "check"; label = "Copied";
-          } catch (_) {
-            name = "fail"; label = "Could not copy";
-          }
-          copy.replaceChildren(chatIcon(name));
-          copy.classList.add(name === "check" ? "is-done" : "is-failed");
-          copy.setAttribute("aria-label", label);
-          copyStatus.textContent = label;
-          setTimeout(() => {
-            copy.replaceChildren(chatIcon("copy"));
-            copy.classList.remove("is-done", "is-failed");
-            copy.setAttribute("aria-label", "Copy code");
-            copyStatus.textContent = "";
-          }, 1600);
-        });
-        head.append(lang, copy, copyStatus);
-        const pre = document.createElement("pre");
-        // Scrollable, so the keyboard has to be able to reach and scroll it.
-        pre.tabIndex = 0;
-        pre.setAttribute("aria-label", language + " code");
-        const code = document.createElement("code");
-        code.appendChild(highlightChatCode(source.join("\n"), language));
-        pre.appendChild(code);
-        block.append(head, pre); target.appendChild(block); continue;
+        target.appendChild(renderChatCodeCard(source.join("\n"), language));
+        continue;
       }
       if (i + 1 < lines.length && line.includes("|") && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
         const table = document.createElement("table"); table.className = "chat-table";
@@ -2648,6 +2611,101 @@
     return fragment;
   }
 
+  // One card for any code in the transcript: a fence and a file preview differ
+  // only in the second header button and whether the body starts clamped.
+  function renderChatCodeCard(source, language, options) {
+    const opts = options || {};
+    const block = document.createElement("div");
+    block.className = "chat-code-block" + (opts.className ? " " + opts.className : "");
+    const head = document.createElement("div"); head.className = "chat-code-header";
+    const lang = document.createElement("span"); lang.className = "chat-code-lang"; lang.textContent = language;
+    const tools = document.createElement("div"); tools.className = "chat-code-tools";
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "chat-code-copy";
+    copy.setAttribute("aria-label", "Copy code");
+    copy.dataset.tip = "Copy code";
+    copy.appendChild(chatIcon("copy"));
+    // The button carries an icon, so the result has to be spoken: it swaps to a
+    // tick or a cross and the live region says which, then resets.
+    const copyStatus = document.createElement("span");
+    copyStatus.className = "chat-visually-hidden";
+    copyStatus.setAttribute("aria-live", "polite");
+    copy.addEventListener("click", async () => {
+      let name = "copy";
+      let label = "Copy code";
+      try {
+        await navigator.clipboard.writeText(source);
+        name = "check"; label = "Copied";
+      } catch (_) {
+        name = "fail"; label = "Could not copy";
+      }
+      copy.replaceChildren(chatIcon(name));
+      copy.classList.add(name === "check" ? "is-done" : "is-failed");
+      copy.setAttribute("aria-label", label);
+      copyStatus.textContent = label;
+      setTimeout(() => {
+        copy.replaceChildren(chatIcon("copy"));
+        copy.classList.remove("is-done", "is-failed");
+        copy.setAttribute("aria-label", "Copy code");
+        copyStatus.textContent = "";
+      }, 1600);
+    });
+    tools.appendChild(copy);
+
+    if (opts.onOpen) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "chat-code-copy chat-file-open";
+      open.setAttribute("aria-label", "Open file");
+      open.dataset.tip = "Open file";
+      open.appendChild(chatIcon("open"));
+      open.addEventListener("click", opts.onOpen);
+      tools.appendChild(open);
+    }
+    head.append(lang, tools, copyStatus);
+
+    const pre = document.createElement("pre");
+    // Scrollable, so the keyboard has to be able to reach and scroll it - but a
+    // clamped preview cannot scroll, so it stays out of the tab order until it
+    // is opened.
+    pre.tabIndex = opts.clampLines ? -1 : 0;
+    pre.setAttribute("aria-label", (language || "Code") + " code");
+    const code = document.createElement("code");
+    code.appendChild(highlightChatCode(source, language));
+    pre.appendChild(code);
+    block.append(head, pre);
+
+    if (opts.clampLines) {
+      block.classList.add("is-clamped");
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "chat-file-more";
+      more.textContent = "Show more";
+      more.setAttribute("aria-expanded", "false");
+      more.addEventListener("click", () => {
+        const clamped = block.classList.toggle("is-clamped");
+        more.textContent = clamped ? "Show more" : "Show less";
+        more.setAttribute("aria-expanded", String(!clamped));
+        pre.tabIndex = clamped ? -1 : 0;
+      });
+      block.appendChild(more);
+    }
+    return block;
+  }
+
+  // What the run just wrote, shown where it wrote it. Three lines is the glance;
+  // the extension is the language the tokeniser keys on.
+  function renderChatFilePreview(path, preview) {
+    const extension = ((/\.([A-Za-z0-9]+)$/.exec(path || "") || [])[1] || "file").toLowerCase();
+    return renderChatCodeCard(preview, extension, {
+      className: "chat-file-preview",
+      onOpen: () => post("contextAction", { action: "openpath", title: path, path }),
+      clampLines: preview.split("\n").length > 3 ? 3 : 0,
+    });
+  }
+
   function renderChatActionCard(action) {
     const card = document.createElement("div");
     card.className = "chat-action" + (action.ok ? " ok" : " failed");
@@ -2695,7 +2753,17 @@
       card.appendChild(target);
     }
     card.title = summary;
-    return card;
+    // A created file's result is its content, so it opens under the row as the
+    // same card the answer uses for code. Only a real payload earns the card:
+    // an empty or binary file is already fully described by its row.
+    const preview = action.ok && action.tool === "create_file" && typeof action.preview === "string"
+      ? action.preview
+      : "";
+    if (!preview.trim()) return card;
+    const step = document.createElement("div");
+    step.className = "chat-step";
+    step.append(card, renderChatFilePreview(action.target, preview));
+    return step;
   }
 
   function renderChatPendingAction() {
@@ -3843,6 +3911,7 @@
           target: typeof action.target === "string" ? action.target : "",
           ok: action.ok !== false,
           summary: typeof action.summary === "string" ? action.summary : "",
+          preview: typeof action.preview === "string" ? action.preview : "",
         });
         renderChatMessages();
       }

@@ -1382,6 +1382,14 @@ impl RuntimeWorker {
                     self.overlay.set_status_text("Failed to copy path");
                 }
             }
+            // Opening a file from a transcript card. The card shows the path it
+            // will open, and the user clicked it, so it runs without a prompt.
+            "openpath" => {
+                if path.is_empty() { return; }
+                if let Err(error) = crate::action_executor::launch_path(path) {
+                    self.overlay.set_status_text(&format!("Open error: {error}"));
+                }
+            }
             "uninstall" => {
                 if _title.is_empty() { return; }
                 let items = crate::uninstall_registry::search_uninstall_actions_for_title(_title, 5);

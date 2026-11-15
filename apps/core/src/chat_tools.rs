@@ -80,18 +80,34 @@ pub(crate) enum ChatTool {
     /// Read-only, and the only tool that brings arbitrary file content into
     /// the conversation — which is why its output is delimited as data.
     ReadFile { path: String },
+    /// Change part of an existing file, leaving the rest alone.
+    ///
+    /// `create_file` refuses a path that already exists, so without this the
+    /// only ways to change a file are to rewrite it as a second file or to run
+    /// a command that does an unreviewable bulk write. "Change the heading in
+    /// index.html" is the common request after "create it".
+    ///
+    /// `old_text` must occur exactly once. Editing the first of several matches
+    /// would silently change a spot the user did not mean, so zero or several
+    /// matches are refused with a sentence the model can act on. An empty
+    /// `new_text` deletes the match.
+    EditFile {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
     /// Move or rename. `to` is a whole path, not a name: "rename this to
     /// notes.txt" and "move that into documents" are the same operation with
     /// different destinations, and a name-only field cannot express the second.
     MovePath { path: String, to: String },
     /// Copy, leaving the source in place.
     CopyPath { path: String, to: String },
-    /// Remove a file or folder.
+    /// Remove a file or folder by moving it to the Recycle Bin.
     ///
-    /// The first irreversible tool. `recursive` is explicit rather than
-    /// inferred: a folder delete that quietly removes a tree is a different
-    /// act from removing an empty directory, and the user is entitled to see
-    /// which one they are approving.
+    /// `recursive` is explicit rather than inferred: a folder delete that
+    /// quietly removes a tree is a different act from removing an empty
+    /// directory, and the user is entitled to see which one they are approving.
+    /// It decides the card's wording only; the shell removes either kind.
     DeletePath { path: String, recursive: bool },
     /// A shell command, run through PowerShell as the current user.
     ///
@@ -155,6 +171,7 @@ impl ChatTool {
             Self::CreateFolder { .. } => "create_folder",
             Self::CreateFile { .. } => "create_file",
             Self::ReadFile { .. } => "read_file",
+            Self::EditFile { .. } => "edit_file",
             Self::MovePath { .. } => "move_path",
             Self::CopyPath { .. } => "copy_path",
             Self::DeletePath { .. } => "delete_path",
@@ -172,11 +189,14 @@ impl ChatTool {
             // Reading is the safest thing the loop can do: it changes nothing
             // and reaches nothing outside the machine.
             Self::ReadFile { .. } => Annotations::read_only(),
+            // Editing overwrites bytes that already exist, so it is destructive
+            // in the MCP sense even though the file survives.
+            Self::EditFile { .. } => Annotations::destructive(),
             // Moving and copying change the disk but destroy nothing, so they
             // are destructive in the MCP sense and get a confirmation.
             Self::MovePath { .. } | Self::CopyPath { .. } => Annotations::destructive(),
-            // Delete is the one that cannot be undone. It is annotated the same
-            // way, but the card says so in words; see `PendingAction::of`.
+            // Delete goes to the Recycle Bin, but it still takes the file out
+            // of where it was; the card says where it went.
             Self::DeletePath { .. } => Annotations::destructive(),
             // A command can create, delete or overwrite anything the user can
             // reach, so it is destructive in the strongest sense: it is never
@@ -201,7 +221,8 @@ impl ChatTool {
         match self {
             Self::OpenPath { path }
             | Self::RevealPath { path }
-            | Self::ReadFile { path } => path,
+            | Self::ReadFile { path }
+            | Self::EditFile { path, .. } => path,
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
             Self::MovePath { path, .. }
@@ -370,6 +391,61 @@ impl RawToolCall {
                     });
                 }
                 Ok(ChatTool::ReadFile { path })
+            }
+            "edit_file" => {
+                let path = arg("path")?;
+                // The same destination rules as `read_file`: a write to a
+                // system location is never what the user meant, and a path
+                // that is not a file cannot be edited.
+                let target = std::path::Path::new(&path);
+                if !target.exists() {
+                    return Err(ToolError::MissingPath { path });
+                }
+                if !target.is_file() {
+                    return Err(ToolError::IllegalName {
+                        tool: "edit_file",
+                        reason: "that path is a folder, not a file".to_string(),
+                    });
+                }
+                if is_system_path(target) {
+                    return Err(ToolError::IllegalName {
+                        tool: "edit_file",
+                        reason: "that is a system location".to_string(),
+                    });
+                }
+                // `old_text` is matched against the file exactly as given, so
+                // it is not trimmed: leading indentation is part of the text
+                // the model is naming. `new_text` may be empty (a deletion).
+                let old_text = self
+                    .arguments
+                    .get("old_text")
+                    .and_then(|value| value.as_str())
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+                    .ok_or(ToolError::EmptyArgument {
+                        tool: "edit_file",
+                        field: leak_field("old_text"),
+                    })?;
+                let new_text = self
+                    .arguments
+                    .get("new_text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if old_text.len() + new_text.len() > MAX_WRITE_BYTES {
+                    return Err(ToolError::IllegalName {
+                        tool: "edit_file",
+                        reason: format!(
+                            "that edit is {} bytes; the limit is {MAX_WRITE_BYTES}",
+                            old_text.len() + new_text.len()
+                        ),
+                    });
+                }
+                Ok(ChatTool::EditFile {
+                    path,
+                    old_text,
+                    new_text,
+                })
             }
             "move_path" | "copy_path" => {
                 let path = arg("path")?;
@@ -580,6 +656,7 @@ fn leak_name(name: &str) -> &'static str {
         "create_folder" => "create_folder",
         "create_file" => "create_file",
         "read_file" => "read_file",
+        "edit_file" => "edit_file",
         "move_path" => "move_path",
         "copy_path" => "copy_path",
         "delete_path" => "delete_path",
@@ -592,6 +669,8 @@ fn leak_field(field: &str) -> &'static str {
         "path" => "path",
         "url" => "url",
         "name" => "name",
+        "old_text" => "old_text",
+        "new_text" => "new_text",
         _ => "argument",
     }
 }
@@ -1109,17 +1188,20 @@ impl PendingAction {
             ChatTool::CreateFile { append: true, .. } => "Append to file",
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
+            ChatTool::EditFile { .. } => "Edit file",
             ChatTool::MovePath { .. } => "Move",
             ChatTool::CopyPath { .. } => "Copy",
             ChatTool::DeletePath { .. } => "Delete",
             ChatTool::RunCommand { .. } => "Run command",
         };
-        // Delete is the only act here that cannot be undone, and the card is the
-        // last place that fact can be stated plainly. Saying "this will change
-        // something" is true of creating a folder too, which would make the one
-        // irreversible action look like the reversible ones.
+        // Deleting moves the item to the Recycle Bin, which is what Explorer's
+        // Delete does. The card has to say where it went: "This cannot be
+        // undone" would be untrue, and saying nothing would leave the user
+        // thinking the file is gone for good.
         let effect = match tool {
-            ChatTool::DeletePath { .. } => "This cannot be undone.",
+            ChatTool::DeletePath { .. } => {
+                "This moves it to the Recycle Bin, where you can restore it."
+            }
             // Stronger than delete on purpose: one command can delete a whole
             // tree, install software, or send data out. Ranking it below delete
             // because it is only one line would be the wrong lesson.
@@ -1161,6 +1243,15 @@ impl PendingAction {
                 }
                 note
             }
+            ChatTool::EditFile {
+                old_text,
+                new_text,
+                ..
+            } => format!(
+                " It replaces {} bytes of text with {}.",
+                old_text.len(),
+                new_text.len()
+            ),
             ChatTool::MovePath { to, .. } | ChatTool::CopyPath { to, .. } => {
                 format!(" It goes to {to}.")
             }
@@ -1229,6 +1320,11 @@ fn sample_call(name: &str) -> ChatTool {
             append: false,
         },
         "read_file" => ChatTool::ReadFile { path: existing },
+        "edit_file" => ChatTool::EditFile {
+            path: existing,
+            old_text: "old".to_string(),
+            new_text: "new".to_string(),
+        },
         "move_path" => ChatTool::MovePath {
             path: existing.clone(),
             to: format!("{existing}.moved"),
@@ -1263,6 +1359,7 @@ pub(crate) fn all_tool_names() -> &'static [&'static str] {
         "create_folder",
         "create_file",
         "read_file",
+        "edit_file",
         "move_path",
         "copy_path",
         "delete_path",
@@ -1363,6 +1460,22 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
         {
             "type": "function",
             "function": {
+                "name": "edit_file",
+                "description": "Change part of a file that already exists, leaving everything else in it untouched. Use this instead of rewriting the file. Requires user confirmation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path of an existing text file."},
+                        "old_text": {"type": "string", "description": "The exact text to replace, copied from the file, including indentation. It must occur exactly once in the file. Keep it short: a line or two around the change is enough."},
+                        "new_text": {"type": "string", "description": "The text to put in its place. Leave empty to delete the old text."}
+                    },
+                    "required": ["path", "old_text"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "move_path",
                 "description": "Move a file or folder to a new location, which also renames it. Use this for both \"move that into documents\" and \"rename this to notes.txt\". Requires user confirmation.",
                 "parameters": {
@@ -1394,7 +1507,7 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "delete_path",
-                "description": "Delete a file or folder. This cannot be undone. Requires user confirmation, and refuses system locations and drive roots.",
+                "description": "Delete a file or folder by moving it to the Recycle Bin, where the user can restore it. Requires user confirmation, and refuses system locations and drive roots.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1648,6 +1761,11 @@ pub(crate) fn run_cancellable(
                 Err(reason) => ToolOutcome::failure(tool.name(), path, reason),
             }
         },
+        ChatTool::EditFile {
+            path,
+            old_text,
+            new_text,
+        } => edit_file(path, old_text, new_text),
         ChatTool::CreateFolder { name, parent } => {
             // `parent`, when given, was validated as an existing directory and
             // `name` as a single component, so this join cannot escape either.
@@ -1821,28 +1939,23 @@ pub(crate) fn run_cancellable(
                 Err(error) => ToolOutcome::failure(tool.name(), to, error),
             }
         }
-        ChatTool::DeletePath { path, recursive } => {
+        ChatTool::DeletePath { path, .. } => {
             let target = std::path::Path::new(path);
             // Re-checked here as well as in validation. Validation happens when
             // the call arrives; the confirmation may be answered seconds later,
-            // and this is the step that actually destroys something.
+            // and this is the step that moves something.
             if is_system_path(target) || is_drive_root(target) {
                 return ToolOutcome::failure(tool.name(), path, "that path is protected");
             }
             if !target.exists() {
                 return ToolOutcome::failure(tool.name(), path, "that no longer exists");
             }
-            let result = if target.is_dir() {
-                if *recursive {
-                    std::fs::remove_dir_all(target)
-                } else {
-                    std::fs::remove_dir(target)
-                }
-            } else {
-                std::fs::remove_file(target)
-            };
-            match result {
-                Ok(()) => ToolOutcome::success(tool.name(), path, format!("Deleted {path}")),
+            match recycle(path) {
+                Ok(()) => ToolOutcome::success(
+                    tool.name(),
+                    path,
+                    format!("Moved {path} to the Recycle Bin"),
+                ),
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
             }
         }
@@ -1890,6 +2003,180 @@ fn remove_target(path: &std::path::Path) -> Result<(), String> {
         std::fs::remove_file(path)
     };
     result.map_err(|error| format!("could not remove {}: {error}", path.display()))
+}
+
+/// Change part of an existing file, leaving the rest alone.
+///
+/// Refuses rather than guesses when `old_text` is not exactly one match:
+/// editing the first of several would silently change a spot the user did not
+/// name. Written through a temp file so a failed write cannot truncate the
+/// original.
+fn edit_file(path: &str, old_text: &str, new_text: &str) -> ToolOutcome {
+    const TOOL: &str = "edit_file";
+    let target = std::path::Path::new(path);
+    // Re-checked at execution: the card may be approved long after the call
+    // arrived, and this is the step that writes.
+    if is_system_path(target) || !target.is_file() {
+        return ToolOutcome::failure(TOOL, path, "that is no longer a file you can edit");
+    }
+    let size = match std::fs::metadata(target) {
+        Ok(metadata) => metadata.len() as usize,
+        Err(error) => {
+            return ToolOutcome::failure(TOOL, path, format!("could not read that file: {error}"))
+        }
+    };
+    // The whole file has to be held to write it back, and a file over the write
+    // cap could not be written even if the edit were tiny. Say the limit.
+    if size > MAX_WRITE_BYTES {
+        return ToolOutcome::failure(
+            TOOL,
+            path,
+            format!("that file is {size} bytes; editing in place is limited to {MAX_WRITE_BYTES}"),
+        );
+    }
+    let bytes = match std::fs::read(target) {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolOutcome::failure(TOOL, path, error),
+    };
+    // A NUL in the first block means binary; refusing beats writing mojibake
+    // back over the file.
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return ToolOutcome::failure(TOOL, path, "that file is binary, so it has no text to edit");
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return ToolOutcome::failure(
+                TOOL,
+                path,
+                "that file is not UTF-8 text, so it cannot be edited in place",
+            )
+        }
+    };
+    match text.matches(old_text).count() {
+        0 => {
+            return ToolOutcome::failure(
+                TOOL,
+                path,
+                "the text to replace was not found; the file may have changed, so read it again",
+            )
+        }
+        1 => {}
+        matches => {
+            return ToolOutcome::failure(
+                TOOL,
+                path,
+                format!(
+                    "the text to replace occurs {matches} times; include more surrounding text so it matches once"
+                ),
+            )
+        }
+    }
+    let updated = text.replacen(old_text, new_text, 1);
+    if let Err(error) = write_atomically(target, &updated) {
+        return ToolOutcome::failure(TOOL, path, error);
+    }
+    ToolOutcome::success(
+        TOOL,
+        path,
+        format!(
+            "Edited {path}: replaced {} bytes with {}",
+            old_text.len(),
+            new_text.len()
+        ),
+    )
+}
+
+/// Replace a file's contents through a temp file beside it.
+///
+/// The temp lives in the same folder, so the final step is a same-volume swap
+/// rather than a copy; `MOVEFILE_REPLACE_EXISTING` makes that atomic on
+/// Windows. A failed write leaves the original exactly as it was.
+fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or("that path has no folder to write into")?;
+    let temp = parent.join(format!(
+        ".nex-edit-{}-{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temp, text).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("could not write the edit: {error}")
+    })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
+        let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING) } == 0 {
+            let _ = std::fs::remove_file(&temp);
+            return Err("could not replace the file with the edited text".to_string());
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        format!("could not replace the file with the edited text: {error}")
+    })?;
+    Ok(())
+}
+
+/// Move a file or folder to the Recycle Bin, the way Explorer's Delete does.
+///
+/// `delete_path` used to call `remove_file`/`remove_dir_all`, which is
+/// permanent: one misread target destroyed data, and the confirmation card was
+/// the only control. `FOF_ALLOWUNDO` is what makes it recoverable. There is
+/// deliberately no fallback to a permanent delete - succeeding at something the
+/// user read as recoverable is worse than failing.
+#[cfg(windows)]
+fn recycle(path: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+
+    // The list is double-NUL-terminated: SHFileOperationW takes a list of
+    // paths, not a single string.
+    let mut from: Vec<u16> = std::path::Path::new(path)
+        .as_os_str()
+        .encode_wide()
+        .collect();
+    from.push(0);
+    from.push(0);
+
+    let mut operation = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    let code = unsafe { SHFileOperationW(&mut operation) };
+    if code != 0 {
+        return Err(format!(
+            "Windows could not move that to the Recycle Bin (error {code})"
+        ));
+    }
+    if operation.fAnyOperationsAborted != 0 {
+        return Err("the move to the Recycle Bin was abandoned, so nothing was deleted".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn recycle(path: &str) -> Result<(), String> {
+    Err(format!(
+        "moving {path} to the Recycle Bin is only available on Windows"
+    ))
 }
 
 /// What a finished command produced.
@@ -3050,6 +3337,116 @@ mod tests {
         assert_eq!(text.len() > 0, true);
     }
 
+    // --- edit_file (CIQ-179) ---
+
+    fn edit_tool(path: &std::path::Path, old_text: &str, new_text: &str) -> ChatTool {
+        ChatTool::EditFile {
+            path: path.to_string_lossy().into_owned(),
+            old_text: old_text.to_string(),
+            new_text: new_text.to_string(),
+        }
+    }
+
+    #[test]
+    fn edit_file_replaces_the_one_match_and_leaves_the_rest_alone() {
+        let dir = scratch("edit-one");
+        let file = dir.join("page.html");
+        std::fs::write(&file, "<h1>Old</h1>\n<p>Old</p>\n").unwrap();
+        let tool = edit_tool(&file, "<h1>Old</h1>", "<h1>New</h1>");
+        let ran = run(&tool, true, &dir);
+        assert!(ran.ok, "{}", ran.summary);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "<h1>New</h1>\n<p>Old</p>\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_refuses_text_that_appears_zero_or_many_times() {
+        // Editing the first of several matches would change a spot the user did
+        // not name, and a missing string means the file changed underneath.
+        let dir = scratch("edit-ambig");
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "same\nother\nsame\n").unwrap();
+
+        let missing = run(&edit_tool(&file, "absent", "x"), true, &dir);
+        assert!(!missing.ok);
+        assert!(missing.summary.contains("not found"), "{}", missing.summary);
+
+        let several = run(&edit_tool(&file, "same", "changed"), true, &dir);
+        assert!(!several.ok);
+        assert!(
+            several.summary.contains("occurs 2 times"),
+            "{}",
+            several.summary
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "same\nother\nsame\n",
+            "a refused edit must change nothing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_can_delete_text_with_an_empty_replacement() {
+        let dir = scratch("edit-delete");
+        let file = dir.join("page.html");
+        std::fs::write(&file, "a\nb\nc\n").unwrap();
+        let ran = run(&edit_tool(&file, "b\n", ""), true, &dir);
+        assert!(ran.ok, "{}", ran.summary);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "a\nc\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_keeps_leading_whitespace_in_the_match() {
+        // `old_text` must not be trimmed: indentation is part of what the model
+        // is naming, and a trimmed match would hit a different line.
+        let dir = scratch("edit-indent");
+        let file = dir.join("snippet.rs");
+        std::fs::write(&file, "fn main() {\n    run();\n}\n").unwrap();
+        let tool = raw(
+            "edit_file",
+            serde_json::json!({
+                "path": file.to_string_lossy(),
+                "old_text": "    run();",
+                "new_text": "    go();"
+            }),
+        )
+        .validate()
+        .unwrap();
+        let ran = run(&tool, true, &dir);
+        assert!(ran.ok, "{}", ran.summary);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "fn main() {\n    go();\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_file_refuses_a_folder_and_requires_old_text() {
+        let dir = scratch("edit-refuse");
+        let err = call(
+            "edit_file",
+            serde_json::json!({ "path": dir.to_string_lossy(), "old_text": "x" }),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::IllegalName { .. }), "{err:?}");
+
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        let err = call(
+            "edit_file",
+            serde_json::json!({ "path": file.to_string_lossy() }),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::EmptyArgument { .. }), "{err:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- create_file writes contents (CIQ-148) ---
 
     fn write_tool(name: &str, parent: &std::path::Path, content: Option<&str>) -> ChatTool {
@@ -3623,9 +4020,10 @@ mod tests {
     }
 
     #[test]
-    fn the_delete_card_says_it_cannot_be_undone() {
-        // Creating a folder also "changes something"; delete is the only act
-        // that cannot be taken back, and the card is the last place to say so.
+    fn the_delete_card_says_it_goes_to_the_recycle_bin() {
+        // Delete is recoverable now, so the card has to say where the item goes.
+        // "This cannot be undone" would be untrue, and saying nothing would
+        // leave the user thinking it is gone for good.
         let dir = scratch("del-card");
         let folder = dir.join("tree");
         std::fs::create_dir_all(&folder).unwrap();
@@ -3634,7 +4032,11 @@ mod tests {
             path: folder.to_string_lossy().to_string(),
             recursive: true,
         });
-        assert!(card.description.contains("cannot be undone"), "{}", card.description);
+        assert!(
+            card.description.contains("Recycle Bin"),
+            "{}",
+            card.description
+        );
         assert!(card.description.contains("1 item"), "{}", card.description);
         assert!(card.description.contains("Everything inside"), "{}", card.description);
 
@@ -3643,15 +4045,15 @@ mod tests {
             parent: None,
         });
         assert!(
-            !create.description.contains("cannot be undone"),
-            "creating is reversible; only delete says this"
+            !create.description.contains("Recycle Bin"),
+            "creating does not move anything to the bin"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_new_tools_are_all_declared_and_confirmable() {
-        for name in ["move_path", "copy_path", "delete_path"] {
+        for name in ["edit_file", "move_path", "copy_path", "delete_path"] {
             assert!(all_tool_names().contains(&name), "{name} missing from the list");
             assert!(sample_call(name).needs_confirmation(), "{name} must confirm");
             let decl = tool_declarations();

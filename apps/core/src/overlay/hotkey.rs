@@ -1692,7 +1692,8 @@ fn run_helper_supervisor(
                     return;
                 }
                 logging::warn(&format!(
-                    "[nex] elevated helper unavailable ({error}); in-process hook stays active"
+                    "[nex] elevated helper unavailable ({error}); hotkey will not fire while an \
+                     elevated window has focus"
                 ));
             }
         }
@@ -1843,6 +1844,85 @@ fn start_helper_cmd_server() {
     }
 }
 
+/// Create a pipe, retrying while the name is briefly held by a closing one.
+///
+/// `PIPE_SINGLE_INSTANCE` is deliberate and stays: unlimited instances let a
+/// reconnect attach to an abandoned instance, and a helper writing "HOTKEY"
+/// into one nobody drained froze input for ~10 s. The cost is that the name is
+/// unavailable until the previous handle closes, and the supervisor retries the
+/// same name, so without this retry it lost that race repeatedly: 13 of 19
+/// spawn attempts on the reporting machine, each one leaving the hotkey dead
+/// against elevated windows while the log claimed a fallback covered it.
+///
+/// Takes the create call as a parameter so a test can drive the retry without a
+/// real pipe: `ConnectNamedPipe` blocks until a client attaches, which no test
+/// can provide.
+fn create_pipe_retrying_busy(
+    wide: &[u16],
+    pipe_name: &str,
+    create: unsafe extern "system" fn(
+        *const u16,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void,
+) -> Result<*mut core::ffi::c_void, String> {
+    use windows_sys::Win32::Foundation::GetLastError;
+
+    const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
+    const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
+    const PIPE_WAIT: u32 = 0x0000_0000;
+    const PIPE_SINGLE_INSTANCE: u32 = 1;
+    // All instances of this name are in use; the previous handle is closing.
+    const ERROR_PIPE_BUSY: u32 = 231;
+    // Bounded: the helper that held the name is being killed by the caller, so
+    // its handle closes in milliseconds. A longer wait would only hold up the
+    // supervisor's reconnect.
+    const PIPE_BUSY_ATTEMPTS: u32 = 20;
+    const PIPE_BUSY_WAIT_MS: u32 = 25;
+
+    for attempt in 0..PIPE_BUSY_ATTEMPTS {
+        let handle = unsafe {
+            create(
+                wide.as_ptr(),
+                PIPE_ACCESS_INBOUND,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                PIPE_SINGLE_INSTANCE,
+                0,
+                65536,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if !handle.is_null() && handle as isize != -1 {
+            return Ok(handle);
+        }
+        let error = unsafe { GetLastError() };
+        if error != ERROR_PIPE_BUSY {
+            return Err(format!(
+                "CreateNamedPipeW(inbound) failed for {pipe_name}: err={error}"
+            ));
+        }
+        if attempt + 1 == PIPE_BUSY_ATTEMPTS {
+            return Err(format!(
+                "CreateNamedPipeW(inbound) failed for {pipe_name}: err={error} \
+                 (pipe stayed busy for {} ms)",
+                PIPE_BUSY_ATTEMPTS * PIPE_BUSY_WAIT_MS
+            ));
+        }
+        // The handle closes on the other side, so there is nothing to poll:
+        // sleep rather than spin.
+        std::thread::sleep(std::time::Duration::from_millis(PIPE_BUSY_WAIT_MS as u64));
+    }
+    Err(format!(
+        "CreateNamedPipeW(inbound) failed for {pipe_name}: exhausted retries"
+    ))
+}
+
 /// Create the helper's detection pipe and hand back the read end.
 ///
 /// The pipe object MUST be created by this Medium-IL process. It used to be
@@ -1872,6 +1952,15 @@ fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String
     // for ~10s on the first press after a hotkey save.
     const PIPE_SINGLE_INSTANCE: u32 = 1;
     const ERROR_PIPE_CONNECTED: u32 = 535;
+    // All pipe instances for this name are in use. The previous handle is
+    // still closing, so the name is briefly unavailable. Observed on this
+    // machine in 13 of 19 spawn attempts before this was handled.
+    const ERROR_PIPE_BUSY: u32 = 231;
+    // Bounded: the helper that held the name is being killed by the caller,
+    // so its handle closes in milliseconds. Waiting longer than this would
+    // hold up the supervisor's reconnect for no gain.
+    const PIPE_BUSY_ATTEMPTS: u32 = 20;
+    const PIPE_BUSY_WAIT_MS: u32 = 25;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -1892,24 +1981,7 @@ fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String
     }
 
     let wide = to_wide(pipe_name);
-    let handle = unsafe {
-        CreateNamedPipeW(
-            wide.as_ptr(),
-            PIPE_ACCESS_INBOUND,
-            PIPE_TYPE_BYTE | PIPE_WAIT,
-            PIPE_SINGLE_INSTANCE,
-            0,
-            65536,
-            0,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle.is_null() || handle as isize == -1 {
-        return Err(format!(
-            "CreateNamedPipeW(inbound) failed for {pipe_name}: err={}",
-            unsafe { GetLastError() }
-        ));
-    }
+    let handle = create_pipe_retrying_busy(&wide, pipe_name, CreateNamedPipeW)?;
 
     let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
     if connected == 0 {
@@ -2874,6 +2946,113 @@ fn dispatch_reason_text(reason: DispatchReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A busy name must be retried, not failed immediately.
+    ///
+    /// Reproduces the reported symptom without a real pipe: the stub returns
+    /// ERROR_PIPE_BUSY for the first attempts and a handle afterwards, which is
+    /// exactly what a still-closing previous instance looks like.
+    #[test]
+    fn a_busy_pipe_name_is_retried_instead_of_failing() {
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        unsafe extern "system" fn busy_then_ok(
+            _: *const u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void {
+            let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 3 {
+                // The previous instance has not closed yet.
+                unsafe {
+                    windows_sys::Win32::Foundation::SetLastError(231);
+                }
+                return -1isize as *mut core::ffi::c_void;
+            }
+            0x1234 as *mut core::ffi::c_void
+        }
+
+        let wide = to_wide("\\\\.\\pipe\\nex-test-busy");
+        let handle = create_pipe_retrying_busy(&wide, "nex-test-busy", busy_then_ok)
+            .expect("the third attempt must succeed");
+        assert_eq!(handle as isize, 0x1234);
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "it must have retried past the three busy answers"
+        );
+    }
+
+    /// A non-busy error is not retried: the cause is not a closing handle.
+    #[test]
+    fn a_non_busy_pipe_error_fails_at_once() {
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        unsafe extern "system" fn always_denied(
+            _: *const u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void {
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // 5 = ERROR_ACCESS_DENIED, a real 231 look-alike in the logs.
+            unsafe {
+                windows_sys::Win32::Foundation::SetLastError(5);
+            }
+            -1isize as *mut core::ffi::c_void
+        }
+
+        let wide = to_wide("\\\\.\\pipe\\nex-test-denied");
+        let error = create_pipe_retrying_busy(&wide, "nex-test-denied", always_denied)
+            .err()
+            .expect("access denied must not be retried into success");
+        assert!(error.contains("err=5"), "got: {error}");
+        assert_eq!(
+            CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a non-busy error costs exactly one attempt"
+        );
+    }
+
+    /// A name held past every attempt reports why, not a bare errno.
+    #[test]
+    fn a_permanently_busy_name_reports_the_real_cause() {
+        unsafe extern "system" fn always_busy(
+            _: *const u16,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: u32,
+            _: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void {
+            unsafe {
+                windows_sys::Win32::Foundation::SetLastError(231);
+            }
+            -1isize as *mut core::ffi::c_void
+        }
+
+        let wide = to_wide("\\\\.\\pipe\\nex-test-always-busy");
+        let error = create_pipe_retrying_busy(&wide, "nex-test-always-busy", always_busy)
+            .err()
+            .expect("a permanently busy name must fail");
+        assert!(
+            error.contains("pipe stayed busy"),
+            "the message must name the real cause, got: {error}"
+        );
+    }
     #[test] fn parse_ctrl_space() { let p = parse_hotkey("Ctrl+Space").unwrap(); assert_eq!(p.modifiers, vec!["Ctrl"]); assert_eq!(p.key, "Space"); }
     #[test] fn parse_ctrl_shift_f5() { let p = parse_hotkey("Ctrl+Shift+F5").unwrap(); assert_eq!(p.modifiers, vec!["Shift", "Ctrl"]); assert_eq!(p.key, "F5"); }
     #[test] fn parse_single_key() { let p = parse_hotkey("F1").unwrap(); assert!(p.modifiers.is_empty()); assert_eq!(p.key, "F1"); }

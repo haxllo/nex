@@ -118,6 +118,11 @@
   // from chatStreaming because the two look identical in the UI but behave
   // differently: streaming ends on its own, this does not.
   let chatPendingAction = null;
+  // The action that was just approved, while it runs. Kept outside the
+  // transcript model on purpose: the clock ticks once a second and a full
+  // re-render per tick would rebuild every message to move one number.
+  let chatRunningAction = null;
+  let chatRunningTimer = 0;
   // Set when the step limit stopped a request, so the transcript can offer a
   // Continue control instead of asking the user to type "continue".
   let chatLimitReached = null;
@@ -2366,6 +2371,9 @@
       }
     }
     if (atBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+    // The running row is not part of any message, so a re-render drops it. Put
+    // it back where the finished card will land.
+    renderChatRunningAction();
   }
 
   function postChatResize() {
@@ -2756,6 +2764,15 @@
       card.appendChild(target);
     }
     card.title = summary;
+    // What the step cost, once it is over. Under a second is not worth a number;
+    // a slow command's cost is the whole reason for saying it.
+    if (typeof action.duration_ms === "number" && action.duration_ms >= 1000) {
+      const took = document.createElement("span");
+      took.className = "chat-action-clock";
+      took.textContent = chatDurationLabel(action.duration_ms);
+      took.title = "Time this step took";
+      card.appendChild(took);
+    }
     // A created file's result is its content, so it opens under the row as the
     // same card the answer uses for code. Only a real payload earns the card:
     // an empty or binary file is already fully described by its row.
@@ -2824,14 +2841,127 @@
   function answerChatPendingAction(accept) {
     if (!chatPendingAction) return;
     const requestId = chatPendingAction.requestId;
-    chatPendingAction = null;
     const card = $("chat-pending-action");
     if (card) card.remove();
+    // The run starts now, so the transcript has to say so: a command with
+    // nothing on screen for 43 seconds is indistinguishable from a freeze, and
+    // pressing Stop is then the reasonable thing to do.
+    if (accept) startChatRunningAction(chatPendingAction);
+    chatPendingAction = null;
     if (!requestId) return;
     // The turn resumes server-side either way: approved runs, refused tells the
     // model it was not done so it does not claim otherwise.
     post("chatConfirmAction", { requestId, accept: !!accept });
     updateChatStreamingState(true);
+  }
+
+  // 0:43. A count reads as work in progress; the allowance line above it says
+  // how far the count can go.
+  function chatElapsedLabel(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  // What the finished step cost. "0:43" on a card that has stopped reads as a
+  // position, not a duration.
+  function chatDurationLabel(ms) {
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 10) return `${(ms / 1000).toFixed(1)} s`;
+    if (seconds < 60) return `${seconds} s`;
+    return `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`;
+  }
+
+  function renderChatRunningAction() {
+    const stale = $("chat-running-action");
+    if (stale) stale.remove();
+    if (!chatRunningAction) return;
+    const last = chatMessages[chatMessages.length - 1];
+    const article = last && last.role === "assistant"
+      ? chatMessagesEl.querySelector('[data-message-id="' + CSS.escape(last.id) + '"]')
+      : null;
+    if (!article) return;
+    let list = article.querySelector(".chat-actions");
+    if (!list) {
+      list = document.createElement("div");
+      list.className = "chat-actions";
+      article.insertBefore(list, article.querySelector(".chat-message-content"));
+      article.classList.add("has-surface");
+    }
+
+    const wrap = document.createElement("div");
+    wrap.id = "chat-running-action";
+    wrap.className = "chat-running";
+
+    const row = document.createElement("div");
+    row.className = "chat-action running";
+    const glyph = document.createElement("span");
+    glyph.className = "chat-action-glyph";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.appendChild(chatIcon(CHAT_ACTION_ICONS[chatRunningAction.tool] || "terminal"));
+    row.appendChild(glyph);
+
+    const body = document.createElement("div");
+    body.className = "chat-action-body";
+    const label = document.createElement("span");
+    label.className = "chat-action-label";
+    label.textContent = "Running";
+    body.appendChild(label);
+    row.appendChild(body);
+
+    if (chatRunningAction.target) {
+      const target = document.createElement("code");
+      // A path is read from its file name, so its row truncates from the start.
+      // A command is read from its verb, and bidi reordering moves its quotes
+      // and redirection operators, so it is left-to-right and cut at the end.
+      target.className = "chat-action-target" + (chatRunningAction.tool === "run_command" ? " chat-action-command" : "");
+      target.textContent = chatRunningAction.target;
+      target.title = chatRunningAction.target;
+      row.appendChild(target);
+    }
+
+    const clock = document.createElement("span");
+    clock.id = "chat-running-clock";
+    clock.className = "chat-action-clock";
+    clock.textContent = chatElapsedLabel(Date.now() - chatRunningAction.startedAt);
+    row.appendChild(clock);
+    wrap.appendChild(row);
+
+    // The allowance exactly as the confirmation card worded it ("It is stopped
+    // after 30 seconds"), because the approved text is the text that applies.
+    if (chatRunningAction.description) {
+      const allowance = document.createElement("p");
+      allowance.className = "chat-running-allowance";
+      allowance.textContent = chatRunningAction.description;
+      wrap.appendChild(allowance);
+    }
+
+    list.appendChild(wrap);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  function startChatRunningAction(action) {
+    clearChatRunningAction();
+    chatRunningAction = {
+      tool: action.tool || "action",
+      target: typeof action.target === "string" ? action.target : "",
+      description: typeof action.description === "string" ? action.description : "",
+      startedAt: Date.now(),
+    };
+    renderChatRunningAction();
+    chatRunningTimer = window.setInterval(() => {
+      const clock = $("chat-running-clock");
+      if (clock && chatRunningAction) clock.textContent = chatElapsedLabel(Date.now() - chatRunningAction.startedAt);
+    }, 1000);
+  }
+
+  function clearChatRunningAction() {
+    if (chatRunningTimer) {
+      window.clearInterval(chatRunningTimer);
+      chatRunningTimer = 0;
+    }
+    chatRunningAction = null;
+    const row = $("chat-running-action");
+    if (row) row.remove();
   }
 
   /**
@@ -3100,6 +3230,7 @@
   function stopChatRequest() {
     invalidateChatRequest();
     chatLiveStatus.textContent = "Response stopped";
+    clearChatRunningAction();
     updateChatStreamingState(false);
     renderChatMessages();
     persistChat();
@@ -3924,6 +4055,7 @@
       if (requestMatches) {
         chatActiveRequest = null;
         requestMatches = false;
+        clearChatRunningAction();
         const last = chatMessages[chatMessages.length - 1];
         if (last && last.role === "assistant" && !last.content) { last.content = state.chatError; last.error = true; }
         chatLiveStatus.textContent = "";
@@ -3933,6 +4065,8 @@
       }
     }
     if (state.chatAction && requestMatches) {
+      // The outcome replaces the running row; the cost moves onto the card.
+      clearChatRunningAction();
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") {
         const action = state.chatAction;
@@ -3943,6 +4077,7 @@
           ok: action.ok !== false,
           summary: typeof action.summary === "string" ? action.summary : "",
           preview: typeof action.preview === "string" ? action.preview : "",
+          duration_ms: typeof action.duration_ms === "number" ? action.duration_ms : null,
         });
         renderChatMessages();
       }
@@ -3964,6 +4099,8 @@
       persistChat();
     }
     if (state.chatDone && requestMatches) {
+      // No run can still be in flight once the turn is over.
+      clearChatRunningAction();
       const last = chatMessages[chatMessages.length - 1];
       if (last && last.role === "assistant") delete last.incomplete;
       chatActiveRequest = null;
@@ -3987,6 +4124,9 @@
     if (state.chatCancelled && requestMatches) {
       chatActiveRequest = null;
       chatLiveStatus.textContent = "Response stopped";
+      // A stopped command is not still running: the loop stopped reading, and
+      // the card that would have replaced this row will not arrive.
+      clearChatRunningAction();
       updateChatStreamingState(false);
       renderChatMessages();
       persistChat();

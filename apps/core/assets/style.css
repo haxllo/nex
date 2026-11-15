@@ -3334,6 +3334,34 @@ html.glass-native .chat-composer-shell {
 }
 .chat-action.ok .chat-action-glyph { color: var(--text-dim); }
 .chat-action.failed .chat-action-glyph { color: var(--danger); }
+/* The approved action while it runs. The clock is the only moving part in the
+   transcript, and it is the difference between "working" and "frozen". */
+.chat-action.running .chat-action-glyph { color: var(--accent); }
+/* A command line reads from its verb, and bidi reordering moves the quotes and
+   redirection operators that end it. Paths are the opposite case. */
+.chat-action-target.chat-action-command {
+  direction: ltr;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+.chat-action-clock {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  /* Not --text-dim: it measured 3.37:1 on the glass panel, and the cost of a
+     step is content. Size and mono carry the hierarchy instead. */
+  color: var(--text);
+  font: 11px/1.7 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* The allowance, as the confirmation card worded it: the one fact that says how
+   long the wait may be. */
+.chat-running-allowance {
+  margin: 0;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
 .chat-action-body { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex: 0 1 auto; }
 .chat-action-label { flex: 0 0 auto; font-size: 12.5px; font-weight: 400; color: var(--text); }
 .chat-action-text { min-width: 0; color: var(--text); font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }

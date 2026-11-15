@@ -1413,6 +1413,9 @@ fn push_action_outcome(
         "target": outcome.target,
         "ok": outcome.ok,
         "summary": outcome.summary,
+        // The card keeps the cost after the step ends: a 43-second command and a
+        // 40-millisecond one used to look identical.
+        "duration_ms": outcome.duration_ms,
     });
     // A created file's result is its content, so the card can show what landed
     // instead of only where it landed.
@@ -2847,6 +2850,9 @@ mod tests {
             target: "C:\\Users\\x\\Desktop\\hello.txt".into(),
             ok: true,
             summary: "Created file hello.txt".into(),
+            // A slow step must carry its cost to the card, so the transcript
+            // can still say why it took a while.
+            duration_ms: Some(43_200),
         };
 
         push_action_outcome(&sink, Some("req-1"), &outcome);
@@ -2862,6 +2868,15 @@ mod tests {
         // The target travels separately so the card can show the path the user
         // can act on, instead of it being buried inside a sentence.
         assert_eq!(action["target"], "C:\\Users\\x\\Desktop\\hello.txt");
+        assert_eq!(action["duration_ms"], 43_200);
+    }
+
+    /// A refusal never ran, so it has no cost to report and the card shows none.
+    #[test]
+    fn an_outcome_that_never_ran_carries_no_duration() {
+        let outcome = crate::chat_tools::ToolOutcome::failure("run_command", "x", "declined");
+        assert_eq!(outcome.duration_ms, None);
+        assert!(!outcome.for_model().contains("took"));
     }
 
     #[test]
@@ -2937,6 +2952,7 @@ mod tests {
                     target: "C:\\Users\\x\\Desktop\\Test123".into(),
                     ok: true,
                     summary: "Created folder C:\\Users\\x\\Desktop\\Test123".into(),
+                    duration_ms: None,
                 },
             ),
             (

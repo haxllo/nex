@@ -3429,6 +3429,14 @@ html.glass-native .chat-composer-shell {
 @media (prefers-reduced-motion: reduce) {
   .chat-trace-title { animation: none; background: none; color: var(--text-dim); }
 }
+/* A stopped answer is not in progress, so its line holds still and stays
+   readable: the dim colour measures 3.37:1 on the panel, below AA. */
+.chat-trace-stopped { color: var(--text); }
+.chat-trace-stopped .chat-trace-title {
+  animation: none;
+  background: none;
+  color: inherit;
+}
 
 /* A blocking confirmation: the one inset in the transcript. The rule marks it
    as a decision instead of another line of output; the text stays on the

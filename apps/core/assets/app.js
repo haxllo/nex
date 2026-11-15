@@ -2308,11 +2308,13 @@
         }
         const content = document.createElement("div"); content.className = "chat-message-content";
         // An answer that has not produced a token yet shows the waiting dots
-        // instead of an empty block. The stream replaces them on the first
-        // chunk; a stopped or cancelled turn drops `chatActiveRequest`, so the
-        // dots cannot outlive the request that owns them.
+        // instead of an empty block. Only the newest answer can be waiting:
+        // an older one that never got its first token - a superseded request,
+        // or a turn that ended on an error - would otherwise show dots again
+        // the moment any request is active.
         const awaitingFirstToken = message.role === "assistant" && message.incomplete
-          && !message.content && chatActiveRequest;
+          && !message.content && chatActiveRequest
+          && message === chatMessages[chatMessages.length - 1];
         if (awaitingFirstToken) {
           content.appendChild(renderChatLoading());
         } else {
@@ -4093,6 +4095,9 @@
       const inTranscript = requestMatches && last && last.role === "assistant";
       if (inTranscript) {
         last.errorText = state.chatError;
+        // The turn is over. Without this the errored answer shows the waiting
+        // dots again as soon as the next request sets chatActiveRequest.
+        delete last.incomplete;
         chatNotice.textContent = "";
         chatNotice.classList.remove("error");
       } else {

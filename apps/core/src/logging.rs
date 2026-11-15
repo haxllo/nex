@@ -169,31 +169,81 @@ fn install_panic_hook() {
     let _ = PANIC_HOOK_INSTALLED.get_or_init(|| {
         let prior = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
-            let location = panic_info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "unknown".to_string());
-            let payload = panic_info
-                .payload()
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "panic payload unavailable".to_string());
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            error(&format!("panic at {location}: {payload}\nbacktrace:\n{backtrace}"));
+            error(&format_panic(panic_info));
             prior(panic_info);
         }));
     });
 }
 
+/// One panic as a log line: where, on which thread, and what it said.
+///
+/// Split out from [`install_panic_hook`] so a test can drive the exact
+/// formatting. The hook itself already captured the panic text, location and
+/// backtrace, but nothing asserted that a panic on a worker thread produced a
+/// line at all, so a regression there would have been silent.
+fn format_panic(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
+    let location = panic_info
+        .location()
+        .map(|l| format!("{}:{}", l.file(), l.line()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let payload = panic_info
+        .payload()
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| panic_info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic payload unavailable".to_string());
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("unnamed");
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    format!("panic at {location} on thread '{name}': {payload}\nbacktrace:\n{backtrace}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::logs_dir;
+    use super::{format_panic, logs_dir};
 
     #[test]
     fn logs_dir_uses_stable_app_data_layout() {
         let dir = logs_dir();
         let lowered = dir.to_string_lossy().to_ascii_lowercase();
         assert!(lowered.contains("nex") || lowered.contains("swiftfind"));
+    }
+
+    #[test]
+    fn a_worker_thread_panic_is_reported_with_where_and_which_thread() {
+        // The UI process owns the overlay, hotkeys and tray, so a panic on a
+        // worker is not a degraded app: it is the window disappearing. The hook
+        // has to name the thread and the site for that to be diagnosable from a
+        // diagnostics bundle afterwards.
+        let hook = std::panic::take_hook();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = captured.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            sink.lock().unwrap().push(format_panic(info));
+        }));
+
+        let result = std::thread::Builder::new()
+            .name("nex-test-worker".into())
+            .spawn(|| panic!("index row was malformed"))
+            .expect("spawn worker")
+            .join();
+        std::panic::set_hook(hook);
+
+        assert!(result.is_err(), "the worker must have panicked");
+        let lines = captured.lock().unwrap();
+        assert_eq!(lines.len(), 1, "one panic must produce exactly one line");
+        let line = &lines[0];
+        assert!(
+            line.contains("panic at "),
+            "the line must say where: {line}"
+        );
+        assert!(
+            line.contains("on thread 'nex-test-worker'"),
+            "the line must name the thread: {line}"
+        );
+        assert!(
+            line.contains("index row was malformed"),
+            "the line must carry the payload: {line}"
+        );
     }
 }

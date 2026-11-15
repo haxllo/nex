@@ -1122,9 +1122,25 @@ impl HotkeyListener {
                 // system input (frozen keyboard, Start menu leaking through,
                 // tray menus never opening).
                 let (target_is_win_local, target_key_local, required_mods_local) = {
-                    let g = HOOK_CTX.lock().unwrap();
-                    let c = g.as_ref().unwrap();
-                    (c.target_is_win, c.target_key, c.required_mods.clone())
+                    // No unwrap: this thread is reached from a listener that can
+                    // be started before HOOK_CTX is published, and a poisoned
+                    // mutex is not a reason to panic. The hook proc below
+                    // treats a missing context as "pass every key through", so
+                    // the same rule applies here: with no context there is
+                    // nothing to register.
+                    let ctx = HOOK_CTX
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().cloned());
+                    match ctx {
+                        Some(c) => (c.target_is_win, c.target_key, c.required_mods),
+                        None => {
+                            logging::info(
+                                "[nex::debug] Hook: no HookContext at start; no fallback hotkey registered",
+                            );
+                            (true, 0u32, Vec::new())
+                        }
+                    }
                 };
                 if !target_is_win_local {
                     let mod_map: &[(u32, u32)] = &[
@@ -1213,8 +1229,15 @@ impl HotkeyListener {
                         // fallback to the freshly synced HOOK_CTX. Brief lock
                         // on this thread is fine — it's not the input path.
                         logging::info("[nex::debug] Hook: live re-register requested");
-                        let g = HOOK_CTX.lock().unwrap();
-                        if let Some(ctx) = g.as_ref() {
+                        // A poisoned lock or a cleared context must not panic
+                        // on the message-loop thread: it owns the hook, so the
+                        // process dying would leave the input hook installed
+                        // with nobody to remove it.
+                        let ctx = HOOK_CTX
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().cloned());
+                        if let Some(ctx) = ctx.as_ref() {
                             if fallback_id != 0 {
                                 if let Some(f) = unregister_hotkey {
                                     unsafe { f(std::ptr::null_mut(), fallback_id as i32); }
@@ -1266,7 +1289,8 @@ impl HotkeyListener {
                                 ));
                             }
                         }
-                        drop(g);
+                        // The guard is already released: the context above is
+                        // a clone, not a borrow held across the re-register.
                         continue;
                     }
                     if msg.message == WM_HOTKEY && fallback_id != 0 && !should_exit_for_thread.load(Ordering::SeqCst) {

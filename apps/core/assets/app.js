@@ -2289,7 +2289,11 @@
       chatMessagesEl.replaceChildren();
       for (const message of chatMessages) {
         const article = document.createElement("article");
-        article.className = "chat-message " + (message.role === "user" ? "user" : "assistant") + (message.error ? " error" : "");
+        // `message.error` is the old shape: the whole reply tinted red. Only
+        // transcripts saved before errorText keep it, so a reloaded history does
+        // not silently lose its warning.
+        article.className = "chat-message " + (message.role === "user" ? "user" : "assistant")
+          + (message.error && !message.errorText ? " error" : "");
         // A reply with actions gets one surface around cards and prose, so the
         // result reads as part of the answer instead of a separate widget.
         if (message.role === "assistant" && Array.isArray(message.actions) && message.actions.length && !message.error) {
@@ -2316,6 +2320,14 @@
           if (!message.content) content.hidden = true;
         }
         article.appendChild(content);
+        // The failure is its own block, never a tint: a turn that already has
+        // cards or prose must not read as though all of it failed.
+        if (message.errorText) {
+          const failed = document.createElement("div");
+          failed.className = "chat-message-error";
+          failed.textContent = message.errorText;
+          article.appendChild(failed);
+        }
         if (Array.isArray(message.localContext) && message.localContext.length) {
           const context = document.createElement("div");
           context.className = "chat-message-context";
@@ -4073,13 +4085,24 @@
       chatConnectButton.disabled = false;
       chatConnectButton.textContent = "Connect account";
       chatConnectButton.setAttribute("aria-busy", "false");
-      chatNotice.textContent = state.chatError; chatNotice.classList.add("error");
+      // The failure goes where the answer stopped: on that message, as its own
+      // block. Writing it to the composer as well showed the same sentence
+      // twice, and the footer copy never clears on its own. Errors that belong
+      // to no turn (a bad key, a config problem) still use the footer.
+      const last = chatMessages[chatMessages.length - 1];
+      const inTranscript = requestMatches && last && last.role === "assistant";
+      if (inTranscript) {
+        last.errorText = state.chatError;
+        chatNotice.textContent = "";
+        chatNotice.classList.remove("error");
+      } else {
+        chatNotice.textContent = state.chatError;
+        chatNotice.classList.add("error");
+      }
       if (requestMatches) {
         chatActiveRequest = null;
         requestMatches = false;
         clearChatRunningAction();
-        const last = chatMessages[chatMessages.length - 1];
-        if (last && last.role === "assistant" && !last.content) { last.content = state.chatError; last.error = true; }
         chatLiveStatus.textContent = "";
         updateChatStreamingState(false);
         renderChatMessages();

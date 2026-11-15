@@ -62,10 +62,18 @@ pub(crate) enum ChatTool {
     /// `content` is the text to write. Without it the file is empty, which was
     /// the only behaviour for a while and made every "write me a script"
     /// request produce an empty file that the card called *Created file*.
+    ///
+    /// `append` adds to an existing file instead of creating one. A reply has a
+    /// hard output limit, and one call carries its whole content, so a page or
+    /// a script long enough to be useful does not fit in a single call: the
+    /// answer was cut off mid-argument and the file never came into being.
+    /// Writing it in parts, first part creating and the rest appending, is what
+    /// makes a long file reachable at all.
     CreateFile {
         name: String,
         parent: Option<std::path::PathBuf>,
         content: Option<String>,
+        append: bool,
     },
     /// The text of a file, so a question about its contents has an answer.
     ///
@@ -319,7 +327,26 @@ impl RawToolCall {
                         });
                     }
                 }
-                Ok(ChatTool::CreateFile { name, parent, content })
+                // Appending without text is a no-op the card would still call a
+                // success, so it is refused here rather than written as nothing.
+                let append = self
+                    .arguments
+                    .get("append")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let has_text = content.as_deref().is_some_and(|text| !text.is_empty());
+                if append && !has_text {
+                    return Err(ToolError::IllegalName {
+                        tool: "create_file",
+                        reason: "append needs the content to add".to_string(),
+                    });
+                }
+                Ok(ChatTool::CreateFile {
+                    name,
+                    parent,
+                    content,
+                    append,
+                })
             }
             "read_file" => {
                 let path = arg("path")?;
@@ -1036,6 +1063,7 @@ impl PendingAction {
             ChatTool::RevealPath { .. } => "Show in File Explorer",
             ChatTool::OpenUrl { .. } => "Open link",
             ChatTool::CreateFolder { .. } => "Create folder",
+            ChatTool::CreateFile { append: true, .. } => "Append to file",
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
             ChatTool::MovePath { .. } => "Move",
@@ -1063,18 +1091,30 @@ impl PendingAction {
         // policy that silently refuses .ps1, which is a reasonable thing to ask
         // for on Windows.
         let detail = match tool {
-            ChatTool::CreateFile { name, content, .. } => {
+            ChatTool::CreateFile {
+                name,
+                content,
+                append,
+                ..
+            } => {
                 let mut note = String::new();
                 if let Some(extension) = executable_extension(name) {
                     note.push_str(&format!(
                         " This creates a {extension} file, which runs code if you open it."
                     ));
                 }
-                match content {
-                    Some(text) if !text.is_empty() => {
-                        note.push_str(&format!(" It will contain {} bytes of text.", text.len()))
+                if *append {
+                    note.push_str(&format!(
+                        " It adds {} bytes to the end of the existing file.",
+                        content.as_deref().map(str::len).unwrap_or(0)
+                    ));
+                } else {
+                    match content {
+                        Some(text) if !text.is_empty() => {
+                            note.push_str(&format!(" It will contain {} bytes of text.", text.len()))
+                        }
+                        _ => note.push_str(" It will be empty."),
                     }
-                    _ => note.push_str(" It will be empty."),
                 }
                 note
             }
@@ -1143,6 +1183,7 @@ fn sample_call(name: &str) -> ChatTool {
             name: "new.txt".to_string(),
             parent: None,
             content: None,
+            append: false,
         },
         "read_file" => ChatTool::ReadFile { path: existing },
         "move_path" => ChatTool::MovePath {
@@ -1249,13 +1290,14 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "create_file",
-                "description": "Create a file, optionally with its contents. Requires user confirmation.",
+                "description": "Create a file, optionally with its contents, or add to a file you created earlier with append. Requires user confirmation.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "File name, no path separators. Include the extension, such as notes.md or script.ps1."},
                         "parent": {"type": "string", "description": "Optional absolute path of an existing folder to create the file in, such as a folder you just created. Omit for the user's default create folder."},
-                        "content": {"type": "string", "description": "The text to write. Omit or leave empty to create an empty file. Give complete file contents, never a placeholder or '...'."}
+                        "content": {"type": "string", "description": "The text to write. Omit or leave empty to create an empty file. Give complete file contents, never a placeholder or '...'. Keep one call to about 150 lines; a longer file is written in parts."},
+                        "append": {"type": "boolean", "description": "True to add this content to the end of a file that already exists, instead of creating a new one. Use it for the second and later parts of a long file, with the same name and parent as the first part. Never use it to restart a file."}
                     },
                     "required": ["name"]
                 }
@@ -1586,11 +1628,51 @@ pub(crate) fn run_cancellable(
                 Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
             }
         }
-        ChatTool::CreateFile { name, parent, content } => {
+        ChatTool::CreateFile {
+            name,
+            parent,
+            content,
+            append,
+        } => {
             // `parent`, when given, was validated as an existing directory and
             // `name` as a single component, so this join cannot escape either.
             let base = parent.clone().unwrap_or_else(|| create_base.to_path_buf());
             let target = base.join(name);
+            let shown = target.to_string_lossy().to_string();
+            if *append {
+                // Continuing a file that is already there. Append is how a long
+                // file gets finished, so a missing file is a real failure, not
+                // a cue to create one.
+                let before = match std::fs::metadata(&target) {
+                    Ok(metadata) if metadata.is_file() => metadata.len(),
+                    _ => {
+                        return ToolOutcome::failure(
+                            tool.name(),
+                            &shown,
+                            "there is no file to append to",
+                        )
+                    }
+                };
+                let mut handle = match std::fs::OpenOptions::new().append(true).open(&target) {
+                    Ok(handle) => handle,
+                    Err(error) => return ToolOutcome::failure(tool.name(), &shown, error),
+                };
+                use std::io::Write as _;
+                let text = content.as_deref().unwrap_or_default();
+                if let Err(error) = handle.write_all(text.as_bytes()) {
+                    // Never delete on a failed append: the parts already written
+                    // are the ones worth keeping. Cut the failed tail back off
+                    // so the file is what it was before this call.
+                    let _ = handle.set_len(before);
+                    return ToolOutcome::failure(tool.name(), &shown, error);
+                }
+                return ToolOutcome {
+                    tool: tool.name().to_string(),
+                    target: shown.clone(),
+                    ok: true,
+                    summary: format!("Appended {} bytes to {shown}", text.len()),
+                };
+            }
             if target.exists() {
                 return ToolOutcome::failure(
                     tool.name(),
@@ -1598,7 +1680,6 @@ pub(crate) fn run_cancellable(
                     "that file already exists",
                 );
             }
-            let shown = target.to_string_lossy().to_string();
             if let Some(parent) = target.parent() {
                 if let Err(error) = std::fs::create_dir_all(parent) {
                     return ToolOutcome::failure(tool.name(), &shown, error);
@@ -2296,6 +2377,7 @@ mod tests {
             name: "x.txt".into(),
             parent: None,
             content: None,
+            append: false,
 }));
     }
 
@@ -2376,7 +2458,7 @@ mod tests {
             parent: None,
         }
         .needs_confirmation());
-        assert!(ChatTool::CreateFile { name: "x".into(), parent: None, content: None }.needs_confirmation());
+        assert!(ChatTool::CreateFile { name: "x".into(), parent: None, content: None, append: false }.needs_confirmation());
     }
 
     #[test]
@@ -2602,6 +2684,7 @@ mod tests {
             name: "quarterly report.docx".into(),
             parent: None,
             content: None,
+            append: false,
 };
         let pending = PendingAction::of(&tool);
         // The user approves this string, so it must be the real value — not a
@@ -2632,6 +2715,7 @@ mod tests {
             name: "should_not_exist.txt".into(),
             parent: None,
             content: None,
+            append: false,
 },
         ] {
             let outcome = run(&tool, false, &dir);
@@ -2676,6 +2760,7 @@ mod tests {
             name: "notes.txt".into(),
             parent: None,
             content: None,
+            append: false,
 },
             true,
             &dir,
@@ -2760,6 +2845,7 @@ mod tests {
                 name: "hello.txt".into(),
                 parent: Some(inner.clone()),
                 content: None,
+                append: false,
 },
             true,
             &root,
@@ -2928,6 +3014,16 @@ mod tests {
             name: name.to_string(),
             parent: Some(parent.to_path_buf()),
             content: content.map(str::to_string),
+            append: false,
+        }
+    }
+
+    fn append_tool(name: &str, parent: &std::path::Path, content: &str) -> ChatTool {
+        ChatTool::CreateFile {
+            name: name.to_string(),
+            parent: Some(parent.to_path_buf()),
+            content: Some(content.to_string()),
+            append: true,
         }
     }
 
@@ -3033,6 +3129,63 @@ mod tests {
         assert!(raw("create_file", serde_json::json!({ "name": "a.txt", "content": at_cap }))
             .validate()
             .is_ok());
+    }
+
+    // --- create_file append: finishing a long file in parts (CIQ-175) ---
+
+    #[test]
+    fn append_adds_to_the_end_without_touching_what_is_there() {
+        let dir = scratch("append");
+        let first = run(&write_tool("index.html", &dir, Some("<html>\n")), true, &dir);
+        assert!(first.ok, "{}", first.summary);
+        let second = run(&append_tool("index.html", &dir, "<body>\n"), true, &dir);
+        assert!(second.ok, "{}", second.summary);
+        assert!(second.summary.contains("Appended"), "{}", second.summary);
+        let on_disk = std::fs::read_to_string(dir.join("index.html")).unwrap();
+        assert_eq!(on_disk, "<html>\n<body>\n");
+    }
+
+    #[test]
+    fn append_to_a_missing_file_fails_instead_of_creating_one() {
+        // Append is how a long file gets finished; quietly creating a second
+        // half-file at the same name would lose the first.
+        let dir = scratch("append-missing");
+        let ran = run(&append_tool("absent.txt", &dir, "more"), true, &dir);
+        assert!(!ran.ok, "{}", ran.summary);
+        assert!(ran.summary.contains("no file to append to"), "{}", ran.summary);
+        assert!(!dir.join("absent.txt").exists());
+    }
+
+    #[test]
+    fn append_still_needs_confirmation() {
+        let dir = scratch("append-confirm");
+        std::fs::write(dir.join("page.html"), "<html>").unwrap();
+        let tool = append_tool("page.html", &dir, "<body>");
+        assert!(tool.needs_confirmation());
+        let ran = run(&tool, false, &dir);
+        assert!(!ran.ok);
+        assert_eq!(std::fs::read_to_string(dir.join("page.html")).unwrap(), "<html>");
+    }
+
+    #[test]
+    fn an_append_without_content_is_refused() {
+        let err = raw(
+            "create_file",
+            serde_json::json!({ "name": "a.txt", "append": true }),
+        )
+        .validate();
+        assert!(matches!(err, Err(ToolError::IllegalName { .. })), "{err:?}");
+    }
+
+    #[test]
+    fn the_append_card_says_it_adds_to_an_existing_file() {
+        let dir = scratch("append-card");
+        let card = PendingAction::of(&append_tool("page.html", &dir, "12345"));
+        assert!(
+            card.description.contains("adds 5 bytes to the end"),
+            "{}",
+            card.description
+        );
     }
 
     // --- drive roots (reported bug: G:\ rejected as a system folder) ---

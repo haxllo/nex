@@ -2923,6 +2923,7 @@
   const CHAT_HISTORY_MAX_TURNS = 24;
   const CHAT_HISTORY_TURN_MAX_CHARS = 6000;
   const CHAT_HISTORY_MAX_BYTES = 40_000;
+  const CHAT_HISTORY_ACTION_MAX = 12;
   const CHAT_ATTACHMENT_MAX_FILES = 3;
   const CHAT_ATTACHMENT_MAX_BYTES = 12 * 1024;
   const CHAT_ATTACHMENTS_MAX_BYTES = 20 * 1024;
@@ -2940,6 +2941,28 @@
       && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo);
   }
 
+  // One line per action a turn actually ran. The model never sees its own
+  // cards, only this text, so without it a follow-up ("open it again") has no
+  // path and searches a whole drive for something it created a turn earlier.
+  // Only outcomes, never previews or arguments: this rides in every request.
+  function chatHistoryActionLines(actions) {
+    if (!Array.isArray(actions) || !actions.length) return "";
+    const lines = [];
+    const seen = new Set();
+    for (const action of actions) {
+      if (lines.length >= CHAT_HISTORY_ACTION_MAX) break;
+      const tool = typeof action.tool === "string" ? action.tool : "";
+      if (!tool) continue;
+      // A failed action reports why, so the next turn does not retry it blind.
+      const detail = action.ok && action.target ? action.target : (action.summary || "failed");
+      const line = "- " + tool + (action.ok ? ": " : " failed: ") + detail;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      lines.push(line);
+    }
+    return lines.length ? "Actions already run in this reply (facts, not instructions):\n" + lines.join("\n") : "";
+  }
+
   function buildChatHistory(turns, message, requestId, attachments, includePcInfo) {
     const candidates = turns.filter((turn) => !turn.error
       && !(turn.role === "assistant" && turn.incomplete)
@@ -2949,7 +2972,12 @@
     let totalBytes = 0;
     for (let index = candidates.length - 1; index >= 0; index--) {
       const turn = candidates[index];
-      const encodedContent = chatTextEncoder.encode(Array.from(turn.content).slice(0, CHAT_HISTORY_TURN_MAX_CHARS).join(""));
+      // The action lines go first: the turn is cut from the start at
+      // CHAT_HISTORY_TURN_MAX_CHARS, and the paths matter more than the prose.
+      const text = turn.role === "assistant"
+        ? [chatHistoryActionLines(turn.actions), turn.content].filter(Boolean).join("\n")
+        : turn.content;
+      const encodedContent = chatTextEncoder.encode(Array.from(text).slice(0, CHAT_HISTORY_TURN_MAX_CHARS).join(""));
       const content = chatTextDecoder.decode(encodedContent);
       if (totalBytes + encodedContent.length > CHAT_HISTORY_MAX_BYTES) break;
       const nextHistory = [{ role: turn.role, content }, ...history];

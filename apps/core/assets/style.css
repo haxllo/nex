@@ -3111,6 +3111,7 @@ html.glass-native .chat-composer-shell {
 .chat-code-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .chat-code-copy.is-done { color: var(--text); opacity: 1; }
 .chat-code-copy.is-failed { color: var(--danger); opacity: 1; }
+.chat-code-tools { display: flex; align-items: center; gap: 1px; }
 /* Scrolls sideways and down; focusable so the keyboard can scroll it, which is
    why the block draws the ring. */
 .chat-code-block pre {
@@ -3129,6 +3130,36 @@ html.glass-native .chat-composer-shell {
 /* The code box scrolls, so it takes focus; ring on the box, not on an invisible
    inner element. */
 .chat-code-block pre:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* A file a step just wrote, shown under its row: same card as a fenced block so
+   the two read as one thing. */
+.chat-file-preview { margin: 5px 0 2px; }
+/* Three lines is the glance; the footer is the rest. The clip is done at the
+   line boundary - top padding plus three line boxes - so the fourth line does
+   not show as a sliver above the button. */
+.chat-file-preview.is-clamped pre { max-height: calc(9px + 3 * 1.6em); overflow: hidden; }
+/* Opening is the reason this card exists, so unlike copy it does not wait for
+   the pointer to arrive. */
+.chat-file-open { opacity: 1; }
+.chat-file-more {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  border-top: 1px solid var(--divider);
+  background: transparent;
+  /* A control, so it is ink rather than metadata: --text-dim measured 4.46:1
+     on the plate behind this card, just under the 4.5 a 10.5px label needs. */
+  color: var(--text);
+  font: 500 10.5px/1.5 var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat-file-more:hover { background: var(--hover); }
+}
+.chat-file-more:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .chat-code-block .tok-comment { color: var(--code-comment); font-style: italic; }
 .chat-code-block .tok-keyword { color: var(--code-keyword); }
 .chat-code-block .tok-string { color: var(--code-string); }

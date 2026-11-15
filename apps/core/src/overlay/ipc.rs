@@ -46,6 +46,7 @@ pub(crate) const KNOWN_POWER_ACTIONS: &[&str] =
 pub(crate) const KNOWN_CONTEXT_ACTIONS: &[&str] = &[
     "runas",
     "openfolder",
+    "openpath",
     "copypath",
     "uninstall",
     "pin",

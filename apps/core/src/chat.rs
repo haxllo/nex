@@ -1383,19 +1383,46 @@ fn push_action_outcome(
     request_id: Option<&str>,
     outcome: &crate::chat_tools::ToolOutcome,
 ) {
-    push_chat_update(
-        sink,
-        request_update(
-            request_id,
-            "chatAction",
-            json!({
-                "tool": outcome.tool,
-                "target": outcome.target,
-                "ok": outcome.ok,
-                "summary": outcome.summary,
-            }),
-        ),
-    );
+    let mut payload = json!({
+        "tool": outcome.tool,
+        "target": outcome.target,
+        "ok": outcome.ok,
+        "summary": outcome.summary,
+    });
+    // A created file's result is its content, so the card can show what landed
+    // instead of only where it landed.
+    if outcome.ok && outcome.tool == "create_file" {
+        if let Some(preview) = created_file_preview(&outcome.target) {
+            payload["preview"] = json!(preview);
+        }
+    }
+    push_chat_update(sink, request_update(request_id, "chatAction", payload));
+}
+
+/// The first lines of a file the run just created. Bounded on purpose: the card
+/// shows a glance, not a viewer, and this rides on a chat update.
+fn created_file_preview(path: &str) -> Option<String> {
+    const MAX_LINES: usize = 40;
+    const MAX_BYTES: u64 = 16 * 1024;
+    use std::io::Read as _;
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_BYTES)
+        .read_to_end(&mut head)
+        .ok()?;
+    // Lossy rather than strict: a cut at the byte cap can split a character,
+    // and losing the last line beats losing the preview.
+    let text = String::from_utf8_lossy(&head);
+    // Binary has no lines worth showing; the path is then the whole summary.
+    if text.contains('\u{0}') {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
 }
 
 fn action_output_items(
@@ -2702,6 +2729,44 @@ mod tests {
         // The target travels separately so the card can show the path the user
         // can act on, instead of it being buried inside a sentence.
         assert_eq!(action["target"], "C:\\Users\\x\\Desktop\\hello.txt");
+    }
+
+    #[test]
+    fn a_created_file_carries_a_bounded_preview() {
+        let root = std::env::temp_dir().join(format!("nex-166-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("build.ps1");
+        let body: String = (1..=60).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(&script, &body).unwrap();
+        let binary = root.join("blob.bin");
+        std::fs::write(&binary, b"\x00\x01\x02").unwrap();
+
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let sink: ChatUpdateSink = Arc::new(Mutex::new(Box::new(move |update: Value| {
+            sink_seen.lock().unwrap().push(update);
+        })));
+        let created = crate::chat_tools::ToolOutcome::success(
+            "create_file",
+            &script.to_string_lossy(),
+            "Created file build.ps1 (500 bytes)",
+        );
+        let blob = crate::chat_tools::ToolOutcome::success(
+            "create_file",
+            &binary.to_string_lossy(),
+            "Created file blob.bin (3 bytes)",
+        );
+
+        push_action_outcome(&sink, None, &created);
+        push_action_outcome(&sink, None, &blob);
+
+        let seen = seen.lock().unwrap();
+        let preview = seen[0]["chatAction"]["preview"].as_str().unwrap();
+        assert_eq!(preview.lines().count(), 40);
+        assert!(preview.starts_with("line 1\n"));
+        // A file with nothing readable in it says nothing rather than garbage.
+        assert!(seen[1]["chatAction"].get("preview").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

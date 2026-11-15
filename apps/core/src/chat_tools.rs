@@ -1356,6 +1356,15 @@ impl PendingAction {
     }
 
     pub(crate) fn of(tool: &ChatTool) -> Self {
+        Self::of_in(tool, &crate::chat::create_base_dir())
+    }
+
+    /// As [`of`], with the default create folder handed in.
+    ///
+    /// The card for a create has to name the whole destination, and the default
+    /// destination is resolved from config and the shell, which tests should
+    /// not depend on.
+    pub(crate) fn of_in(tool: &ChatTool, create_base: &std::path::Path) -> Self {
         let verb = match tool {
             ChatTool::OpenPath { .. } => "Open",
             ChatTool::RevealPath { .. } => "Show in File Explorer",
@@ -1466,9 +1475,19 @@ impl PendingAction {
             }
             _ => String::new(),
         };
+        // A create is approved by approving its destination, so a name-only
+        // target hides the one fact the user needs: "scripts" in Documents and
+        // "scripts" on the Desktop are different actions.
+        let target = match tool {
+            ChatTool::CreateFolder { name, parent } | ChatTool::CreateFile { name, parent, .. } => {
+                let base = parent.clone().unwrap_or_else(|| create_base.to_path_buf());
+                base.join(name).to_string_lossy().into_owned()
+            }
+            _ => tool.target().to_string(),
+        };
         Self {
             tool: tool.name().to_string(),
-            target: tool.target().to_string(),
+            target,
             description: format!("{verb}. {effect}{detail}"),
         }
     }
@@ -4696,6 +4715,32 @@ mod tests {
             .unwrap_err();
             assert!(matches!(err, ToolError::IllegalName { .. }), "{name} -> {err:?}");
         }
+    }
+
+    #[test]
+    fn a_create_card_names_the_whole_destination() {
+        let base = std::path::Path::new("C:\\Users\\me\\Documents");
+
+        let card = PendingAction::of_in(
+            &ChatTool::CreateFolder {
+                name: "scripts".to_string(),
+                parent: None,
+            },
+            base,
+        );
+        assert_eq!(card.target, "C:\\Users\\me\\Documents\\scripts");
+
+        // A parent the model supplied wins over the default create folder.
+        let card = PendingAction::of_in(
+            &ChatTool::CreateFile {
+                name: "a.txt".to_string(),
+                parent: Some(std::path::PathBuf::from("G:\\work")),
+                content: None,
+                append: false,
+            },
+            base,
+        );
+        assert_eq!(card.target, "G:\\work\\a.txt");
     }
 
     #[test]

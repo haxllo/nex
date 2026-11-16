@@ -95,8 +95,10 @@ jobs:
         run: |
           $doc = "docs/whats-new.md"
           if (-not (Test-Path $doc)) {
-            Write-Host "::warning::$doc is missing; the What's New view will show the tips fallback."
-            exit 0
+            # Absent is not "skipped this release": the document is committed,
+            # so a tree without it is broken. Stale text is a judgement call
+            # and only warns; emptiness is a defect and fails the release.
+            throw "$doc is missing. It is committed to the repository; restore it from git."
           }
           $raw = Get-Content $doc -Raw
           $match = [regex]::Match($raw, '<!--\s*release:\s*([^\s>-]+)\s*-->')
@@ -110,8 +112,7 @@ jobs:
           }
           $visible = [regex]::Replace($raw, '(?s)<!--.*?-->', '')
           if ([string]::IsNullOrWhiteSpace($visible)) {
-            Write-Host "::warning::$doc has no text outside its HTML comments; the What's New view will be empty."
-            exit 0
+            throw "$doc has no text outside its HTML comments; the What's New view would be empty."
           }
           Write-Host "What's New document is current for $env:VERSION."
 

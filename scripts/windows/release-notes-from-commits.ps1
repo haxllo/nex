@@ -38,18 +38,31 @@ try {
   $features = New-Object System.Collections.Generic.List[string]
   $fixes = New-Object System.Collections.Generic.List[string]
   $performance = New-Object System.Collections.Generic.List[string]
+  $untyped = New-Object System.Collections.Generic.List[string]
   $log = New-Object System.Collections.Generic.List[string]
+
+  # Commits that describe how the work landed rather than what changed. The
+  # commit-msg hook already exempts the same subjects, so a revert or a merge
+  # does not appear in the notes a user reads.
+  $skipPattern = '^(Merge |Revert |fixup!|squash!|docs:|chore:|test:)'
 
   foreach ($line in $commits) {
     if (-not $line) { continue }
     $parts = $line -split "`t", 2
     $sha = $parts[0]
     $subject = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    if ($subject -match $skipPattern) { continue }
 
     # "type(scope): summary" -> scope + summary; anything else stays whole.
-    $item = $subject
-    $bucket = $log
-    if ($subject -match '^([a-zA-Z]+)(\(([^)]*)\))?!?:\s*(.+)$') {
+    # The Linear id is stripped before the type is read: without that,
+    # "CIQ-201: read the ..." parses as a "CIQ" type and the summary loses its
+    # opening words. The id identifies the issue, not the change, and a
+    # release note is read by people who do not have Linear access.
+    $clean = ($subject -replace '^CIQ-[0-9]+:\s*', '').Trim()
+    $clean = ($clean -replace '\s*\(?CIQ-[0-9]+\)?\s*', ' ').Trim()
+    $item = $clean
+    $bucket = $null
+    if ($clean -match '^([a-zA-Z]+)(\(([^)]*)\))?!?:\s*(.+)$') {
       $type = $matches[1].ToLowerInvariant()
       $scope = $matches[3]
       $summary = $matches[4]
@@ -58,13 +71,20 @@ try {
         'feat' { $bucket = $features }
         'fix' { $bucket = $fixes }
         'perf' { $bucket = $performance }
-        default { $bucket = $log }
+        default { $bucket = $null }
       }
     }
     else {
-      $item = "- $subject"
+      # No type prefix: still a change worth listing, so it goes in the flat
+      # list rather than being dropped. Only that list is rendered - the commit
+      # log below carries the same text with its link, which is why this used
+      # to appear twice.
+      $item = "- $clean"
     }
-    $bucket.Add($item)
+    # `$null -ne` rather than truthiness: an empty List[string] evaluates to
+    # $false in PowerShell, so `if ($bucket)` sent every typed commit to the
+    # untyped list until each bucket already had an entry.
+    if ($null -ne $bucket) { $bucket.Add($item) } else { $untyped.Add($item) }
     $log.Add("- [``$sha``](https://github.com/haxllo/nex/commit/$sha) $subject")
   }
 
@@ -98,6 +118,15 @@ try {
     $out.Add("### Performance")
     $out.Add("")
     $out.AddRange($performance)
+    $out.Add("")
+  }
+
+  # Only when something landed without a type prefix. An empty heading reads
+  # worse than none at all.
+  if ($untyped.Count) {
+    $out.Add("### Changes")
+    $out.Add("")
+    $out.AddRange($untyped)
     $out.Add("")
   }
 

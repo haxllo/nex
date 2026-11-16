@@ -1966,17 +1966,17 @@ impl RuntimeWorker {
                     })
                     .ok();
             }
-            OverlayEvent::UpdateAvailable { available, latest } => {
+            OverlayEvent::UpdateAvailable { available, .. } => {
                 self.overlay.set_update_available(available);
                 log_info(&format!("[nex] update_available={}", available));
-                // The pill always names the detected version: a stale
-                // post-update pending would otherwise show old notes for
-                // a newly detected release.
-                if available {
-                    if let Some(version) = latest {
-                        self.overlay.set_whats_new_pending(version);
-                    }
-                }
+                // Detecting a release is not installing it. Setting the
+                // pending version here made the What's New pill appear while
+                // an older version was running, and the view then showed the
+                // *new* release's notes for a build that did not contain it —
+                // which the user saw again after updating, twice for one
+                // release. `check_pending` asks the right question instead:
+                // has the version actually running been seen? The detected
+                // version is deliberately not part of the notes path.
             }
             OverlayEvent::WhatsNew => {
                 // The view is opening — this counts as seen even if the
@@ -1985,18 +1985,18 @@ impl RuntimeWorker {
                 if let Some(version) = self.overlay.whats_new_pending() {
                     crate::whats_new::mark_seen(&version);
                     self.overlay.clear_whats_new_pending();
-                    let event_tx = self.event_tx.clone();
-                    std::thread::Builder::new()
-                        .name("nex-whats-new-fetch".into())
-                        .spawn(move || {
-                            let markdown = crate::whats_new::fetch_notes_markdown(&version);
-                            let json = serde_json::json!({
-                                "whatsNew": { "version": version, "markdown": markdown },
-                            })
-                            .to_string();
-                            let _ = event_tx.send(OverlayEvent::WhatsNewReady(json));
-                        })
-                        .ok();
+                    // Baked at compile time, so there is nothing to wait for:
+                    // sending it straight through removes a thread and the
+                    // window where the view sat empty until a network call
+                    // answered.
+                    let json = serde_json::json!({
+                        "whatsNew": {
+                            "version": version,
+                            "markdown": crate::whats_new::notes_markdown(),
+                        },
+                    })
+                    .to_string();
+                    let _ = self.event_tx.send(OverlayEvent::WhatsNewReady(json));
                 }
             }
             OverlayEvent::WhatsNewReady(json) => {

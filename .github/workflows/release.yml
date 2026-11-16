@@ -58,6 +58,24 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The What's New view renders a document baked into the binary by
+      # apps/core/build.rs, read from this file at compile time. Checking it
+      # here, before the build, is deliberate: generating a draft afterwards
+      # would leave the shipped binary holding whatever existed when it
+      # compiled, which is the tips fallback when the prose was never written.
+      - name: Check the release notes exist
+        run: |
+          $file = "docs/releases/v${env:VERSION}-notes.md"
+          if (-not (Test-Path $file)) {
+            throw "Missing $file. Write it before tagging: it is both the release body and the text baked into the What's New view. Run scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION to draft one."
+          }
+          $body = Get-Content $file -Raw
+          if ([string]::IsNullOrWhiteSpace(($body -split '## Commit Log')[0])) {
+            throw "$file has no user-facing section before '## Commit Log'; the What's New view would be empty."
+          }
+          "path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        id: notes
+
       - name: Build the release binaries
         timeout-minutes: 60
         run: cargo build --locked --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
@@ -70,17 +88,6 @@ jobs:
 
       - name: Package the installer
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
-
-      - name: Resolve the release notes
-        id: notes
-        run: |
-          $file = "docs/releases/v${env:VERSION}-notes.md"
-          if (-not (Test-Path $file)) {
-            Write-Host "::warning::No hand-written notes at $file. Generating a draft from the commit log."
-            pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION -OutputPath $file
-          }
-          if (-not (Test-Path $file)) { throw "Release notes are missing and could not be generated." }
-          "path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Open the release
         env:

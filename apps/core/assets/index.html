@@ -268,6 +268,13 @@
           <div id="chat-live-status" class="chat-live-status" aria-live="polite"></div>
         </div>
 
+        <!-- Shown only when the view is scrolled away from the newest turn. It is
+             a sibling of the scroller: inside it, the button would scroll away
+             with the content it is meant to escape. -->
+        <button type="button" id="chat-jump-bottom" class="chat-jump-bottom" hidden aria-label="Jump to the newest message">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+        </button>
+
         <div class="chat-composer-wrap">
           <div id="chat-context-selection" class="chat-context-selection" role="group" aria-label="Selected local context" hidden></div>
           <div id="chat-composer-shell" class="chat-composer-shell">

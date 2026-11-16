@@ -238,9 +238,10 @@ Never put tickets, commits, file or function names in it.
 exist before the build. A build without it emits a `cargo:warning` and bakes an
 empty string, which ships the tips fallback.
 
-**Shipping without rewriting the What's New document is allowed.** The release
-workflow never blocks on it; it warns when the `release:` marker at the top of
-the file does not name the version being released. That marker is how a stale
+**Shipping without rewriting the What's New document is allowed. Shipping
+without the document is not.** The file is committed, so its absence means a
+broken tree and fails the release; so does a file with no text outside its
+HTML comments. Text that is merely stale only warns. That marker is how a stale
 document is detected — bump it with the prose, or the app shows last release's
 text. `scripts/windows/release-notes-from-commits.ps1` drafts
 `docs/releases/v<ver>-notes.md` from the commit log when that file is absent,

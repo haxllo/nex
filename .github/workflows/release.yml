@@ -63,41 +63,57 @@ jobs:
       # here, before the build, is deliberate: generating a draft afterwards
       # would leave the shipped binary holding whatever existed when it
       # compiled, which is the tips fallback when the prose was never written.
-      # Two documents, both required, both checked before the build.
+      # The release notes are the GitHub release body, and are drafted from the
+      # commit log when no file for this version exists. This stays before the
+      # build on purpose: the run should fail on a broken notes step before it
+      # spends an hour compiling.
       #
-      # docs/releases/v<ver>-notes.md  the GitHub release page, with the commit log
-      # docs/whats-new.md              the in-app What's New view, baked into the
-      #                                binary at compile time by apps/core/build.rs
-      #
-      # Checking before the build is deliberate. The document is compiled in, so
-      # generating it afterwards would leave the shipped binary holding whatever
-      # existed at compile time — the tips fallback — while the release page
-      # showed a draft.
-      - name: Check the release documents exist
-        run: |
-          $notes = "docs/releases/v${env:VERSION}-notes.md"
-          if (-not (Test-Path $notes)) {
-            throw "Missing $notes. Write it before tagging: it is the release page body. Run scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION to draft one."
-          }
-          if ([string]::IsNullOrWhiteSpace((Get-Content $notes -Raw))) {
-            throw "$notes is empty; the release page would have no body."
-          }
-
-          $whatsNew = "docs/whats-new.md"
-          if (-not (Test-Path $whatsNew)) {
-            throw "Missing $whatsNew. Write it before tagging: it is baked into the binary and shown in the What's New view."
-          }
-          # Strip the HTML comments first; the instructions live in them and
-          # they do not count as content the user would see.
-          $visible = [regex]::Replace((Get-Content $whatsNew -Raw), '(?s)<!--.*?-->', '')
-          if ([string]::IsNullOrWhiteSpace($visible)) {
-            throw "$whatsNew has no text outside its HTML comments; the What's New view would be empty."
-          }
-          if ($visible -match '## Commit Log') {
-            throw "$whatsNew mentions a commit log; that belongs in $notes."
-          }
-          "path=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      # The in-app What's New document is NOT checked here. It is baked into the
+      # binary at compile time from docs/whats-new.md, and squeezing a release
+      # out without rewriting it is a legitimate choice — the app then shows the
+      # text that is committed. Blocking the release on prose would make a
+      # five-minute job a hard dependency of shipping a fix.
+      - name: Resolve the release notes
         id: notes
+        run: |
+          $file = "docs/releases/v${env:VERSION}-notes.md"
+          if (-not (Test-Path $file)) {
+            Write-Host "::warning::No notes at $file. Generating a draft from the commit log."
+            pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION -OutputPath $file
+          }
+          if (-not (Test-Path $file)) { throw "Release notes are missing and could not be generated." }
+          if ([string]::IsNullOrWhiteSpace((Get-Content $file -Raw))) {
+            throw "$file is empty; the release page would have no body."
+          }
+          "path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # A warning, never a failure. Releasing without rewriting the What's New
+      # document is allowed; the shipped app then shows the committed text,
+      # which is the previous release's prose if the marker still names it.
+      # Saying so loudly is what keeps that from happening quietly.
+      - name: Note whether the What's New document is current
+        run: |
+          $doc = "docs/whats-new.md"
+          if (-not (Test-Path $doc)) {
+            Write-Host "::warning::$doc is missing; the What's New view will show the tips fallback."
+            exit 0
+          }
+          $raw = Get-Content $doc -Raw
+          $match = [regex]::Match($raw, '<!--\s*release:\s*([^\s>-]+)\s*-->')
+          if (-not $match.Success) {
+            Write-Host "::warning::$doc has no '<!-- release: X -->' marker; cannot tell whether the text matches $env:VERSION."
+            exit 0
+          }
+          if ($match.Groups[1].Value -ne $env:VERSION) {
+            Write-Host "::warning::$doc is written for $($match.Groups[1].Value) but this release is $env:VERSION. The app will show the older text."
+            exit 0
+          }
+          $visible = [regex]::Replace($raw, '(?s)<!--.*?-->', '')
+          if ([string]::IsNullOrWhiteSpace($visible)) {
+            Write-Host "::warning::$doc has no text outside its HTML comments; the What's New view will be empty."
+            exit 0
+          }
+          Write-Host "What's New document is current for $env:VERSION."
 
       - name: Build the release binaries
         timeout-minutes: 60

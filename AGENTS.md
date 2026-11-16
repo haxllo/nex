@@ -222,7 +222,7 @@ work is: bump the version, write the notes, commit, push the tag. Pushing a
 all three crates, builds, packs the zip and installer, and opens the GitHub
 release. Do not run the packaging scripts by hand for a release.
 
-**Two separate release documents, both written before the tag.**
+**Two separate release documents.** Only the first is required to ship.
 
 | File | Audience | Who reads it |
 |---|---|---|
@@ -236,24 +236,32 @@ Never put tickets, commits, file or function names in it.
 
 `apps/core/build.rs` bakes `docs/whats-new.md` at compile time, so it must
 exist before the build. A build without it emits a `cargo:warning` and bakes an
-empty string, which would ship the tips fallback; the workflow refuses to
-publish in that case and a unit test fails on an empty bake.
-`scripts/windows/release-notes-from-commits.ps1` drafts
-`docs/releases/v<ver>-notes.md` from the commit log — a drafting tool for the
-release page only, never a source for What's New.
+empty string, which ships the tips fallback.
+
+**Shipping without rewriting the What's New document is allowed.** The release
+workflow never blocks on it; it warns when the `release:` marker at the top of
+the file does not name the version being released. That marker is how a stale
+document is detected — bump it with the prose, or the app shows last release's
+text. `scripts/windows/release-notes-from-commits.ps1` drafts
+`docs/releases/v<ver>-notes.md` from the commit log when that file is absent,
+and the workflow runs it automatically; it is a drafting tool for the release
+page only, never a source for What's New.
 
 ```bash
 # 1. bump version in apps/core, apps/ui, and apps/indexer (all three build
 #    scripts stamp FileVersion from their own package)
-# 2. rewrite docs/whats-new.md for this release (comments stripped at build)
-# 3. write docs/releases/v<ver>-notes.md (copy docs/releases/RELEASE-TEMPLATE.md)
+# 2. rewrite docs/whats-new.md for this release, and bump its `release:` marker
+#    (optional, but skipping it ships last release's text)
+# 3. write docs/releases/v<ver>-notes.md, or let the workflow draft it
 #    — do 1-3 in one commit, because the What's New document is compiled in
 cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
 
 # 4. tag only after those commits are on master, then push
 git tag v<ver>
 git push origin master --tags
-# .github/workflows/release.yml builds, packages and opens the release
+# .github/workflows/release.yml does everything else: verifies the tag against
+# all three crates, drafts missing notes, builds, packages the zip and the
+# installer, and opens the release.
 ```
 
 Publishing happens from the tag. The release page gets the release notes file;

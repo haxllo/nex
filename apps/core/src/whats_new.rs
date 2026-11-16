@@ -81,72 +81,162 @@ fn mark_seen_in(dir: &Path, version: &str) {
     }
 }
 
-/// The notes for the version this binary is, baked at compile time by
-/// `build.rs` from `docs/releases/v<version>-notes.md`.
+/// The What's New document for this binary, baked at compile time by
+/// `build.rs` from `docs/whats-new.md`.
 ///
-/// These used to be fetched from the GitHub release page at runtime, which
-/// meant the page rendered whatever the release body contained — a body now
-/// generated from commit messages, so it grew into a changelog dump that got
-/// worse every release and could not be curated. Baking the hand-written
-/// document keeps the page clean, works offline, and cannot disagree with the
-/// version the user is actually running.
-const BAKED_NOTES: &str = include_str!(concat!(env!("OUT_DIR"), "/release_notes.md"));
+/// This is a separate document from the GitHub release notes
+/// (`docs/releases/v<version>-notes.md`). The release page carries the commit
+/// log and the downloads; this one is written for the person using Nex and is
+/// edited by hand before each release. `build.rs` strips the format
+/// instructions the document carries in HTML comments.
+///
+/// This used to be fetched from the GitHub release page at runtime, which
+/// meant the view rendered a body generated from commit messages — a changelog
+/// dump that got worse every release and could not be curated.
+const BAKED_NOTES: &str = include_str!(concat!(env!("OUT_DIR"), "/whats_new.md"));
 
-/// The notes to show for this build, commit log and binary links removed.
+/// The What's New text to show for this build.
+///
+/// The document explains its own format in HTML comments so whoever edits it
+/// knows the rules; the in-app renderer understands headings, paragraphs and
+/// bullets but not HTML, so those comments are removed here rather than
+/// appearing as literal text.
 pub fn notes_markdown() -> String {
-    extract_highlights(BAKED_NOTES)
+    strip_html_comments(BAKED_NOTES)
 }
 
-/// Keep all user-facing release notes, including the title and summary, and
-/// drop the commit log and binary links — those are for the release page, not
-/// the overlay.
-fn extract_highlights(body: &str) -> String {
-    const ENDS: &[&str] = &["## Commit Log", "## Binary"];
-    body.lines()
-        .take_while(|line| !ENDS.iter().any(|marker| line.trim() == *marker))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+/// Remove `<!-- ... -->` blocks, including multi-line ones.
+///
+/// An unterminated comment is dropped to the end of the document rather than
+/// left in: the alternative is leaking editing instructions to a user.
+fn strip_html_comments(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let continued_comment = inside;
+        let mut kept = String::new();
+        let mut rest = line;
+        loop {
+            if inside {
+                match rest.find("-->") {
+                    Some(end) => {
+                        rest = &rest[end + 3..];
+                        inside = false;
+                    }
+                    None => {
+                        // The comment continues onto the next line; nothing
+                        // of this one survives. Break rather than assign an
+                        // empty `rest`, which would loop forever with no
+                        // `-->` left to find.
+                        break;
+                    }
+                }
+            } else {
+                match rest.find("<!--") {
+                    Some(start) => {
+                        kept.push_str(&rest[..start]);
+                        rest = &rest[start + 4..];
+                        inside = true;
+                    }
+                    None => {
+                        kept.push_str(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        let had_comment = continued_comment || line.contains("<!--");
+        // A line that held nothing but comment disappears completely. Keeping
+        // it as a blank line would split a bullet list the comment sat inside
+        // into two lists, which changes how the view renders the document.
+        if had_comment && kept.trim().is_empty() {
+            continue;
+        }
+        out.push(kept.trim_end().to_string());
+    }
+
+    // Collapse the blank runs left where comment blocks used to be.
+    let mut cleaned: Vec<&str> = Vec::new();
+    let mut blank_run = 0;
+    for line in &out {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        cleaned.push(line);
+    }
+    cleaned.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A release must not ship an empty What's New view. `build.rs` warns
+    /// rather than failing when the document is missing, which keeps ordinary
+    /// builds working but would let a release publish the tips fallback; this
+    /// makes that case visible in the test run instead.
     #[test]
-    fn extract_keeps_what_changed_drops_log_and_binaries() {
-        let body = "## Title\n\nIntro.\n\n## What changed\n\n- **Fast**: now faster\n\n### Bug Fixes\n\n- **Stuck**: fixed\n\n## Commit Log\n\n- [`abc`](url) msg\n\n## Binary\n\n- [Download](url)";
-        let out = extract_highlights(body);
-        assert!(out.contains("- **Fast**: now faster"));
-        assert!(out.contains("### Bug Fixes"));
-        assert!(!out.contains("Commit Log"));
-        assert!(!out.contains("Download"));
-    }
-
-    /// The build bakes the notes document for the version being built, so a
-    /// release cannot ship another release's prose. `build.rs` warns rather
-    /// than failing when the document is missing, which keeps ordinary builds
-    /// working but would let a release ship the tips fallback; this makes that
-    /// case visible in the test run instead.
-    #[test]
-    fn baked_notes_exist_and_are_not_the_previous_release() {
+    fn baked_notes_are_present_and_are_prose() {
         let notes = notes_markdown();
         assert!(
             !notes.trim().is_empty(),
-            "no notes baked for {}: add docs/releases/v{}-notes.md",
-            env!("CARGO_PKG_VERSION"),
+            "no What's New baked for {}: write docs/whats-new.md",
             env!("CARGO_PKG_VERSION"),
         );
+        // Instructions for whoever edits the document live in HTML comments.
+        // The in-app renderer does not understand HTML, so anything left would
+        // be shown to the user as literal text.
+        assert!(
+            !notes.contains("<!--") && !notes.contains("-->"),
+            "a format comment survived into the baked document"
+        );
+        // The release page owns the commit log; the app must not show it.
         assert!(
             !notes.contains("## Commit Log"),
-            "the baked notes still carry the commit log; it belongs on the              release page, not in the overlay"
+            "the baked document carries a commit log; it belongs in docs/releases"
         );
     }
 
     #[test]
-    fn extract_falls_back_to_whole_body_without_section() {
-        assert_eq!(extract_highlights("just text").trim(), "just text");
+    fn comments_are_removed_from_the_shown_text() {
+        assert_eq!(strip_html_comments("before\n<!-- note -->\nafter"), "before\nafter");
+    }
+
+    #[test]
+    fn a_multi_line_comment_is_removed() {
+        let text = "keep\n<!--\n  several\n  lines\n-->\nalso keep";
+        assert_eq!(strip_html_comments(text), "keep\nalso keep");
+    }
+
+    /// An unterminated comment must not reach the user.
+    #[test]
+    fn an_unclosed_comment_is_dropped_to_the_end() {
+        assert_eq!(strip_html_comments("shown\n<!-- never closed\nsecret"), "shown");
+    }
+
+    /// A comment between two bullets must not become a blank line: a blank line
+    /// ends the list in the view's renderer, turning one list into two.
+    #[test]
+    fn a_comment_inside_a_list_does_not_split_it() {
+        let text = "- first\n<!-- why -->\n- second";
+        assert_eq!(strip_html_comments(text), "- first\n- second");
+    }
+
+    /// Comments between blocks leave exactly one blank line, not a run.
+    #[test]
+    fn a_comment_between_blocks_leaves_one_blank_line() {
+        let text = "## Heading\n\n<!--\n  note\n-->\n\nText.";
+        assert_eq!(strip_html_comments(text), "## Heading\n\nText.");
+    }
+
+    #[test]
+    fn an_inline_comment_keeps_the_text_around_it() {
+        assert_eq!(strip_html_comments("left <!-- x --> right"), "left  right");
     }
 
     #[test]

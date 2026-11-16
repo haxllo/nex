@@ -2559,6 +2559,10 @@ html.glass-native .row .icon.placeholder {
 
 #panel.chat-open #chat-view {
   display: flex;
+  /* The jump-to-bottom control is absolutely positioned against this, not
+     against the scroller: a child of the scroller would travel with the
+     content it is meant to escape. */
+  position: relative;
   animation: chatReveal 160ms cubic-bezier(0.2, 0.7, 0.2, 1) backwards;
 }
 
@@ -2921,6 +2925,65 @@ html.glass-native .chat-composer-shell {
   border: 2px solid transparent;
   background-clip: padding-box;
 }
+/* Sticks to the bottom of the transcript while it is scrolled away from the
+   newest turn. It is inside .chat-scroll so it travels with the content it
+   belongs to, and outside the message column so a long answer cannot push it. */
+/* Pinned to the bottom of the transcript while it is scrolled away from the
+   newest turn.
+   
+   It floats rather than sitting in the flow: any in-flow placement either took
+   a row of its own or, with a negative margin pulled back over the content,
+   covered the last line of the answer. Floating over the transcript is the one
+   arrangement that leaves the layout untouched. The backdrop is opaque enough
+   that whatever passes behind it stays readable rather than showing through. */
+/* Shown only while the transcript is scrolled away from its newest turn.
+   
+   It floats above the composer rather than inside the scroller: a child of the
+   scroller travels with the content it exists to escape, and an in-flow sibling
+   either took a row of its own or, pulled back with a negative margin, covered
+   the last line of the answer. The backdrop is opaque so the text passing
+   behind it does not show through. */
+.chat-jump-bottom {
+  position: absolute;
+  left: 50%;
+  /* Just above the composer. Measured at 91px, and the button sits 10px above
+     it. A composer that grows with its textarea would need this to follow, so
+     app.js keeps it in step with the measured height rather than trusting a
+     constant that was true on one machine. */
+  bottom: calc(var(--composer-height, 91px) + 10px);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface, #1c1c1e);
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  transform: translateX(-50%);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.chat-jump-bottom[hidden] { display: none; }
+.chat-jump-bottom:hover { transform: translateX(-50%) translateY(-1px); }
+.chat-jump-bottom svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-jump-bottom { transition: none; }
+  .chat-jump-bottom:hover { transform: translateX(-50%); }
+}
+
 .chat-scroll.is-empty {
   display: flex;
   flex-direction: column;

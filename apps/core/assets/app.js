@@ -64,6 +64,7 @@
   const chatView = $("chat-view");
   const chatScroll = $("chat-scroll");
   const chatMessagesEl = $("chat-messages");
+  const chatJumpBottom = $("chat-jump-bottom");
   const chatEmpty = $("chat-empty");
   const chatInput = $("chat-input");
   const chatSendButton = $("chat-send-button");
@@ -2447,6 +2448,7 @@
       }
     }
     if (atBottom) chatScroll.scrollTop = chatScroll.scrollHeight;
+    syncChatJumpBottom();
     // The running row is not part of any message, so a re-render drops it. Put
     // it back where the finished card will land.
     renderChatRunningAction();
@@ -2883,6 +2885,43 @@
    * has no height until layout has run; measuring before that scrolls to where
    * the card starts rather than to its buttons.
    */
+  /**
+   * True when the newest turn is in view.
+   *
+   * 42px rather than 0 because a partly visible last line still reads as the
+   * bottom, and pinning the button to a strict equality made it flicker while
+   * a streaming answer grew by a line.
+   */
+  function chatIsAtBottom() {
+    if (!chatScroll) return true;
+    return chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 42;
+  }
+
+  /// Keep the jump control in step with the scroll position.
+  ///
+  /// Shown only when there is something below the fold, so it never covers the
+  /// newest turn while that turn is readable.
+  function syncChatJumpBottom() {
+    if (!chatJumpBottom) return;
+    const away = !chatIsAtBottom();
+    chatJumpBottom.hidden = !away;
+    if (!away) return;
+    // The button sits above the composer, and the composer grows as the
+    // textarea does. Reading its height each time keeps the button from
+    // drifting over the input on a long draft.
+    const wrap = chatView.querySelector(".chat-composer-wrap");
+    if (wrap) {
+      const h = wrap.getBoundingClientRect().height;
+      if (h > 0) chatView.style.setProperty("--composer-height", Math.round(h) + "px");
+    }
+  }
+
+  function jumpChatToBottom() {
+    if (!chatScroll) return;
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+    syncChatJumpBottom();
+  }
+
   function revealChatCard(card) {
     if (!card || !chatScroll) return;
     requestAnimationFrame(() => {
@@ -3394,6 +3433,11 @@
     chatLiveStatus.textContent = "";
     saveChatTitle(); persistChat();
     renderChatMessages();
+    // Deliberately unconditional. The render above only follows the bottom when
+    // the view was already there, so sending from partway up left the user's own
+    // message below the fold - the one thing they just wrote was the one thing
+    // they could not see.
+    jumpChatToBottom();
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
     post("chatSend", { ...request, message, history, attachments, includePcInfo });
@@ -4014,6 +4058,19 @@
     post("chatPickerAdd", { entries: selectedIds });
   });
   chatSendButton.addEventListener("click", () => chatStreaming ? stopChatRequest() : sendChatMessage());
+  // Passive: this only toggles the button's visibility, so it must never block
+  // the scroll itself. A transcript that scrolls janky is worse than a button
+  // that updates a frame late.
+  chatScroll.addEventListener("scroll", syncChatJumpBottom, { passive: true });
+  if (chatJumpBottom) {
+    chatJumpBottom.addEventListener("click", (event) => {
+      // The control sits over the transcript; without this the click also lands
+      // on whatever is underneath it.
+      event.preventDefault();
+      jumpChatToBottom();
+      chatInput.focus();
+    });
+  }
   // Model links open in the default browser (WebView2 blocks target=_blank).
   chatMessagesEl.addEventListener("click", (event) => {
     const link = event.target.closest ? event.target.closest("a[href]") : null;

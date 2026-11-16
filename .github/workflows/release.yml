@@ -63,17 +63,40 @@ jobs:
       # here, before the build, is deliberate: generating a draft afterwards
       # would leave the shipped binary holding whatever existed when it
       # compiled, which is the tips fallback when the prose was never written.
-      - name: Check the release notes exist
+      # Two documents, both required, both checked before the build.
+      #
+      # docs/releases/v<ver>-notes.md  the GitHub release page, with the commit log
+      # docs/whats-new.md              the in-app What's New view, baked into the
+      #                                binary at compile time by apps/core/build.rs
+      #
+      # Checking before the build is deliberate. The document is compiled in, so
+      # generating it afterwards would leave the shipped binary holding whatever
+      # existed at compile time — the tips fallback — while the release page
+      # showed a draft.
+      - name: Check the release documents exist
         run: |
-          $file = "docs/releases/v${env:VERSION}-notes.md"
-          if (-not (Test-Path $file)) {
-            throw "Missing $file. Write it before tagging: it is both the release body and the text baked into the What's New view. Run scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION to draft one."
+          $notes = "docs/releases/v${env:VERSION}-notes.md"
+          if (-not (Test-Path $notes)) {
+            throw "Missing $notes. Write it before tagging: it is the release page body. Run scripts/windows/release-notes-from-commits.ps1 -Version $env:VERSION to draft one."
           }
-          $body = Get-Content $file -Raw
-          if ([string]::IsNullOrWhiteSpace(($body -split '## Commit Log')[0])) {
-            throw "$file has no user-facing section before '## Commit Log'; the What's New view would be empty."
+          if ([string]::IsNullOrWhiteSpace((Get-Content $notes -Raw))) {
+            throw "$notes is empty; the release page would have no body."
           }
-          "path=$file" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $whatsNew = "docs/whats-new.md"
+          if (-not (Test-Path $whatsNew)) {
+            throw "Missing $whatsNew. Write it before tagging: it is baked into the binary and shown in the What's New view."
+          }
+          # Strip the HTML comments first; the instructions live in them and
+          # they do not count as content the user would see.
+          $visible = [regex]::Replace((Get-Content $whatsNew -Raw), '(?s)<!--.*?-->', '')
+          if ([string]::IsNullOrWhiteSpace($visible)) {
+            throw "$whatsNew has no text outside its HTML comments; the What's New view would be empty."
+          }
+          if ($visible -match '## Commit Log') {
+            throw "$whatsNew mentions a commit log; that belongs in $notes."
+          }
+          "path=$notes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         id: notes
 
       - name: Build the release binaries

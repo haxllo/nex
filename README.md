@@ -13,14 +13,34 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
   <a href="https://www.rust-lang.org/"><img src="https://www.shieldcn.dev/badge/-Rust-000000.svg?logo=rust&variant=secondary&size=xs&theme=zinc" alt="Rust"/></a>
 </div>
 
----
+<br>
 
-Nex replaces the Start menu. Hit the **Win** key anywhere and a glass panel
-drops in under your cursor: type a few letters, press Enter, and the app or
-file is open. No window switching, no mouse.
+<div align="center">
+  <img src="docs/images/demo.gif" alt="Press Win, type, launch" width="800"/>
+</div>
 
-It indexes your whole drive natively, so the first result is usually the one
-you wanted by the time you have typed three characters.
+<br>
+
+**Press `Win`. Type. Enter.** That is the whole app.
+
+Nex replaces the Start menu. The panel drops in under your cursor, indexes your
+whole drive, and usually has the thing you want by the third character. No
+window switching, no mouse, no plugin to configure first.
+
+Built for anyone who opens the same handful of apps and folders all day and is
+tired of hunting through the Start menu for them.
+
+## Install
+
+**[Download the latest release](https://github.com/haxllo/nex/releases/latest)**
+— installer or portable zip, whichever you prefer.
+
+Run it and Nex starts in the background, ready on the **Win** key. No setup,
+no account, no configuration file to edit.
+
+> **Requirements:** Windows 10 or 11, 64-bit. The helper process launches
+> elevated so the hotkey still works over Task Manager and Settings. Windows
+> asks for that once, on first run.
 
 ## Why Nex
 
@@ -50,12 +70,66 @@ before they do anything useful. Nex is built around three things:
 | **Game mode** | Suppresses the hotkey over fullscreen games, and says so in the tray |
 | **Auto-update** | Built-in updater, with What's New shown after it installs |
 
-## Install
+## Usage
 
-Download the installer from the [Releases page](https://github.com/haxllo/nex/releases/latest)
-and run it. Nex starts in the background, ready on the **Win** key.
+Press **Win**, type, press **Enter**.
 
-The zip on the same page is portable, if you would rather not run an installer.
+- **Right-click a result** for run as admin, copy path, open containing folder,
+  uninstall, and pin or unpin.
+- **Tray icon** for quit, restart, and game-mode status.
+
+<details>
+<summary><b>Search syntax</b></summary>
+
+<br>
+
+| Prefix | Scope |
+|---|---|
+| *(none)* | Fuzzy search across everything indexed |
+| `>` | Command mode: actions and web searches |
+| `@apps` | Applications only |
+| `@files` | Files only |
+| `@folders` | Folders only |
+| `kind:file`, `ext:md` | Key/value filters |
+
+</details>
+
+<details>
+<summary><b>Command-line flags</b></summary>
+
+<br>
+
+Not needed for daily use, but available:
+
+| Command | Description |
+|---|---|
+| `NexUIProcess.exe --foreground` | Run attached to a terminal |
+| `NexUIProcess.exe --status` | Check whether Nex is running |
+| `NexUIProcess.exe --quit` | Stop the running instance |
+| `NexUIProcess.exe --restart` | Restart the instance |
+| `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics zip |
+
+</details>
+
+<details>
+<summary><b>Configuration</b></summary>
+
+<br>
+
+On first launch Nex writes `%APPDATA%\Nex\config.toml`. The index lives beside
+it in `%APPDATA%\Nex\index.sqlite3`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `hotkey` | `Win` (left) | Global summon shortcut |
+| `max_results` | `20` | Results shown per query |
+| `show_files` | `false` | Include files in results |
+| `show_folders` | `false` | Include folders in results |
+| `launch_at_startup` | `true` | Start with Windows |
+
+Most settings are also editable from the settings view in the panel.
+
+</details>
 
 ## Build from source
 
@@ -71,60 +145,14 @@ cargo build --release --bin NexUIProcess --bin NexIndexerProcess --bin NexHelper
 Then run `target/release/NexUIProcess.exe --foreground`. The `--foreground`
 flag keeps the terminal attached, which is what you want while developing.
 
-> Building needs the three binaries, not just the UI. `NexUIProcess.exe` owns
+> Building needs all three binaries, not just the UI. `NexUIProcess.exe` owns
 > the overlay and search, `NexIndexerProcess.exe` owns discovery and the index,
 > and `NexHelper.exe` handles input from elevated windows. The UI launches the
 > other two itself.
 
-## Usage
-
-Press **Win**, type, press **Enter**. That is the whole interaction.
-
-- **Right-click a result** for run as admin, copy path, open containing folder,
-  uninstall, and pin or unpin.
-- **Tray icon** for quit, restart, and game-mode status.
-
-### Search syntax
-
-| Prefix | Scope |
-|---|---|
-| *(none)* | Fuzzy search across everything indexed |
-| `>` | Command mode: actions and web searches |
-| `@apps` | Applications only |
-| `@files` | Files only |
-| `@folders` | Folders only |
-| `kind:file`, `ext:md` | Key/value filters |
-
-### Command-line flags
-
-Not needed for daily use, but available:
-
-| Command | Description |
-|---|---|
-| `NexUIProcess.exe --foreground` | Run attached to a terminal |
-| `NexUIProcess.exe --status` | Check whether Nex is running |
-| `NexUIProcess.exe --quit` | Stop the running instance |
-| `NexUIProcess.exe --restart` | Restart the instance |
-| `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics zip |
-
-## Configuration
-
-On first launch Nex writes `%APPDATA%\Nex\config.toml`. The index lives
-beside it in `%APPDATA%\Nex\index.sqlite3`.
-
-| Setting | Default | Description |
-|---|---|---|
-| `hotkey` | `Win` (left) | Global summon shortcut |
-| `max_results` | `20` | Results shown per query |
-| `show_files` | `false` | Include files in results |
-| `show_folders` | `false` | Include folders in results |
-| `launch_at_startup` | `true` | Start with Windows |
-
-Most settings are also editable from the settings view in the panel.
-
 ## Architecture
 
-Three processes, deliberately split so that none of them does another's job:
+Three processes, split so that none of them does another's job:
 
 | Process | Integrity | Owns |
 |---|---|---|
@@ -140,7 +168,10 @@ The split is not decoration. A Medium-integrity process cannot receive input
 destined for an elevated window, so hotkey detection for Task Manager and
 Settings has to live in the helper and be forwarded back over a pipe.
 
-A few decisions worth knowing:
+<details>
+<summary><b>Design decisions worth knowing</b></summary>
+
+<br>
 
 - **Fire-and-forget state.** Rust pushes JSON snapshots to the WebView with
   `PostWebMessageAsJson`. Nothing blocks on synchronous script evaluation.
@@ -154,7 +185,12 @@ A few decisions worth knowing:
 - **Forced foreground.** `AttachThreadInput` is required for reliable focus on
   Windows; the window manager alone is not enough.
 
-### Project layout
+</details>
+
+<details>
+<summary><b>Project layout</b></summary>
+
+<br>
 
 ```
 apps/
@@ -172,6 +208,8 @@ apps/
 Each binary is its own package on purpose: a Windows resource script is linked
 into every binary of its package and inherited by dependents, so sharing one
 would give all three processes the same Task Manager name.
+
+</details>
 
 ## Development
 

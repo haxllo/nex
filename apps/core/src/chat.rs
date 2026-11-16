@@ -2890,6 +2890,40 @@ mod tests {
         );
     }
 
+    /// The PC facts ride on every request, so their size is a standing cost.
+    ///
+    /// They are worth it: CIQ-157 removed the per-message opt-in because a
+    /// gated block left the model without a real Desktop path and it invented
+    /// `C:\\Users\\Alex\\Desktop`. So the answer to "should they always be
+    /// sent" is yes, and the answer to "how much may they grow" needs to be a
+    /// number rather than a habit. Without this, each new fact looks cheap on
+    /// its own - a monitor line, then free space, then installed apps - and
+    /// every request ends up carrying a spec sheet for a question that is not
+    /// about this machine.
+    ///
+    /// A fact that changes over time does not belong here at all: it is read
+    /// when the request is built and then reported as current, so it turns
+    /// into a confidently stale answer. Free disk space is the type case, and
+    /// it belongs to run_command.
+    #[test]
+    fn the_pc_facts_stay_small_enough_to_ship_on_every_request() {
+        const BUDGET: usize = 2000;
+        let request = SendRequest {
+            request_id: "req-1".into(),
+            message: "hello".into(),
+            history: Vec::new(),
+            attachments: Vec::new(),
+            include_pc_info: true,
+        };
+        let message = message_with_local_context(&request);
+        assert!(
+            message.len() <= BUDGET,
+            "the PC facts plus framing reached {} chars, over the {BUDGET} budget; \
+             a new fact must displace an existing one, not be appended",
+            message.len()
+        );
+    }
+
     /// The log that produced this rule: after a page was created, "open it
     /// again" became a 43-second recursive scan of G:\ in round 0, because the
     /// created path lived only in the action card and never in the history.

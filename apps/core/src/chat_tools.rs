@@ -286,8 +286,10 @@ impl ChatTool {
             // The query is what the user is asking about, so it is what the
             // card names.
             Self::SearchPaths { query, .. } => query,
-            // No argument to name, so the card says what it is looking up.
-            Self::PcSpecs => "this PC",
+            // Nothing was named, and the card renders verb + target, so a
+            // placeholder here reads "Done this PC" - a path-shaped line for a
+            // tool that has no path. Empty, so the row shows only its verb.
+            Self::PcSpecs => "",
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
             Self::MovePath { path, .. }
@@ -2286,11 +2288,11 @@ fn run_inner(
         ChatTool::PcSpecs => {
             let specs = crate::chat::current_pc_info();
             if specs.trim().is_empty() {
-                ToolOutcome::failure(tool.name(), "this PC", "no specification could be read")
+                ToolOutcome::failure(tool.name(), "", "no specification could be read")
             } else {
                 ToolOutcome {
                     tool: tool.name().to_string(),
-                    target: "this PC".to_string(),
+                    target: String::new(),
                     ok: true,
                     summary: specs,
                     duration_ms: None,
@@ -4916,6 +4918,29 @@ mod tests {
     /// tool has to return it. A named tool that answers with nothing would put
     /// the model back where CIQ-196 left it: told there is a way to find out,
     /// with no way to find out.
+    /// The card renders verb + target, so a target on a path-less tool reads as
+    /// a path.
+    ///
+    /// `pc_specs` first shipped with its target set to "this PC", and the
+    /// transcript row came out as "Done this PC" - a placeholder shaped exactly
+    /// like the folder a real action would name. The user read it as a result.
+    #[test]
+    fn a_tool_that_names_no_path_has_no_target_to_show() {
+        let tool = ChatTool::PcSpecs;
+        assert_eq!(
+            tool.target(),
+            "",
+            "the card must show only the verb, not a made-up location"
+        );
+        let action = PendingAction::of_in(&tool, std::path::Path::new("."));
+        assert!(
+            action.target.is_empty(),
+            "the rendered row would read '{}{}'",
+            action.description,
+            action.target
+        );
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     fn pc_specs_reports_the_machine_it_runs_on() {

@@ -2532,6 +2532,7 @@
     create_file: "Created file",
     read_file: "Read",
     search_paths: "Searched",
+    pc_specs: "Read specs",
     move_path: "Moved",
     copy_path: "Copied",
     // Delete is the only action here that cannot be taken back, so it gets its

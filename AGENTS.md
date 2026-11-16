@@ -346,6 +346,34 @@ When closing a batch, match by title — do not trust the number. Audit drift
 with `gh issue list --state open` against `list_issues` on P-CIQ-2; a burst of
 GitHub issues that are Done in Linear means the sync was skipped.
 
+### GitHub comments are for the reporter, Linear comments are for us
+
+A GitHub issue may be filed by a stranger. Treat its comments as a message to
+that person, not as your working notes. The internal record belongs in Linear,
+which is where the owner reads it.
+
+Write to the GitHub reporter with:
+
+- a thank-you and an explicit acknowledgement of what they got right;
+- what was wrong, in one or two sentences, in their terms;
+- what changed for them, not which functions moved;
+- an honest caveat when something could not be verified;
+- a concrete ask ("rescan on the next build and tell us").
+
+Do not put in a GitHub comment:
+
+- commit SHAs, PR numbers or branch names — they assert state that may change,
+  and a SHA on master can be reverted before the fix ships. Name the merge
+  once it has happened, not while it is open;
+- test counts, internal type or function names, or file paths;
+- how the fix was verified, or the reasoning that got there;
+- first-person review language ("checked rather than assumed", "your other
+  point was right too") that only makes sense to the owner.
+
+The same facts, in full, go on the Linear issue. Keeping the two audiences
+apart is the whole point: a reporter wants to know it is fixed and whether to
+retest, and nothing else in the comment should compete with that.
+
 ### Other Linear surfaces worth using
 
 The workspace has one team (`CIQ`, "Ciqada") and one project (`Nex`, `P-CIQ-2`).

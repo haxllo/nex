@@ -1874,6 +1874,15 @@ pub(crate) struct ToolOutcome {
     /// User-facing sentence, rendered on the action card. Kept free of
     /// delimiters and escaping, because the card shows it verbatim.
     pub summary: String,
+    /// What the card shows instead of `summary`, when the two differ.
+    ///
+    /// `summary` is usually both the card text and the result the model reads,
+    /// which is right for a path or a search hit. It is wrong for a tool that
+    /// returns the answer itself: `pc_specs` put "CPU: AMD Ryzen 5 3600" on the
+    /// card and the model then wrote the same CPU in prose underneath, so one
+    /// answer appeared twice. The value still has to reach the model, so the
+    /// card gets a quiet label while `summary` keeps the data.
+    pub card_text: Option<String>,
     /// How long the action took, when it actually ran. `None` for an outcome
     /// that describes a refusal: nothing ran, so there is no cost to report.
     /// Set once, by [`run_cancellable`], so no tool has to carry a clock.
@@ -1897,6 +1906,7 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: true,
             summary: detail.to_string(),
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -1907,6 +1917,7 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: false,
             summary: format!("Failed: {reason}"),
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -2302,6 +2313,7 @@ fn run_inner(
                 target: path.clone(),
                 ok: true,
                 summary: format!("Opened {path}"),
+                card_text: None,
                 duration_ms: None,
             },
             Err(error) => ToolOutcome::failure(tool.name(), path, error),
@@ -2313,6 +2325,7 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: format!("Revealed {path} in File Explorer"),
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
@@ -2324,6 +2337,7 @@ fn run_inner(
                 target: url.clone(),
                 ok: true,
                 summary: format!("Opened {url} in the browser"),
+                card_text: None,
                 duration_ms: None,
             },
             Err(error) => ToolOutcome::failure(tool.name(), url, error),
@@ -2339,6 +2353,7 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: text,
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(reason) => ToolOutcome::failure(tool.name(), path, reason),
@@ -2359,6 +2374,12 @@ fn run_inner(
                     target: String::new(),
                     ok: true,
                     summary: specs,
+                    // The card shows only what was read. The specs themselves
+                    // are the answer, and the model writes them in prose - so
+                    // putting them here too printed the same value twice, which
+                    // is what "what's my cpu" produced: the CPU on the card and
+                    // the CPU again underneath it.
+                    card_text: Some("Read from this PC".to_string()),
                     duration_ms: None,
                 }
             }
@@ -2374,6 +2395,7 @@ fn run_inner(
                 target: query.clone(),
                 ok: true,
                 summary,
+                card_text: None,
                 duration_ms: None,
             },
             Err(reason) => ToolOutcome::failure(tool.name(), query, reason),
@@ -2402,6 +2424,7 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Created folder {shown}"),
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
@@ -2450,6 +2473,7 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Appended {} bytes to {shown}", text.len()),
+                    card_text: None,
                     duration_ms: None,
                 };
             }
@@ -2501,6 +2525,7 @@ fn run_inner(
                 target: shown.clone(),
                 ok: true,
                 summary,
+                card_text: None,
                 duration_ms: None,
             }
         }
@@ -2594,6 +2619,7 @@ fn run_inner(
                 // failed" becomes "the build is done".
                 ok: output.exit_code == 0,
                 summary: output.summary,
+                card_text: None,
                 duration_ms: None,
             },
             Err(reason) => ToolOutcome::failure(tool.name(), command, reason),
@@ -3196,6 +3222,7 @@ mod tests {
             target: "x".into(),
             ok: true,
             summary: summary.into(),
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -3394,6 +3421,7 @@ mod tests {
             target: "C:\\notes.txt".to_string(),
             ok: true,
             summary: summary.to_string(),
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -4559,6 +4587,7 @@ mod tests {
             target: "C:/x".to_string(),
             ok: true,
             summary: summary.to_string(),
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -5015,6 +5044,31 @@ mod tests {
             std::path::Path::new("."),
         );
         assert!(all.summary.lines().count() >= 3, "the full sheet is still available");
+    }
+
+    /// The value goes to the model, not to the card as well.
+    ///
+    /// Seen in the built app: the card showed "CPU: AMD Ryzen 5 3600" and the
+    /// reply said "Your CPU is an AMD Ryzen 5 3600" - one answer, printed twice,
+    /// because the summary was doing both jobs. The model still needs the value,
+    /// so it stays in `summary`; the card gets a quiet label instead.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn the_spec_value_goes_to_the_model_and_a_label_to_the_card() {
+        let tool = ChatTool::PcSpecs { fields: vec!["cpu".to_string()] };
+        let outcome = run(&tool, true, std::path::Path::new("."));
+        assert!(
+            outcome.summary.contains("CPU:"),
+            "the model must still receive the value it was asked for"
+        );
+        let card = outcome
+            .card_text
+            .as_deref()
+            .expect("a value-shaped result must not repeat itself on the card");
+        assert!(
+            !card.contains("CPU:") && !card.contains("Ryzen"),
+            "the card repeats the value the reply will state: {card}"
+        );
     }
 
     /// An unknown name is a refusal, not a silent empty answer.

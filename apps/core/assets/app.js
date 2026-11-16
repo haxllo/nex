@@ -2784,6 +2784,8 @@
       target.title = action.target;
       card.appendChild(target);
     }
+    // The hover title follows the same text the row shows, so a tool whose
+    // card is a quiet label does not reveal the value on hover instead.
     card.title = summary;
     // What the step cost, once it is over. Under a second is not worth a number;
     // a slow command's cost is the whole reason for saying it.

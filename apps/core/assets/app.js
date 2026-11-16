@@ -2083,6 +2083,62 @@
     return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
   }
 
+  // Renders a reply that is still arriving.
+  //
+  // The transcript used to append every delta to one text node, so an answer
+  // was plain text until the last token and only then became a list, a table or
+  // a code card. A 200-item list arrived as one unreadable paragraph and was
+  // replaced wholesale at the end.
+  //
+  // The fix is not "re-parse everything on every delta", because markdown is
+  // ambiguous while it is incomplete: `1.` may be a list or text, `**bo` is not
+  // bold yet, and re-parsing each token makes a line visibly flip back and
+  // forth. That is worse than one swap at the end.
+  //
+  // Instead the *completed* prefix is rendered and only the last, still-being-
+  // written line is left as plain text. A line's rendering is therefore decided
+  // once, when its newline arrives, and never revisited - so there is no
+  // flicker, and everything already settled on screen is properly formatted.
+  //
+  // An unclosed code fence is handled deliberately: the fence is complete as a
+  // *decision* even though its content is not, so the card is rendered and
+  // grows as text arrives instead of appearing at the end. Closed fences inside
+  // the prefix render normally.
+  function renderChatStreamingPrefix(target, markdown) {
+    const text = String(markdown || "").replace(/\r/g, "");
+    const cut = text.lastIndexOf("\n");
+    // No newline yet: the whole reply is one in-flight line, so show it plain.
+    if (cut < 0) {
+      target.replaceChildren(document.createTextNode(text));
+      return;
+    }
+    const settled = text.slice(0, cut + 1);
+    const inFlight = text.slice(cut + 1);
+    renderChatMarkdown(target, settled);
+    // Fences are counted on the settled part only: an odd count means one is
+    // open, and its content is still arriving.
+    const openFence = (settled.match(/^\s*```/gm) || []).length % 2 === 1;
+    if (openFence) {
+      // The renderer already produced a code card from the partial source, so
+      // only the still-arriving tail of that block needs to be added to it.
+      if (inFlight) {
+        const card = target.querySelector(".chat-code-block:last-of-type");
+        const slot = card && card.querySelector("pre code");
+        if (slot) slot.appendChild(document.createTextNode(inFlight));
+        else target.appendChild(document.createTextNode(inFlight));
+      }
+      return;
+    }
+    if (inFlight) {
+      // A separate <p> so the in-flight line sits on its own rather than being
+      // glued to the end of the last rendered block.
+      const line = document.createElement("p");
+      line.className = "chat-streaming-line";
+      line.textContent = inFlight;
+      target.appendChild(line);
+    }
+  }
+
   function renderChatMarkdown(target, markdown) {
     target.replaceChildren();
     const lines = String(markdown || "").replace(/\r/g, "").split("\n");
@@ -2384,7 +2440,7 @@
           }
           if (message.content.length > chatStreamOffset) {
             content.hidden = false;
-            content.firstChild.appendData(message.content.slice(chatStreamOffset));
+            renderChatStreamingPrefix(content, message.content);
             chatStreamOffset = message.content.length;
           }
         }

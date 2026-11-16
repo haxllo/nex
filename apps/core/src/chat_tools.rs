@@ -21,21 +21,42 @@ pub(crate) struct Annotations {
     pub destructive: bool,
     /// Reaches outside the local machine.
     pub open_world: bool,
+    /// The result is the answer the user asked for, not a record of what the
+    /// tool did.
+    ///
+    /// This is the difference between a side effect and a query. "Created
+    /// folder C:\x" is a receipt: the interesting part is that the thing now
+    /// exists, and the reply adds nothing. "CPU: AMD Ryzen 5 3600" is the
+    /// answer: the user asked for it, and it belongs in the reply. A card that
+    /// prints both kinds the same way ends up stating the answer twice, because
+    /// the model has no way to know the card already said it.
+    ///
+    /// Without this the alternative is a `tool == "..."` test in the UI, which
+    /// is how `create_file` grew one and how `pc_specs` needed patching for
+    /// exactly the same collision.
+    pub returns_value: bool,
 }
 
 impl Annotations {
     const fn read_only() -> Self {
-        Self { read_only: true, destructive: false, open_world: false }
+        Self { read_only: true, destructive: false, open_world: false, returns_value: false }
     }
     /// Changes nothing locally, but reaches the network. Not `read_only`:
     /// a request that leaves the machine is not harmless by default, and an
     /// injected file could use it to call out to somewhere. It is not
     /// destructive, so the user is not asked to confirm a browser tab.
+    /// A read whose result is the answer, not a receipt.
+    ///
+    /// Every query tool goes through here, so the card and the reply cannot
+    /// both claim the same value.
+    const fn query() -> Self {
+        Self { read_only: true, destructive: false, open_world: false, returns_value: true }
+    }
     const fn open_world() -> Self {
-        Self { read_only: false, destructive: false, open_world: true }
+        Self { read_only: false, destructive: false, open_world: true, returns_value: false }
     }
     const fn destructive() -> Self {
-        Self { read_only: false, destructive: true, open_world: false }
+        Self { read_only: false, destructive: true, open_world: false, returns_value: false }
     }
 }
 
@@ -106,6 +127,27 @@ pub(crate) enum ChatTool {
         kind: PathKind,
         limit: usize,
     },
+    /// The machine's own specification, on request.
+    ///
+    /// These lines used to ride on every request as context, which meant a
+    /// question like "write me a poem" carried a CPU, a GPU and a memory
+    /// count it had no use for. They are also the one part of the facts that
+    /// is never needed to resolve a path, so they can wait until the model
+    /// actually asks about the hardware.
+    ///
+    /// What stays in the prompt is the user's folder locations and drives.
+    /// Those cannot move behind a tool: CIQ-157 showed that without a real
+    /// Desktop path in context the model invents `C:\Users\Alex\Desktop`,
+    /// and a path it must fetch first is a path it may skip fetching.
+    ///
+    /// `fields` narrows the answer to the specs actually asked about. Without
+    /// it the tool returned all five lines, so "what is my CPU" came back with
+    /// the OS, the GPU and the memory too and the reply read like a spec sheet.
+    ///
+    /// It stays optional and label-shaped rather than becoming five tools: "my
+    /// CPU" and "what am I running" are one question, and a model choosing
+    /// between pc_cpu / pc_gpu / pc_memory spends a round deciding.
+    PcSpecs { fields: Vec<String> },
     /// Change part of an existing file, leaving the rest alone.
     ///
     /// `create_file` refuses a path that already exists, so without this the
@@ -209,6 +251,7 @@ impl ChatTool {
             Self::CreateFile { .. } => "create_file",
             Self::ReadFile { .. } => "read_file",
             Self::SearchPaths { .. } => "search_paths",
+            Self::PcSpecs { .. } => "pc_specs",
             Self::EditFile { .. } => "edit_file",
             Self::MovePath { .. } => "move_path",
             Self::CopyPath { .. } => "copy_path",
@@ -225,11 +268,13 @@ impl ChatTool {
             Self::CreateFolder { .. } => Annotations::destructive(),
             Self::CreateFile { .. } => Annotations::destructive(),
             // Reading is the safest thing the loop can do: it changes nothing
-            // and reaches nothing outside the machine.
-            Self::ReadFile { .. } => Annotations::read_only(),
+            // and reaches nothing outside the machine. Its result is also the
+            // answer, so the card must not print it a second time.
+            Self::ReadFile { .. } => Annotations::query(),
             // Reading the index changes nothing and reaches nothing outside
             // the machine, so a search never needs a confirmation card.
-            Self::SearchPaths { .. } => Annotations::read_only(),
+            Self::SearchPaths { .. } => Annotations::query(),
+            Self::PcSpecs { .. } => Annotations::query(),
             // Editing overwrites bytes that already exist, so it is destructive
             // in the MCP sense even though the file survives.
             Self::EditFile { .. } => Annotations::destructive(),
@@ -267,6 +312,10 @@ impl ChatTool {
             // The query is what the user is asking about, so it is what the
             // card names.
             Self::SearchPaths { query, .. } => query,
+            // Nothing was named, and the card renders verb + target, so a
+            // placeholder here reads "Done this PC" - a path-shaped line for a
+            // tool that has no path. Empty, so the row shows only its verb.
+            Self::PcSpecs { .. } => "",
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
             Self::MovePath { path, .. }
@@ -446,6 +495,32 @@ impl RawToolCall {
                     offset,
                     limit,
                 })
+            }
+            // Only the selector is taken, and only from a fixed set, so a
+            // model cannot ask this tool for an arbitrary registry read.
+            "pc_specs" => {
+                let mut fields = Vec::new();
+                if let Some(raw) = self.arguments.get("fields") {
+                    let list = raw.as_array().ok_or_else(|| ToolError::IllegalName {
+                        tool: "pc_specs",
+                        reason: "fields must be a list of names".to_string(),
+                    })?;
+                    for value in list {
+                        let want = value.as_str().ok_or_else(|| ToolError::IllegalName {
+                            tool: "pc_specs",
+                            reason: "each field must be a string".to_string(),
+                        })?;
+                        let canonical = PC_SPEC_FIELDS
+                            .iter()
+                            .find(|known| known.eq_ignore_ascii_case(want))
+                            .ok_or_else(|| ToolError::IllegalName {
+                                tool: "pc_specs",
+                                reason: format!("{want} is not a spec this tool has"),
+                            })?;
+                        fields.push((*canonical).to_string());
+                    }
+                }
+                Ok(ChatTool::PcSpecs { fields })
             }
             "search_paths" => {
                 let query = arg("query")?;
@@ -1374,6 +1449,7 @@ impl PendingAction {
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
             ChatTool::SearchPaths { .. } => "Search paths",
+            ChatTool::PcSpecs { .. } => "Read PC specs",
             ChatTool::EditFile { .. } => "Edit file",
             ChatTool::MovePath { .. } => "Move",
             ChatTool::CopyPath { .. } => "Copy",
@@ -1526,6 +1602,7 @@ fn sample_call(name: &str) -> ChatTool {
             kind: PathKind::Any,
             limit: SEARCH_PATHS_DEFAULT_LIMIT,
         },
+        "pc_specs" => ChatTool::PcSpecs { fields: Vec::new() },
         "edit_file" => ChatTool::EditFile {
             path: existing,
             old_text: "old".to_string(),
@@ -1557,6 +1634,29 @@ fn sample_call(name: &str) -> ChatTool {
 /// adding a derive dependency. Keeping the names here means the count in the
 /// drift test is derived rather than a literal someone forgets to edit — which
 /// is exactly what happened when this list said six while nine were declared.
+/// The specs `pc_specs` can be asked for, and the fact labels they map to.
+///
+/// A fixed list keeps the tool from becoming a registry reader on demand, and
+/// keeps the names the model may use in one place instead of scattering string
+/// comparisons through the parser.
+pub(crate) const PC_SPEC_FIELDS: &[&str] = &["cpu", "gpu", "memory", "os", "logical_processors"];
+
+/// The fact label a spec name selects.
+///
+/// `os` is not a prefix of the emitted line - the OS fact reads "Windows: ..."
+/// - so the mapping cannot be derived from the name and has to be stated.
+fn pc_spec_label(field: &str) -> &'static str {
+    match field {
+        "cpu" => "CPU",
+        "gpu" => "GPU",
+        "memory" => "Installed memory",
+        "logical_processors" => "Logical processors",
+        // The fact line is "Windows: Windows 11 Pro ...", so the label is the
+        // word before the colon, not the product name.
+        _ => "Windows",
+    }
+}
+
 pub(crate) fn all_tool_names() -> &'static [&'static str] {
     &[
         "open_path",
@@ -1566,6 +1666,7 @@ pub(crate) fn all_tool_names() -> &'static [&'static str] {
         "create_file",
         "read_file",
         "search_paths",
+        "pc_specs",
         "edit_file",
         "move_path",
         "copy_path",
@@ -1689,6 +1790,23 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
         {
             "type": "function",
             "function": {
+                "name": "pc_specs",
+                "description": "The specification of this PC: processor, graphics, installed memory and Windows version. Call this before answering any question about the hardware of this machine instead of guessing or asking the user. It is read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fields": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["cpu", "gpu", "memory", "os", "logical_processors"]},
+                            "description": "Which specs to return. Omit for all of them. Ask for only the ones the question needs: 'what is my CPU' wants cpu alone, not the whole sheet."
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "edit_file",
                 "description": "Change part of a file that already exists, leaving everything else in it untouched. Use this instead of rewriting the file. Requires user confirmation.",
                 "parameters": {
@@ -1778,6 +1896,21 @@ pub(crate) struct ToolOutcome {
     /// User-facing sentence, rendered on the action card. Kept free of
     /// delimiters and escaping, because the card shows it verbatim.
     pub summary: String,
+    /// Whether the result is the answer rather than a receipt.
+    ///
+    /// Copied from the tool's annotations at the moment it ran, because the
+    /// payload builder has only the name and re-deriving it from a name is the
+    /// `tool == "..."` pattern this replaces.
+    pub returns_value: bool,
+    /// What the card shows instead of `summary`, when the two differ.
+    ///
+    /// `summary` is usually both the card text and the result the model reads,
+    /// which is right for a path or a search hit. It is wrong for a tool that
+    /// returns the answer itself: `pc_specs` put "CPU: AMD Ryzen 5 3600" on the
+    /// card and the model then wrote the same CPU in prose underneath, so one
+    /// answer appeared twice. The value still has to reach the model, so the
+    /// card gets a quiet label while `summary` keeps the data.
+    pub card_text: Option<String>,
     /// How long the action took, when it actually ran. `None` for an outcome
     /// that describes a refusal: nothing ran, so there is no cost to report.
     /// Set once, by [`run_cancellable`], so no tool has to carry a clock.
@@ -1801,8 +1934,29 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: true,
             summary: detail.to_string(),
+            returns_value: false,
+            card_text: None,
             duration_ms: None,
         }
+    }
+
+    /// What the card should print, decided by what kind of tool this was.
+    ///
+    /// A query's result is the answer, and the model states it in the reply. If
+    /// the card printed it too, the same value appears twice and no wording in
+    /// the prompt can prevent it - the duplication happens in the UI, after the
+    /// model has already answered. So a query's card shows only its verb, and a
+    /// side effect keeps its receipt.
+    ///
+    /// Derived from the annotations rather than from a list of tool names,
+    /// because a name list is what went wrong twice: `pc_specs` needed a patch
+    /// of its own, and `create_file` still carries a `tool === "create_file"`
+    /// test in app.js.
+    pub(crate) fn card_summary(&self) -> Option<String> {
+        if self.returns_value {
+            return None;
+        }
+        Some(self.card_text.clone().unwrap_or_else(|| self.summary.clone()))
     }
 
     pub(crate) fn failure(tool: &str, target: &str, reason: impl std::fmt::Display) -> Self {
@@ -1811,6 +1965,8 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: false,
             summary: format!("Failed: {reason}"),
+            returns_value: false,
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -2183,6 +2339,9 @@ pub(crate) fn run_cancellable(
     let started = std::time::Instant::now();
     let mut outcome = run_inner(tool, confirmed, create_base, cancelled);
     outcome.duration_ms = Some(started.elapsed().as_millis() as u64);
+    // Decided here, once, where the tool itself is in hand. Every outcome passes
+    // through this function, so no tool can forget to say what kind it is.
+    outcome.returns_value = tool.annotations().returns_value;
     outcome
 }
 
@@ -2206,6 +2365,8 @@ fn run_inner(
                 target: path.clone(),
                 ok: true,
                 summary: format!("Opened {path}"),
+                returns_value: false,
+                card_text: None,
                 duration_ms: None,
             },
             Err(error) => ToolOutcome::failure(tool.name(), path, error),
@@ -2217,6 +2378,8 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: format!("Revealed {path} in File Explorer"),
+                    returns_value: false,
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(error) => ToolOutcome::failure(tool.name(), path, error),
@@ -2228,6 +2391,8 @@ fn run_inner(
                 target: url.clone(),
                 ok: true,
                 summary: format!("Opened {url} in the browser"),
+                returns_value: false,
+                card_text: None,
                 duration_ms: None,
             },
             Err(error) => ToolOutcome::failure(tool.name(), url, error),
@@ -2243,9 +2408,34 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: text,
+                    returns_value: false,
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(reason) => ToolOutcome::failure(tool.name(), path, reason),
+            }
+        },
+        ChatTool::PcSpecs { fields } => {
+            let specs = if fields.is_empty() {
+                crate::chat::current_pc_info()
+            } else {
+                let labels: Vec<&str> = fields.iter().map(|f| pc_spec_label(f)).collect();
+                crate::chat::pc_info_matching(&labels)
+            };
+            if specs.trim().is_empty() {
+                ToolOutcome::failure(tool.name(), "", "no specification could be read")
+            } else {
+                ToolOutcome {
+                    tool: tool.name().to_string(),
+                    target: String::new(),
+                    ok: true,
+                    summary: specs,
+                    // No override: a query tool's card is derived from its
+                    // annotations, not from this one tool's wording.
+                    returns_value: false,
+                    card_text: None,
+                    duration_ms: None,
+                }
             }
         },
         ChatTool::SearchPaths {
@@ -2259,6 +2449,8 @@ fn run_inner(
                 target: query.clone(),
                 ok: true,
                 summary,
+                returns_value: false,
+                card_text: None,
                 duration_ms: None,
             },
             Err(reason) => ToolOutcome::failure(tool.name(), query, reason),
@@ -2287,6 +2479,8 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Created folder {shown}"),
+                    returns_value: false,
+                    card_text: None,
                     duration_ms: None,
                 },
                 Err(error) => ToolOutcome::failure(tool.name(), &shown, error),
@@ -2335,6 +2529,8 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Appended {} bytes to {shown}", text.len()),
+                    returns_value: false,
+                    card_text: None,
                     duration_ms: None,
                 };
             }
@@ -2386,6 +2582,8 @@ fn run_inner(
                 target: shown.clone(),
                 ok: true,
                 summary,
+                returns_value: false,
+                card_text: None,
                 duration_ms: None,
             }
         }
@@ -2479,6 +2677,8 @@ fn run_inner(
                 // failed" becomes "the build is done".
                 ok: output.exit_code == 0,
                 summary: output.summary,
+                returns_value: false,
+                card_text: None,
                 duration_ms: None,
             },
             Err(reason) => ToolOutcome::failure(tool.name(), command, reason),
@@ -3081,6 +3281,8 @@ mod tests {
             target: "x".into(),
             ok: true,
             summary: summary.into(),
+            returns_value: false,
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -3279,6 +3481,8 @@ mod tests {
             target: "C:\\notes.txt".to_string(),
             ok: true,
             summary: summary.to_string(),
+            returns_value: false,
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -3336,6 +3540,7 @@ mod tests {
             read_only: false,
             destructive: false,
             open_world: false,
+            returns_value: false,
         }));
     }
 
@@ -3348,11 +3553,13 @@ mod tests {
             read_only: true,
             destructive: false,
             open_world: false,
+            returns_value: false,
         }));
         assert!(needs_confirmation(Annotations {
             read_only: false,
             destructive: true,
             open_world: false,
+            returns_value: false,
         }));
         // Network reach with no local write is a browser tab, not a file
         // operation, so it does not need a click.
@@ -3360,6 +3567,7 @@ mod tests {
             read_only: false,
             destructive: false,
             open_world: true,
+            returns_value: false,
         }));
     }
 
@@ -4444,6 +4652,8 @@ mod tests {
             target: "C:/x".to_string(),
             ok: true,
             summary: summary.to_string(),
+            returns_value: false,
+            card_text: None,
             duration_ms: None,
         }
     }
@@ -4862,6 +5072,160 @@ mod tests {
     }
 
     // --- declarations stay in sync with the enum ---
+
+    /// The prompt tells the model to call `pc_specs` for the hardware, so the
+    /// tool has to return it. A named tool that answers with nothing would put
+    /// the model back where CIQ-196 left it: told there is a way to find out,
+    /// with no way to find out.
+    /// Asking for one spec must not return the sheet.
+    ///
+    /// Seen in the built app: "what's my cpu" put all five lines on the card -
+    /// OS, CPU, GPU, logical processors, memory - and the reply then restated
+    /// the CPU. The question was one field; the tool answered five.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn pc_specs_returns_only_the_fields_it_was_asked_for() {
+        let cpu_only = raw("pc_specs", serde_json::json!({"fields": ["cpu"]}))
+            .validate()
+            .expect("pc_specs should accept a known field");
+        let outcome = run(&cpu_only, true, std::path::Path::new("."));
+        assert!(outcome.ok, "pc_specs failed: {}", outcome.summary);
+        assert!(outcome.summary.contains("CPU:"), "the asked-for field is missing");
+        assert!(
+            !outcome.summary.contains("Installed memory:"),
+            "a field nobody asked for was returned: {}",
+            outcome.summary
+        );
+        assert!(
+            !outcome.summary.contains("Logical processors:"),
+            "a field nobody asked for was returned: {}",
+            outcome.summary
+        );
+
+        // No selector still means everything, so the tool stays useful for
+        // "tell me about this PC".
+        let all = run(
+            &ChatTool::PcSpecs { fields: Vec::new() },
+            true,
+            std::path::Path::new("."),
+        );
+        assert!(all.summary.lines().count() >= 3, "the full sheet is still available");
+    }
+
+    /// A query's value goes to the model; its card says only what was read.
+    ///
+    /// Seen in the built app: the card showed "CPU: AMD Ryzen 5 3600" and the
+    /// reply said "Your CPU is an AMD Ryzen 5 3600" - one answer, printed twice.
+    ///
+    /// The rule is derived from the tool's annotations, not from its name, so
+    /// every query tool is covered and none needs a patch of its own.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_query_answers_in_the_reply_and_not_on_the_card() {
+        // read_file is checked by annotation alone: any file it can read here
+        // would be a fixture, and the point is the classification, not the bytes.
+        assert!(
+            ChatTool::ReadFile {
+                path: "x".into(),
+                offset: None,
+                limit: None,
+            }
+            .annotations()
+            .returns_value,
+            "read_file returns an answer too"
+        );
+
+        for tool in [ChatTool::PcSpecs { fields: vec!["cpu".to_string()] }] {
+            assert!(
+                tool.annotations().returns_value,
+                "{} returns an answer, so it must be marked as a query",
+                tool.name()
+            );
+            let outcome = run(&tool, true, std::path::Path::new("."));
+            assert!(outcome.ok, "{} failed: {}", tool.name(), outcome.summary);
+            assert!(
+                !outcome.summary.is_empty(),
+                "{} must still give the model its value",
+                tool.name()
+            );
+            assert!(
+                outcome.card_summary().is_none(),
+                "{} would print its answer on the card and again in the reply",
+                tool.name()
+            );
+        }
+
+        // A side effect keeps its receipt: the user has to see what changed.
+        let act = ChatTool::CreateFolder {
+            name: "receipt".to_string(),
+            parent: None,
+        };
+        assert!(!act.annotations().returns_value);
+        let receipt = run(&act, true, &std::env::temp_dir());
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("receipt"));
+        assert!(
+            receipt.card_summary().is_some(),
+            "an action that changed something must say so on its card"
+        );
+    }
+
+    /// An unknown name is a refusal, not a silent empty answer.
+    #[test]
+    fn pc_specs_rejects_a_field_it_does_not_have() {
+        let err = raw("pc_specs", serde_json::json!({"fields": ["motherboard"]}))
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::IllegalName { .. }),
+            "a made-up field must be refused, got {err:?}"
+        );
+    }
+
+    /// The card renders verb + target, so a target on a path-less tool reads as
+    /// a path.
+    ///
+    /// `pc_specs` first shipped with its target set to "this PC", and the
+    /// transcript row came out as "Done this PC" - a placeholder shaped exactly
+    /// like the folder a real action would name. The user read it as a result.
+    #[test]
+    fn a_tool_that_names_no_path_has_no_target_to_show() {
+        let tool = ChatTool::PcSpecs { fields: Vec::new() };
+        assert_eq!(
+            tool.target(),
+            "",
+            "the card must show only the verb, not a made-up location"
+        );
+        let action = PendingAction::of_in(&tool, std::path::Path::new("."));
+        assert!(
+            action.target.is_empty(),
+            "the rendered row would read '{}{}'",
+            action.description,
+            action.target
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn pc_specs_reports_the_machine_it_runs_on() {
+        let tool = ChatTool::PcSpecs { fields: Vec::new() };
+        assert!(
+            !tool.needs_confirmation(),
+            "reading a spec is not a change to the PC, so it must not ask"
+        );
+        let outcome = run(&tool, true, std::path::Path::new("."));
+        assert!(outcome.ok, "pc_specs failed: {}", outcome.summary);
+        assert!(
+            outcome.summary.contains("CPU:")
+                || outcome.summary.contains("Installed memory:")
+                || outcome.summary.contains("Windows"),
+            "the tool returned no recognisable spec: {}",
+            outcome.summary
+        );
+        assert!(
+            outcome.summary.len() < 2000,
+            "the tool must stay a short spec, not a dump"
+        );
+    }
 
     #[test]
     fn every_declared_tool_validates_as_a_known_tool() {

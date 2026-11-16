@@ -2922,6 +2922,8 @@ fn run_powershell_cancellable(
         .args([
             "-NoProfile",
             "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
             "-Command",
             command,
         ])

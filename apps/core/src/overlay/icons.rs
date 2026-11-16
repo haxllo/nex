@@ -737,7 +737,7 @@ fn resolve_package_dirs(family: &str) -> Vec<PathBuf> {
         );
         let output = std::process::Command::new("powershell.exe")
             .args([
-                "-NoProfile", "-NonInteractive",
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                 "-WindowStyle", "Hidden", "-Command", &script,
             ])
             .creation_flags(CREATE_NO_WINDOW)

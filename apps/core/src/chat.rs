@@ -1467,7 +1467,7 @@ fn push_action_outcome(
         "target": outcome.target,
         "ok": outcome.ok,
         // The card may show a quieter label than the value the model read.
-        "summary": outcome.card_text.clone().unwrap_or_else(|| outcome.summary.clone()),
+        "summary": outcome.card_summary(),
         // The card keeps the cost after the step ends: a 43-second command and a
         // 40-millisecond one used to look identical.
         "duration_ms": outcome.duration_ms,
@@ -3009,6 +3009,7 @@ mod tests {
             target: "C:\\Users\\x\\Desktop\\hello.txt".into(),
             ok: true,
             summary: "Created file hello.txt".into(),
+            returns_value: false,
             card_text: None,
             // A slow step must carry its cost to the card, so the transcript
             // can still say why it took a while.
@@ -3112,6 +3113,7 @@ mod tests {
                     target: "C:\\Users\\x\\Desktop\\Test123".into(),
                     ok: true,
                     summary: "Created folder C:\\Users\\x\\Desktop\\Test123".into(),
+                    returns_value: false,
                     card_text: None,
                     duration_ms: None,
                 },

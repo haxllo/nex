@@ -2532,7 +2532,7 @@
     create_file: "Created file",
     read_file: "Read",
     search_paths: "Searched",
-    pc_specs: "Read specs",
+    pc_specs: "Read PC specs",
     move_path: "Moved",
     copy_path: "Copied",
     // Delete is the only action here that cannot be taken back, so it gets its
@@ -2764,6 +2764,12 @@
     // A step that names a path shows only the verb and the path: the tail of the
     // path already is the file name. Rendering the summary as well made the row
     // read "Created folder created folder C:\...\sasa".
+    //
+    // A query is different again: its result is the answer, and the reply states
+    // it. Printing it here as well is what made "what's my cpu" show the CPU on
+    // the card and then again in the sentence below it. The server decides this
+    // from the tool's annotations and sends no summary for a query, so the row is
+    // the verb alone.
     const summary = (action.summary || "").trim();
     const ok = action.ok && !!action.target;
     const name = ok ? "" : summary;

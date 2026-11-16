@@ -21,21 +21,42 @@ pub(crate) struct Annotations {
     pub destructive: bool,
     /// Reaches outside the local machine.
     pub open_world: bool,
+    /// The result is the answer the user asked for, not a record of what the
+    /// tool did.
+    ///
+    /// This is the difference between a side effect and a query. "Created
+    /// folder C:\x" is a receipt: the interesting part is that the thing now
+    /// exists, and the reply adds nothing. "CPU: AMD Ryzen 5 3600" is the
+    /// answer: the user asked for it, and it belongs in the reply. A card that
+    /// prints both kinds the same way ends up stating the answer twice, because
+    /// the model has no way to know the card already said it.
+    ///
+    /// Without this the alternative is a `tool == "..."` test in the UI, which
+    /// is how `create_file` grew one and how `pc_specs` needed patching for
+    /// exactly the same collision.
+    pub returns_value: bool,
 }
 
 impl Annotations {
     const fn read_only() -> Self {
-        Self { read_only: true, destructive: false, open_world: false }
+        Self { read_only: true, destructive: false, open_world: false, returns_value: false }
     }
     /// Changes nothing locally, but reaches the network. Not `read_only`:
     /// a request that leaves the machine is not harmless by default, and an
     /// injected file could use it to call out to somewhere. It is not
     /// destructive, so the user is not asked to confirm a browser tab.
+    /// A read whose result is the answer, not a receipt.
+    ///
+    /// Every query tool goes through here, so the card and the reply cannot
+    /// both claim the same value.
+    const fn query() -> Self {
+        Self { read_only: true, destructive: false, open_world: false, returns_value: true }
+    }
     const fn open_world() -> Self {
-        Self { read_only: false, destructive: false, open_world: true }
+        Self { read_only: false, destructive: false, open_world: true, returns_value: false }
     }
     const fn destructive() -> Self {
-        Self { read_only: false, destructive: true, open_world: false }
+        Self { read_only: false, destructive: true, open_world: false, returns_value: false }
     }
 }
 
@@ -247,12 +268,13 @@ impl ChatTool {
             Self::CreateFolder { .. } => Annotations::destructive(),
             Self::CreateFile { .. } => Annotations::destructive(),
             // Reading is the safest thing the loop can do: it changes nothing
-            // and reaches nothing outside the machine.
-            Self::ReadFile { .. } => Annotations::read_only(),
+            // and reaches nothing outside the machine. Its result is also the
+            // answer, so the card must not print it a second time.
+            Self::ReadFile { .. } => Annotations::query(),
             // Reading the index changes nothing and reaches nothing outside
             // the machine, so a search never needs a confirmation card.
-            Self::SearchPaths { .. } => Annotations::read_only(),
-            Self::PcSpecs { .. } => Annotations::read_only(),
+            Self::SearchPaths { .. } => Annotations::query(),
+            Self::PcSpecs { .. } => Annotations::query(),
             // Editing overwrites bytes that already exist, so it is destructive
             // in the MCP sense even though the file survives.
             Self::EditFile { .. } => Annotations::destructive(),
@@ -1874,6 +1896,12 @@ pub(crate) struct ToolOutcome {
     /// User-facing sentence, rendered on the action card. Kept free of
     /// delimiters and escaping, because the card shows it verbatim.
     pub summary: String,
+    /// Whether the result is the answer rather than a receipt.
+    ///
+    /// Copied from the tool's annotations at the moment it ran, because the
+    /// payload builder has only the name and re-deriving it from a name is the
+    /// `tool == "..."` pattern this replaces.
+    pub returns_value: bool,
     /// What the card shows instead of `summary`, when the two differ.
     ///
     /// `summary` is usually both the card text and the result the model reads,
@@ -1906,9 +1934,29 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: true,
             summary: detail.to_string(),
+            returns_value: false,
             card_text: None,
             duration_ms: None,
         }
+    }
+
+    /// What the card should print, decided by what kind of tool this was.
+    ///
+    /// A query's result is the answer, and the model states it in the reply. If
+    /// the card printed it too, the same value appears twice and no wording in
+    /// the prompt can prevent it - the duplication happens in the UI, after the
+    /// model has already answered. So a query's card shows only its verb, and a
+    /// side effect keeps its receipt.
+    ///
+    /// Derived from the annotations rather than from a list of tool names,
+    /// because a name list is what went wrong twice: `pc_specs` needed a patch
+    /// of its own, and `create_file` still carries a `tool === "create_file"`
+    /// test in app.js.
+    pub(crate) fn card_summary(&self) -> Option<String> {
+        if self.returns_value {
+            return None;
+        }
+        Some(self.card_text.clone().unwrap_or_else(|| self.summary.clone()))
     }
 
     pub(crate) fn failure(tool: &str, target: &str, reason: impl std::fmt::Display) -> Self {
@@ -1917,6 +1965,7 @@ impl ToolOutcome {
             target: target.to_string(),
             ok: false,
             summary: format!("Failed: {reason}"),
+            returns_value: false,
             card_text: None,
             duration_ms: None,
         }
@@ -2290,6 +2339,9 @@ pub(crate) fn run_cancellable(
     let started = std::time::Instant::now();
     let mut outcome = run_inner(tool, confirmed, create_base, cancelled);
     outcome.duration_ms = Some(started.elapsed().as_millis() as u64);
+    // Decided here, once, where the tool itself is in hand. Every outcome passes
+    // through this function, so no tool can forget to say what kind it is.
+    outcome.returns_value = tool.annotations().returns_value;
     outcome
 }
 
@@ -2313,6 +2365,7 @@ fn run_inner(
                 target: path.clone(),
                 ok: true,
                 summary: format!("Opened {path}"),
+                returns_value: false,
                 card_text: None,
                 duration_ms: None,
             },
@@ -2325,6 +2378,7 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: format!("Revealed {path} in File Explorer"),
+                    returns_value: false,
                     card_text: None,
                     duration_ms: None,
                 },
@@ -2337,6 +2391,7 @@ fn run_inner(
                 target: url.clone(),
                 ok: true,
                 summary: format!("Opened {url} in the browser"),
+                returns_value: false,
                 card_text: None,
                 duration_ms: None,
             },
@@ -2353,6 +2408,7 @@ fn run_inner(
                     target: path.clone(),
                     ok: true,
                     summary: text,
+                    returns_value: false,
                     card_text: None,
                     duration_ms: None,
                 },
@@ -2374,12 +2430,10 @@ fn run_inner(
                     target: String::new(),
                     ok: true,
                     summary: specs,
-                    // The card shows only what was read. The specs themselves
-                    // are the answer, and the model writes them in prose - so
-                    // putting them here too printed the same value twice, which
-                    // is what "what's my cpu" produced: the CPU on the card and
-                    // the CPU again underneath it.
-                    card_text: Some("Read from this PC".to_string()),
+                    // No override: a query tool's card is derived from its
+                    // annotations, not from this one tool's wording.
+                    returns_value: false,
+                    card_text: None,
                     duration_ms: None,
                 }
             }
@@ -2395,6 +2449,7 @@ fn run_inner(
                 target: query.clone(),
                 ok: true,
                 summary,
+                returns_value: false,
                 card_text: None,
                 duration_ms: None,
             },
@@ -2424,6 +2479,7 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Created folder {shown}"),
+                    returns_value: false,
                     card_text: None,
                     duration_ms: None,
                 },
@@ -2473,6 +2529,7 @@ fn run_inner(
                     target: shown.clone(),
                     ok: true,
                     summary: format!("Appended {} bytes to {shown}", text.len()),
+                    returns_value: false,
                     card_text: None,
                     duration_ms: None,
                 };
@@ -2525,6 +2582,7 @@ fn run_inner(
                 target: shown.clone(),
                 ok: true,
                 summary,
+                returns_value: false,
                 card_text: None,
                 duration_ms: None,
             }
@@ -2619,6 +2677,7 @@ fn run_inner(
                 // failed" becomes "the build is done".
                 ok: output.exit_code == 0,
                 summary: output.summary,
+                returns_value: false,
                 card_text: None,
                 duration_ms: None,
             },
@@ -3222,6 +3281,7 @@ mod tests {
             target: "x".into(),
             ok: true,
             summary: summary.into(),
+            returns_value: false,
             card_text: None,
             duration_ms: None,
         }
@@ -3421,6 +3481,7 @@ mod tests {
             target: "C:\\notes.txt".to_string(),
             ok: true,
             summary: summary.to_string(),
+            returns_value: false,
             card_text: None,
             duration_ms: None,
         }
@@ -3479,6 +3540,7 @@ mod tests {
             read_only: false,
             destructive: false,
             open_world: false,
+            returns_value: false,
         }));
     }
 
@@ -3491,11 +3553,13 @@ mod tests {
             read_only: true,
             destructive: false,
             open_world: false,
+            returns_value: false,
         }));
         assert!(needs_confirmation(Annotations {
             read_only: false,
             destructive: true,
             open_world: false,
+            returns_value: false,
         }));
         // Network reach with no local write is a browser tab, not a file
         // operation, so it does not need a click.
@@ -3503,6 +3567,7 @@ mod tests {
             read_only: false,
             destructive: false,
             open_world: true,
+            returns_value: false,
         }));
     }
 
@@ -4587,6 +4652,7 @@ mod tests {
             target: "C:/x".to_string(),
             ok: true,
             summary: summary.to_string(),
+            returns_value: false,
             card_text: None,
             duration_ms: None,
         }
@@ -5046,28 +5112,60 @@ mod tests {
         assert!(all.summary.lines().count() >= 3, "the full sheet is still available");
     }
 
-    /// The value goes to the model, not to the card as well.
+    /// A query's value goes to the model; its card says only what was read.
     ///
     /// Seen in the built app: the card showed "CPU: AMD Ryzen 5 3600" and the
-    /// reply said "Your CPU is an AMD Ryzen 5 3600" - one answer, printed twice,
-    /// because the summary was doing both jobs. The model still needs the value,
-    /// so it stays in `summary`; the card gets a quiet label instead.
+    /// reply said "Your CPU is an AMD Ryzen 5 3600" - one answer, printed twice.
+    ///
+    /// The rule is derived from the tool's annotations, not from its name, so
+    /// every query tool is covered and none needs a patch of its own.
     #[test]
     #[cfg(target_os = "windows")]
-    fn the_spec_value_goes_to_the_model_and_a_label_to_the_card() {
-        let tool = ChatTool::PcSpecs { fields: vec!["cpu".to_string()] };
-        let outcome = run(&tool, true, std::path::Path::new("."));
+    fn a_query_answers_in_the_reply_and_not_on_the_card() {
+        // read_file is checked by annotation alone: any file it can read here
+        // would be a fixture, and the point is the classification, not the bytes.
         assert!(
-            outcome.summary.contains("CPU:"),
-            "the model must still receive the value it was asked for"
+            ChatTool::ReadFile {
+                path: "x".into(),
+                offset: None,
+                limit: None,
+            }
+            .annotations()
+            .returns_value,
+            "read_file returns an answer too"
         );
-        let card = outcome
-            .card_text
-            .as_deref()
-            .expect("a value-shaped result must not repeat itself on the card");
+
+        for tool in [ChatTool::PcSpecs { fields: vec!["cpu".to_string()] }] {
+            assert!(
+                tool.annotations().returns_value,
+                "{} returns an answer, so it must be marked as a query",
+                tool.name()
+            );
+            let outcome = run(&tool, true, std::path::Path::new("."));
+            assert!(outcome.ok, "{} failed: {}", tool.name(), outcome.summary);
+            assert!(
+                !outcome.summary.is_empty(),
+                "{} must still give the model its value",
+                tool.name()
+            );
+            assert!(
+                outcome.card_summary().is_none(),
+                "{} would print its answer on the card and again in the reply",
+                tool.name()
+            );
+        }
+
+        // A side effect keeps its receipt: the user has to see what changed.
+        let act = ChatTool::CreateFolder {
+            name: "receipt".to_string(),
+            parent: None,
+        };
+        assert!(!act.annotations().returns_value);
+        let receipt = run(&act, true, &std::env::temp_dir());
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("receipt"));
         assert!(
-            !card.contains("CPU:") && !card.contains("Ryzen"),
-            "the card repeats the value the reply will state: {card}"
+            receipt.card_summary().is_some(),
+            "an action that changed something must say so on its card"
         );
     }
 

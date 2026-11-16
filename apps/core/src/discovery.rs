@@ -1962,8 +1962,6 @@ foreach ($root in $roots) {
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
             "-WindowStyle",
             "Hidden",
             "-Command",
@@ -2051,8 +2049,6 @@ Get-StartApps | ForEach-Object {
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
             "-WindowStyle",
             "Hidden",
             "-Command",
@@ -2138,8 +2134,6 @@ Get-AppxPackage | ForEach-Object {
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
             "-WindowStyle",
             "Hidden",
             "-Command",
@@ -2178,82 +2172,123 @@ Get-AppxPackage | ForEach-Object {
 
 #[cfg(target_os = "windows")]
 fn load_exe_company_names(exe_paths: &[String]) -> Result<HashMap<String, String>, ProviderError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    if exe_paths.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let joined_paths = exe_paths.join("\u{1f}");
-    if joined_paths.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$separator = [char]0x1f
-$paths = @()
-if ($env:NEX_EXE_PATHS) { $paths = $env:NEX_EXE_PATHS -split $separator }
-elseif ($env:SWIFTFIND_EXE_PATHS) { $paths = $env:SWIFTFIND_EXE_PATHS -split $separator }
-foreach ($path in $paths) {
-  $candidate = [string]$path
-  if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-  if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-  try {
-    $publisher = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($candidate).CompanyName
-    if (-not [string]::IsNullOrWhiteSpace($publisher)) {
-      "{0}`t{1}" -f $candidate, $publisher.Trim()
-    }
-  } catch {}
-}
-"#;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .env("NEX_EXE_PATHS", &joined_paths)
-        .env("SWIFTFIND_EXE_PATHS", joined_paths)
-        .creation_flags(CREATE_NO_WINDOW);
-
-    let output = command.output().map_err(|error| {
-        ProviderError::new(format!(
-            "exe publisher discovery invocation failed: {error}"
-        ))
-    })?;
-    if !output.status.success() {
-        return Ok(HashMap::new());
-    }
-
     let mut out = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let Some(path_raw) = parts.next() else {
+    for path in exe_paths {
+        let Some(publisher) = exe_company_name(path) else {
             continue;
         };
-        let Some(publisher_raw) = parts.next() else {
-            continue;
-        };
-        let path = path_raw.trim();
-        let publisher = publisher_raw.trim();
-        if path.is_empty() || publisher.is_empty() {
-            continue;
-        }
-        if let Some(clean_publisher) = sanitize_publisher_label(publisher) {
+        if let Some(clean_publisher) = sanitize_publisher_label(&publisher) {
             out.insert(normalize_id_path(path), clean_publisher);
         }
     }
-
     Ok(out)
+}
+
+/// Read the `CompanyName` string from an executable's version resource.
+///
+/// This replaced a `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy
+/// Bypass -WindowStyle Hidden -Command` call that ran the same lookup via
+/// `[System.Diagnostics.FileVersionInfo]::GetVersionInfo(...)`. That argument
+/// set is the shape malware loaders use to hide an executable payload, and a
+/// user's antivirus flagged the process as a result (CIQ-201). The work was a
+/// file read either way, so it is now done in-process: no child process, no
+/// hidden window, and no flag that exists only to look suspicious.
+///
+/// `None` covers everything the old script swallowed in a bare `catch {}` -
+/// no resource, an unreadable file, a missing `CompanyName` - so a file that
+/// never showed a publisher still shows none.
+#[cfg(target_os = "windows")]
+fn exe_company_name(path: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW};
+
+    // File APIs take a NUL-terminated UTF-16 path. A path containing an
+    // interior NUL cannot be opened at all, so it is dropped here rather than
+    // truncated silently.
+    let mut wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().collect();
+    if wide.contains(&0) {
+        return None;
+    }
+    wide.push(0);
+
+    unsafe {
+        let mut handle = 0u32;
+        let size = GetFileVersionInfoSizeW(wide.as_ptr(), &mut handle);
+        if size == 0 {
+            return None;
+        }
+        // A resource that reports a size but cannot be read is a real case on
+        // truncated or still-being-written binaries during discovery.
+        let mut buffer = vec![0u8; size as usize];
+        let read = GetFileVersionInfoW(wide.as_ptr(), 0, size, buffer.as_mut_ptr().cast());
+        if read == 0 {
+            return None;
+        }
+
+        Some(company_name_from_block(&buffer)?)
+    }
+}
+
+/// Pull `CompanyName` out of a version-resource block.
+///
+/// The structure is a `VS_VERSIONINFO` tree. The company name lives in
+/// `\\StringFileInfo\\<lang><codepage>\\CompanyName`, and the language table can
+/// hold several entries, so every string table is visited and the first
+/// non-empty company name wins. That matches what the .NET property returned,
+/// which applies its own fallback to the first populated table.
+#[cfg(target_os = "windows")]
+unsafe fn company_name_from_block(block: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::VerQueryValueW;
+
+    let mut translations_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut translations_len = 0u32;
+    let translations_key: Vec<u16> = "\\VarFileInfo\\Translation\0"
+        .encode_utf16()
+        .collect();
+    if unsafe {
+        VerQueryValueW(
+            block.as_ptr().cast(),
+            translations_key.as_ptr(),
+            &mut translations_ptr,
+            &mut translations_len,
+        )
+    } == 0
+    {
+        return None;
+    }
+    if translations_ptr.is_null() || translations_len < 4 {
+        return None;
+    }
+
+    let count = (translations_len as usize) / 4;
+    let pairs = unsafe { std::slice::from_raw_parts(translations_ptr.cast::<u16>(), count * 2) };
+    for pair in pairs.chunks_exact(2) {
+        let (language, codepage) = (pair[0], pair[1]);
+        let key = format!("\\StringFileInfo\\{language:04x}{codepage:04x}\\CompanyName\0");
+        let key: Vec<u16> = key.encode_utf16().collect();
+        let mut value_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut value_len = 0u32;
+        if unsafe {
+            VerQueryValueW(
+                block.as_ptr().cast(),
+                key.as_ptr(),
+                &mut value_ptr,
+                &mut value_len,
+            )
+        } == 0
+            || value_ptr.is_null()
+            || value_len == 0
+        {
+            continue;
+        }
+        let units = unsafe { std::slice::from_raw_parts(value_ptr.cast::<u16>(), value_len as usize) };
+        let text = String::from_utf16_lossy(units);
+        let text = text.trim_matches('\0').trim();
+        if !text.is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -2942,5 +2977,115 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The lookup that replaced the PowerShell call must read the company name
+    /// from a real signed binary. `notepad.exe` always carries one, and the
+    /// expected value is Microsoft's, not ours, so this fails if the string
+    /// table walk regresses rather than silently returning None.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn exe_company_name_reads_a_real_version_resource() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let notepad = format!("{system_root}\\System32\\notepad.exe");
+        if !Path::new(&notepad).is_file() {
+            return;
+        }
+        let publisher = exe_company_name(&notepad)
+            .expect("notepad.exe carries a CompanyName resource");
+        assert!(
+            publisher.to_ascii_lowercase().contains("microsoft"),
+            "expected a Microsoft publisher, got {publisher:?}"
+        );
+    }
+
+    /// A file with no version resource is the case the old script swallowed in
+    /// a bare `catch {}`. It must be `None`, not an error and not a panic.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn exe_company_name_returns_none_for_a_file_without_a_resource() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("plain.txt");
+        std::fs::write(&path, b"no version resource here").expect("write");
+        let text = path.to_string_lossy().to_string();
+        assert_eq!(exe_company_name(&text), None);
+    }
+
+    /// Nothing is returned for a path that does not exist, which is normal
+    /// during discovery when an entry disappears between scan and read.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn exe_company_name_returns_none_for_a_missing_path() {
+        assert_eq!(exe_company_name("C:\\definitely\\not\\here.exe"), None);
+    }
+
+    /// The map's keys stay normalised the same way the callers expect, so a
+    /// lookup by the shortcut target still resolves.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn load_exe_company_names_keys_match_normalize_id_path() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let notepad = format!("{system_root}\\System32\\notepad.exe");
+        if !Path::new(&notepad).is_file() {
+            return;
+        }
+        let map = load_exe_company_names(&[notepad.clone()]).expect("lookup runs");
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&normalize_id_path(&notepad)));
+    }
+
+    /// One-off equivalence check against the mechanism this replaced. Both
+    /// paths read the same resource, so any file whose label differs is a
+    /// parse bug. Not a permanent test: it shells out to PowerShell, which is
+    /// the thing being removed, so it is ignored unless asked for by name.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn native_lookup_matches_powershell_for_real_binaries() {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let candidates = [
+            format!("{system_root}\\System32\\notepad.exe"),
+            format!("{system_root}\\System32\\calc.exe"),
+            format!("{system_root}\\System32\\mspaint.exe"),
+            format!("{system_root}\\System32\\cmd.exe"),
+            format!("{system_root}\\explorer.exe"),
+            format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        ];
+        let existing: Vec<String> = candidates
+            .into_iter()
+            .filter(|p| Path::new(p).is_file())
+            .collect();
+        if existing.is_empty() {
+            return;
+        }
+
+        let script = existing
+            .iter()
+            .map(|p| format!("[System.Diagnostics.FileVersionInfo]::GetVersionInfo('{p}').CompanyName"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("powershell");
+        let expected = String::from_utf8_lossy(&output.stdout);
+        let expected: Vec<&str> = expected.lines().map(|l| l.trim()).collect();
+
+        for (index, path) in existing.iter().enumerate() {
+            let native = exe_company_name(path);
+            let sanitized = native
+                .as_deref()
+                .and_then(sanitize_publisher_label);
+            let old = expected
+                .get(index)
+                .copied()
+                .filter(|v| !v.is_empty())
+                .and_then(sanitize_publisher_label);
+            assert_eq!(
+                sanitized, old,
+                "label mismatch for {path}: native={native:?} powershell={:?}",
+                expected.get(index)
+            );
+        }
     }
 }

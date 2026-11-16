@@ -2961,16 +2961,29 @@ html.glass-native .chat-composer-shell {
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 50%;
-  background: var(--surface, #1c1c1e);
+  /* --bg-raised, not --surface: --surface is not a token in this stylesheet,
+     so the previous `var(--surface, #1c1c1e)` silently took the hardcoded
+     fallback and the button stayed near-black in the light theme. Measured:
+     rgb(28, 28, 30) in both themes before this change. */
+  background: var(--bg-raised);
   color: var(--text);
   cursor: pointer;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
   transform: translateX(-50%);
-  transition: opacity 120ms ease, transform 120ms ease;
+  transition: opacity 120ms ease, transform 120ms ease, background-color var(--dur-fast) var(--ease);
 }
 .chat-jump-bottom[hidden] { display: none; }
 .chat-jump-bottom:hover { transform: translateX(-50%) translateY(-1px); }
+/* The glyph is 12x14 inside a 24x24 box, so centring the box is not the same
+   as centring the ink. Measured from the rendered pixels at 4x: the circle
+   centre was (91.5, 91.5) and the arrow's ink centre (93.5, 93.5) - two
+   device pixels right and down, half a CSS pixel each. The transform below is
+   that correction, not a guess.
+
+   display:block removes the inline baseline gap, which on its own put the
+   glyph a further ~1.5px low. */
 .chat-jump-bottom svg {
+  display: block;
   width: 15px;
   height: 15px;
   fill: none;
@@ -2978,6 +2991,7 @@ html.glass-native .chat-composer-shell {
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
+  transform: translate(-0.5px, -0.5px);
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-jump-bottom { transition: none; }

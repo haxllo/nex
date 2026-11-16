@@ -2871,6 +2871,26 @@
     return step;
   }
 
+  /**
+   * Bring a newly added card into view.
+   *
+   * The transcript scrolls on `.chat-scroll`, not on the inner column: only the
+   * former carries `overflow-y: auto`, so a `scrollTop` written to the column
+   * is accepted and has no effect. That is why a permission card opened below
+   * the fold with the view already at the bottom - the user had to find it.
+   *
+   * The scroll is deferred by a frame because the card was just appended and
+   * has no height until layout has run; measuring before that scrolls to where
+   * the card starts rather than to its buttons.
+   */
+  function revealChatCard(card) {
+    if (!card || !chatScroll) return;
+    requestAnimationFrame(() => {
+      if (!card.isConnected) return;
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+    });
+  }
+
   function renderChatPendingAction() {
     const existing = $("chat-pending-action");
     if (existing) existing.remove();
@@ -2920,7 +2940,7 @@
     card.appendChild(row);
 
     chatMessagesEl.appendChild(card);
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    revealChatCard(card);
   }
 
   function answerChatPendingAction(accept) {
@@ -3106,7 +3126,7 @@
     card.appendChild(row);
 
     chatMessagesEl.appendChild(card);
-    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    revealChatCard(card);
   }
 
   /**

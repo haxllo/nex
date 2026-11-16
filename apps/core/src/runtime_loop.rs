@@ -459,22 +459,41 @@ pub(crate) fn run_windows_runtime(
         .and_then(|g| g.take_application_watchers());
     // Watcher handles are dropped here, after their service locks are released.
 
+    // Every step below runs on the thread that owns the window, so any block
+    // here is felt as the UI freezing before it exits. The elapsed times are
+    // logged because a 2s stall used to fall entirely between two lines: the
+    // log had one-second resolution and no per-step timing at all.
+    let shutdown_started = std::time::Instant::now();
+    let mut step_at = shutdown_started;
+    let mut mark = |label: &str, at: &mut std::time::Instant| {
+        log_info(&format!(
+            "[nex] shutdown: {label} ({}ms, {}ms total)",
+            at.elapsed().as_millis(),
+            shutdown_started.elapsed().as_millis()
+        ));
+        *at = std::time::Instant::now();
+    };
+
     // Signal the worker thread to stop immediately instead of waiting
     // for the next recv tick (removes up to 50 ms jitter on shutdown).
     log_info("[nex] shutdown: stopping worker message pump");
     overlay.stop();
+    mark("worker pump stopped", &mut step_at);
 
     // Drop the hotkey listener (unregisters the global hotkey) and
     // wait for the worker thread to finish its `run_message_pump`.
     log_info("[nex] shutdown: dropping hotkey listener");
     drop(hotkey_listener.lock().unwrap_or_else(|e| e.into_inner()).take());
+    mark("hotkey listener dropped", &mut step_at);
     log_info("[nex] shutdown: joining worker thread");
     let _ = worker_join.join();
+    mark("worker thread joined", &mut step_at);
     // Commit watcher writes and wait for merges so the next launch does
     // not find a half-merged index.
     if let Ok(guard) = service.read() {
         guard.shutdown_search_index();
     }
+    mark("search index shut down", &mut step_at);
     // The indexer is a child of this UI process only by convention (spawned
     // detached). Ask it to exit now so `quit` never leaves it running; its
     // parent-PID watchdog is only a backstop for crashes.
@@ -483,9 +502,13 @@ pub(crate) fn run_windows_runtime(
         if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
             log_info("[nex] shutdown: stopping NexIndexerProcess");
             crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR);
+            mark("indexer asked to stop", &mut step_at);
         }
     }
-    log_info("[nex] shutdown: complete, process exiting");
+    log_info(&format!(
+        "[nex] shutdown: complete, process exiting ({}ms total)",
+        shutdown_started.elapsed().as_millis()
+    ));
 
     host_result.map_err(RuntimeError::Overlay)
 }

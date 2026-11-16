@@ -1497,10 +1497,20 @@ fn kill_helper_process(handle: isize) {
         }
     } else {
         logging::info("[nex] shutdown: killing NexHelper by name (scheduled task)");
-        let _ = std::process::Command::new("taskkill")
+        // Spawned, not awaited. ".output()" waited for the child to finish,
+        // and this runs on the thread tearing the UI down, so a slow or
+        // denied kill stalled the window with it. The helper is elevated and
+        // this process is not, so a denial is a normal outcome; nothing here
+        // needs the exit status.
+        let spawned = std::process::Command::new("taskkill")
             .args(["/F", "/IM", "NexHelper.exe"])
             .creation_flags(0x08000000)
-            .output();
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Err(error) = spawned {
+            logging::warn(&format!("[nex] shutdown: taskkill unavailable: {error}"));
+        }
     }
 }
 

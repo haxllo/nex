@@ -16,7 +16,7 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
 <br>
 
 <div align="center">
-  <img src="docs/images/demo.gif" alt="Press Win, type, launch" width="800"/>
+  <img src="https://cdn.nexapp.live/demo.webp" alt="Press Win, type, launch" width="900"/>
 </div>
 
 <br>

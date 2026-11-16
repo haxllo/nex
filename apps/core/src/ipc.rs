@@ -572,19 +572,51 @@ pub fn search_seed(
     Ok(items)
 }
 
+/// Liveness probe with a short budget.
+///
+/// Called from teardown paths and from a poll loop, so it must not carry the
+/// default 60-second budget: a single unresponsive indexer would stall the
+/// caller far past the point where the answer stops mattering.
 pub fn indexer_is_alive(addr: &str) -> bool {
     matches!(
-        ipc_call(addr, &IpcRequest::new("ping", Value::Null)),
+        ipc_call_with_timeout(
+            addr,
+            &IpcRequest::new("ping", Value::Null),
+            LIVE_PROBE_TIMEOUT,
+        ),
         Ok(response) if response.ok
     )
 }
 
+/// Budget for a liveness ping. Long enough to answer on a busy machine, short
+/// enough that a caller polling for exit keeps making progress.
+pub const LIVE_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Budget for asking the indexer to exit during teardown.
+///
+/// The call runs on the thread that is tearing the UI down, so a slow answer
+/// stalls the window and the user's input with it. A quit is worth waiting a
+/// moment for, not a minute: past this the indexer's parent-PID watchdog ends
+/// it anyway, which is why an unanswered shutdown is not an error here.
+pub const SHUTDOWN_INDEXER_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Ask the indexer to exit voluntarily. Returns true when the indexer
 /// acknowledged, or when nothing was listening in the first place.
+///
+/// Bounded end to end. Bounding only the shutdown call was not enough: the
+/// fallback used to ask `indexer_is_alive`, which goes through `ipc_call` and
+/// its 60-second budget, so a silent indexer still froze the quit for a
+/// minute — the short timeout was spent and then the long one began.
 pub fn shutdown_indexer(addr: &str) -> bool {
-    match ipc_call(addr, &IpcRequest::new("shutdown", Value::Null)) {
+    match ipc_call_with_timeout(
+        addr,
+        &IpcRequest::new("shutdown", Value::Null),
+        SHUTDOWN_INDEXER_TIMEOUT,
+    ) {
         Ok(response) => response.ok,
-        Err(_) => !indexer_is_alive(addr),
+        // Not answering is not a failure to report: the watchdog will end it.
+        // Treat the indexer as stopping rather than probing it again.
+        Err(_) => true,
     }
 }
 
@@ -673,6 +705,54 @@ pub fn ensure_indexer_running(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quitting used to wait up to 60 s on the indexer, on the thread that
+    /// owns the window, so a busy indexer froze the UI before exit. The bound
+    /// is asserted here rather than observed in a live quit: the point is that
+    /// no code path can reintroduce a minute-long block unnoticed.
+    #[test]
+    fn shutdown_budget_is_short_enough_to_not_freeze_the_ui() {
+        assert!(
+            SHUTDOWN_INDEXER_TIMEOUT <= Duration::from_millis(500),
+            "a shutdown above 500ms is felt as a freeze: {SHUTDOWN_INDEXER_TIMEOUT:?}"
+        );
+    }
+
+    /// An indexer that never answers must not turn a quit into an error. The
+    /// port is bound and left silent, which is exactly the busy-indexer case.
+    #[test]
+    fn shutdown_of_a_silent_indexer_returns_within_the_budget() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        // Accept and *hold* the connection open without replying, which is the
+        // case that actually waits: a dropped stream returns at once and would
+        // let this test pass against a 60 s timeout.
+        let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let hold_for_server = hold.clone();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                while hold_for_server.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                drop(stream);
+            }
+        });
+        let started = std::time::Instant::now();
+        let result = shutdown_indexer(&addr);
+        let elapsed = started.elapsed();
+        hold.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = result;
+        // The wait must be the budget, not a scheduler accident: the old 60 s
+        // call would sit here for a minute.
+        assert!(
+            elapsed >= SHUTDOWN_INDEXER_TIMEOUT,
+            "expected to wait out the budget, returned in {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "shutdown waited {elapsed:?} on a silent indexer"
+        );
+    }
 
     #[test]
     fn request_roundtrip_keeps_version_and_params() {

@@ -3121,7 +3121,24 @@ mod tests {
     }
 
     // One press tracker for every detector: bare taps fire once, chords never.
+    //
+    // These five share the module's WIN_PRESS_ACTIVE / WIN_CHORD_SEEN atomics,
+    // and every one of them resets that state before asserting on transitions.
+    // Run in parallel they reset each other mid-assertion, which made
+    // bare_press_fires_exactly_once fail on this machine while passing under
+    // --test-threads=1 and in CI. Same fix as the Tantivy and overlay_state
+    // suites: a module-local gate, so only this state is serialised.
+    static WIN_PRESS_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Hold for the whole test: `let _gate = win_press_guard();`
+    fn win_press_guard() -> std::sync::MutexGuard<'static, ()> {
+        WIN_PRESS_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test] fn bare_press_fires_exactly_once() {
+        let _gate = win_press_guard();
         reset_win_press_state();
         note_win_press_start();
         note_win_press_start();              // key auto-repeat / second detector
@@ -3129,6 +3146,7 @@ mod tests {
         assert!(!finish_win_press());        // other detector's key-up
     }
     #[test] fn chord_press_never_fires() {
+        let _gate = win_press_guard();
         reset_win_press_state();
         note_win_press_start();
         assert!(note_chord_key());           // Win+E key-down
@@ -3136,6 +3154,7 @@ mod tests {
         assert!(!finish_win_press());
     }
     #[test] fn chord_flag_does_not_leak_into_next_press() {
+        let _gate = win_press_guard();
         reset_win_press_state();
         note_win_press_start();
         assert!(note_chord_key());
@@ -3144,10 +3163,12 @@ mod tests {
         assert!(finish_win_press());
     }
     #[test] fn chord_key_outside_press_is_ignored() {
+        let _gate = win_press_guard();
         reset_win_press_state();
         assert!(!note_chord_key());
     }
     #[test] fn chord_press_clears_focus_escape_guard() {
+        let _gate = win_press_guard();
         reset_win_press_state();
         note_win_press_start();
         set_suppress_focus_escape(true);

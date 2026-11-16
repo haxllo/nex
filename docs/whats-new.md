@@ -1,3 +1,4 @@
+<!-- release: 2.41.0 -->
 <!--
   WHAT THIS FILE IS
   This is the text people see inside Nex, in the What's New view, after they
@@ -5,9 +6,17 @@
   docs/releases/v<version>-notes.md and carries the commit log.
 
   EDIT THIS FILE BEFORE EACH RELEASE, IN THE SAME COMMIT AS THE VERSION BUMP.
-  apps/core/build.rs bakes it into the binary at compile time, so a build
-  without it produces an app whose What's New view is the tips fallback only.
-  A unit test fails when the baked text is empty.
+  apps/core/build.rs bakes it into the binary at compile time.
+
+  THE FIRST LINE OF THIS FILE IS A MARKER THAT NAMES THE RELEASE THIS TEXT IS
+  FOR. Update it to the version being released. If it does not match, the
+  release workflow still succeeds — it logs a warning and never blocks — but
+  the What's New view will show whatever was written last time, which is worse
+  than showing nothing. Update the marker and the prose together.
+
+  Do not quote comment syntax inside this block: a nested opener or a stray
+  terminator closes the block early and the rest of these instructions appear
+  as literal text in the app.
 
   HTML COMMENTS ARE REMOVED BEFORE THEY REACH THE APP (build.rs strips them),
   so use them freely for notes to yourself and to whatever agent edits this

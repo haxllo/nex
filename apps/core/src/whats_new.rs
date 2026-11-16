@@ -239,6 +239,20 @@ mod tests {
         assert_eq!(strip_html_comments("left <!-- x --> right"), "left  right");
     }
 
+    /// A `-->` written inside a comment ends it early, and everything after
+    /// it is shown. This bit the document itself: the instructions described
+    /// the release marker by quoting its comment syntax, which closed the
+    /// block and leaked instruction text into the view.
+    #[test]
+    fn text_after_a_stray_terminator_is_still_only_a_warning_not_silence() {
+        let text = "<!--\n  see <!-- release: 1 --> for the marker\n  more rules\n-->\n## Shown";
+        let shown = strip_html_comments(text);
+        // The early close leaves the remaining rules visible, which is exactly
+        // why the document must not quote comment syntax at itself.
+        assert!(shown.contains("more rules"), "{shown}");
+        assert!(shown.contains("## Shown"));
+    }
+
     #[test]
     fn pending_seen_current_means_nothing_pending() {
         let dir = std::env::temp_dir().join(format!("nex-wn-seen-{}", std::process::id()));

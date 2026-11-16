@@ -13,138 +13,191 @@ A keyboard-first launcher for Windows. Press a global hotkey to summon a floatin
   <a href="https://www.rust-lang.org/"><img src="https://www.shieldcn.dev/badge/-Rust-000000.svg?logo=rust&variant=secondary&size=xs&theme=zinc" alt="Rust"/></a>
 </div>
 
+---
+
+Nex replaces the Start menu. Hit the **Win** key anywhere and a glass panel
+drops in under your cursor: type a few letters, press Enter, and the app or
+file is open. No window switching, no mouse.
+
+It indexes your whole drive natively, so the first result is usually the one
+you wanted by the time you have typed three characters.
+
+## Why Nex
+
+Most launchers make you wait for a window, or make you configure a plugin
+before they do anything useful. Nex is built around three things:
+
+- **It opens instantly.** The WebView stays resident after you hide the panel,
+  so summoning it is a show rather than a cold start.
+- **It searches the real disk.** A native MFT scan reads the NTFS master file
+  table directly instead of walking directories, so a full-drive index is
+  practical rather than a background job that never finishes.
+- **It looks like part of Windows.** Acrylic backdrop, rounded corners and a
+  contact shadow, with a CSS fallback on older builds.
+
 ## Features
 
-- **Keyboard-first** — Press the Win key to summon Nex from anywhere — replaces the Start menu
-- **Fuzzy search** — Tantivy-powered full-text search across apps, files, and folders
-- **Native discovery** — MFT (NTFS) / walkdir file discovery
-- **Calculator** — Inline arithmetic evaluation in the search bar
-- **Clipboard history** — Recently copied items at your fingertips
-- **Actions & plugins** — Custom commands, web searches, and extensible plugin SDK
-- **Game mode** — Automatic suppression while gaming
-- **Auto-updater** — Stay current with built-in update mechanism
+| | |
+|---|---|
+| **Keyboard-first** | Glows up on the Win key from anywhere, replacing the Start menu |
+| **Fuzzy search** | Tantivy full-text index across apps, files and folders |
+| **Native discovery** | NTFS MFT scan, with a walkdir fallback for non-NTFS roots |
+| **Live updates** | File and application watchers keep results current without a rescan |
+| **Calculator** | Inline arithmetic in the search bar |
+| **Clipboard history** | Recently copied items, one keystroke away |
+| **Assistant** | Ask in plain words; it can read, write, move and delete files and run commands, behind a confirmation card |
+| **Actions** | Custom commands and web searches, run straight from a result |
+| **Game mode** | Suppresses the hotkey over fullscreen games, and says so in the tray |
+| **Auto-update** | Built-in updater, with What's New shown after it installs |
 
-## Getting Started
+## Install
 
-### Install
+Download the installer from the [Releases page](https://github.com/haxllo/nex/releases/latest)
+and run it. Nex starts in the background, ready on the **Win** key.
 
-Download the latest installer from the [Releases page](https://github.com/haxllo/nex/releases/latest). Run it — Nex starts in the background, ready on the **Win key**.
+The zip on the same page is portable, if you would rather not run an installer.
 
-### Build from Source
+## Build from source
+
+**Requirements:** Windows 10 or 11, 64-bit. [Rust](https://rustup.rs) stable.
+The MSVC or GNU toolchain both work.
 
 ```bash
 git clone https://github.com/haxllo/nex.git
 cd nex
 cargo build --release --bin NexUIProcess --bin NexIndexerProcess --bin NexHelper
-./target/release/NexUIProcess.exe
 ```
 
-**Requirements:** Windows 10/11 (64-bit), Rust 1.85+
+Then run `target/release/NexUIProcess.exe --foreground`. The `--foreground`
+flag keeps the terminal attached, which is what you want while developing.
 
-### Configuration
-
-On first launch, Nex creates a config at `%APPDATA%\Nex\config.toml`.
-
-| Setting | Default | Description |
-|---|---|---|
-| `hotkey` | `Win` (Left) | Global summon shortcut — replaces Start menu |
-| `max_results` | `20` | Results shown |
-| `show_files` | `false` | Include files |
-| `show_folders` | `false` | Include folders |
-| `launch_at_startup` | `true` | Auto-start with Windows |
+> Building needs the three binaries, not just the UI. `NexUIProcess.exe` owns
+> the overlay and search, `NexIndexerProcess.exe` owns discovery and the index,
+> and `NexHelper.exe` handles input from elevated windows. The UI launches the
+> other two itself.
 
 ## Usage
 
-### Search Syntax
+Press **Win**, type, press **Enter**. That is the whole interaction.
+
+- **Right-click a result** for run as admin, copy path, open containing folder,
+  uninstall, and pin or unpin.
+- **Tray icon** for quit, restart, and game-mode status.
+
+### Search syntax
 
 | Prefix | Scope |
 |---|---|
-| *(none)* | Fuzzy search all indexed items |
-| `>` | Command mode (actions, web search) |
-| `@apps` | Filter to applications |
-| `@files` | Filter to files |
-| `@folders` | Filter to folders |
-| `kind:file` / `ext:md` | DSL key:value filters |
+| *(none)* | Fuzzy search across everything indexed |
+| `>` | Command mode: actions and web searches |
+| `@apps` | Applications only |
+| `@files` | Files only |
+| `@folders` | Folders only |
+| `kind:file`, `ext:md` | Key/value filters |
 
-### Using Nex (GUI app)
+### Command-line flags
 
-Nex runs in the background as a system-tray app — no commands needed for day-to-day use.
-
-- **Summon** — press the Win key; type to search; Enter to launch
-- **Right-click a result** — run as admin, copy path, open folder, uninstall, pin/unpin
-- **Tray icon** — right-click for quit, restart, and quick-launch controls
-
-Power-user CLI flags (rarely needed):
+Not needed for daily use, but available:
 
 | Command | Description |
 |---|---|
-| `nex --status` | Check if running |
-| `nex --quit` | Stop the running instance |
-| `nex --restart` | Restart the instance |
-| `nex --diagnostics-bundle` | Dump diagnostics to zip |
+| `NexUIProcess.exe --foreground` | Run attached to a terminal |
+| `NexUIProcess.exe --status` | Check whether Nex is running |
+| `NexUIProcess.exe --quit` | Stop the running instance |
+| `NexUIProcess.exe --restart` | Restart the instance |
+| `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics zip |
 
-## Project Structure
+## Configuration
 
-```
-nex/
-├── apps/core/           # Main Rust application
-│   ├── src/
-│   │   ├── main.rs      # Entry point
-│   │   ├── lib.rs       # Library root (nex_core)
-│   │   ├── runtime.rs   # Core orchestration
-│   │   ├── overlay/     # WebView2 UI (tao + wry)
-│   │   ├── search.rs    # Query DSL
-│   │   ├── tantivy_search.rs # Full-text engine
-│   │   ├── calculator.rs
-│   │   ├── clipboard_history.rs
-│   │   ├── plugin_sdk.rs
-│   │   ├── updater.rs
-│   │   └── config.rs
-│   └── Cargo.toml
-├── apps/assets/         # Branding assets
-├── scripts/             # Build & packaging
-├── tests/               # Performance & smoke tests
-└── docs/                # Architecture & plans
-```
+On first launch Nex writes `%APPDATA%\Nex\config.toml`. The index lives
+beside it in `%APPDATA%\Nex\index.sqlite3`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `hotkey` | `Win` (left) | Global summon shortcut |
+| `max_results` | `20` | Results shown per query |
+| `show_files` | `false` | Include files in results |
+| `show_folders` | `false` | Include folders in results |
+| `launch_at_startup` | `true` | Start with Windows |
+
+Most settings are also editable from the settings view in the panel.
 
 ## Architecture
 
-Nex renders its overlay as a native Windows popup using **tao** (window management) and **wry** (WebView2 embedding). All UI is HTML/CSS/JS — no GDI or Direct2D.
+Three processes, deliberately split so that none of them does another's job:
 
-| Component | File | Purpose |
+| Process | Integrity | Owns |
 |---|---|---|
-| Host | `overlay/host.rs` | Event loop, WebView, Win32 chrome, positioning |
-| Model | `overlay/model.rs` | Event/state/theme types |
-| Icons | `overlay/icons.rs` | LRU cache, base64 PNG encoding |
-| Shim | `overlay/shim.rs` | Runtime-to-overlay API |
-| Hotkey | `overlay/hotkey.rs` | `RegisterHotKey` + message loop |
-| Tray | `overlay/tray.rs` | System tray + context menu |
-| Platform | `overlay/platform.rs` | Theme detection, IPC signaling |
-| Indexing | `overlay/indexing_progress.rs` | First-time indexing UI |
+| `NexUIProcess.exe` | Medium | Overlay and WebView2, hotkeys, tray, settings, search over the published index snapshot |
+| `NexIndexerProcess.exe` | Medium | Discovery, SQLite writes, file and app watchers, Tantivy |
+| `NexHelper.exe` | High | Elevated hotkey detection, foreground grant, input simulation |
 
-**Key design decisions:**
+The UI spawns and supervises the other two. The indexer watches its parent and
+exits if the UI disappears. The helper is a privileged broker and never owns
+process lifecycle.
 
-- **Fire-and-forget state** — Rust pushes JSON snapshots to WebView via `PostWebMessageAsJson`. No synchronous script evaluation on the critical path.
-- **Warm-release** — WebView stays resident for instant open. Icon cache clears ~5 seconds after hide.
-- **Acrylic backdrop** — Rounded corners + acrylic blur via DWM APIs, with CSS fallback on older Windows.
-- **Cursor-anchored positioning** — Window centers on the monitor under the cursor, upper-third placement (Raycast/Spotlight style).
-- **Force-foreground** — `AttachThreadInput` ensures reliable focus on show; winit/tao alone isn't sufficient on Windows.
-- **Instance signaling** — Registered window messages let a second process show/quit the running instance.
-- **Embedded UI** — HTML, CSS, and JS compiled into the binary via `include_str!`, served through `nexasset://` custom protocol.
+The split is not decoration. A Medium-integrity process cannot receive input
+destined for an elevated window, so hotkey detection for Task Manager and
+Settings has to live in the helper and be forwarded back over a pipe.
 
-## Building & Testing
+A few decisions worth knowing:
+
+- **Fire-and-forget state.** Rust pushes JSON snapshots to the WebView with
+  `PostWebMessageAsJson`. Nothing blocks on synchronous script evaluation.
+- **Warm release.** The WebView stays alive between shows. Only the icon cache
+  is trimmed, a few seconds after hiding.
+- **Embedded UI.** HTML, CSS and JS are compiled into the binary with
+  `include_str!` and served over a `nexasset://` custom protocol, so there is
+  no asset directory to lose.
+- **Cursor-anchored positioning.** The panel centres on the monitor under the
+  cursor, in the upper third, Raycast style.
+- **Forced foreground.** `AttachThreadInput` is required for reliable focus on
+  Windows; the window manager alone is not enough.
+
+### Project layout
+
+```
+apps/
+├── core/       nex_core — the engine shared by every binary
+│   └── src/
+│       ├── overlay/    WebView2 host, hotkeys, tray, icons (tao + wry)
+│       ├── chat/       assistant, tool calling, confirmation cards
+│       ├── discovery   MFT and walkdir file discovery
+│       └── ...         search, config, calculator, clipboard, updater
+├── ui/         NexUIProcess — overlay, tray, search UI
+├── indexer/    NexIndexerProcess — discovery and indexing
+└── helper/     NexHelper — elevated input broker
+```
+
+Each binary is its own package on purpose: a Windows resource script is linked
+into every binary of its package and inherited by dependents, so sharing one
+would give all three processes the same Task Manager name.
+
+## Development
 
 ```bash
-cargo build --bin NexUIProcess --bin NexIndexerProcess --bin NexHelper              # Debug
-cargo build --release --bin NexUIProcess --bin NexIndexerProcess --bin NexHelper    # Release
-cargo test -p nex                  # Tests (broken on Windows — hangs)
+cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+cargo test -p nex                        # unit tests
+cargo test -p nex --lib chat             # one module
+cargo test -p nex-indexer --test process_isolation_test   # IPC end to end
 ```
+
+If your machine is short on RAM or disk, point Cargo elsewhere and build a
+single job at a time:
+
+```bash
+export CARGO_TARGET_DIR=/g/nex-target CARGO_BUILD_JOBS=1
+```
+
+Web assets (`index.html`, `style.css`, `app.js`) are embedded at compile time.
+Editing them without rebuilding changes nothing at runtime.
 
 ## Documentation
 
-- [Architecture Notes](docs/README.md)
+- [Architecture notes](docs/README.md)
 - [Changelog](CHANGELOG.md)
+- [What's New](docs/whats-new.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

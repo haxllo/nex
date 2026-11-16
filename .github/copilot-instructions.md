@@ -15,3 +15,9 @@ skipped:
 4. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker only.
 5. **Entry point.** `Nex.exe` was removed; use `NexUIProcess.exe`.
+
+6. **Releasing is CI's job.** Bump the three crate versions, optionally rewrite
+   `docs/whats-new.md`, commit, push a `v*` tag. `.github/workflows/release.yml`
+   drafts the release notes, builds, packages and publishes. Do not write
+   `docs/releases/v<ver>-notes.md` by hand, do not run the packaging scripts,
+   and do not release unless the user asked for one.

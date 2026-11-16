@@ -217,10 +217,13 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 **IMPORTANT**: Release workflows must be run directly by the main agent (me), NOT delegated to subagents. Use subagents only for review/verification of release output if needed.
 
 **Trigger**: When the user asks to run, create, or publish a Nex release, the
-work is: bump the version, write the notes, commit, push the tag. Pushing a
-`v*` tag runs `.github/workflows/release.yml`, which verifies the tag matches
-all three crates, builds, packs the zip and installer, and opens the GitHub
-release. Do not run the packaging scripts by hand for a release.
+work is: bump the version, optionally rewrite `docs/whats-new.md`, commit, and
+push the tag. Pushing a `v*` tag runs `.github/workflows/release.yml`, which
+verifies the tag matches all three crates, builds, packs the zip and installer,
+and opens the GitHub release. **Do not run the packaging scripts by hand, and
+do not write `docs/releases/v<ver>-notes.md` by hand** — the workflow drafts it
+from the commit log at tag time. Do not bump the version or push a tag unless
+the user asked for a release.
 
 **Two separate release documents.** Only the first is required to ship.
 
@@ -253,11 +256,13 @@ page only, never a source for What's New.
 #    scripts stamp FileVersion from their own package)
 # 2. rewrite docs/whats-new.md for this release, and bump its `release:` marker
 #    (optional, but skipping it ships last release's text)
-# 3. write docs/releases/v<ver>-notes.md, or let the workflow draft it
-#    — do 1-3 in one commit, because the What's New document is compiled in
-cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
+#    — do 1-2 in one commit, because the What's New document is compiled in
 
-# 4. tag only after those commits are on master, then push
+# NO local release build is needed. CI builds the shipped binaries; a local
+# build only proves the tree compiles and costs ten minutes. Do not run one
+# as part of releasing. Do not write docs/releases/v<ver>-notes.md either.
+
+# 3. tag only after those commits are on master, then push
 git tag v<ver>
 git push origin master --tags
 # .github/workflows/release.yml does everything else: verifies the tag against

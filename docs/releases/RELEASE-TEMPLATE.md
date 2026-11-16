@@ -3,6 +3,15 @@
 {1-2 sentence summary of release — plain words, what it feels like for the user}
 
 <!--
+  THIS FILE IS NOT A STEP IN RELEASING.
+
+  `scripts/windows/release-notes-from-commits.ps1` drafts each release's notes
+  from the commit log, and `.github/workflows/release.yml` runs it at tag time
+  when `docs/releases/v<ver>-notes.md` does not exist. Nobody has to write that
+  file by hand. Keep this document as the shape the generator aims for, and as
+  a reference when correcting a release body with `gh release edit --notes-file`
+  after the fact.
+
   PUBLISHING RULES (never ship this block — it is an HTML comment):
   - GitHub release title must be exactly `v{VER}` (version only, no
     descriptive suffix — the descriptive title lives in the body heading).

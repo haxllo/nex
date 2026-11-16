@@ -2997,6 +2997,11 @@ html.glass-native .chat-composer-shell {
 
 .chat-message-content > :first-child { margin-top: 0; }
 .chat-message-content > :last-child { margin-bottom: 0; }
+/* The line still being written. It is kept out of the markdown renderer on
+   purpose: a half-arrived "1." or "**bo" is ambiguous, and re-parsing it each
+   frame makes the text visibly flip between plain and formatted. Plain here,
+   formatted the moment its newline arrives. */
+.chat-streaming-line { white-space: pre-wrap; }
 .chat-message-content p { margin: 0 0 10px; }
 .chat-message-content p:last-child { margin-bottom: 0; }
 .chat-message-content ul,

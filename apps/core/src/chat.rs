@@ -705,6 +705,15 @@ fn request_update(request_id: Option<&str>, key: &str, value: Value) -> Value {
     Value::Object(update)
 }
 
+/// Whether the OpenAI-compatible finish reason means the reply was cut short.
+///
+/// Only `length` is a cut: the model was still working when the output budget
+/// ended, so the next round can carry on. `stop` is a normal end, and
+/// `content_filter` will not get further by asking again.
+fn finish_reason_is_cut(reason: &str) -> bool {
+    reason == "length"
+}
+
 fn openai_stream_is_complete(payload: &str) -> bool {
     payload == "[DONE]"
 }
@@ -858,6 +867,13 @@ pub(crate) fn start(raw: String, push: impl FnMut(Value) + Send + 'static) {
 struct StreamedTurn {
     text: String,
     calls: Vec<crate::chat_tools::RawToolCall>,
+    /// The round hit the output-token limit, so its tool calls may be cut off.
+    ///
+    /// Both wire formats report this differently - the ChatGPT responses stream
+    /// via `response.incomplete`, the OpenAI-compatible one only via
+    /// `choices[0].finish_reason == "length"` - and both collapse into this flag
+    /// so the loop above them can treat a cut the same way either way.
+    truncated: bool,
 }
 
 /// Accumulates `tool_calls` deltas, which arrive fragmented by index.
@@ -994,6 +1010,9 @@ fn stream_openai(
         .build();
     let create_base = create_base_dir();
     let mut loop_state = crate::chat_tools::ToolLoop::new().with_user_text(&request.message);
+    // How many rounds were cut by the output cap in this request. Bounds the
+    // continuation so a model that always overshoots cannot spin.
+    let mut cut_rounds = 0_usize;
     // Same contract as the ChatGPT-account path: after an action, the next
     // round's prose starts on its own line instead of under the result.
     let needs_break = std::cell::Cell::new(false);
@@ -1028,6 +1047,29 @@ fn stream_openai(
         loop_state.begin_round();
         let turn = stream_openai_once(config, &agent, &body, id, &mut emit_with_break)?;
         if turn.calls.is_empty() {
+            // A length stop is a cut, not an answer: the model was still
+            // working when the budget ended. Ending the turn here dropped the
+            // rest of the reply with no signal, which is what "replies are cut
+            // silently" reported. Ask it to carry on, but stop after two cuts
+            // so a model that keeps overshooting cannot loop forever.
+            if turn.truncated {
+                cut_rounds += 1;
+                if cut_rounds > 2 {
+                    emit(
+                        "The reply kept hitting the output limit, so I stopped. Ask for one smaller piece at a time.",
+                        None,
+                    );
+                    return Ok(());
+                }
+                if !turn.text.is_empty() {
+                    messages.push(json!({"role":"assistant","content": turn.text}));
+                }
+                messages.push(json!({
+                    "role": "user",
+                    "content": output_limit_note_text(),
+                }));
+                continue;
+            }
             return Ok(());
         }
         // Tool calls are only meaningful with the text that introduced them.
@@ -1238,6 +1280,7 @@ fn stream_openai_once(
     let mut reader = BufReader::new(response.into_reader());
     let mut pending_line = String::new();
     let mut finished = false;
+    let mut truncated = false;
     let mut turn = StreamedTurn::default();
     let mut calls = ToolCallAccumulator::default();
     loop {
@@ -1286,15 +1329,26 @@ fn stream_openai_once(
         if let Some(error) = event.pointer("/error/message").and_then(Value::as_str) {
             return Err(error.to_string());
         }
+        // `finish_reason` is null on every chunk until the last one. A value of
+        // "length" means the model was still working when the output budget
+        // ended, exactly like the ChatGPT path's `response.incomplete`. Reading
+        // it here is what makes a cut recoverable on this provider too: without
+        // it the round looked complete, the carrying calls were reported as if
+        // they had arrived whole, and a half-written file was never retried.
+        if let Some(reason) = event
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            truncated = finish_reason_is_cut(reason);
+        }
     }
     if !finished {
         return Err("The provider connection ended before the response was complete.".into());
     }
     if !calls.is_empty() {
-        // This path does not detect a length stop yet, so every call it holds is
-        // reported as it arrived.
-        turn.calls = calls.finish(false);
+        turn.calls = calls.finish(truncated);
     }
+    turn.truncated = truncated;
     Ok(turn)
 }
 
@@ -2027,6 +2081,10 @@ fn incomplete_is_resumable(reason: Option<&str>) -> bool {
     matches!(reason, Some("max_output_tokens"))
 }
 
+fn output_limit_note_text() -> &'static str {
+    "Your last reply hit the output-token limit and was cut off. Continue from where it stopped, and do not repeat what you already produced. If you were writing a file, keep each create_file call to about 150 lines: create the file with the first part, then add the rest with create_file and append=true, using the same name and parent. Any action that was cut off was not run."
+}
+
 /// What the model is told when its reply was cut off by the output limit.
 ///
 /// A user-role item, because that is the only part type the API accepts a
@@ -2038,7 +2096,7 @@ fn output_limit_note() -> serde_json::Value {
         "role": "user",
         "content": [{
             "type": "input_text",
-            "text": "Your last reply hit the output-token limit and was cut off. Continue from where it stopped, and do not repeat what you already produced. If you were writing a file, keep each create_file call to about 150 lines: create the file with the first part, then add the rest with create_file and append=true, using the same name and parent. Any action that was cut off was not run."
+            "text": output_limit_note_text()
         }],
     })
 }
@@ -3510,6 +3568,42 @@ mod tests {
         assert!(incomplete_is_resumable(Some("max_output_tokens")));
         assert!(!incomplete_is_resumable(Some("content_filter")));
         assert!(!incomplete_is_resumable(None));
+    }
+
+    /// The OpenAI-compatible provider reports a length stop only through
+    /// `finish_reason`, which this path never read.
+    ///
+    /// Reported as CIQ-181: "BYOK chat still ignores a length stop, so replies
+    /// are cut silently". Nothing here parsed the field, so `truncated` was
+    /// always false, the round looked complete, and the loop returned without
+    /// telling the user the reply had been cut.
+    #[test]
+    fn finish_reason_length_marks_the_round_as_cut() {
+        // Only `length` is a cut. `stop` is a normal end and `content_filter`
+        // will not get further by asking again, so neither may continue.
+        assert!(finish_reason_is_cut("length"));
+        assert!(!finish_reason_is_cut("stop"));
+        assert!(!finish_reason_is_cut("content_filter"));
+    }
+
+    /// A cut round must not silently end the turn.
+    ///
+    /// The continuation is bounded, because a model that always overshoots
+    /// would otherwise loop until `MAX_TOOL_ROUNDS`. Two cuts then a stop
+    /// matches the ChatGPT path, which already reports at the third.
+    #[test]
+    fn a_cut_round_continues_but_does_not_loop_forever() {
+        let mut cut_rounds = 0_usize;
+        let mut continued = 0_usize;
+        for _ in 0..10 {
+            cut_rounds += 1;
+            if cut_rounds > 2 {
+                break;
+            }
+            continued += 1;
+        }
+        assert_eq!(continued, 2, "it must try to continue, twice");
+        assert_eq!(cut_rounds, 3, "and then stop rather than spin");
     }
 
     #[test]

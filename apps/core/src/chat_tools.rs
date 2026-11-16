@@ -119,10 +119,14 @@ pub(crate) enum ChatTool {
     /// Desktop path in context the model invents `C:\Users\Alex\Desktop`,
     /// and a path it must fetch first is a path it may skip fetching.
     ///
-    /// Takes no arguments. "My CPU" and "what am I running" are the same
-    /// question, and asking the model to guess a key would turn a fact lookup
-    /// into a round of "which of these six words did you mean".
-    PcSpecs,
+    /// `fields` narrows the answer to the specs actually asked about. Without
+    /// it the tool returned all five lines, so "what is my CPU" came back with
+    /// the OS, the GPU and the memory too and the reply read like a spec sheet.
+    ///
+    /// It stays optional and label-shaped rather than becoming five tools: "my
+    /// CPU" and "what am I running" are one question, and a model choosing
+    /// between pc_cpu / pc_gpu / pc_memory spends a round deciding.
+    PcSpecs { fields: Vec<String> },
     /// Change part of an existing file, leaving the rest alone.
     ///
     /// `create_file` refuses a path that already exists, so without this the
@@ -226,7 +230,7 @@ impl ChatTool {
             Self::CreateFile { .. } => "create_file",
             Self::ReadFile { .. } => "read_file",
             Self::SearchPaths { .. } => "search_paths",
-            Self::PcSpecs => "pc_specs",
+            Self::PcSpecs { .. } => "pc_specs",
             Self::EditFile { .. } => "edit_file",
             Self::MovePath { .. } => "move_path",
             Self::CopyPath { .. } => "copy_path",
@@ -248,7 +252,7 @@ impl ChatTool {
             // Reading the index changes nothing and reaches nothing outside
             // the machine, so a search never needs a confirmation card.
             Self::SearchPaths { .. } => Annotations::read_only(),
-            Self::PcSpecs => Annotations::read_only(),
+            Self::PcSpecs { .. } => Annotations::read_only(),
             // Editing overwrites bytes that already exist, so it is destructive
             // in the MCP sense even though the file survives.
             Self::EditFile { .. } => Annotations::destructive(),
@@ -289,7 +293,7 @@ impl ChatTool {
             // Nothing was named, and the card renders verb + target, so a
             // placeholder here reads "Done this PC" - a path-shaped line for a
             // tool that has no path. Empty, so the row shows only its verb.
-            Self::PcSpecs => "",
+            Self::PcSpecs { .. } => "",
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
             Self::MovePath { path, .. }
@@ -470,9 +474,32 @@ impl RawToolCall {
                     limit,
                 })
             }
-            // No arguments to validate: the tool reports what the machine says
-            // about itself and takes nothing from the model to get it.
-            "pc_specs" => Ok(ChatTool::PcSpecs),
+            // Only the selector is taken, and only from a fixed set, so a
+            // model cannot ask this tool for an arbitrary registry read.
+            "pc_specs" => {
+                let mut fields = Vec::new();
+                if let Some(raw) = self.arguments.get("fields") {
+                    let list = raw.as_array().ok_or_else(|| ToolError::IllegalName {
+                        tool: "pc_specs",
+                        reason: "fields must be a list of names".to_string(),
+                    })?;
+                    for value in list {
+                        let want = value.as_str().ok_or_else(|| ToolError::IllegalName {
+                            tool: "pc_specs",
+                            reason: "each field must be a string".to_string(),
+                        })?;
+                        let canonical = PC_SPEC_FIELDS
+                            .iter()
+                            .find(|known| known.eq_ignore_ascii_case(want))
+                            .ok_or_else(|| ToolError::IllegalName {
+                                tool: "pc_specs",
+                                reason: format!("{want} is not a spec this tool has"),
+                            })?;
+                        fields.push((*canonical).to_string());
+                    }
+                }
+                Ok(ChatTool::PcSpecs { fields })
+            }
             "search_paths" => {
                 let query = arg("query")?;
                 // Store recall matches on a trigram index, so a word shorter
@@ -1400,7 +1427,7 @@ impl PendingAction {
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
             ChatTool::SearchPaths { .. } => "Search paths",
-            ChatTool::PcSpecs => "Read PC specs",
+            ChatTool::PcSpecs { .. } => "Read PC specs",
             ChatTool::EditFile { .. } => "Edit file",
             ChatTool::MovePath { .. } => "Move",
             ChatTool::CopyPath { .. } => "Copy",
@@ -1553,7 +1580,7 @@ fn sample_call(name: &str) -> ChatTool {
             kind: PathKind::Any,
             limit: SEARCH_PATHS_DEFAULT_LIMIT,
         },
-        "pc_specs" => ChatTool::PcSpecs,
+        "pc_specs" => ChatTool::PcSpecs { fields: Vec::new() },
         "edit_file" => ChatTool::EditFile {
             path: existing,
             old_text: "old".to_string(),
@@ -1585,6 +1612,29 @@ fn sample_call(name: &str) -> ChatTool {
 /// adding a derive dependency. Keeping the names here means the count in the
 /// drift test is derived rather than a literal someone forgets to edit — which
 /// is exactly what happened when this list said six while nine were declared.
+/// The specs `pc_specs` can be asked for, and the fact labels they map to.
+///
+/// A fixed list keeps the tool from becoming a registry reader on demand, and
+/// keeps the names the model may use in one place instead of scattering string
+/// comparisons through the parser.
+pub(crate) const PC_SPEC_FIELDS: &[&str] = &["cpu", "gpu", "memory", "os", "logical_processors"];
+
+/// The fact label a spec name selects.
+///
+/// `os` is not a prefix of the emitted line - the OS fact reads "Windows: ..."
+/// - so the mapping cannot be derived from the name and has to be stated.
+fn pc_spec_label(field: &str) -> &'static str {
+    match field {
+        "cpu" => "CPU",
+        "gpu" => "GPU",
+        "memory" => "Installed memory",
+        "logical_processors" => "Logical processors",
+        // The fact line is "Windows: Windows 11 Pro ...", so the label is the
+        // word before the colon, not the product name.
+        _ => "Windows",
+    }
+}
+
 pub(crate) fn all_tool_names() -> &'static [&'static str] {
     &[
         "open_path",
@@ -1719,8 +1769,17 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "pc_specs",
-                "description": "The specification of this PC: processor, graphics, installed memory and Windows version. Call this before answering any question about the hardware of this machine instead of guessing or asking the user. It is read-only and takes no arguments.",
-                "parameters": {"type": "object", "properties": {}}
+                "description": "The specification of this PC: processor, graphics, installed memory and Windows version. Call this before answering any question about the hardware of this machine instead of guessing or asking the user. It is read-only.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fields": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["cpu", "gpu", "memory", "os", "logical_processors"]},
+                            "description": "Which specs to return. Omit for all of them. Ask for only the ones the question needs: 'what is my CPU' wants cpu alone, not the whole sheet."
+                        }
+                    }
+                }
             }
         },
         {
@@ -2285,8 +2344,13 @@ fn run_inner(
                 Err(reason) => ToolOutcome::failure(tool.name(), path, reason),
             }
         },
-        ChatTool::PcSpecs => {
-            let specs = crate::chat::current_pc_info();
+        ChatTool::PcSpecs { fields } => {
+            let specs = if fields.is_empty() {
+                crate::chat::current_pc_info()
+            } else {
+                let labels: Vec<&str> = fields.iter().map(|f| pc_spec_label(f)).collect();
+                crate::chat::pc_info_matching(&labels)
+            };
             if specs.trim().is_empty() {
                 ToolOutcome::failure(tool.name(), "", "no specification could be read")
             } else {
@@ -4918,6 +4982,53 @@ mod tests {
     /// tool has to return it. A named tool that answers with nothing would put
     /// the model back where CIQ-196 left it: told there is a way to find out,
     /// with no way to find out.
+    /// Asking for one spec must not return the sheet.
+    ///
+    /// Seen in the built app: "what's my cpu" put all five lines on the card -
+    /// OS, CPU, GPU, logical processors, memory - and the reply then restated
+    /// the CPU. The question was one field; the tool answered five.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn pc_specs_returns_only_the_fields_it_was_asked_for() {
+        let cpu_only = raw("pc_specs", serde_json::json!({"fields": ["cpu"]}))
+            .validate()
+            .expect("pc_specs should accept a known field");
+        let outcome = run(&cpu_only, true, std::path::Path::new("."));
+        assert!(outcome.ok, "pc_specs failed: {}", outcome.summary);
+        assert!(outcome.summary.contains("CPU:"), "the asked-for field is missing");
+        assert!(
+            !outcome.summary.contains("Installed memory:"),
+            "a field nobody asked for was returned: {}",
+            outcome.summary
+        );
+        assert!(
+            !outcome.summary.contains("Logical processors:"),
+            "a field nobody asked for was returned: {}",
+            outcome.summary
+        );
+
+        // No selector still means everything, so the tool stays useful for
+        // "tell me about this PC".
+        let all = run(
+            &ChatTool::PcSpecs { fields: Vec::new() },
+            true,
+            std::path::Path::new("."),
+        );
+        assert!(all.summary.lines().count() >= 3, "the full sheet is still available");
+    }
+
+    /// An unknown name is a refusal, not a silent empty answer.
+    #[test]
+    fn pc_specs_rejects_a_field_it_does_not_have() {
+        let err = raw("pc_specs", serde_json::json!({"fields": ["motherboard"]}))
+            .validate()
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::IllegalName { .. }),
+            "a made-up field must be refused, got {err:?}"
+        );
+    }
+
     /// The card renders verb + target, so a target on a path-less tool reads as
     /// a path.
     ///
@@ -4926,7 +5037,7 @@ mod tests {
     /// like the folder a real action would name. The user read it as a result.
     #[test]
     fn a_tool_that_names_no_path_has_no_target_to_show() {
-        let tool = ChatTool::PcSpecs;
+        let tool = ChatTool::PcSpecs { fields: Vec::new() };
         assert_eq!(
             tool.target(),
             "",
@@ -4944,7 +5055,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn pc_specs_reports_the_machine_it_runs_on() {
-        let tool = ChatTool::PcSpecs;
+        let tool = ChatTool::PcSpecs { fields: Vec::new() };
         assert!(
             !tool.needs_confirmation(),
             "reading a spec is not a change to the PC, so it must not ask"

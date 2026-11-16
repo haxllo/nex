@@ -106,6 +106,23 @@ pub(crate) enum ChatTool {
         kind: PathKind,
         limit: usize,
     },
+    /// The machine's own specification, on request.
+    ///
+    /// These lines used to ride on every request as context, which meant a
+    /// question like "write me a poem" carried a CPU, a GPU and a memory
+    /// count it had no use for. They are also the one part of the facts that
+    /// is never needed to resolve a path, so they can wait until the model
+    /// actually asks about the hardware.
+    ///
+    /// What stays in the prompt is the user's folder locations and drives.
+    /// Those cannot move behind a tool: CIQ-157 showed that without a real
+    /// Desktop path in context the model invents `C:\Users\Alex\Desktop`,
+    /// and a path it must fetch first is a path it may skip fetching.
+    ///
+    /// Takes no arguments. "My CPU" and "what am I running" are the same
+    /// question, and asking the model to guess a key would turn a fact lookup
+    /// into a round of "which of these six words did you mean".
+    PcSpecs,
     /// Change part of an existing file, leaving the rest alone.
     ///
     /// `create_file` refuses a path that already exists, so without this the
@@ -209,6 +226,7 @@ impl ChatTool {
             Self::CreateFile { .. } => "create_file",
             Self::ReadFile { .. } => "read_file",
             Self::SearchPaths { .. } => "search_paths",
+            Self::PcSpecs => "pc_specs",
             Self::EditFile { .. } => "edit_file",
             Self::MovePath { .. } => "move_path",
             Self::CopyPath { .. } => "copy_path",
@@ -230,6 +248,7 @@ impl ChatTool {
             // Reading the index changes nothing and reaches nothing outside
             // the machine, so a search never needs a confirmation card.
             Self::SearchPaths { .. } => Annotations::read_only(),
+            Self::PcSpecs => Annotations::read_only(),
             // Editing overwrites bytes that already exist, so it is destructive
             // in the MCP sense even though the file survives.
             Self::EditFile { .. } => Annotations::destructive(),
@@ -267,6 +286,8 @@ impl ChatTool {
             // The query is what the user is asking about, so it is what the
             // card names.
             Self::SearchPaths { query, .. } => query,
+            // No argument to name, so the card says what it is looking up.
+            Self::PcSpecs => "this PC",
             Self::OpenUrl { url } => url,
             Self::CreateFolder { name, .. } | Self::CreateFile { name, .. } => name,
             Self::MovePath { path, .. }
@@ -447,6 +468,9 @@ impl RawToolCall {
                     limit,
                 })
             }
+            // No arguments to validate: the tool reports what the machine says
+            // about itself and takes nothing from the model to get it.
+            "pc_specs" => Ok(ChatTool::PcSpecs),
             "search_paths" => {
                 let query = arg("query")?;
                 // Store recall matches on a trigram index, so a word shorter
@@ -1374,6 +1398,7 @@ impl PendingAction {
             ChatTool::CreateFile { .. } => "Create file",
             ChatTool::ReadFile { .. } => "Read file",
             ChatTool::SearchPaths { .. } => "Search paths",
+            ChatTool::PcSpecs => "Read PC specs",
             ChatTool::EditFile { .. } => "Edit file",
             ChatTool::MovePath { .. } => "Move",
             ChatTool::CopyPath { .. } => "Copy",
@@ -1526,6 +1551,7 @@ fn sample_call(name: &str) -> ChatTool {
             kind: PathKind::Any,
             limit: SEARCH_PATHS_DEFAULT_LIMIT,
         },
+        "pc_specs" => ChatTool::PcSpecs,
         "edit_file" => ChatTool::EditFile {
             path: existing,
             old_text: "old".to_string(),
@@ -1566,6 +1592,7 @@ pub(crate) fn all_tool_names() -> &'static [&'static str] {
         "create_file",
         "read_file",
         "search_paths",
+        "pc_specs",
         "edit_file",
         "move_path",
         "copy_path",
@@ -1684,6 +1711,14 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                     },
                     "required": ["query"]
                 }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "pc_specs",
+                "description": "The specification of this PC: processor, graphics, installed memory and Windows version. Call this before answering any question about the hardware of this machine instead of guessing or asking the user. It is read-only and takes no arguments.",
+                "parameters": {"type": "object", "properties": {}}
             }
         },
         {
@@ -2246,6 +2281,20 @@ fn run_inner(
                     duration_ms: None,
                 },
                 Err(reason) => ToolOutcome::failure(tool.name(), path, reason),
+            }
+        },
+        ChatTool::PcSpecs => {
+            let specs = crate::chat::current_pc_info();
+            if specs.trim().is_empty() {
+                ToolOutcome::failure(tool.name(), "this PC", "no specification could be read")
+            } else {
+                ToolOutcome {
+                    tool: tool.name().to_string(),
+                    target: "this PC".to_string(),
+                    ok: true,
+                    summary: specs,
+                    duration_ms: None,
+                }
             }
         },
         ChatTool::SearchPaths {
@@ -4862,6 +4911,33 @@ mod tests {
     }
 
     // --- declarations stay in sync with the enum ---
+
+    /// The prompt tells the model to call `pc_specs` for the hardware, so the
+    /// tool has to return it. A named tool that answers with nothing would put
+    /// the model back where CIQ-196 left it: told there is a way to find out,
+    /// with no way to find out.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn pc_specs_reports_the_machine_it_runs_on() {
+        let tool = ChatTool::PcSpecs;
+        assert!(
+            !tool.needs_confirmation(),
+            "reading a spec is not a change to the PC, so it must not ask"
+        );
+        let outcome = run(&tool, true, std::path::Path::new("."));
+        assert!(outcome.ok, "pc_specs failed: {}", outcome.summary);
+        assert!(
+            outcome.summary.contains("CPU:")
+                || outcome.summary.contains("Installed memory:")
+                || outcome.summary.contains("Windows"),
+            "the tool returned no recognisable spec: {}",
+            outcome.summary
+        );
+        assert!(
+            outcome.summary.len() < 2000,
+            "the tool must stay a short spec, not a dump"
+        );
+    }
 
     #[test]
     fn every_declared_tool_validates_as_a_known_tool() {

@@ -581,6 +581,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 &proxy,
                                 &state,
                                 show_pending,
+                                ready,
                                 &mut glass_timeout_armed_for,
                             );
                             push_state(&webview, &state, &icon_cache, true);
@@ -718,6 +719,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         &proxy,
                         &state,
                         show_pending,
+                        ready,
                         &mut glass_timeout_armed_for,
                     );
                     if ready && (visible || show_pending) {
@@ -1188,6 +1190,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         &proxy,
                         &state,
                         show_pending,
+                        ready,
                         &mut glass_timeout_armed_for,
                     );
                     // Push state with show_pending so the JS side sends
@@ -1469,6 +1472,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 &proxy,
                                 &state,
                                 show_pending,
+                                ready,
                                 &mut glass_timeout_armed_for,
                             );
                         }
@@ -2660,6 +2664,23 @@ fn begin_pending_show(
     state.lock().map(|s| s.show_id).unwrap_or(0)
 }
 
+/// Whether the reveal deadline may start now.
+///
+/// The budget is for presenting one glass frame, and no frame can be
+/// presented before the page exists to ask for one. A show that raced
+/// WebView2's first load used to spend its whole budget on that load and then
+/// fall back to opaque, which is the cold first show losing glass.
+/// `WebviewReady` arms this itself once the page is up, so waiting here costs
+/// nothing and the deadline then measures the thing it is named for.
+fn glass_timeout_may_arm(
+    show_pending: bool,
+    webview_ready: bool,
+    transparency: bool,
+    glass_failed: bool,
+) -> bool {
+    show_pending && webview_ready && transparency && !glass_failed
+}
+
 /// Arm the bounded reveal fallback once per show when native glass is
 /// expected. A late frame must not switch a panel from opaque to glass after
 /// it has already appeared.
@@ -2667,11 +2688,15 @@ fn arm_glass_show_timeout(
     proxy: &EventLoopProxy<UiCommand>,
     state: &Arc<Mutex<ShimState>>,
     show_pending: bool,
+    webview_ready: bool,
     armed_for: &mut Option<u64>,
 ) {
-    if !show_pending || !crate::overlay::platform::transparency_enabled()
-        || crate::overlay::refraction::glass_failed()
-    {
+    if !glass_timeout_may_arm(
+        show_pending,
+        webview_ready,
+        crate::overlay::platform::transparency_enabled(),
+        crate::overlay::refraction::glass_failed(),
+    ) {
         return;
     }
     let Some(show_id) = state.lock().ok().and_then(|s| {
@@ -4481,5 +4506,35 @@ mod snapshot_tests {
         assert_eq!(field(&push(&s), "pointerOverPanel"), json!(true));
         s.pointer_over_panel = false;
         assert_eq!(field(&push(&s), "pointerOverPanel"), json!(false));
+    }
+}
+
+#[cfg(test)]
+mod glass_timeout_gate_tests {
+    use super::glass_timeout_may_arm;
+
+    /// A cold show whose WebView2 has not loaded yet must not start the
+    /// reveal deadline. It did once: the budget expired during the load and
+    /// the first show after launch came up opaque instead of glass.
+    #[test]
+    fn a_show_before_the_page_loads_does_not_arm_the_deadline() {
+        assert!(!glass_timeout_may_arm(true, false, true, false));
+    }
+
+    /// The same show once the page is up: WebviewReady arms it here.
+    #[test]
+    fn the_same_show_arms_once_the_page_is_up() {
+        assert!(glass_timeout_may_arm(true, true, true, false));
+    }
+
+    #[test]
+    fn nothing_arms_without_a_pending_show() {
+        assert!(!glass_timeout_may_arm(false, true, true, false));
+    }
+
+    #[test]
+    fn nothing_arms_when_transparency_is_off_or_glass_has_failed() {
+        assert!(!glass_timeout_may_arm(true, true, false, false));
+        assert!(!glass_timeout_may_arm(true, true, true, true));
     }
 }

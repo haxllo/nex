@@ -10,17 +10,16 @@
 //! - `seen != current` → the app was updated → pending
 //! - `seen == current` → already viewed/dismissed → nothing
 //!
-//! Notes content comes from the GitHub release page for the new version
-//! (same source as the update check), trimmed to user-facing release notes
-//! with technical commit logs and binary links removed. Offline or unpublished
-//! notes degrade to an empty string and the page renders a generic fallback +
-//! tips.
+//! Notes content is baked into the binary at build time from
+//! `docs/releases/v<version>-notes.md` (see `build.rs`), trimmed to the
+//! user-facing part with technical commit logs and binary links removed. A
+//! build without that document bakes an empty string and the page renders its
+//! generic fallback + tips.
 
 use std::path::{Path, PathBuf};
 
 const STATE_FILE_NAME: &str = "state.json";
 const SEEN_FIELD: &str = "whats_new_seen";
-const RELEASES_REPO: &str = "haxllo/nex";
 
 fn state_path() -> PathBuf {
     crate::config::stable_app_data_dir().join(STATE_FILE_NAME)
@@ -82,32 +81,20 @@ fn mark_seen_in(dir: &Path, version: &str) {
     }
 }
 
-/// Fetch the release notes for `version` and omit technical commit logs and
-/// binary links. Returns the markdown (possibly empty when offline or when
-/// the release has no parseable section — the page falls back to tips).
-pub fn fetch_notes_markdown(version: &str) -> String {
-    let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/tags/v{version}");
-    let text = match ureq::get(&url)
-        .set("User-Agent", "Nex-WhatsNew")
-        .set("Accept", "application/vnd.github+json")
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-    {
-        Ok(response) => match response.into_string() {
-            Ok(text) => text,
-            Err(_) => return String::new(),
-        },
-        Err(_) => return String::new(),
-    };
-    let body: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(body) => body,
-        Err(_) => return String::new(),
-    };
-    let markdown = body
-        .get("body")
-        .and_then(|body| body.as_str())
-        .unwrap_or_default();
-    extract_highlights(markdown)
+/// The notes for the version this binary is, baked at compile time by
+/// `build.rs` from `docs/releases/v<version>-notes.md`.
+///
+/// These used to be fetched from the GitHub release page at runtime, which
+/// meant the page rendered whatever the release body contained — a body now
+/// generated from commit messages, so it grew into a changelog dump that got
+/// worse every release and could not be curated. Baking the hand-written
+/// document keeps the page clean, works offline, and cannot disagree with the
+/// version the user is actually running.
+const BAKED_NOTES: &str = include_str!(concat!(env!("OUT_DIR"), "/release_notes.md"));
+
+/// The notes to show for this build, commit log and binary links removed.
+pub fn notes_markdown() -> String {
+    extract_highlights(BAKED_NOTES)
 }
 
 /// Keep all user-facing release notes, including the title and summary, and
@@ -135,6 +122,26 @@ mod tests {
         assert!(out.contains("### Bug Fixes"));
         assert!(!out.contains("Commit Log"));
         assert!(!out.contains("Download"));
+    }
+
+    /// The build bakes the notes document for the version being built, so a
+    /// release cannot ship another release's prose. `build.rs` warns rather
+    /// than failing when the document is missing, which keeps ordinary builds
+    /// working but would let a release ship the tips fallback; this makes that
+    /// case visible in the test run instead.
+    #[test]
+    fn baked_notes_exist_and_are_not_the_previous_release() {
+        let notes = notes_markdown();
+        assert!(
+            !notes.trim().is_empty(),
+            "no notes baked for {}: add docs/releases/v{}-notes.md",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert!(
+            !notes.contains("## Commit Log"),
+            "the baked notes still carry the commit log; it belongs on the              release page, not in the overlay"
+        );
     }
 
     #[test]

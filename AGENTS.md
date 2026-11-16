@@ -216,27 +216,38 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 
 **IMPORTANT**: Release workflows must be run directly by the main agent (me), NOT delegated to subagents. Use subagents only for review/verification of release output if needed.
 
-**Trigger**: When the user asks to run, create, or publish a Nex release, execute this release procedure. It is a manual agent workflow, not a GitHub Actions dispatch.
+**Trigger**: When the user asks to run, create, or publish a Nex release, the
+work is: bump the version, write the notes, commit, push the tag. Pushing a
+`v*` tag runs `.github/workflows/release.yml`, which verifies the tag matches
+all three crates, builds, packs the zip and installer, and opens the GitHub
+release. Do not run the packaging scripts by hand for a release.
+
+**The notes file must exist before you build.** `apps/core/build.rs` bakes
+`docs/releases/v<ver>-notes.md` into the binary at compile time, and the
+What's New view renders that document (trimmed at `## Commit Log`). A build
+without it emits a `cargo:warning` and bakes an empty string, so the shipped
+app would show the tips fallback; the workflow refuses to publish in that
+case, and a unit test fails on an empty bake. `scripts/windows/release-notes-from-commits.ps1`
+drafts one from the commit log when you want a starting point — it is a
+drafting tool, not a release step, and its output is developer-voiced prose
+that usually wants editing before users read it.
 
 ```bash
-# 1. bump version in apps/core, apps/ui, and apps/indexer (all
-#    three build scripts stamp FileVersion from their own package); commit the
-#    release changes; do not tag yet
+# 1. bump version in apps/core, apps/ui, and apps/indexer (all three build
+#    scripts stamp FileVersion from their own package)
+# 2. write docs/releases/v<ver>-notes.md (copy docs/releases/RELEASE-TEMPLATE.md),
+#    in the same commit as the bump — the notes are compiled in
 cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
 
-# 2. build artifacts (zip, setup, manifest)
-pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-artifact.ps1 -Channel stable
-pwsh -ExecutionPolicy Bypass -File scripts/windows/package-windows-installer.ps1 -Channel stable
-
-# 3. write release notes to docs/releases/v<ver>-notes.md (copy from docs\releases\RELEASE-TEMPLATE.md) and commit them
-
-# 4. tag only after the release-notes commit, then push
+# 3. tag only after the version bump and the notes are on master, then push
 git tag v<ver>
 git push origin master --tags
-
-# 5. create GitHub release
-gh release create v<ver> --title "v<ver>" --notes-file docs/releases/v<ver>-notes.md artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe,manifest.json}
+# .github/workflows/release.yml builds, packages and opens the release
 ```
+
+Publishing happens from the tag: the release body is the notes file, so what
+users read in the GitHub release and what they see in the What's New view are
+the same document.
 
 Artifacts land in `artifacts/windows/nex-<ver>-windows-x64.{zip,setup.exe}` + manifest.
 

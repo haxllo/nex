@@ -186,6 +186,13 @@ pub(crate) fn selected_session_key() -> Option<String> {
 
 /// One enumerated session that answers liveness probes.
 struct LiveSession {
+    /// Identity for switching, pinning, dedupe and stall tracking.
+    ///
+    /// The raw source app id when the player reports one, otherwise a
+    /// fallback derived from the title. Using the raw id alone meant two
+    /// players that cannot report one both became `""`, and the second was
+    /// dropped as a duplicate of the first — invisible, with nothing logged.
+    key: String,
     app_id: String,
     session: Session,
     playing: bool,
@@ -199,8 +206,10 @@ struct LiveSession {
 /// All playing/paused/changing sessions that answer. `changing`
 /// (buffer flicker) counts as live so a buffering session never drops
 /// from the list for a snapshot — dropping is what flapped the whole
-/// view between sessions. Sync cheap calls only — no metadata or
-/// thumbnail reads, so this stays fast per snapshot.
+/// view between sessions. Cheap calls only — no metadata or thumbnail
+/// reads, so this stays fast per snapshot. The one exception is a player
+/// that reports no app id at all: it pays a single title read to get a
+/// fallback identity, because the alternative is not being listed.
 fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as S;
 
@@ -224,6 +233,13 @@ fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
                     .SourceAppUserModelId()
                     .map(|id| id.to_string())
                     .unwrap_or_default();
+                let key = if app_id.is_empty() {
+                    let fallback = media_fallback_key(&session_title(&session));
+                    warn_once_about_idless_session(&fallback);
+                    fallback
+                } else {
+                    app_id.clone()
+                };
                 // Recency signal for tie-breaking between playing sessions.
                 // Cheap enough to read per session; 0 when the source does not
                 // expose a timeline, which sorts it behind any real stamp.
@@ -233,6 +249,7 @@ fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
                     .map(datetime_to_unix_millis)
                     .unwrap_or(0);
                 out.push(LiveSession {
+                    key,
                     app_id,
                     session,
                     playing: status == S::Playing,
@@ -316,7 +333,7 @@ fn advancement_fresh(anchor_pos: f64, anchor_time_ms: u64, pos: f64, now_ms: u64
 
 /// A playing-like session counts as effectively playing unless its
 /// position froze past the grace (background-tab stall).
-fn effectively_playing(app_id: &str, session: &Session, now_ms: u64) -> bool {
+fn effectively_playing(key: &str, session: &Session, now_ms: u64) -> bool {
     let pos = ticks_to_secs(
         session
             .GetTimelineProperties()
@@ -329,7 +346,7 @@ fn effectively_playing(app_id: &str, session: &Session, now_ms: u64) -> bool {
     let Ok(mut guard) = map.lock() else {
         return true;
     };
-    let entry = guard.entry(app_id.to_string()).or_insert((pos, now_ms));
+    let entry = guard.entry(key.to_string()).or_insert((pos, now_ms));
     if advancement_fresh(entry.0, entry.1, pos, now_ms) {
         if pos > entry.0 + ADVANCE_EPS_SECS {
             *entry = (pos, now_ms);
@@ -410,7 +427,7 @@ fn pick_from_list(manager: &SessionManager, live: &[LiveSession]) -> Option<(Ses
     // User pin wins while live (switcher dots).
     if let Ok(mut selected) = selected_app().lock() {
         if let Some(pinned) = selected.clone() {
-            if let Some(hit) = live.iter().find(|s| s.app_id == pinned) {
+            if let Some(hit) = live.iter().find(|s| s.key == pinned) {
                 set_last_pick(&pinned);
                 return Some((hit.session.clone(), true));
             }
@@ -425,11 +442,11 @@ fn pick_from_list(manager: &SessionManager, live: &[LiveSession]) -> Option<(Ses
         .iter()
         .map(|s| {
             let playing_like = s.playing || s.changing;
-            let eff = playing_like && effectively_playing(&s.app_id, &s.session, now_ms);
+            let eff = playing_like && effectively_playing(&s.key, &s.session, now_ms);
             let spotify = s.app_id.to_ascii_lowercase().contains("spotify");
             (
                 s.session.clone(),
-                s.app_id.clone(),
+                s.key.clone(),
                 eff,
                 spotify,
                 s.last_updated_ms,
@@ -500,32 +517,76 @@ fn pick_from_list(manager: &SessionManager, live: &[LiveSession]) -> Option<(Ses
 /// Switcher entries from one shared enumeration — callers must reuse
 /// the same `live` list they picked from, so dots and pick can never
 /// disagree about who exists. Titles fetched only when 2+ apps are
-/// live (the only state where dots show). Dedupes by app id.
-fn switcher_entries(live: &[LiveSession], active_app_id: &str) -> (Vec<MediaSessionEntry>, String) {
-    let mut seen: Vec<String> = Vec::new();
-    let mut ranked: Vec<&LiveSession> = Vec::new();
-    for candidate in live {
-        if seen.contains(&candidate.app_id) {
-            continue;
-        }
-        seen.push(candidate.app_id.clone());
-        ranked.push(candidate);
+/// live (the only state where dots show). Dedupes by [`LiveSession::key`].
+fn switcher_entries(live: &[LiveSession], active_key: &str) -> (Vec<MediaSessionEntry>, String) {
+    let keys: Vec<String> = live.iter().map(|s| s.key.clone()).collect();
+    let order = ordered_unique_indices(&keys);
+    if order.len() < 2 {
+        return (Vec::new(), active_key.to_string());
     }
-    // Playing entries first so dots sit in a stable, meaningful order.
-    ranked.sort_by_key(|s| (!s.playing, s.app_id.clone()));
-    if ranked.len() < 2 {
-        return (Vec::new(), active_app_id.to_string());
-    }
-    let entries = ranked
+    let entries = order
         .iter()
-        .map(|s| MediaSessionEntry {
-            key: s.app_id.clone(),
-            source: friendly_source(&s.app_id),
-            title: session_title(&s.session),
-            playing: s.playing,
+        .map(|&index| {
+            let session = &live[index];
+            MediaSessionEntry {
+                key: session.key.clone(),
+                source: friendly_source(&session.app_id),
+                title: session_title(&session.session),
+                playing: session.playing,
+            }
         })
         .collect();
-    (entries, active_app_id.to_string())
+    (entries, active_key.to_string())
+}
+
+/// First index of each distinct key, in a stable key order.
+///
+/// Order is by identity alone. It used to put playing sessions first, which
+/// moved a dot's position the moment playback changed: with four dots the
+/// user aimed at the third and hit the first by the next push. Playing is
+/// shown on the dot (`dot-playing`) instead of by moving it.
+fn ordered_unique_indices(keys: &[String]) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        if seen.contains(&key.as_str()) {
+            continue;
+        }
+        seen.push(key.as_str());
+        order.push(index);
+    }
+    order.sort_by(|a, b| keys[*a].cmp(&keys[*b]));
+    order
+}
+
+/// Identity for a session whose source app id cannot be read.
+///
+/// The title is the only distinguishing signal left, so two id-less players
+/// stay apart as long as they play different tracks. Two of them playing the
+/// same track are genuinely indistinguishable and collapse — which is now
+/// said out loud by [`warn_once_about_idless_session`] rather than silently.
+fn media_fallback_key(title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        "media:unknown".to_string()
+    } else {
+        format!("media:{}", title.to_lowercase())
+    }
+}
+
+/// Say it once per identity, not once per snapshot.
+fn warn_once_about_idless_session(key: &str) {
+    static REPORTED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    let Ok(mut reported) = REPORTED.get_or_init(|| Mutex::new(Vec::new())).lock() else {
+        return;
+    };
+    if reported.iter().any(|seen| seen == key) {
+        return;
+    }
+    reported.push(key.to_string());
+    crate::logging::warn(&format!(
+        "media: session reported no source app id, using fallback key {key:?}"
+    ));
 }
 
 fn session_title(session: &Session) -> String {
@@ -987,7 +1048,14 @@ fn snapshot_inner() -> MediaState {
         .map(|(level, muted)| (level, muted, true))
         .unwrap_or((1.0, false, false));
 
-    let (sessions, session_key) = switcher_entries(&live, &app_id);
+    // The active dot is matched by identity, so it has to be spelled the
+    // same way the entries are — including the id-less fallback.
+    let active_key = if app_id.is_empty() {
+        media_fallback_key(&title)
+    } else {
+        app_id.clone()
+    };
+    let (sessions, session_key) = switcher_entries(&live, &active_key);
 
     let state = MediaState {
         active: true,
@@ -1097,6 +1165,38 @@ pub fn control(action: MediaAction) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug: two players that cannot report an app id both became `""`,
+    /// and the dedupe dropped the second one. Neither dot nor selection
+    /// could reach it, and nothing was logged.
+    #[test]
+    fn two_sessions_without_an_app_id_are_both_listed() {
+        let keys = vec![
+            media_fallback_key("Track A"),
+            media_fallback_key("Track B"),
+        ];
+        assert_eq!(ordered_unique_indices(&keys), vec![0, 1]);
+    }
+
+    #[test]
+    fn an_unreadable_app_id_still_yields_a_distinct_non_empty_key() {
+        assert_eq!(media_fallback_key("   "), "media:unknown");
+        assert_ne!(media_fallback_key("Track A"), media_fallback_key("Track B"));
+        assert_eq!(media_fallback_key("Track A"), media_fallback_key("track a"));
+    }
+
+    /// Position used to be `(!playing, app_id)`, so a session that started
+    /// playing jumped to the front and every other dot shifted with it.
+    #[test]
+    fn switcher_order_is_by_identity_only_and_does_not_repeat_a_key() {
+        let keys = vec![
+            "zeta".to_string(),
+            "alpha".to_string(),
+            "zeta".to_string(),
+        ];
+        // One entry per identity, ordered by key — not by who is playing.
+        assert_eq!(ordered_unique_indices(&keys), vec![1, 0]);
+    }
 
     /// Only `NotReady` is a race that a later snapshot can fix. Retrying the
     /// others would just add latency for a thumbnail that is definitively

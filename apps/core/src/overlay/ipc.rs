@@ -204,6 +204,10 @@ pub(crate) struct ChatConfirmActionPayload {
     pub request_id: String,
     #[serde(default)]
     pub accept: bool,
+    /// Accept this and every remaining bypassable action in the same turn.
+    /// Absent from older pages, which simply keeps asking.
+    #[serde(default)]
+    pub all: bool,
 }
 
 /// Resize payload: `{t:"resize", v:{v:h, immediate:bool}}` (current) or

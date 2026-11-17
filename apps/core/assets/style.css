@@ -3598,6 +3598,7 @@ html.glass-native .chat-jump-bottom {
 .chat-pending-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text); }
 .chat-pending-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .chat-pending-confirm,
+.chat-pending-rest,
 .chat-pending-cancel {
   appearance: none;
   font: inherit;
@@ -3621,13 +3622,24 @@ html.glass-native .chat-jump-bottom {
   border: 1px solid transparent;
   color: var(--text-dim);
 }
+/* Wider permission than Allow, so it never wears Allow's fill and is never the
+   first thing the eye lands on. Outlined means "more than the button beside
+   it", which is what it is. */
+.chat-pending-rest {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
 @media (hover: hover) and (pointer: fine) {
   .chat-pending-confirm:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+  .chat-pending-rest:hover { background: var(--hover); }
   .chat-pending-cancel:hover { background: var(--hover); color: var(--text); }
 }
 .chat-pending-confirm:active,
+.chat-pending-rest:active,
 .chat-pending-cancel:active { transform: scale(0.97); }
 .chat-pending-confirm:focus-visible,
+.chat-pending-rest:focus-visible,
 .chat-pending-cancel:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -3697,6 +3709,7 @@ html.glass-native .chat-jump-bottom {
   .chat-pending-action,
   .chat-limit-card { animation: chatFadeIn var(--dur) var(--ease) both; }
   .chat-pending-confirm:active,
+  .chat-pending-rest:active,
   .chat-pending-cancel:active,
   .chat-limit-continue:active,
   .chat-limit-dismiss:active { transform: none; }

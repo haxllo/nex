@@ -549,7 +549,28 @@ fn request_id_from_raw(raw: &str) -> Option<String> {
 ///
 /// Returns false when there is nothing pending or the id does not match, so a
 /// stale UI cannot confirm a different request's action.
-pub(crate) fn confirm_action(request_id: &str, accept: bool) -> bool {
+/// Turn in which the user asked to not be asked again.
+///
+/// Keyed by the turn's own id rather than a flag, so the grant ends with the
+/// task that was approved: the next turn carries a different id and starts
+/// clean, with no reset step that could be forgotten.
+static BYPASS_TURN: Mutex<Option<u64>> = Mutex::new(None);
+
+fn bypass_active(id: u64) -> bool {
+    BYPASS_TURN
+        .lock()
+        .map(|turn| *turn == Some(id))
+        .unwrap_or(false)
+}
+
+/// Record that one approval covers the rest of this turn's bypassable actions.
+pub(crate) fn approve_rest_of_turn(id: u64) {
+    if let Ok(mut turn) = BYPASS_TURN.lock() {
+        *turn = Some(id);
+    }
+}
+
+pub(crate) fn confirm_action(request_id: &str, accept: bool, all: bool) -> bool {
     let mut pending = PENDING_CONFIRM
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -559,6 +580,9 @@ pub(crate) fn confirm_action(request_id: &str, accept: bool) -> bool {
     if ACTIVE_REQUEST.load(Ordering::SeqCst) != *pending_id {
         return false;
     }
+    // Captured before the slot is emptied; used only if this approval is also
+    // asked to cover what follows it.
+    let approved_turn = *pending_id;
     if !cancel_matches(request_id, ACTIVE_CLIENT_REQUEST_ID.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_deref())
@@ -568,6 +592,12 @@ pub(crate) fn confirm_action(request_id: &str, accept: bool) -> bool {
     let Some((_, sender)) = pending.take() else {
         return false;
     };
+    // Only an approval can widen itself, and only after it has been matched to
+    // the live turn — a stale or unauthenticated request must not grant
+    // anything for later actions.
+    if all && accept {
+        approve_rest_of_turn(approved_turn);
+    }
     sender.send(accept).is_ok()
 }
 
@@ -637,6 +667,17 @@ fn await_confirmation(
     unfamiliar_url: bool,
 ) -> ConfirmationOutcome {
     let ordinal = next_confirmation_ordinal(id);
+    // A grant covers the rest of its own turn only. `delete_path` and
+    // `run_command` are never covered, and an unfamiliar-URL prompt exists for
+    // a different reason, so none of them can be skipped here. Each auto-run is
+    // still written to the log on its own line.
+    if !unfamiliar_url && tool.bypass_allowed() && bypass_active(id) {
+        crate::logging::info(&format!(
+            "chat: confirmation ordinal={ordinal} tool={} outcome=Approved auto=true",
+            tool.name()
+        ));
+        return ConfirmationOutcome::Approved;
+    }
     let started = Instant::now();
     let (sender, receiver) = std::sync::mpsc::channel::<bool>();
     {
@@ -702,7 +743,20 @@ fn await_confirmation(
 
 #[cfg(test)]
 mod confirm_tests {
-    use super::{ConfirmationOutcome, next_confirmation_ordinal};
+    use super::{ConfirmationOutcome, approve_rest_of_turn, bypass_active, next_confirmation_ordinal};
+
+    #[test]
+    fn a_rest_of_task_approval_ends_with_its_own_turn() {
+        // Keyed by turn id rather than a flag, so the grant cannot outlive the
+        // task that was approved. Ids are distinctive because the state is
+        // process-global and the harness runs tests in parallel.
+        let turn = u64::MAX - 61;
+        let next_turn = u64::MAX - 62;
+        assert!(!bypass_active(turn));
+        approve_rest_of_turn(turn);
+        assert!(bypass_active(turn));
+        assert!(!bypass_active(next_turn));
+    }
 
     #[test]
     fn cards_are_numbered_within_a_turn_and_restart_on_the_next() {

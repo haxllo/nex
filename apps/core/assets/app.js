@@ -1110,7 +1110,7 @@
       completionEl.textContent = "";
       input.placeholder = inCommandMode
         ? "Type a command…"
-        : pushedPlaceholder || "Type to search, Tab for chat";
+        : pushedPlaceholder || "Type to search, Tab to chat";
       return;
     }
     completionEl.textContent = completion.slice(input.value.length);

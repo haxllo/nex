@@ -3038,11 +3038,14 @@ html.glass-native .chat-composer-shell {
   background: var(--hover);
   color: var(--text);
 }
-.chat-scope-chip + .chat-model-chip { margin-left: 2px; }
+/* General sibling, not adjacent: DOM order between the two chips is not
+   something the layout should depend on, and when it broke the pair split to
+   opposite ends of the strip with the folder in the middle. */
+.chat-scope-chip:not([hidden]) ~ .chat-model-chip { margin-left: 2px; }
 /* A hidden chip still sits between the two siblings in the DOM, so the rule
    above would strip the model chip's auto margin and slide it to the left.
    With no scope the strip has to look exactly as it did before this feature. */
-.chat-scope-chip[hidden] + .chat-model-chip { margin-left: auto; }
+.chat-scope-chip[hidden] ~ .chat-model-chip { margin-left: auto; }
 .chat-scope-chip[hidden] { display: none; }
 .chat-scope-open {
   display: inline-flex;

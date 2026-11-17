@@ -169,6 +169,11 @@
             </button>
             <button type="button" id="chat-scope-clear" class="chat-scope-clear" title="Stop working in this folder" aria-label="Stop working in this folder">&times;</button>
           </div>
+          <button type="button" id="chat-model-button" class="chat-model-chip" title="Provider and model settings">
+            <span class="chat-model-dot" aria-hidden="true"></span>
+            <span id="chat-model-label">Choose a model</span>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+          </button>
           <div id="chat-scope-menu" class="chat-scope-menu" role="dialog" aria-label="Working folder contents" hidden>
             <div class="chat-scope-menu-head">
               <span id="chat-scope-menu-path" class="chat-scope-menu-path" title=""></span>
@@ -178,11 +183,6 @@
             <div id="chat-scope-menu-empty" class="chat-scope-menu-state" role="status" hidden>This folder is empty.</div>
             <div id="chat-scope-menu-loading" class="chat-scope-menu-state" role="status" hidden>Reading the folder…</div>
           </div>
-          <button type="button" id="chat-model-button" class="chat-model-chip" title="Provider and model settings">
-            <span class="chat-model-dot" aria-hidden="true"></span>
-            <span id="chat-model-label">Choose a model</span>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
-          </button>
           <span id="chat-provider-label" class="chat-visually-hidden">ChatGPT</span>
         </div>
 

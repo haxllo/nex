@@ -1082,16 +1082,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     path,
                     result,
                 } => {
+                    crate::runtime::log_info(&format!(
+                        "[nex][scope] listed gen={generation} current={} path={:?} entries={} err={}",
+                        CHAT_FOLDER_GENERATION.load(Ordering::SeqCst),
+                        path,
+                        result.as_ref().map(|l| l.entries.len()).unwrap_or(0),
+                        result.as_ref().err().map(String::as_str).unwrap_or("-")
+                    ));
                     // Drop a stale answer rather than paint the wrong folder.
                     if generation != CHAT_FOLDER_GENERATION.load(Ordering::SeqCst) - 1 {
                         return;
                     }
                     let Some(wv) = webview.as_ref() else {
+                        crate::runtime::log_info("[nex][scope] no webview to post to");
                         return;
                     };
                     if !ready {
+                        crate::runtime::log_info("[nex][scope] page not ready, dropped");
                         return;
                     }
+                    crate::runtime::log_info("[nex][scope] posting listing");
                     match result {
                         Ok(mut listing) => {
                             // The dropdown shows what the chip says; the path is
@@ -2578,11 +2588,18 @@ fn handle_ipc(
             try_send_ui(proxy, UiCommand::ChatPickerAdd(p.entries));
         }
         OverlayMessage::ChatListFolder(p) => {
+            crate::runtime::log_info(&format!("[nex][scope] request path={:?}", p.path));
             // Only a folder that is still there and absolute is listed; a stale
             // chip must not turn into a read of something else.
             let path = std::path::PathBuf::from(&p.path);
             let generation = CHAT_FOLDER_GENERATION.fetch_add(1, Ordering::SeqCst);
             if !path.is_absolute() || !path.is_dir() {
+                crate::runtime::log_info(&format!(
+                    "[nex][scope] rejected path={:?} absolute={} dir={}",
+                    path,
+                    path.is_absolute(),
+                    path.is_dir()
+                ));
                 try_send_ui(
                     proxy,
                     UiCommand::ChatFolderListed {

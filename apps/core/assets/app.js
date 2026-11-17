@@ -311,7 +311,7 @@
   };
   const ICON_GENERIC_COMMAND = () => cmdSvg('<path d="M12.6 3.2L6.4 12.4h4.4L9.8 20.8 17.6 9.6h-4.2z"/>');
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatConfirmAction", "chatPickFiles", "chatPickerNavigate", "chatPickerAdd"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatConfirmAction", "chatPickFiles", "chatListFolder", "chatAttachPaths", "chatPickerNavigate", "chatPickerAdd"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -4430,7 +4430,10 @@
         scopeMenuError = "";
         scopeMenuEntries = (Array.isArray(listing?.entries) ? listing.entries : [])
           .filter((entry) => entry && typeof entry.name === "string" && typeof entry.path === "string")
-          .map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory === true, path: entry.path }));
+          // `is_directory` is the wire name: the listing comes straight from
+          // Rust, and reading a camelCase field here silently made every row a
+          // file, which is why folders and files had the same icon.
+          .map((entry) => ({ name: entry.name, isDirectory: entry.is_directory === true, path: entry.path }));
       }
       renderScopeMenu();
     }
@@ -4675,7 +4678,7 @@
   // ── Rust → JS bridge ─────────────────────────────────────
   window.nex = {
     apply(state) {
-      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatConfigureResult || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatLimitReached || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
+      if (!Array.isArray(state.rows) && (state.chatConfig || state.chatConfigureResult || state.chatModels || state.chatDelta || state.chatAction || state.chatDone || state.chatActionPending || state.chatLimitReached || state.chatError || state.chatNotice || state.chatPickerError !== undefined || state.chatPickerLoading !== undefined || state.chatPickerOpen !== undefined || state.chatPickerClosed !== undefined || state.chatPickerListing !== undefined || state.chatFolderListing !== undefined || state.chatFolderError !== undefined || state.chatCancelled || state.chatFilesSelected || typeof state.chatConnecting === "boolean" || typeof state.chatDisconnecting === "boolean")) {
         applyChatUpdate(state);
         return;
       }

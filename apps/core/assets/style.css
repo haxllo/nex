@@ -40,6 +40,10 @@
      at 1px they look like a border, which is what this replaces. */
   --composer-surface: #3a3a3a;
   --composer-surface-focus: #404040;
+  /* Confirmation card: the icon tile and the target well are lightness steps
+     off the card itself, the same way panels sit off the page. */
+  --confirm-tile: rgba(255, 255, 255, 0.055);
+  --confirm-well: rgba(0, 0, 0, 0.26);
   --scrollbar-thumb: rgba(255, 255, 255, 0.2);
   --panel-surface: var(--bg);
   --panel-highlight: rgba(255, 255, 255, 0.1);
@@ -102,6 +106,8 @@ html[data-theme="light"] {
      the only pure white surface, so it lifts without any drawn edge. */
   --composer-surface: #ffffff;
   --composer-surface-focus: #ffffff;
+  --confirm-tile: rgba(0, 0, 0, 0.055);
+  --confirm-well: rgba(0, 0, 0, 0.062);
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --panel-highlight: rgba(255, 255, 255, 0.65);
   --panel-edge: rgba(0, 0, 0, 0.09);
@@ -3578,25 +3584,61 @@ html.glass-native .chat-jump-bottom {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   align-self: stretch;
-  padding: 10px 12px;
-  border-left: 2px solid var(--warn-border);
-  border-radius: 0 6px 6px 0;
-  background: var(--warn-wash);
+  padding: 12px 13px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--bg-raised);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16), 0 8px 20px -14px rgba(0, 0, 0, 0.5);
   animation: chatActionIn 180ms var(--ease-out) both;
 }
-.chat-pending-title { font-size: 12.5px; font-weight: 500; letter-spacing: -0.005em; color: var(--text); }
+/* Heading block: a glyph, then the action over the consequence. The colour
+   used to sit on a warn-tinted wash with a left rule, which made every card
+   read as a warning; the danger is in the target, not in the card existing. */
+.chat-pending-head { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+.chat-pending-icon {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  background: var(--confirm-tile);
+  color: var(--text-dim);
+}
+.chat-pending-icon svg { width: 15px; height: 15px; }
+.chat-pending-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.chat-pending-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.chat-pending-detail {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+/* The target is the thing being decided, so it gets its own well rather than
+   sharing a text block. Three lines at most: a path of any real length would
+   otherwise push the buttons off the bottom of a fixed panel. */
 .chat-pending-target {
+  display: block;
+  max-height: 4.9em;
+  overflow: auto;
+  padding: 7px 10px;
+  border-radius: var(--r-lg);
+  background: var(--confirm-well);
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: 1.55;
   color: var(--text);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.chat-pending-effect { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text); }
-.chat-pending-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text); }
-.chat-pending-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.chat-pending-actions { display: flex; align-items: center; gap: 2px; margin-top: 1px; }
 .chat-pending-confirm,
 .chat-pending-rest,
 .chat-pending-cancel {
@@ -3605,34 +3647,29 @@ html.glass-native .chat-jump-bottom {
   font-size: 12px;
   font-weight: 500;
   letter-spacing: -0.005em;
-  padding: 4px 11px;
-  border-radius: var(--r-sm);
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease-out);
 }
+/* The one filled control, pushed to the right edge and the only pill: the
+   layout should say which button the keyboard's Enter reaches. */
 .chat-pending-confirm {
+  margin-left: auto;
+  padding: 5px 14px;
+  border-radius: 999px;
   background: var(--accent);
-  border: 1px solid transparent;
   color: var(--accent-fg);
+  font-weight: 600;
 }
-/* Same box as Allow, no chrome: the primary is decided by the fill alone. */
-.chat-pending-cancel {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-}
-/* Wider permission than Allow, so it never wears Allow's fill and is never the
-   first thing the eye lands on. Outlined means "more than the button beside
-   it", which is what it is. */
-.chat-pending-rest {
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  color: var(--text);
-}
+/* Text-only, so refusing is never louder than allowing. */
+.chat-pending-cancel,
+.chat-pending-rest { background: transparent; color: var(--text-dim); }
 @media (hover: hover) and (pointer: fine) {
   .chat-pending-confirm:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
-  .chat-pending-rest:hover { background: var(--hover); }
+  .chat-pending-rest:hover,
   .chat-pending-cancel:hover { background: var(--hover); color: var(--text); }
 }
 .chat-pending-confirm:active,

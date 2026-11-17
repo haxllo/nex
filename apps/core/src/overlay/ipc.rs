@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 /// settings save (~1 KB of cfg JSON); 64 KiB leaves wide headroom while
 /// bounding allocator work per message.
 pub(crate) const MAX_IPC_BYTES: usize = 64 * 1024;
+/// Most files the dropdown may attach in one message. Matches the attachment
+/// cap the picker already enforces, so the two routes agree.
+pub(crate) const MAX_ATTACH_PATHS: usize = 3;
 /// Longest accepted search query (characters). The input box holds one line.
 pub(crate) const MAX_QUERY_CHARS: usize = 1024;
 /// Longest accepted title for pin/unpin/context actions (characters).
@@ -92,6 +95,20 @@ fn check_len(value: &str, max_chars: usize, field: &str) -> Result<(), String> {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NoPayload {}
+
+/// One folder's contents for the working-folder dropdown.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatListFolderPayload {
+    pub path: String,
+}
+
+/// Files the user picked out of the dropdown, by path.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatAttachPathsPayload {
+    pub paths: Vec<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -387,6 +404,15 @@ pub(crate) enum OverlayMessage {
     ChatPickerUp(NoPayload),
     #[serde(rename = "chatPickerAdd")]
     ChatPickerAdd(ChatPickerAddPayload),
+    /// List one folder for the working-folder dropdown. Separate from the
+    /// attachment picker on purpose: the dropdown is a small anchored menu, and
+    /// the picker is a modal that owns its own listing state.
+    #[serde(rename = "chatListFolder")]
+    ChatListFolder(ChatListFolderPayload),
+    /// Attach files the user picked from the dropdown, by path rather than by
+    /// picker id, because the dropdown has no picker listing.
+    #[serde(rename = "chatAttachPaths")]
+    ChatAttachPaths(ChatAttachPathsPayload),
     #[serde(rename = "chatPickerCancel")]
     ChatPickerCancel(NoPayload),
     #[serde(rename = "openExternal")]
@@ -465,6 +491,8 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "chatConfirmAction",
         "chatConfirmAction",
         "chatPickFiles",
+        "chatListFolder",
+        "chatAttachPaths",
         "chatPickerNavigate",
         "chatPickerUp",
         "chatPickerAdd",
@@ -500,6 +528,20 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
             let (h, _) = p.v.height_and_immediate();
             if !h.is_finite() {
                 return Err(IpcReject::BadPayload("resize height is not finite".into()));
+            }
+        }
+        OverlayMessage::ChatListFolder(p) => {
+            check_len(&p.path, 4096, "folder path").map_err(IpcReject::BadPayload)?
+        }
+        OverlayMessage::ChatAttachPaths(p) => {
+            if p.paths.len() > MAX_ATTACH_PATHS {
+                return Err(IpcReject::BadPayload(format!(
+                    "{} files chosen at once",
+                    p.paths.len()
+                )));
+            }
+            for path in &p.paths {
+                check_len(path, 4096, "file path").map_err(IpcReject::BadPayload)?;
             }
         }
         OverlayMessage::MediaSeek(p) => {
@@ -878,6 +920,48 @@ mod tests {
             parse_overlay(r#"{"t":"chatPickFiles"}"#),
             Ok(OverlayMessage::ChatPickFiles(NoPayload {}))
         );
+    }
+
+    #[test]
+    fn working_folder_requests_parse_and_are_bounded() {
+        assert_eq!(
+            parse_overlay(r#"{"t":"chatListFolder","path":"G:\\Projects\\nex"}"#),
+            Ok(OverlayMessage::ChatListFolder(ChatListFolderPayload {
+                path: r"G:\Projects\nex".into(),
+            }))
+        );
+        assert_eq!(
+            parse_overlay(r#"{"t":"chatAttachPaths","paths":["G:\\a.txt"]}"#),
+            Ok(OverlayMessage::ChatAttachPaths(ChatAttachPathsPayload {
+                paths: vec![r"G:\a.txt".into()],
+            }))
+        );
+
+        // The dropdown can only ever carry the attachment cap, so a message
+        // listing more files than that is malformed rather than truncated.
+        let many = (0..=MAX_ATTACH_PATHS)
+            // Forward slashes on purpose: a path built with single backslashes
+            // is not valid JSON (`\0` is an invalid escape) and that rejection
+            // would hide the count check this test exists for.
+            .map(|index| format!("\"C:/f{index}.txt\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(r#"{{"t":"chatAttachPaths","paths":[{many}]}}"#);
+        let too_many = parse_overlay(&body);
+        assert!(
+            matches!(&too_many, Err(IpcReject::BadPayload(_))),
+            "{too_many:?}"
+        );
+
+        // An over-long path is rejected before any filesystem call sees it.
+        let body = format!(
+            r#"{{"t":"chatListFolder","path":"{}"}}"#,
+            "x".repeat(5000)
+        );
+        assert!(matches!(
+            parse_overlay(&body),
+            Err(IpcReject::BadPayload(_))
+        ));
     }
 
     #[test]

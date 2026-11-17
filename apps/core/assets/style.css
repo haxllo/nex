@@ -2895,13 +2895,169 @@ html.glass-native .chat-composer-shell {
    than a toolbar. When unset the element is hidden and the strip is untouched.
    Only the last segment of the path is shown; the full path is the tooltip,
    because a deep folder would otherwise push the model chip off the strip. */
-.chat-scope-chip { margin-left: auto; }
+/* The dropdown the working-folder chip opens. Anchored to the context bar
+   rather than to the chip, so it hangs off the right edge and stays put when
+   the folder name changes width. Same sheet language as the model menu. */
+.chat-scope-menu {
+  position: absolute;
+  z-index: 7;
+  top: 44px;
+  right: 14px;
+  width: 300px;
+  max-height: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .45);
+  animation: chatMenuIn 140ms var(--ease-out);
+}
+.chat-scope-menu[hidden] { display: none; }
+.chat-scope-menu-head {
+  flex: 0 0 auto;
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+.chat-scope-menu-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.chat-scope-menu-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+  margin: 0;
+  list-style: none;
+}
+.chat-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 0 4px 0 0;
+  border-radius: var(--r-sm);
+}
+.chat-scope-row:hover,
+.chat-scope-row:focus-within { background: var(--hover); }
+.chat-scope-row-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-scope-row-open:focus-visible { outline: none; }
+.chat-scope-row-icon {
+  display: inline-flex;
+  flex: 0 0 13px;
+  color: var(--text-faint);
+}
+.chat-scope-row-icon svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-scope-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Attaching is the second action on a row, so it lives behind a small + that
+   only appears on hover or focus: opening is what a row is for. */
+.chat-scope-row-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 99px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.chat-scope-row:hover .chat-scope-row-add,
+.chat-scope-row:focus-within .chat-scope-row-add { opacity: 1; }
+.chat-scope-row-add:hover { color: var(--text); background: var(--hover); }
+.chat-scope-menu-state {
+  flex: 0 0 auto;
+  padding: 10px 12px 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.chat-scope-menu-state.is-error { color: var(--danger, var(--text)); }
+.chat-scope-menu-state[hidden] { display: none; }
+
+.chat-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 6px 0 9px;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.chat-scope-chip:hover,
+.chat-scope-chip:focus-within {
+  background: var(--hover);
+  color: var(--text);
+}
 .chat-scope-chip + .chat-model-chip { margin-left: 2px; }
 /* A hidden chip still sits between the two siblings in the DOM, so the rule
    above would strip the model chip's auto margin and slide it to the left.
    With no scope the strip has to look exactly as it did before this feature. */
 .chat-scope-chip[hidden] + .chat-model-chip { margin-left: auto; }
 .chat-scope-chip[hidden] { display: none; }
+.chat-scope-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.chat-scope-open:focus-visible { outline: none; }
 .chat-scope-glyph { display: inline-flex; flex: 0 0 11px; }
 .chat-scope-glyph svg {
   width: 11px;
@@ -2914,19 +3070,42 @@ html.glass-native .chat-composer-shell {
   stroke-linejoin: round;
 }
 .chat-scope-chip #chat-scope-label {
-  max-width: 180px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A real button of its own, not a span inside the chip: two separate actions
+   need two separate hit areas, and a button inside a button is neither valid
+   HTML nor reachable by keyboard. It stays dim until the chip is hovered or
+   focused so the folder name is what the strip shows at rest. */
 .chat-scope-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 99px;
+  background: none;
+  color: var(--text-faint);
   font-size: 13px;
   line-height: 1;
+  cursor: pointer;
+  overflow: hidden;
   opacity: 0;
-  transition: opacity var(--dur) var(--ease);
+  transition:
+    width var(--dur) var(--ease),
+    opacity var(--dur) var(--ease),
+    color var(--dur) var(--ease);
 }
+/* Collapsed at rest so the folder name sits centred in the pill rather than
+   leaving a gap for a button nobody can see. It opens the space on hover, and
+   on focus too, so reaching it with Tab reveals the target it landed on. */
 .chat-scope-chip:hover .chat-scope-clear,
-.chat-scope-chip:focus-visible .chat-scope-clear { opacity: 1; }
+.chat-scope-chip:focus-within .chat-scope-clear { width: 16px; opacity: 1; }
+.chat-scope-clear:hover { color: var(--text); }
 
 .chat-context-selection { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 14px 5px; }
 .chat-context-selection[hidden] { display: none !important; }
@@ -4399,6 +4578,7 @@ html.glass-native .chat-history {
 .chat-file-picker-action.is-primary { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
 .chat-file-picker-action.is-primary:hover:not(:disabled) { opacity: 0.88; }
 .chat-file-picker-action:disabled { opacity: .45; cursor: default; }
+.chat-file-picker-action[hidden] { display: none; }
 
 @media (max-width: 360px) {
   .chat-file-picker-header { gap: 6px; padding-inline: 8px; }

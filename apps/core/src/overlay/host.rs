@@ -82,13 +82,14 @@ fn start_chat_picker_listing(
     proxy: &EventLoopProxy<UiCommand>,
     generation: u64,
     directory: Option<std::path::PathBuf>,
+    everything: bool,
 ) -> Result<(), String> {
     let task_proxy = proxy.clone();
     std::thread::Builder::new()
         .name("nex-chat-picker-browse".into())
         .spawn(move || {
             let result = match directory {
-                Some(path) => super::file_picker::chat_picker_directory(path),
+                Some(path) => super::file_picker::chat_picker_directory(path, everything),
                 None => Ok(super::file_picker::chat_picker_locations()),
             };
             try_send_ui(
@@ -98,6 +99,49 @@ fn start_chat_picker_listing(
         })
         .map(|_| ())
         .map_err(|e| format!("Nex couldn't open this folder: {e}"))
+}
+
+/// List one folder for the working-folder dropdown. Its own thread and its own
+/// generation counter: the dropdown can be reopened while a listing is in
+/// flight, and a late answer must not overwrite a newer one.
+fn start_chat_folder_listing(
+    proxy: &EventLoopProxy<UiCommand>,
+    generation: u64,
+    path: std::path::PathBuf,
+) -> Result<(), String> {
+    let task_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-chat-scope-listing".into())
+        .spawn(move || {
+            // Everything in the folder, not only the formats nex can read: the
+            // dropdown opens files as well as attaching them.
+            let result = super::file_picker::chat_picker_directory(path.clone(), true);
+            try_send_ui(
+                &task_proxy,
+                UiCommand::ChatFolderListed {
+                    generation,
+                    path,
+                    result,
+                },
+            );
+        })
+        .map(|_| ())
+        .map_err(|e| format!("Nex couldn't read this folder: {e}"))
+}
+
+fn start_chat_attach_paths(
+    proxy: &EventLoopProxy<UiCommand>,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let task_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-chat-scope-attach".into())
+        .spawn(move || {
+            let result = super::file_picker::read_chat_files(paths);
+            try_send_ui(&task_proxy, UiCommand::ChatFilesAttached { result });
+        })
+        .map(|_| ())
+        .map_err(|e| format!("Nex couldn't read these files: {e}"))
 }
 
 fn start_chat_picker_file_read(
@@ -118,6 +162,10 @@ fn start_chat_picker_file_read(
         .map(|_| ())
         .map_err(|e| format!("Nex couldn't read the selected files: {e}"))
 }
+
+/// Bumped for every working-folder listing request. A slow answer for a folder
+/// the dropdown has already left must not replace what is on screen now.
+static CHAT_FOLDER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
@@ -216,6 +264,16 @@ pub(crate) enum UiCommand {
     ChatPickerListed {
         generation: u64,
         result: Result<super::file_picker::ChatPickerDirectory, String>,
+    },
+    /// One folder's contents for the working-folder dropdown.
+    ChatFolderListed {
+        generation: u64,
+        path: std::path::PathBuf,
+        result: Result<super::file_picker::ChatPickerDirectory, String>,
+    },
+    /// Files chosen in the dropdown, read and ready to attach.
+    ChatFilesAttached {
+        result: Result<Vec<super::file_picker::SelectedChatFile>, String>,
     },
     ChatPickerFilesRead {
         generation: u64,
@@ -814,7 +872,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             );
                         }
                     }
-                    if let Err(error) = start_chat_picker_listing(&proxy, generation, None) {
+                    if let Err(error) = start_chat_picker_listing(&proxy, generation, None, false) {
                         try_send_ui(
                             &proxy,
                             UiCommand::ChatPickerListed {
@@ -889,7 +947,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
                         }
                     }
-                    if let Err(error) = start_chat_picker_listing(&proxy, generation, Some(path)) {
+                    if let Err(error) =
+                        start_chat_picker_listing(&proxy, generation, Some(path), false)
+                    {
                         try_send_ui(
                             &proxy,
                             UiCommand::ChatPickerListed {
@@ -926,7 +986,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             post_json(wv, &serde_json::json!({ "chatPickerLoading": true }));
                         }
                     }
-                    if let Err(error) = start_chat_picker_listing(&proxy, generation, parent) {
+                    if let Err(error) =
+                        start_chat_picker_listing(&proxy, generation, parent, false)
+                    {
                         try_send_ui(
                             &proxy,
                             UiCommand::ChatPickerListed {
@@ -1013,6 +1075,66 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                     if dismiss_overlay {
                         let _ = event_tx.send(OverlayEvent::Escape);
+                    }
+                }
+                UiCommand::ChatFolderListed {
+                    generation,
+                    path,
+                    result,
+                } => {
+                    // Drop a stale answer rather than paint the wrong folder.
+                    if generation != CHAT_FOLDER_GENERATION.load(Ordering::SeqCst) - 1 {
+                        return;
+                    }
+                    let Some(wv) = webview.as_ref() else {
+                        return;
+                    };
+                    if !ready {
+                        return;
+                    }
+                    match result {
+                        Ok(mut listing) => {
+                            // The dropdown shows what the chip says; the path is
+                            // echoed back so the page can tell which folder the
+                            // rows belong to.
+                            let echo = path.to_string_lossy().into_owned();
+                            listing.current_dir = Some(path);
+                            post_json(
+                                wv,
+                                &serde_json::json!({
+                                    "chatFolderListing": listing,
+                                    // Echoed separately because the listing's
+                                    // own folder field is not serialised; the
+                                    // page compares this with what it asked for
+                                    // before painting rows.
+                                    "chatFolderPath": echo,
+                                }),
+                            );
+                        }
+                        Err(error) => post_json(
+                            wv,
+                            &serde_json::json!({
+                                "chatFolderError": error,
+                            }),
+                        ),
+                    }
+                }
+                UiCommand::ChatFilesAttached { result } => {
+                    let Some(wv) = webview.as_ref() else {
+                        return;
+                    };
+                    if !ready {
+                        return;
+                    }
+                    match result {
+                        Ok(files) => post_json(
+                            wv,
+                            &serde_json::json!({ "chatFilesSelected": files }),
+                        ),
+                        Err(error) => post_json(
+                            wv,
+                            &serde_json::json!({ "chatPickerError": error }),
+                        ),
                     }
                 }
                 UiCommand::ChatPickerFilesRead { generation, result } => {
@@ -2454,6 +2576,43 @@ fn handle_ipc(
         }
         OverlayMessage::ChatPickerAdd(p) => {
             try_send_ui(proxy, UiCommand::ChatPickerAdd(p.entries));
+        }
+        OverlayMessage::ChatListFolder(p) => {
+            // Only a folder that is still there and absolute is listed; a stale
+            // chip must not turn into a read of something else.
+            let path = std::path::PathBuf::from(&p.path);
+            let generation = CHAT_FOLDER_GENERATION.fetch_add(1, Ordering::SeqCst);
+            if !path.is_absolute() || !path.is_dir() {
+                try_send_ui(
+                    proxy,
+                    UiCommand::ChatFolderListed {
+                        generation,
+                        path,
+                        result: Err("This folder is no longer there.".into()),
+                    },
+                );
+                return;
+            }
+            if let Err(error) = start_chat_folder_listing(proxy, generation, path) {
+                crate::runtime::log_warn(&format!("[nex] {error}"));
+            }
+        }
+        OverlayMessage::ChatAttachPaths(p) => {
+            let paths: Vec<std::path::PathBuf> = p
+                .paths
+                .iter()
+                .filter(|path| {
+                    let path = std::path::PathBuf::from(path);
+                    path.is_absolute() && path.is_file()
+                })
+                .map(std::path::PathBuf::from)
+                .collect();
+            if paths.is_empty() {
+                return;
+            }
+            if let Err(error) = start_chat_attach_paths(proxy, paths) {
+                crate::runtime::log_warn(&format!("[nex] {error}"));
+            }
         }
         OverlayMessage::ChatPickerCancel(_) => {
             try_send_ui(

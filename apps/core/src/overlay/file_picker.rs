@@ -17,7 +17,9 @@ pub(crate) struct ChatPickerEntry {
     pub(crate) name: String,
     pub(crate) is_directory: bool,
     pub(crate) size: Option<u64>,
-    #[serde(skip)]
+    /// Absolute path. The attachment picker never needed it in the page, but
+    /// browsing an approved folder opens a file instead of reading it, and that
+    /// needs the real path rather than an index into a listing that has moved on.
     pub(crate) path: PathBuf,
 }
 
@@ -69,7 +71,10 @@ pub(crate) fn chat_picker_locations() -> ChatPickerDirectory {
     }
 }
 
-pub(crate) fn chat_picker_directory(path: PathBuf) -> Result<ChatPickerDirectory, String> {
+pub(crate) fn chat_picker_directory(
+    path: PathBuf,
+    everything: bool,
+) -> Result<ChatPickerDirectory, String> {
     let metadata = fs::metadata(&path).map_err(|e| format!("Couldn't open this folder: {e}"))?;
     if !metadata.is_dir() {
         return Err("This location is no longer a folder.".into());
@@ -94,7 +99,12 @@ pub(crate) fn chat_picker_directory(path: PathBuf) -> Result<ChatPickerDirectory
             Err(_) => continue,
         };
         let is_directory = file_type.is_dir();
-        if !is_directory && (!file_type.is_file() || !is_supported_extension(&entry.path())) {
+        // Attaching reads the file, so only formats nex can read are offered.
+        // Browsing only opens them, so everything in the folder is listed.
+        if !is_directory
+            && (!file_type.is_file()
+                || (!everything && !is_supported_extension(&entry.path())))
+        {
             continue;
         }
         let size = if is_directory {
@@ -210,8 +220,41 @@ fn safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_supported_extension, safe_name};
+    use super::{chat_picker_directory, is_supported_extension, safe_name};
     use std::path::Path;
+
+    #[test]
+    fn browsing_a_folder_lists_files_attaching_could_not_read() {
+        let dir = std::env::temp_dir().join(format!("nex-picker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("notes.md"), "x").unwrap();
+        std::fs::write(dir.join("photo.png"), "x").unwrap();
+        std::fs::write(dir.join("archive.zip"), "x").unwrap();
+
+        let attach = chat_picker_directory(dir.clone(), false).unwrap();
+        let mut attached: Vec<_> = attach.entries.iter().map(|e| e.name.as_str()).collect();
+        attached.sort_unstable();
+        assert_eq!(attached, ["notes.md", "sub"], "attach must stay text-only");
+
+        // Browsing opens files instead of reading them, so the filter that
+        // protects attachment reading must not hide half the folder.
+        let browse = chat_picker_directory(dir.clone(), true).unwrap();
+        let mut browsed: Vec<_> = browse.entries.iter().map(|e| e.name.as_str()).collect();
+        browsed.sort_unstable();
+        assert_eq!(browsed, ["archive.zip", "notes.md", "photo.png", "sub"]);
+
+        // The page opens what it lists, and it only has the path for that.
+        let photo = browse
+            .entries
+            .iter()
+            .find(|entry| entry.name == "photo.png")
+            .unwrap();
+        assert_eq!(photo.path, dir.join("photo.png"));
+        assert!(browse.entries.iter().all(|entry| entry.path.is_absolute()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn accepts_supported_extensions_case_insensitively() {

@@ -81,6 +81,14 @@
   const chatFilePickerCount = $("chat-file-picker-count");
   const chatFilePickerCancel = $("chat-file-picker-cancel");
   const chatFilePickerAdd = $("chat-file-picker-add");
+  const chatScopeChip = $("chat-scope-chip");
+  const chatScopeClear = $("chat-scope-clear");
+  const chatScopeMenu = $("chat-scope-menu");
+  const chatScopeMenuPath = $("chat-scope-menu-path");
+  const chatScopeMenuList = $("chat-scope-menu-list");
+  const chatScopeMenuError = $("chat-scope-menu-error");
+  const chatScopeMenuEmpty = $("chat-scope-menu-empty");
+  const chatScopeMenuLoading = $("chat-scope-menu-loading");
   const chatMenuScrim = $("chat-menu-scrim");
   const chatContextSelection = $("chat-context-selection");
   const chatNotice = $("chat-notice");
@@ -138,6 +146,14 @@
   const CHAT_PICKER_OPERATION_TIMEOUT_MS = 30_000;
   let chatPickerLoading = false;
   let chatPickerListing = null;
+  // The working-folder dropdown. It owns its own listing (not the attachment
+  // picker's) because it is a small anchored menu, not a modal.
+  let scopeMenuOpen = false;
+  let scopeMenuPath = "";
+  let scopeMenuEntries = [];
+  let scopeMenuError = "";
+  let scopeMenuLoading = false;
+  let scopeMenuFocusAfterLoad = false;
   let chatPickerErrorMessage = "";
   let chatPickerFocusAfterListing = false;
   const chatPickerSelectedIds = new Set();
@@ -295,7 +311,7 @@
   };
   const ICON_GENERIC_COMMAND = () => cmdSvg('<path d="M12.6 3.2L6.4 12.4h4.4L9.8 20.8 17.6 9.6h-4.2z"/>');
 
-  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatConfirmAction", "chatPickerNavigate", "chatPickerAdd"]);
+  const FLAT_IPC_PAYLOADS = new Set(["chatConfigure", "chatFetchModels", "chatSend", "chatCancel", "chatConfirmAction", "chatPickFiles", "chatPickerNavigate", "chatPickerAdd"]);
   function post(t, v) {
     try {
       const message = v === undefined ? { t } : FLAT_IPC_PAYLOADS.has(t) ? { t, ...v } : { t, v };
@@ -1800,6 +1816,7 @@
   }
 
   function setChatScope(path) {
+    closeScopeMenu();
     const conversation = chatConversations.find((item) => item.id === chatConversationId);
     if (!conversation) return;
     const next = typeof path === "string" ? path.trim() : "";
@@ -1810,13 +1827,16 @@
   }
 
   function renderChatScope() {
-    const chip = $("chat-scope-button");
+    const chip = $("chat-scope-chip");
     if (!chip) return;
     const path = currentChatScope();
     if (!path) {
+      // Nothing left to list: leaving a menu open on a folder that is no longer
+      // the conversation's folder would be a lie about what the agent uses.
+      closeScopeMenu();
       chip.hidden = true;
-      chip.removeAttribute("title");
-      chip.removeAttribute("aria-label");
+      $("chat-scope-button").removeAttribute("title");
+      $("chat-scope-button").removeAttribute("aria-label");
       $("chat-scope-label").textContent = "";
       return;
     }
@@ -1827,8 +1847,135 @@
     const segment = trimmed.split(/[\\/]/).pop() || trimmed;
     $("chat-scope-label").textContent = segment;
     chip.hidden = false;
-    chip.title = path + " — click to clear";
-    chip.setAttribute("aria-label", "Working folder " + path + ". Clear it.");
+    const open = $("chat-scope-button");
+    open.title = path;
+    open.setAttribute("aria-label", "Browse working folder " + path);
+  }
+
+  // --- working-folder dropdown -------------------------------------------
+  // Clicking the chip lists the folder the chip names. A file row opens the
+  // file, a folder row opens it outside nex, and the small + attaches a file to
+  // the next message without leaving the conversation. Nothing here changes the
+  // scope itself: only the card the agent raises can do that, and only the ×
+  // clears it.
+
+  const SCOPE_MENU_MAX_ROWS = 80;
+
+  function closeScopeMenu(restoreFocus = false) {
+    if (!scopeMenuOpen) return;
+    scopeMenuOpen = false;
+    scopeMenuEntries = [];
+    scopeMenuError = "";
+    scopeMenuLoading = false;
+    scopeMenuFocusAfterLoad = false;
+    renderScopeMenu();
+    if (restoreFocus) $("chat-scope-button")?.focus();
+  }
+
+  function toggleScopeMenu() {
+    if (scopeMenuOpen) {
+      closeScopeMenu(true);
+      return;
+    }
+    openScopeMenu();
+  }
+
+  function openScopeMenu() {
+    const path = currentChatScope();
+    if (!path) return;
+    scopeMenuOpen = true;
+    scopeMenuPath = path;
+    scopeMenuEntries = [];
+    scopeMenuError = "";
+    scopeMenuLoading = true;
+    scopeMenuFocusAfterLoad = true;
+    renderScopeMenu();
+    // Anything slower than this is a dead end rather than a slow disk, and an
+    // endless spinner in a 300 px menu tells the user nothing.
+    armScopeMenuTimeout();
+    post("chatListFolder", { path });
+  }
+
+  let scopeMenuTimeout = 0;
+  function armScopeMenuTimeout() {
+    window.clearTimeout(scopeMenuTimeout);
+    scopeMenuTimeout = window.setTimeout(() => {
+      scopeMenuTimeout = 0;
+      if (!scopeMenuOpen || !scopeMenuLoading) return;
+      scopeMenuLoading = false;
+      scopeMenuError = "This folder took too long to read.";
+      renderScopeMenu();
+    }, 8000);
+  }
+
+  function scopeEntryIcon(isDirectory) {
+    return isDirectory
+      ? '<svg viewBox="0 0 24 24"><path d="M3.5 7.5h6l2 2h9v9h-17z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v5h5"/></svg>';
+  }
+
+  function renderScopeMenu() {
+    chatScopeMenu.hidden = !scopeMenuOpen;
+    $("chat-scope-button").setAttribute("aria-expanded", String(scopeMenuOpen));
+    if (!scopeMenuOpen) return;
+
+    chatScopeMenuPath.textContent = scopeMenuPath || "";
+    chatScopeMenuPath.title = scopeMenuPath || "";
+    chatScopeMenuError.hidden = !scopeMenuError;
+    chatScopeMenuError.textContent = scopeMenuError;
+    chatScopeMenuLoading.hidden = !scopeMenuLoading;
+    const showList = !scopeMenuLoading && !scopeMenuError && scopeMenuEntries.length > 0;
+    chatScopeMenuList.hidden = !showList;
+    chatScopeMenuEmpty.hidden = scopeMenuLoading || !!scopeMenuError || scopeMenuEntries.length !== 0;
+    chatScopeMenuList.replaceChildren();
+    if (!showList) return;
+
+    for (const entry of scopeMenuEntries.slice(0, SCOPE_MENU_MAX_ROWS)) {
+      const row = document.createElement("li");
+      row.className = "chat-scope-row";
+
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "chat-scope-row-open";
+      open.setAttribute("aria-label", `${entry.isDirectory ? "Open folder" : "Open file"} ${entry.name}`);
+      const icon = document.createElement("span");
+      icon.className = "chat-scope-row-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = scopeEntryIcon(entry.isDirectory);
+      const name = document.createElement("span");
+      name.className = "chat-scope-row-name";
+      name.textContent = entry.name;
+      open.append(icon, name);
+      open.addEventListener("click", () => {
+        if (!entry.path) return;
+        // The same message the results list and transcript cards use, so a file
+        // opened from here behaves exactly like one opened from search.
+        post("contextAction", { action: "openpath", title: entry.name, path: entry.path });
+      });
+      row.append(open);
+
+      if (!entry.isDirectory) {
+        // Attaching reads the file, so it is offered only where nex can read it.
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "chat-scope-row-add";
+        add.textContent = "+";
+        add.title = `Add ${entry.name} to your message`;
+        add.setAttribute("aria-label", `Add ${entry.name} to your message`);
+        add.addEventListener("click", () => {
+          post("chatAttachPaths", { paths: [entry.path] });
+          flashChatNotice(`${entry.name} added to your next message`);
+        });
+        row.append(add);
+      }
+
+      chatScopeMenuList.append(row);
+    }
+
+    if (scopeMenuFocusAfterLoad) {
+      scopeMenuFocusAfterLoad = false;
+      chatScopeMenuList.querySelector(".chat-scope-row-open")?.focus();
+    }
   }
 
   function persistChat() {
@@ -3869,13 +4016,14 @@
   $("chat-new-button").addEventListener("click", newChatConversation);
   $("chat-copy-button").addEventListener("click", copyChatTranscript);
   $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
-  // Clicking the folder chip clears it. The whole chip is the target rather
-  // than a separate × button: a button inside a button is neither valid HTML
-  // nor reachable by keyboard, and clearing is the only thing it does.
   $("chat-scope-button").addEventListener("click", () => {
+    const scope = currentChatScope();
+    if (scope) toggleScopeMenu();
+  });
+  $("chat-scope-clear").addEventListener("click", () => {
     if (!currentChatScope()) return;
     setChatScope("");
-    chatInput.focus();
+    $("chat-input").focus();
   });
 
   $("chat-model-button").addEventListener("click", (event) => {
@@ -4144,6 +4292,12 @@
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (scopeMenuOpen) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeScopeMenu(true);
+      return;
+    }
     if (!chatModelOptions.hidden) {
       closeChatModelOptions();
       chatModelSelect.focus();
@@ -4157,12 +4311,13 @@
     }
   });
   document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest("#chat-scope-menu") && !event.target.closest("#chat-scope-chip")) closeScopeMenu();
     if (!event.target.closest(".chat-model-picker")) closeChatModelOptions();
     if (!event.target.closest(".chat-provider-picker")) closeChatProviderOptions();
     if (!chatSettings.hidden && !event.target.closest("#chat-settings") && !event.target.closest("#chat-model-button")) setChatSettingsOpen(false);
     if (!chatHistory.hidden && !event.target.closest("#chat-history") && !event.target.closest("#chat-history-button")) setChatHistoryOpen(false);
   });
-  chatAttachButton.addEventListener("click", () => {
+  function openChatFilePicker() {
     if (chatPickerRequested || chatFilePickerOpen || chatAttachButton.disabled) return;
     chatPickerRequested = true;
     renderChatFilePicker();
@@ -4175,7 +4330,9 @@
       flashChatNotice("The file picker did not respond. Please try again.");
     }, 10000);
     post("chatPickFiles");
-  });
+  }
+
+  chatAttachButton.addEventListener("click", () => openChatFilePicker());
   chatFilePickerBack.addEventListener("click", () => {
     if (chatPickerLoading || !chatPickerListing?.can_go_up) return;
     chatPickerSelectedIds.clear();
@@ -4253,6 +4410,30 @@
     if (typeof state.chatPickerLoading === "boolean") chatPickerLoading = state.chatPickerLoading;
     if (state.chatPickerOpen === true && chatPickerLoading) armChatPickerOperationTimeout();
     if (state.chatPickerLoading === false || state.chatPickerClosed === true) clearChatPickerOperationTimeout();
+    // The chip's dropdown: rows for the folder it names, or why there are none.
+    if (state.chatFolderListing || state.chatFolderError !== undefined) {
+      window.clearTimeout(scopeMenuTimeout);
+      scopeMenuTimeout = 0;
+      scopeMenuLoading = false;
+      if (state.chatFolderError !== undefined) {
+        const error = state.chatFolderError;
+        scopeMenuError = typeof error === "string" && error ? error : "Nex couldn't read this folder.";
+        scopeMenuEntries = [];
+      } else {
+        const listing = state.chatFolderListing;
+        const asked = typeof state.chatFolderPath === "string" ? state.chatFolderPath : "";
+        // A late answer for a folder the menu has already left must not replace
+        // what is on screen, so the echo has to match the open request.
+        if (!scopeMenuOpen || (asked && scopeMenuPath && asked !== scopeMenuPath)) {
+          return;
+        }
+        scopeMenuError = "";
+        scopeMenuEntries = (Array.isArray(listing?.entries) ? listing.entries : [])
+          .filter((entry) => entry && typeof entry.name === "string" && typeof entry.path === "string")
+          .map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory === true, path: entry.path }));
+      }
+      renderScopeMenu();
+    }
     if (Object.prototype.hasOwnProperty.call(state, "chatPickerListing")) {
       chatPickerListing = state.chatPickerListing && typeof state.chatPickerListing === "object" ? state.chatPickerListing : null;
       chatPickerSelectedIds.clear();

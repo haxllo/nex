@@ -606,6 +606,27 @@ impl ConfirmationOutcome {
     }
 }
 
+/// Card number within the current turn, and which turn that was.
+///
+/// Whether per-action approval is too expensive is measurable, not arguable —
+/// but nothing recorded it. A multi-file task raises one card per file and the
+/// worker blocks on each, so this is the only place that can count them and
+/// time them. A decision about batching should rest on that instead of on an
+/// impression of one run.
+static CONFIRM_ORDINAL: Mutex<Option<(u64, u32)>> = Mutex::new(None);
+
+fn next_confirmation_ordinal(id: u64) -> u32 {
+    let Ok(mut state) = CONFIRM_ORDINAL.lock() else {
+        return 1;
+    };
+    let entry = state.get_or_insert((id, 0));
+    if entry.0 != id {
+        *entry = (id, 0);
+    }
+    entry.1 += 1;
+    entry.1
+}
+
 /// Block until the user answers, the request is superseded, or the timeout
 /// elapses. Only `Approved` permits the caller to run the action.
 fn await_confirmation(
@@ -615,6 +636,8 @@ fn await_confirmation(
     tool: &crate::chat_tools::ChatTool,
     unfamiliar_url: bool,
 ) -> ConfirmationOutcome {
+    let ordinal = next_confirmation_ordinal(id);
+    let started = Instant::now();
     let (sender, receiver) = std::sync::mpsc::channel::<bool>();
     {
         let mut pending = PENDING_CONFIRM
@@ -646,6 +669,15 @@ fn await_confirmation(
             ConfirmationOutcome::Superseded
         }
     };
+    // The answer as received, before the superseded check below decides whether
+    // it may run: what is being measured is the cost of asking, not the effect.
+    // The tool name only — a target path here would put the user's file layout
+    // into a bundle that gets shared for support.
+    crate::logging::info(&format!(
+        "chat: confirmation ordinal={ordinal} tool={} outcome={outcome:?} waited_ms={}",
+        tool.name(),
+        started.elapsed().as_millis()
+    ));
     // Only clear the slot if it is still ours; a newer request may have taken it.
     {
         let mut pending = PENDING_CONFIRM
@@ -664,7 +696,20 @@ fn await_confirmation(
 
 #[cfg(test)]
 mod confirm_tests {
-    use super::ConfirmationOutcome;
+    use super::{ConfirmationOutcome, next_confirmation_ordinal};
+
+    #[test]
+    fn cards_are_numbered_within_a_turn_and_restart_on_the_next() {
+        // This is how "five files is five approvals" becomes a number in the
+        // log instead of an impression. Ids are distinctive because the state
+        // is process-global and the harness runs tests in parallel.
+        let turn = u64::MAX - 41;
+        let next_turn = u64::MAX - 42;
+        assert_eq!(next_confirmation_ordinal(turn), 1);
+        assert_eq!(next_confirmation_ordinal(turn), 2);
+        assert_eq!(next_confirmation_ordinal(turn), 3);
+        assert_eq!(next_confirmation_ordinal(next_turn), 1);
+    }
 
     #[test]
     fn only_approval_permits_the_action() {

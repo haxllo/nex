@@ -103,10 +103,84 @@ fn write_line(level: &str, message: &str) {
         return;
     };
 
-    let ts = now_secs();
+    let ts = timestamp();
     let line = format!("[{ts}] [{level}] {message}\n");
     let _ = file.write_all(line.as_bytes());
     let _ = file.flush();
+}
+
+/// `YYYY-MM-DD HH:MM:SS.mmm`, fixed width so lines stay aligned and sort
+/// correctly as plain text.
+fn format_stamp(
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    millis: u32,
+) -> String {
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{millis:03}")
+}
+
+/// Local wall clock for the start of a log line.
+///
+/// The line used to begin with a raw epoch second, which is an id you have to
+/// convert before it means anything. A log is read while something is wrong,
+/// so it should say when it happened. Milliseconds are kept because several
+/// startup phases land inside the same second and their order is the point.
+fn timestamp() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::SYSTEMTIME;
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        let mut time: SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { GetLocalTime(&mut time) };
+        format_stamp(
+            i64::from(time.wYear),
+            u32::from(time.wMonth),
+            u32::from(time.wDay),
+            u32::from(time.wHour),
+            u32::from(time.wMinute),
+            u32::from(time.wSecond),
+            u32::from(time.wMilliseconds),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (year, month, day, hour, minute, second) = civil_from_epoch(now_secs());
+        format_stamp(year, month, day, hour, minute, second, 0)
+    }
+}
+
+/// Epoch seconds as a UTC calendar date and time.
+///
+/// Off Windows there is no local-time API in `std`, so the fallback reports UTC
+/// rather than inventing an offset. Exact rather than approximate so it can be
+/// tested against known dates instead of against the clock.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn civil_from_epoch(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let secs = secs as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let hour = (rem / 3_600) as u32;
+    let minute = ((rem % 3_600) / 60) as u32;
+    let second = (rem % 60) as u32;
+
+    // Days-to-civil conversion (Howard Hinnant's algorithm): shift the epoch to
+    // 0000-03-01 so leap days land at the end of the year and need no special
+    // case.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day, hour, minute, second)
 }
 
 fn now_secs() -> u64 {
@@ -200,7 +274,28 @@ fn format_panic(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_panic, logs_dir};
+    use super::{civil_from_epoch, format_panic, format_stamp, logs_dir};
+
+    #[test]
+    fn a_line_states_its_date_and_time_without_conversion() {
+        // Epoch values taken from `date -u`, not from this code.
+        assert_eq!(civil_from_epoch(0), (1970, 1, 1, 0, 0, 0));
+        assert_eq!(civil_from_epoch(1_794_913_714), (2026, 11, 17, 11, 8, 34));
+        // Leap day is the case a naive day count gets wrong.
+        assert_eq!(civil_from_epoch(1_709_251_199), (2024, 2, 29, 23, 59, 59));
+    }
+
+    #[test]
+    fn timestamps_are_fixed_width_so_lines_stay_aligned() {
+        assert_eq!(
+            format_stamp(2026, 1, 2, 3, 4, 5, 6),
+            "2026-01-02 03:04:05.006"
+        );
+        assert_eq!(
+            format_stamp(2026, 11, 17, 17, 9, 6, 123),
+            "2026-11-17 17:09:06.123"
+        );
+    }
 
     #[test]
     fn logs_dir_uses_stable_app_data_layout() {

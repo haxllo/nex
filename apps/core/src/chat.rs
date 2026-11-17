@@ -660,6 +660,12 @@ fn await_confirmation(
             }),
         ),
     );
+    // Split the wait: time to hand the card to the UI, then time until an
+    // answer came back. Lumping them together made the measurement unable to
+    // answer its own question — two cards in one run came back at exactly
+    // 1421 ms, which is the ask-to-answer round trip being measured as if it
+    // were human review time. Batching only pays for the part that is a person.
+    let handoff_ms = started.elapsed().as_millis();
     let outcome = match receiver.recv_timeout(CONFIRM_TIMEOUT) {
         Ok(true) => ConfirmationOutcome::Approved,
         Ok(false) => ConfirmationOutcome::Declined,
@@ -674,7 +680,7 @@ fn await_confirmation(
     // The tool name only — a target path here would put the user's file layout
     // into a bundle that gets shared for support.
     crate::logging::info(&format!(
-        "chat: confirmation ordinal={ordinal} tool={} outcome={outcome:?} waited_ms={}",
+        "chat: confirmation ordinal={ordinal} tool={} outcome={outcome:?} waited_ms={} handoff_ms={handoff_ms}",
         tool.name(),
         started.elapsed().as_millis()
     ));

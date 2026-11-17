@@ -2426,7 +2426,11 @@ fn handle_ipc(
             let _ = event_tx.send(OverlayEvent::ChatCancel(p.request_id));
         }
         OverlayMessage::ChatConfirmAction(p) => {
-            let _ = event_tx.send(OverlayEvent::ChatConfirmAction(p.request_id, p.accept));
+            let _ = event_tx.send(OverlayEvent::ChatConfirmAction(
+                p.request_id,
+                p.accept,
+                p.all,
+            ));
         }
         OverlayMessage::ChatPickFiles(_) => {
             try_send_ui(proxy, UiCommand::OpenChatFilePicker);

@@ -2048,11 +2048,11 @@ impl RuntimeWorker {
                         overlay.push_chat(update.to_string());
                     });
             }
-            OverlayEvent::ChatConfirmAction(request_id, accept) => {
+            OverlayEvent::ChatConfirmAction(request_id, accept, all) => {
                 // Refuse silently when nothing is pending or the id is stale;
                 // the UI already shows the card, so a wrong id is a bug in the
                 // page, not something to report as an error.
-                if !crate::chat::confirm_action(&request_id, accept) {
+                if !crate::chat::confirm_action(&request_id, accept, all) {
                     crate::runtime::log_info(
                         "[nex][chat] ignored a confirmation that matched no pending action",
                     );

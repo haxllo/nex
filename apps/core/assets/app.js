@@ -2969,12 +2969,24 @@
     confirm.className = "chat-pending-confirm";
     confirm.textContent = "Allow";
     confirm.addEventListener("click", () => answerChatPendingAction(true));
+    row.appendChild(confirm);
+    // Offered only where the server says one approval may cover the rest, so
+    // delete and commands never present it. The wording says what it covers:
+    // a button that quietly widens what runs unshown is the whole hazard.
+    if (chatPendingAction.allowRest) {
+      const rest = document.createElement("button");
+      rest.type = "button";
+      rest.className = "chat-pending-rest";
+      rest.textContent = "Allow rest of task";
+      rest.title = "Approve this and the remaining steps in this task. Delete and commands still ask.";
+      rest.addEventListener("click", () => answerChatPendingAction(true, true));
+      row.appendChild(rest);
+    }
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "chat-pending-cancel";
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => answerChatPendingAction(false));
-    row.appendChild(confirm);
     row.appendChild(cancel);
     card.appendChild(row);
 
@@ -2982,7 +2994,7 @@
     revealChatCard(card);
   }
 
-  function answerChatPendingAction(accept) {
+  function answerChatPendingAction(accept, all) {
     if (!chatPendingAction) return;
     const requestId = chatPendingAction.requestId;
     const card = $("chat-pending-action");
@@ -2995,7 +3007,7 @@
     if (!requestId) return;
     // The turn resumes server-side either way: approved runs, refused tells the
     // model it was not done so it does not claim otherwise.
-    post("chatConfirmAction", { requestId, accept: !!accept });
+    post("chatConfirmAction", { requestId, accept: !!accept, all: !!all });
     updateChatStreamingState(true);
   }
 

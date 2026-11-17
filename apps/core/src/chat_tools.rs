@@ -291,6 +291,16 @@ impl ChatTool {
         }
     }
 
+    /// Whether one approval may cover this tool for the rest of a turn.
+    ///
+    /// Approving the rest of a task is a convenience for repetition: five files
+    /// is five cards for one decision. Deleting loses data and `run_command`
+    /// runs arbitrary shell, so neither rides on a grant given for writing
+    /// files - they ask every time, whatever the turn is doing.
+    pub(crate) fn bypass_allowed(&self) -> bool {
+        !matches!(self, Self::DeletePath { .. } | Self::RunCommand { .. })
+    }
+
     /// Does this call need the user to click Confirm before it runs?
     ///
     /// Fail-safe, following the MCP annotation defaults: an unknown or
@@ -1413,6 +1423,10 @@ pub(crate) struct PendingAction {
     pub tool: String,
     pub target: String,
     pub description: String,
+    /// Whether approving this may also cover the rest of the turn's
+    /// bypassable actions. False for delete and command, which ask every time.
+    #[serde(rename = "allowRest")]
+    pub allow_rest: bool,
 }
 
 impl PendingAction {
@@ -1427,6 +1441,9 @@ impl PendingAction {
             target: tool.target().to_string(),
             description: "Open link. This address did not come from you, so confirm it is wanted."
                 .to_string(),
+            // A link opened for a reason the user did not ask for says nothing
+            // about the files that may follow it.
+            allow_rest: false,
         }
     }
 
@@ -1565,6 +1582,7 @@ impl PendingAction {
             tool: tool.name().to_string(),
             target,
             description: format!("{verb}. {effect}{detail}"),
+            allow_rest: tool.bypass_allowed(),
         }
     }
 }
@@ -4483,6 +4501,28 @@ mod tests {
         let ran = run(&write_tool("keep.txt", &dir, Some("clobbered")), true, &dir);
         assert!(!ran.ok);
         assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "original");
+    }
+
+    #[test]
+    fn delete_and_commands_are_never_covered_by_a_rest_of_task_approval() {
+        // The point of the button is repetition - five files for one decision.
+        // Deleting loses data and a command runs arbitrary shell, so neither
+        // may ride on an approval given for writing files.
+        assert!(!sample_call("delete_path").bypass_allowed());
+        assert!(!sample_call("run_command").bypass_allowed());
+        assert!(sample_call("create_file").bypass_allowed());
+        assert!(sample_call("edit_file").bypass_allowed());
+        assert!(sample_call("move_path").bypass_allowed());
+    }
+
+    #[test]
+    fn the_card_offers_the_rest_of_the_task_only_where_it_is_safe() {
+        let base = std::path::Path::new("C:/Users/test");
+        assert!(PendingAction::of_in(&sample_call("create_file"), base).allow_rest);
+        assert!(!PendingAction::of_in(&sample_call("delete_path"), base).allow_rest);
+        assert!(!PendingAction::of_in(&sample_call("run_command"), base).allow_rest);
+        // An unfamiliar link says nothing about files that may follow it.
+        assert!(!PendingAction::for_unfamiliar_url(&sample_call("open_url")).allow_rest);
     }
 
     #[test]

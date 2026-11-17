@@ -269,6 +269,8 @@ pub(crate) enum UiCommand {
     Resize {
         h: f64,
         immediate: bool,
+        /// Which page path asked for the resize (see the resize log).
+        src: &'static str,
     },
     /// Exit the event loop (clean shutdown).
     Quit,
@@ -1348,8 +1350,16 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
 
-                UiCommand::Resize { h, immediate } => {
+                UiCommand::Resize { h, immediate, src } => {
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
+                    // A view-to-view Tab press can produce more than one of
+                    // these per keypress, and a second one that lands after
+                    // the first is what makes the growth look like a step
+                    // rather than a resize. Record what arrived and what it
+                    // did to the window.
+                    crate::logging::info(&format!(
+                        "[nex][resize] request h={h:.0} last={last_applied_height:.0} immediate={immediate} after_show={first_resize_after_show} src={src}"
+                    ));
                     if immediate || h < last_applied_height {
                         // Immediate flag, shrink request, or first resize
                         // after show: apply right away. Immediate skips the
@@ -2320,7 +2330,8 @@ fn handle_ipc(
             // JS sends {t:"resize", v:{v:h, immediate:bool}} (new) or
             // {t:"resize", v:h} (legacy number-only).
             let (h, immediate) = p.v.height_and_immediate();
-            try_send_ui(proxy, UiCommand::Resize { h, immediate });
+            let src = p.v.src();
+            try_send_ui(proxy, UiCommand::Resize { h, immediate, src });
         }
         OverlayMessage::Painted(payload) => {
             // First paint after push_state — safe to show the window.
@@ -3613,6 +3624,7 @@ fn apply_window_height(
     h: f64,
     state: &Arc<Mutex<ShimState>>,
 ) {
+    crate::logging::info(&format!("[nex][resize] apply h={h:.0}"));
     window.set_inner_size(LogicalSize::new(WINDOW_WIDTH, h));
     if let Some(wv) = webview {
         keep_webview_viewport_max(wv);

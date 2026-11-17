@@ -212,15 +212,20 @@ pub(crate) struct ChatConfirmActionPayload {
 
 /// Resize payload: `{t:"resize", v:{v:h, immediate:bool}}` (current) or
 /// `{t:"resize", v:h}` (legacy number-only).
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResizeObject {
     pub v: f64,
     #[serde(default)]
     pub immediate: bool,
+    /// Which page path asked for this height. Carried so the resize log can
+    /// say who posted a request: two callers can disagree about the panel's
+    /// height inside one frame, and a bare height cannot tell them apart.
+    #[serde(default)]
+    pub src: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum ResizeHeight {
     Object(ResizeObject),
@@ -228,10 +233,25 @@ pub(crate) enum ResizeHeight {
 }
 
 impl ResizeHeight {
-    pub(crate) fn height_and_immediate(self) -> (f64, bool) {
+    pub(crate) fn height_and_immediate(&self) -> (f64, bool) {
         match self {
             Self::Object(o) => (o.v, o.immediate),
-            Self::Bare(h) => (h, false),
+            Self::Bare(h) => (*h, false),
+        }
+    }
+
+    /// The page path that asked for this height, for the resize log.
+    pub(crate) fn src(&self) -> &'static str {
+        match self {
+            Self::Object(ResizeObject { src: Some(tag), .. }) => match tag.as_str() {
+                "sched" => "sched",
+                "measure-shrink" => "measure-shrink",
+                "measure-grow" => "measure-grow",
+                "measure-expand" => "measure-expand",
+                "whatsnew" => "whatsnew",
+                _ => "unknown",
+            },
+            _ => "bare",
         }
     }
 }
@@ -754,7 +774,19 @@ mod tests {
             Ok(OverlayMessage::Resize(ResizePayload {
                 v: ResizeHeight::Object(ResizeObject {
                     v: 120.5,
-                    immediate: true
+                    immediate: true,
+                    src: None
+                })
+            }))
+        );
+        // The page tags each request so the resize log can name the caller.
+        assert_eq!(
+            parse_overlay(r#"{"t":"resize","v":{"v":186,"immediate":true,"src":"sched"}}"#),
+            Ok(OverlayMessage::Resize(ResizePayload {
+                v: ResizeHeight::Object(ResizeObject {
+                    v: 186.0,
+                    immediate: true,
+                    src: Some("sched".to_string())
                 })
             }))
         );

@@ -35,6 +35,11 @@
   --bg: #121212;
   --bg-opaque: #121212;
   --bg-raised: #1b1b1b;
+  /* Composer depth. The fill sits one clear step above the surface behind
+     it, and that colour difference is what reads as raised. No inset lines:
+     at 1px they look like a border, which is what this replaces. */
+  --composer-surface: #3a3a3a;
+  --composer-surface-focus: #404040;
   --scrollbar-thumb: rgba(255, 255, 255, 0.2);
   --panel-surface: var(--bg);
   --panel-highlight: rgba(255, 255, 255, 0.1);
@@ -93,6 +98,10 @@ html[data-theme="light"] {
   --bg: #fafafa;
   --bg-opaque: #fafafa;
   --bg-raised: #ffffff;
+  /* On white the step comes from the page being off-white; the composer is
+     the only pure white surface, so it lifts without any drawn edge. */
+  --composer-surface: #ffffff;
+  --composer-surface-focus: #ffffff;
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --panel-highlight: rgba(255, 255, 255, 0.65);
   --panel-edge: rgba(0, 0, 0, 0.09);
@@ -2744,11 +2753,21 @@ html.glass-native .row .icon.placeholder {
   display: block;
   margin: 0 14px;
   padding: 9px 10px 7px;
-  border: 1px solid var(--border-strong);
+  /* No border, and no inset hairline either: a 1px inner line reads as a
+     border at any zoom. The lift comes from the fill being a clear step above
+     the surface behind it, plus a short shadow to seat it on the page. */
+  border: 0;
   border-radius: 14px;
-  background: var(--bg-raised);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .12), 0 10px 24px -14px rgba(0, 0, 0, .5);
-  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+  background: var(--composer-surface);
+  /* Balanced lift rather than a shadow pooling underneath: a tight contact
+     shadow, a short near shadow, and an all-round ambient at zero offset. The
+     vertical offsets stay small so the box does not look lit from directly
+     overhead. */
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, .10),
+    0 2px 6px rgba(0, 0, 0, .12),
+    0 0 14px rgba(0, 0, 0, .10);
+  transition: background-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 /* The composer is the surface the user looks at most, so it follows the
    material in both cases. Under acrylic only, it went solid the moment native
@@ -2766,9 +2785,15 @@ html.glass-native .chat-composer-shell {
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
   backdrop-filter: blur(18px) saturate(1.1);
 }
+/* The composer input takes focus the moment the chat view opens, so anything
+   drawn here is permanent, not a focus state. A ring would therefore read as
+   a border. Focus instead lifts the fill one more step. */
 .chat-composer-shell:focus-within {
-  border-color: var(--focus);
-  box-shadow: 0 0 0 1px var(--focus), 0 10px 24px -14px rgba(0, 0, 0, .5);
+  background: var(--composer-surface-focus);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, .12),
+    0 2px 8px rgba(0, 0, 0, .16),
+    0 0 16px rgba(0, 0, 0, .12);
 }
 
 #chat-input {

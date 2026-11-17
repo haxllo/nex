@@ -1422,6 +1422,13 @@ fn host_of(candidate: &str) -> Option<String> {
 pub(crate) struct PendingAction {
     pub tool: String,
     pub target: String,
+    /// The action, as the card's heading. One or two words, because the
+    /// heading competes with the target for the first look and the target is
+    /// what the user is deciding about.
+    pub verb: String,
+    /// What follows from it, under the heading. `description` is this with the
+    /// verb in front, for the transcript and the record.
+    pub detail: String,
     pub description: String,
     /// Whether approving this may also cover the rest of the turn's
     /// bypassable actions. False for delete and command, which ask every time.
@@ -1439,6 +1446,8 @@ impl PendingAction {
         Self {
             tool: tool.name().to_string(),
             target: tool.target().to_string(),
+            verb: "Open link".to_string(),
+            detail: "This address did not come from you, so confirm it is wanted.".to_string(),
             description: "Open link. This address did not come from you, so confirm it is wanted."
                 .to_string(),
             // A link opened for a reason the user did not ask for says nothing
@@ -1581,6 +1590,10 @@ impl PendingAction {
         Self {
             tool: tool.name().to_string(),
             target,
+            verb: verb.to_string(),
+            // The heading and this line are what the card reads as, so they
+            // are derived here once rather than split apart again in the page.
+            detail: format!("{effect}{detail}"),
             description: format!("{verb}. {effect}{detail}"),
             allow_rest: tool.bypass_allowed(),
         }
@@ -4501,6 +4514,29 @@ mod tests {
         let ran = run(&write_tool("keep.txt", &dir, Some("clobbered")), true, &dir);
         assert!(!ran.ok);
         assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "original");
+    }
+
+    #[test]
+    fn the_card_heading_and_line_agree_with_the_record() {
+        // The transcript prints `description`, the card prints `verb` over
+        // `detail`. They are built together here so the two cannot describe the
+        // same action differently.
+        let base = std::path::Path::new("C:/Users/test");
+        for name in [
+            "create_file",
+            "edit_file",
+            "delete_path",
+            "run_command",
+            "open_url",
+        ] {
+            let card = PendingAction::of_in(&sample_call(name), base);
+            assert_eq!(
+                card.description,
+                format!("{}. {}", card.verb, card.detail),
+                "{name} card disagrees with its record"
+            );
+            assert!(!card.detail.is_empty(), "{name} card has nothing under the heading");
+        }
     }
 
     #[test]

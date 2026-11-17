@@ -2930,6 +2930,28 @@
     });
   }
 
+  // One glyph per kind of action, so a card can be recognised before it is
+  // read: a delete and a written file should not look the same at a glance.
+  // Stroke-only and currentColor, like every other icon in the panel.
+  const CHAT_PENDING_ICONS = {
+    run_command: ["M4 7l4 4-4 4M12 15h7"],
+    delete_path: ["M4 7h16M9.5 7V4h5v3M6.5 7l1 13h9l1-13"],
+    create_folder: ["M3 7h6l2 3h10v9H3z"],
+    reveal_path: ["M3 7h6l2 3h10v9H3z", "M9 14h6"],
+    open_url: ["M9.5 14.5l5-5M8 11l-1.4 1.4a3.6 3.6 0 005 5L13 15.4M16 13l1.4-1.4a3.6 3.6 0 00-5-5L11 8"],
+    move_path: ["M4 12h15M14 7l5 5-5 5"],
+    copy_path: ["M9 9h11v11H9z", "M15 5.5H4.5V16"],
+    open_path: ["M14 4h6v6M20 4l-8.5 8.5M18 14.5V19H5V6h4.5"],
+    search_paths: ["M11 4.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM15.8 15.8L20 20"],
+    pc_specs: ["M8.5 8.5h7v7h-7zM4 10.5h4.5M4 13.5h4.5M15.5 10.5H20M15.5 13.5H20M10.5 4v4.5M13.5 4v4.5M10.5 15.5V20M13.5 15.5V20"],
+  };
+  const CHAT_PENDING_ICON_FILE = ["M6 3.5h7l5 5v12H6z", "M13 3.5v5h5"];
+  function pendingActionIcon(tool) {
+    const paths = CHAT_PENDING_ICONS[tool] || CHAT_PENDING_ICON_FILE;
+    const d = paths.map((path) => `<path d="${path}"/>`).join("");
+    return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+  }
+
   function renderChatPendingAction() {
     const existing = $("chat-pending-action");
     if (existing) existing.remove();
@@ -2938,38 +2960,48 @@
     card.id = "chat-pending-action";
     card.className = "chat-pending-action";
     card.setAttribute("role", "alertdialog");
-    card.setAttribute("aria-label", "Confirm action");
+    card.setAttribute("aria-label", chatPendingAction.verb || "Confirm action");
 
+    // The heading names the action and the line under it says what follows,
+    // so the target below is the only thing left to decide about.
+    const head = document.createElement("div");
+    head.className = "chat-pending-head";
+    const icon = document.createElement("span");
+    icon.className = "chat-pending-icon";
+    icon.innerHTML = pendingActionIcon(chatPendingAction.tool);
+    head.appendChild(icon);
+
+    const copy = document.createElement("div");
+    copy.className = "chat-pending-copy";
     const title = document.createElement("div");
     title.className = "chat-pending-title";
-    title.textContent = "Nex wants to act on your PC";
-    card.appendChild(title);
+    title.textContent = chatPendingAction.verb || "Nex wants to act on your PC";
+    copy.appendChild(title);
+    const detailText = chatPendingAction.detail || "";
+    if (detailText) {
+      const detail = document.createElement("p");
+      detail.className = "chat-pending-detail";
+      detail.textContent = detailText;
+      copy.appendChild(detail);
+    }
+    head.appendChild(copy);
+    card.appendChild(head);
 
     const target = document.createElement("code");
     target.className = "chat-pending-target";
     target.textContent = chatPendingAction.target || "";
+    // The target can be longer than the well; the title carries it in full.
+    target.title = chatPendingAction.target || "";
     card.appendChild(target);
-
-    if (chatPendingAction.description) {
-      const effect = document.createElement("p");
-      effect.className = "chat-pending-effect";
-      effect.textContent = chatPendingAction.description;
-      card.appendChild(effect);
-    }
-
-    const hint = document.createElement("p");
-    hint.className = "chat-pending-hint";
-    hint.textContent = "Nothing has run yet. Review the target above.";
-    card.appendChild(hint);
 
     const row = document.createElement("div");
     row.className = "chat-pending-actions";
-    const confirm = document.createElement("button");
-    confirm.type = "button";
-    confirm.className = "chat-pending-confirm";
-    confirm.textContent = "Allow";
-    confirm.addEventListener("click", () => answerChatPendingAction(true));
-    row.appendChild(confirm);
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chat-pending-cancel";
+    cancel.textContent = "Deny";
+    cancel.addEventListener("click", () => answerChatPendingAction(false));
+    row.appendChild(cancel);
     // Offered only where the server says one approval may cover the rest, so
     // delete and commands never present it. The wording says what it covers:
     // a button that quietly widens what runs unshown is the whole hazard.
@@ -2982,12 +3014,12 @@
       rest.addEventListener("click", () => answerChatPendingAction(true, true));
       row.appendChild(rest);
     }
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "chat-pending-cancel";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => answerChatPendingAction(false));
-    row.appendChild(cancel);
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = "chat-pending-confirm";
+    confirm.textContent = "Allow";
+    confirm.addEventListener("click", () => answerChatPendingAction(true));
+    row.appendChild(confirm);
     card.appendChild(row);
 
     chatMessagesEl.appendChild(card);

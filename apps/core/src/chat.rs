@@ -2303,7 +2303,7 @@ fn message_with_local_context(request: &SendRequest) -> String {
 /// keeps the folder from the transcript and sends bare names that validation
 /// now refuses. Telling it once, on the first message after the clear, is
 /// cheaper than the failed call that would otherwise teach it.
-const SCOPE_CLEARED_LINE: &str = "The working folder for this conversation was cleared. Do not resolve names against a folder any more: send absolute paths.";
+const SCOPE_CLEARED_LINE: &str = "The working folder for this conversation was cleared, so there is none now. Do not resolve names against a folder any more: send absolute paths. If the user asks which folder you are working in, say there is none - the folder that was cleared is still visible earlier in this conversation, and repeating it would be wrong.";
 
 fn message_with_local_context_and_pc_info(request: &SendRequest, pc_info: Option<&str>) -> String {
     let mut message = request.message.clone();

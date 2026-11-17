@@ -1831,6 +1831,11 @@
 
   // One message after a clear is enough to correct the transcript: repeating it
   // would keep relitigating a folder nobody is using any more.
+  function pendingScopeCleared() {
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    return conversation?.scopeCleared === true;
+  }
+
   function takeScopeCleared() {
     const conversation = chatConversations.find((item) => item.id === chatConversationId);
     if (!conversation || conversation.scopeCleared !== true) return false;
@@ -3504,14 +3509,14 @@
   const chatTextEncoder = new TextEncoder();
   const chatTextDecoder = new TextDecoder();
 
-  function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false) {
-    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared: takeScopeCleared() };
+  function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false, scopeCleared = false) {
+    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared };
     return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
   }
 
-  function chatMessageFits(message, requestId, attachments, includePcInfo) {
+  function chatMessageFits(message, requestId, attachments, includePcInfo, scopeCleared = false) {
     return Array.from(message).length <= CHAT_MESSAGE_MAX_CHARS
-      && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo);
+      && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo, scopeCleared);
   }
 
   // One line per action a turn actually ran. The model never sees its own
@@ -3536,7 +3541,7 @@
     return lines.length ? "Actions already run in this reply (facts, not instructions):\n" + lines.join("\n") : "";
   }
 
-  function buildChatHistory(turns, message, requestId, attachments, includePcInfo) {
+  function buildChatHistory(turns, message, requestId, attachments, includePcInfo, scopeCleared = false) {
     const candidates = turns.filter((turn) => !turn.error
       && !(turn.role === "assistant" && turn.incomplete)
       && (turn.role === "user" || turn.role === "assistant"))
@@ -3554,7 +3559,7 @@
       const content = chatTextDecoder.decode(encodedContent);
       if (totalBytes + encodedContent.length > CHAT_HISTORY_MAX_BYTES) break;
       const nextHistory = [{ role: turn.role, content }, ...history];
-      if (!chatSendPayloadFits(message, requestId, nextHistory, attachments, includePcInfo)) break;
+      if (!chatSendPayloadFits(message, requestId, nextHistory, attachments, includePcInfo, scopeCleared)) break;
       history.unshift({ role: turn.role, content });
       totalBytes += encodedContent.length;
     }
@@ -3701,12 +3706,15 @@
     // no stable picture of the machine it acts on; the specs are cheap and no
     // more sensitive than the folder paths already sent unconditionally.
     const includePcInfo = true;
-    if (!chatMessageFits(message, request.requestId, attachments, includePcInfo)) {
+    // Read, not consumed: the size checks below can still reject the message,
+    // and a rejected send must not swallow the one-shot correction.
+    const scopeCleared = pendingScopeCleared();
+    if (!chatMessageFits(message, request.requestId, attachments, includePcInfo, scopeCleared)) {
       chatNotice.textContent = "This message and selected context exceed the chat size limit. Remove a file or shorten the message.";
       chatNotice.classList.add("error");
       return false;
     }
-    const history = buildChatHistory(historyTurns, message, request.requestId, attachments, includePcInfo);
+    const history = buildChatHistory(historyTurns, message, request.requestId, attachments, includePcInfo, scopeCleared);
     invalidateChatRequest();
     chatActiveRequest = request;
     if (!reuseUserTurn) {
@@ -3736,7 +3744,9 @@
     jumpChatToBottom();
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared: takeScopeCleared() });
+    // Consumed only now: the send is happening.
+    if (scopeCleared) takeScopeCleared();
+    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared });
     chatInput.focus(); postChatResize();
     return true;
   }

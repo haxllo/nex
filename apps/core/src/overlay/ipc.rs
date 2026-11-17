@@ -184,6 +184,11 @@ pub(crate) struct ChatSendPayload {
     pub attachments: Vec<ChatAttachmentPayload>,
     #[serde(default)]
     pub include_pc_info: bool,
+    /// The conversation's working folder, when the user set one. Passed
+    /// straight through: the page owns it, and the chat loop resolves bare
+    /// names against it before validating any path.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

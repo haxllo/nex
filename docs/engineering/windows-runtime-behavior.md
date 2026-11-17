@@ -41,6 +41,7 @@ Current hotkey-to-launcher behavior in Nex (`nex`):
    - no-match searches show a single non-launchable `No results` row in the results area
    - empty-query `Enter` keeps compact state and shows `Type to search, Tab to chat` in the input placeholder until input changes
    - `Tab` cycles views: search → Chat, Chat → Media (when a session is active), Media → search
+   - Chat has an optional per-conversation working folder (`set_scope`): when set, a bare or relative path argument resolves into it before the usual absolute/exists/system-folder checks run, the confirmation card still shows the resolved absolute target, and a new conversation starts without one. `run_command` is not affected - no command line is rewritten.
    - footer hint strip is visible while results are shown (`Enter Open • ↑↓ Move • Esc Close`)
    - panel background `#272727` with border `#424242`
    - structured two-line result rows (`title` + `path`) with native Windows/file-type icons

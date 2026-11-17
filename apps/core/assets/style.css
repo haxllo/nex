@@ -2890,6 +2890,44 @@ html.glass-native .chat-composer-shell {
 @keyframes chatPulse { to { opacity: .55; } }
 @keyframes chatSpin { to { transform: rotate(360deg); } }
 
+/* The conversation's working folder, modeled on the model chip: same height,
+   same radius, same transparent fill, so the strip reads as two facts rather
+   than a toolbar. When unset the element is hidden and the strip is untouched.
+   Only the last segment of the path is shown; the full path is the tooltip,
+   because a deep folder would otherwise push the model chip off the strip. */
+.chat-scope-chip { margin-left: auto; }
+.chat-scope-chip + .chat-model-chip { margin-left: 2px; }
+/* A hidden chip still sits between the two siblings in the DOM, so the rule
+   above would strip the model chip's auto margin and slide it to the left.
+   With no scope the strip has to look exactly as it did before this feature. */
+.chat-scope-chip[hidden] + .chat-model-chip { margin-left: auto; }
+.chat-scope-chip[hidden] { display: none; }
+.chat-scope-glyph { display: inline-flex; flex: 0 0 11px; }
+.chat-scope-glyph svg {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-scope-chip #chat-scope-label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-scope-clear {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+.chat-scope-chip:hover .chat-scope-clear,
+.chat-scope-chip:focus-visible .chat-scope-clear { opacity: 1; }
+
 .chat-context-selection { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 14px 5px; }
 .chat-context-selection[hidden] { display: none !important; }
 .chat-context-chip {

@@ -192,6 +192,17 @@ pub(crate) enum ChatTool {
         /// chosen from this, never handed in as a number.
         slow: bool,
     },
+    /// The folder this conversation works in.
+    ///
+    /// Not a session root. Nothing is re-rooted: every tool still takes an
+    /// absolute path and still validates it, and this only decides what a bare
+    /// name or a relative path resolves to before that validation runs. The
+    /// page keeps it per conversation, shows it as a chip, and sends it with
+    /// each request, so it is never remembered by the model across turns and
+    /// never guessed from the last action.
+    SetScope {
+        folder: std::path::PathBuf,
+    },
 }
 
 /// Which kinds of entry a name search may return.
@@ -257,6 +268,7 @@ impl ChatTool {
             Self::CopyPath { .. } => "copy_path",
             Self::DeletePath { .. } => "delete_path",
             Self::RunCommand { .. } => "run_command",
+            Self::SetScope { .. } => "set_scope",
         }
     }
 
@@ -288,6 +300,10 @@ impl ChatTool {
             // reach, so it is destructive in the strongest sense: it is never
             // allowed to run without an explicit approval of its exact text.
             Self::RunCommand { .. } => Annotations::destructive(),
+            // It changes nothing on disk, but it changes what a later bare name
+            // means, and that is exactly the kind of change the user should see
+            // before it takes effect rather than after.
+            Self::SetScope { .. } => Annotations::destructive(),
         }
     }
 
@@ -298,7 +314,10 @@ impl ChatTool {
     /// runs arbitrary shell, so neither rides on a grant given for writing
     /// files - they ask every time, whatever the turn is doing.
     pub(crate) fn bypass_allowed(&self) -> bool {
-        !matches!(self, Self::DeletePath { .. } | Self::RunCommand { .. })
+        !matches!(
+            self,
+            Self::DeletePath { .. } | Self::RunCommand { .. } | Self::SetScope { .. }
+        )
     }
 
     /// Does this call need the user to click Confirm before it runs?
@@ -331,6 +350,9 @@ impl ChatTool {
             Self::MovePath { path, .. }
             | Self::CopyPath { path, .. }
             | Self::DeletePath { path, .. } => path,
+            // The folder itself, so the card shows the exact absolute folder
+            // that later bare names will resolve into.
+            Self::SetScope { folder } => folder.to_str().unwrap_or_default(),
             // The command line itself, not a summary: the card must show the
             // text that will actually be executed.
             Self::RunCommand { command, .. } => command,
@@ -389,6 +411,26 @@ impl RawToolCall {
     /// default: an unparseable call must not become a guess at what the model
     /// meant.
     pub(crate) fn validate(self) -> Result<ChatTool, ToolError> {
+        self.validate_in(None)
+    }
+
+    /// As [`validate`], resolving relative path arguments against `scope`
+    /// first.
+    ///
+    /// This is the whole of the working-folder feature: a bare name or a
+    /// relative path is joined onto the conversation's folder *before* the
+    /// existing checks run, so an absolute path is what reaches every tool,
+    /// and an absolute path is what the card shows. Nothing is re-rooted and
+    /// no validation is loosened - a name that resolves outside the folder, or
+    /// into a system location, fails exactly as it would have.
+    pub(crate) fn validate_in(mut self, scope: Option<&std::path::Path>) -> Result<ChatTool, ToolError> {
+        if let Some(scope) = scope {
+            resolve_path_arguments(&mut self.arguments, &self.name, scope);
+        }
+        self.validate_resolved()
+    }
+
+    fn validate_resolved(self) -> Result<ChatTool, ToolError> {
         let arg = |field: &str| -> Result<String, ToolError> {
             self.arguments
                 .get(field)
@@ -716,6 +758,45 @@ impl RawToolCall {
                 }
                 Ok(ChatTool::RunCommand { command, slow })
             }
+            "set_scope" => {
+                let folder = arg("folder")?;
+                let path = std::path::Path::new(&folder);
+                // The same rules a destination folder has to pass. A scope is
+                // not a session root, so it cannot be a drive or a system
+                // folder: resolving a bare name into C:\Windows would make the
+                // one thing this feature must never do - quietly point an
+                // action somewhere the user did not mean.
+                if !path.is_absolute() {
+                    return Err(ToolError::IllegalName {
+                        tool: "set_scope",
+                        reason: "folder must be an absolute path".to_string(),
+                    });
+                }
+                if is_system_path(path) {
+                    let reason = if is_drive_root(path) {
+                        "that is the root of the Windows drive; choose a folder"
+                    } else {
+                        "that is a system folder, which is never a working folder"
+                    };
+                    return Err(ToolError::IllegalName {
+                        tool: "set_scope",
+                        reason: reason.to_string(),
+                    });
+                }
+                if !path.exists() {
+                    return Err(ToolError::MissingPath { path: folder });
+                }
+                if !path.is_dir() {
+                    return Err(ToolError::IllegalName {
+                        tool: "set_scope",
+                        reason: "that is a file; a working folder has to be a folder"
+                            .to_string(),
+                    });
+                }
+                Ok(ChatTool::SetScope {
+                    folder: path.to_path_buf(),
+                })
+            }
             other => Err(ToolError::UnknownTool { name: other.to_string() }),
         }
     }
@@ -967,6 +1048,90 @@ fn validate_url(url: &str) -> Result<(), ToolError> {
 /// Separators are rejected outright: a model that could name `..\..\Windows`
 /// could write outside the folder the user chose. Reserved device names are
 /// rejected because Windows silently redirects them.
+/// Which argument fields of each tool hold a path, so a scope can resolve them.
+///
+/// Declared as data rather than handled per arm: a tool added later that takes
+/// a path should have one line here, and the absence of a line is visible in
+/// review. `run_command` is deliberately absent - a command's own working
+/// directory is not part of this feature, and rewriting text inside a command
+/// line is the kind of silent edit that makes a visible approval card a lie.
+fn path_fields_for(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "open_path" | "reveal_path" | "read_file" | "edit_file" | "delete_path" => &["path"],
+        "move_path" | "copy_path" => &["path", "to"],
+        "create_folder" | "create_file" => &["parent"],
+        "search_paths" => &["folder"],
+        "set_scope" => &["folder"],
+        _ => &[],
+    }
+}
+
+/// Join a bare name or relative path onto the conversation's working folder.
+///
+/// Only values that are already absolute are left alone. Everything else is a
+/// name the user said out loud ("notes.txt", "src\\main.rs"), and resolving it
+/// here - once, before validation - is what keeps the rest of the tool surface
+/// absolute-path-only. A resolution that lands on a system folder or escapes
+/// the scope is caught by the same checks a typed absolute path faces.
+fn resolve_path_arguments(
+    arguments: &mut serde_json::Value,
+    tool: &str,
+    scope: &std::path::Path,
+) {
+    let Some(object) = arguments.as_object_mut() else {
+        return;
+    };
+    for field in path_fields_for(tool) {
+        let Some(value) = object.get_mut(*field) else {
+            continue;
+        };
+        let Some(raw) = value.as_str() else {
+            continue;
+        };
+        let raw = raw.trim();
+        if raw.is_empty() || is_absolute_path_text(raw) {
+            continue;
+        }
+        // `~` is not expanded by Windows, so it is not guessed at here either:
+        // a name starting with it is joined like any other, and fails as a
+        // missing path rather than opening something unexpected.
+        let joined = scope.join(raw);
+        if let Some(text) = joined.to_str() {
+            *value = serde_json::Value::String(text.to_string());
+        }
+    }
+}
+
+/// Whether the text is a path with a root of its own.
+///
+/// Checked on the string rather than through `Path::is_absolute`, which is
+/// deliberately false for `C:foo` (drive-relative) - a form Windows accepts and
+/// a model occasionally emits. Both a drive letter and a UNC prefix count as
+/// the user naming a real location, so neither is joined onto the scope.
+fn is_absolute_path_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if text.starts_with("\\\\") || text.starts_with("//") {
+        return true;
+    }
+    bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic()
+}
+
+/// The conversation's folder for the rest of the turn, after an outcome.
+///
+/// The page only learns about a working folder at the *next* send, so without
+/// this a scope approved mid-task would not apply until the user typed again -
+/// the card would say the folder was set and the very next call would still be
+/// refused for not being absolute.
+pub(crate) fn scope_after_outcome(
+    tool: &ChatTool,
+    outcome: &ToolOutcome,
+) -> Option<std::path::PathBuf> {
+    match tool {
+        ChatTool::SetScope { folder } if outcome.ok => Some(folder.clone()),
+        _ => None,
+    }
+}
+
 /// Whether a path points into a location nex should never write to.
 ///
 /// A folder supplied by the model is the one argument it fully controls, so a
@@ -1481,6 +1646,7 @@ impl PendingAction {
             ChatTool::CopyPath { .. } => "Copy",
             ChatTool::DeletePath { .. } => "Delete",
             ChatTool::RunCommand { .. } => "Run command",
+            ChatTool::SetScope { .. } => "Work in this folder",
         };
         // Deleting moves the item to the Recycle Bin, which is what Explorer's
         // Delete does. The card has to say where it went: "This cannot be
@@ -1496,6 +1662,10 @@ impl PendingAction {
             ChatTool::RunCommand { .. } => {
                 "This runs as you, and can do anything you could do in a terminal."
             }
+            // Not a warning: nothing on disk changes. What changes is what a
+            // bare file name means for the rest of the conversation, which is
+            // worth saying plainly and without alarm.
+            ChatTool::SetScope { .. } => "This only applies to this conversation.",
             _ if tool.needs_confirmation() => "This will change something on your PC.",
             _ => "This changes nothing on your PC.",
         };
@@ -1574,6 +1744,10 @@ impl PendingAction {
                         COMMAND_TIMEOUT_DEFAULT.as_secs()
                     )
                 }
+            }
+            ChatTool::SetScope { .. } => {
+                " Later actions may name files inside it instead of the full path."
+                    .to_string()
             }
             _ => String::new(),
         };
@@ -1655,6 +1829,9 @@ fn sample_call(name: &str) -> ChatTool {
             command: "Get-Date".to_string(),
             slow: false,
         },
+        "set_scope" => ChatTool::SetScope {
+            folder: std::env::temp_dir(),
+        },
         other => panic!("no sample call for {other}"),
     }
 }
@@ -1703,6 +1880,7 @@ pub(crate) fn all_tool_names() -> &'static [&'static str] {
         "copy_path",
         "delete_path",
         "run_command",
+        "set_scope",
     ]
 }
 
@@ -1908,6 +2086,20 @@ pub(crate) fn tool_declarations() -> serde_json::Value {
                         "slow": {"type": "boolean", "description": "Set true only for a command that is known to take minutes, such as searching a large folder tree. Commands are stopped after 30 seconds unless this is true, which allows 5 minutes; the confirmation card shows which. Prefer a fast command that aggregates (a count, a total) over a slow one that lists. A recursive scan from a drive root (Get-ChildItem 'G:\\' -Recurse) is refused: name the folder to search instead."}
                     },
                     "required": ["command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_scope",
+                "description": "The folder this conversation works in. Call this when the user names a folder to work in for a while (\"work in G:\\Projects\\nex\"), so later calls can name files inside it instead of repeating the full path. Requires confirmation. It changes nothing on disk. It does not replace absolute paths: keep sending them, and only rely on it when the user refers to a file by name alone. It is never inherited by a new conversation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "folder": {"type": "string", "description": "Absolute path of an existing folder. Not a drive root and not a system folder."}
+                    },
+                    "required": ["folder"]
                 }
             }
         }
@@ -2469,6 +2661,20 @@ fn run_inner(
                 }
             }
         },
+        ChatTool::SetScope { folder } => {
+            // Nothing on disk changes: the folder is already known to exist and
+            // the page applies it to the conversation. Saying the path back is
+            // what makes the record show which folder the rest of the turn used.
+            ToolOutcome {
+                tool: tool.name().to_string(),
+                target: folder.to_string_lossy().into_owned(),
+                ok: true,
+                summary: format!("Working folder {}", folder.to_string_lossy()),
+                returns_value: false,
+                card_text: None,
+                duration_ms: None,
+            }
+        }
         ChatTool::SearchPaths {
             query,
             folder,
@@ -4910,6 +5116,164 @@ mod tests {
 
     fn call(name: &str, args: serde_json::Value) -> Result<ChatTool, ToolError> {
         raw(name, args).validate()
+    }
+
+    // --- working folder (CIQ-177) ---
+
+    #[test]
+    fn a_working_folder_has_to_be_a_real_folder() {
+        let dir = scratch("scope_ok");
+        let file = dir.join("note.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        let tool = call("set_scope", serde_json::json!({"folder": dir.to_string_lossy()}))
+            .expect("an existing folder is accepted");
+        assert_eq!(tool.name(), "set_scope");
+        assert!(tool.needs_confirmation(), "the card is what asks");
+
+        // Relative resolves nowhere: the scope exists so a bare name lands
+        // somewhere the user can name out loud.
+        let err = call("set_scope", serde_json::json!({"folder": "projects/nex"})).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+
+        // A drive root or a system folder would make every bare name dangerous.
+        let err = call("set_scope", serde_json::json!({"folder": "C:\\"})).unwrap_err();
+        assert!(err.to_string().contains("drive"), "{err}");
+        let err = call("set_scope", serde_json::json!({"folder": "C:\\Windows"})).unwrap_err();
+        assert!(err.to_string().contains("system folder"), "{err}");
+
+        // A file is not a folder.
+        let err = call("set_scope", serde_json::json!({"folder": file.to_string_lossy()}))
+            .unwrap_err();
+        assert!(err.to_string().contains("has to be a folder"), "{err}");
+
+        // Nothing that does not exist.
+        let missing = dir.join("nope");
+        let err = call("set_scope", serde_json::json!({"folder": missing.to_string_lossy()}))
+            .unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn a_working_folder_is_never_covered_by_allow_rest() {
+        let tool = sample_call("set_scope");
+        assert!(!tool.bypass_allowed());
+        let action = PendingAction::of(&tool);
+        assert_eq!(action.verb, "Work in this folder");
+        assert!(!action.allow_rest);
+        // It must not read as a warning: nothing on disk changes, and a card
+        // that looks like a delete would teach the user to click through.
+        assert!(action.detail.contains("conversation"), "{}", action.detail);
+        assert!(!action.detail.to_lowercase().contains("recycle"), "{}", action.detail);
+    }
+
+    #[test]
+    fn a_bare_name_resolves_into_the_working_folder() {
+        let dir = scratch("scope_resolve");
+        let nested = dir.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        let scope = dir.as_path();
+
+        // A relative path is joined before the existing checks run, so what the
+        // tool holds - and what the card shows - is the absolute target.
+        let tool = raw("read_file", serde_json::json!({"path": "src\\main.rs"}))
+            .validate_in(Some(scope))
+            .expect("resolves to a real file");
+        match tool {
+            ChatTool::ReadFile { path, .. } => {
+                assert_eq!(std::path::PathBuf::from(path), file, "resolved elsewhere")
+            }
+            other => panic!("wrong tool: {other:?}"),
+        }
+
+        // `parent` on a create resolves the same way, so the default create
+        // directory is not used when a scope is set.
+        let tool = raw("create_folder", serde_json::json!({"name": "build", "parent": "."}))
+            .validate_in(Some(scope))
+            .expect("resolves to the scope itself");
+        match tool {
+            ChatTool::CreateFolder { parent, .. } => {
+                assert_eq!(parent.as_deref(), Some(scope), "parent not resolved")
+            }
+            other => panic!("wrong tool: {other:?}"),
+        }
+
+        // An absolute path is never re-joined, even inside the scope.
+        let tool = raw("open_path", serde_json::json!({"path": dir.to_string_lossy()}))
+            .validate_in(Some(scope))
+            .expect("absolute stays absolute");
+        match tool {
+            ChatTool::OpenPath { path } => {
+                assert_eq!(std::path::PathBuf::from(path), dir, "absolute was rewritten")
+            }
+            other => panic!("wrong tool: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_approved_folder_applies_to_the_rest_of_the_turn() {
+        let tool = sample_call("set_scope");
+        let ChatTool::SetScope { folder } = &tool else {
+            panic!("sample_call disagrees with the variant")
+        };
+
+        // Approved: the turn keeps resolving against it from here on.
+        let outcome = crate::chat_tools::run(&tool, true, std::env::temp_dir().as_path());
+        assert!(outcome.ok);
+        assert_eq!(scope_after_outcome(&tool, &outcome), Some(folder.clone()));
+
+        // Declined: nothing was set, and a later bare name must still fail.
+        let declined = crate::chat_tools::run(&tool, false, std::env::temp_dir().as_path());
+        assert!(!declined.ok);
+        assert_eq!(scope_after_outcome(&tool, &declined), None);
+
+        // Every other tool leaves the scope alone, whatever it did.
+        let read = sample_call("read_file");
+        let outcome = crate::chat_tools::run(&read, true, std::env::temp_dir().as_path());
+        assert_eq!(scope_after_outcome(&read, &outcome), None);
+    }
+
+    #[test]
+    fn a_working_folder_does_not_loosen_any_check() {
+        let dir = scratch("scope_strict");
+        let scope = dir.as_path();
+
+        // Resolving upwards out of the scope still meets the system-location
+        // rule, which is the whole reason validation runs after resolution.
+        let err = raw(
+            "create_file",
+            serde_json::json!({"name": "x.txt", "parent": "C:\\Windows\\System32"}),
+        )
+        .validate_in(Some(scope))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("absolute") || err.to_string().contains("system"),
+            "{err}"
+        );
+
+        // A relative name that is not there fails as a missing path, not as a
+        // silent write somewhere else.
+        let err = raw("read_file", serde_json::json!({"path": "not-here.txt"}))
+            .validate_in(Some(scope))
+            .unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+
+        // A command line is never rewritten: an approval card that shows one
+        // string and runs another would be worse than no scope at all.
+        let tool = raw("run_command", serde_json::json!({"command": "dir"}))
+            .validate_in(Some(scope))
+            .unwrap();
+        match tool {
+            ChatTool::RunCommand { command, .. } => assert_eq!(command, "dir"),
+            other => panic!("wrong tool: {other:?}"),
+        }
+
+        // With no scope, a bare name is refused exactly as before.
+        assert!(raw("read_file", serde_json::json!({"path": "notes.txt"}))
+            .validate()
+            .is_err());
     }
 
     #[test]

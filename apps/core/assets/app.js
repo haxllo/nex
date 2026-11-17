@@ -1788,6 +1788,49 @@
     } catch (_) { return []; }
   }
 
+  // ── Working folder ─────────────────────────────────────────
+  // The folder the agent resolves bare names into. It belongs to the
+  // conversation, never to the app: a new conversation starts without one and
+  // nothing is inherited. The page cannot set it by itself either - the only
+  // writer is an approved card from the agent, which arrives as
+  // `chatAction.scope`.
+  function currentChatScope() {
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    return conversation && typeof conversation.scope === "string" ? conversation.scope : "";
+  }
+
+  function setChatScope(path) {
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    if (!conversation) return;
+    const next = typeof path === "string" ? path.trim() : "";
+    if (next === currentChatScope()) return;
+    conversation.scope = next;
+    renderChatScope();
+    persistChat();
+  }
+
+  function renderChatScope() {
+    const chip = $("chat-scope-button");
+    if (!chip) return;
+    const path = currentChatScope();
+    if (!path) {
+      chip.hidden = true;
+      chip.removeAttribute("title");
+      chip.removeAttribute("aria-label");
+      $("chat-scope-label").textContent = "";
+      return;
+    }
+    // Only the last segment fits the strip. The full path is the tooltip, and
+    // it is also what a bare name actually resolves into, so nothing in the UI
+    // claims a folder the agent is not using.
+    const trimmed = path.replace(/[\\/]+$/, "");
+    const segment = trimmed.split(/[\\/]/).pop() || trimmed;
+    $("chat-scope-label").textContent = segment;
+    chip.hidden = false;
+    chip.title = path + " — click to clear";
+    chip.setAttribute("aria-label", "Working folder " + path + ". Clear it.");
+  }
+
   function persistChat() {
     if (!chatConversationId) return;
     const conversation = chatConversations.find((item) => item.id === chatConversationId);
@@ -1811,7 +1854,7 @@
     chatStreaming = false;
     chatConversationId = "chat-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
     chatMessages = [];
-    chatConversations.unshift({ id: chatConversationId, title: "New conversation", messages: [], updatedAt: Date.now(), provider: chatConfig.provider, model: chatConfig.model });
+    chatConversations.unshift({ id: chatConversationId, title: "New conversation", messages: [], updatedAt: Date.now(), provider: chatConfig.provider, model: chatConfig.model, scope: "" });
     setChatHistoryOpen(false);
     chatHistory.replaceChildren();
     renderChatMessages();
@@ -1938,6 +1981,7 @@
         syncChatModelChoice();
         setChatHistoryOpen(false);
         renderChatMessages();
+        renderChatScope();
         updateChatStreamingState(false);
         chatLiveStatus.textContent = "";
         chatNotice.textContent = "";
@@ -2590,6 +2634,7 @@
       } else newChatConversation();
     } else if (!chatConversations.some((conversation) => conversation.id === chatConversationId)) newChatConversation();
     renderChatMessages();
+    renderChatScope();
     post("chatState");
     resizeChatInput();
     postChatResize();
@@ -3301,7 +3346,7 @@
   const chatTextDecoder = new TextDecoder();
 
   function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false) {
-    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo };
+    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null };
     return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
   }
 
@@ -3532,7 +3577,7 @@
     jumpChatToBottom();
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("chatSend", { ...request, message, history, attachments, includePcInfo });
+    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null });
     chatInput.focus(); postChatResize();
     return true;
   }
@@ -3824,6 +3869,15 @@
   $("chat-new-button").addEventListener("click", newChatConversation);
   $("chat-copy-button").addEventListener("click", copyChatTranscript);
   $("chat-history-button").addEventListener("click", () => { renderChatHistory(); setChatHistoryOpen(chatHistory.hidden); });
+  // Clicking the folder chip clears it. The whole chip is the target rather
+  // than a separate × button: a button inside a button is neither valid HTML
+  // nor reachable by keyboard, and clearing is the only thing it does.
+  $("chat-scope-button").addEventListener("click", () => {
+    if (!currentChatScope()) return;
+    setChatScope("");
+    chatInput.focus();
+  });
+
   $("chat-model-button").addEventListener("click", (event) => {
     event.currentTarget.blur();
     const open = chatSettings.hidden;
@@ -4378,6 +4432,10 @@
           preview: typeof action.preview === "string" ? action.preview : "",
           duration_ms: typeof action.duration_ms === "number" ? action.duration_ms : null,
         });
+        // The agent set a working folder and the user approved the card. It
+        // belongs to this conversation, so it is stored here and survives a
+        // reload with it, but a new conversation starts without one.
+        if (typeof action.scope === "string" && action.scope) setChatScope(action.scope);
         renderChatMessages();
       }
       persistChat();

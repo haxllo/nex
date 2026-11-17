@@ -39,7 +39,8 @@ Current hotkey-to-launcher behavior in Nex (`nex`):
    - results are grouped with visible section headers (`Top Hit`, `Applications`, `Files`, `Actions`, `Other`)
    - first best match is rendered as a distinct `Top Hit` card row
    - no-match searches show a single non-launchable `No results` row in the results area
-   - empty-query `Enter` keeps compact state and shows `Start typing to search` in the input placeholder until input changes
+   - empty-query `Enter` keeps compact state and shows `Type to search, Tab for chat` in the input placeholder until input changes
+   - `Tab` cycles views: search → Chat, Chat → Media (when a session is active), Media → search
    - footer hint strip is visible while results are shown (`Enter Open • ↑↓ Move • Esc Close`)
    - panel background `#272727` with border `#424242`
    - structured two-line result rows (`title` + `path`) with native Windows/file-type icons

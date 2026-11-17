@@ -1110,7 +1110,7 @@
       completionEl.textContent = "";
       input.placeholder = inCommandMode
         ? "Type a command…"
-        : pushedPlaceholder || "Search for apps, files and actions…";
+        : pushedPlaceholder || "Type to search, Tab for chat";
       return;
     }
     completionEl.textContent = completion.slice(input.value.length);
@@ -1290,6 +1290,13 @@
         }
         if (e.key === "Tab") {
           e.preventDefault();
+          // Second press of the cycle: Chat, then Media when something is
+          // playing. Escape still closes either one back to the box.
+          if (mediaState && mediaState.active) {
+            closeChatView(false);
+            openMediaView();
+            return;
+          }
           closeChatView(false);
           input.focus();
           return;
@@ -1305,7 +1312,9 @@
       if (mediaOpen && !e.ctrlKey && !e.altKey && !e.metaKey) {
         if (e.key === "Tab") {
           e.preventDefault();
-          openChatView(true);
+          // Third press closes the cycle: Media back to the box.
+          closeMediaView();
+          input.focus();
           return;
         }
         if (e.key === " ") {
@@ -1392,7 +1401,7 @@
         if (mediaOpen) {
           e.preventDefault();
           closeMediaView();
-          openChatView(true);
+          input.focus();
           return;
         }
         if (whatsNewOpen) {
@@ -1404,13 +1413,9 @@
           e.preventDefault();
           return;
         }
-        // First Tab opens Media when available, then Chat. Without an
-        // active media session, the first Tab opens Chat directly.
-        if (mediaState && mediaState.active) {
-          e.preventDefault();
-          openMediaView();
-          return;
-        }
+        // Tab opens Chat first, Media second. Media used to come first, which
+        // made the view people reach for most the second press; the order now
+        // follows how the panel is actually used.
         e.preventDefault();
         openChatView(false);
         return;

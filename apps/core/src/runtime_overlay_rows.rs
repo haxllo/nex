@@ -11,7 +11,7 @@ pub(crate) const STATUS_ROW_NO_RESULTS: &str = "No results";
 #[cfg(target_os = "windows")]
 pub(crate) const STATUS_ROW_NO_COMMAND_RESULTS: &str = "No command matches";
 #[cfg(target_os = "windows")]
-pub(crate) const STATUS_ROW_TYPE_TO_SEARCH: &str = "Start typing to search";
+pub(crate) const STATUS_ROW_TYPE_TO_SEARCH: &str = "Type to search, Tab for chat";
 
 pub(crate) const ACTION_UNINSTALL_CONFIRM_ID: &str = "action:uninstall:confirm";
 pub(crate) const ACTION_UNINSTALL_CANCEL_ID: &str = "action:uninstall:cancel";

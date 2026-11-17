@@ -224,7 +224,7 @@ Behavior details:
   - background `#272727`
   - border `#424242` (1px)
 - Rounded panel with subtle depth and improved typography hierarchy.
-- Input placeholder shown directly in the input box (`Type to search`).
+- Input placeholder shown directly in the input box (`Type to search, Tab for chat`).
 - Result rows are structured two-line cards:
   - primary title line (higher contrast, semibold)
   - secondary path line (muted, ellipsized)

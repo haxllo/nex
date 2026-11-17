@@ -1152,6 +1152,13 @@
   // host keeps the WebView viewport oversized so reveals are pre-painted
   // and shrinks just clip. lastH dedupes repeated measurements.
   let lastH = 0;
+  // One pending window-size request for the whole page. A view transition asks
+  // twice - the closing view measures before the next surface has laid out,
+  // which reads as the 60px clamp floor - and applying both made the window
+  // drop to a sliver for a frame before settling. A newer request supersedes
+  // an older one, and a closing view waits an extra frame so it measures the
+  // layout it is actually leaving the window at.
+  let resizeRaf = 0;
   let needsPainted = false;
   let activeShowId = 0;
   let glassWaitingForShow = false;
@@ -1183,12 +1190,24 @@
   }
   function measure() {
     const h = Math.ceil(panel.getBoundingClientRect().height);
+    // A view transition already has a resize queued. Between the two layouts
+    // the panel genuinely sits at the clamp floor, and posting that makes the
+    // window collapse to a sliver for a frame before the transition's own
+    // resize lands — the jump that made the second Tab press look different
+    // from the first. The queued request owns the height until it has landed.
+    if (resizeRaf) {
+      if (needsPainted) {
+        needsPainted = false;
+        requestAnimationFrame(() => { scrollToInstant(0); noteContentPainted(); });
+      }
+      return;
+    }
     // Shrink path: apply immediately. The WebView viewport is pinned at
     // max height (host keeps it oversized), so shrinking just clips
     // already-rasterized content — no blank region, no acrylic gap.
     if (h > 0 && h < lastH) {
       lastH = h;
-      post("resize", { v: h, immediate: true });
+      post("resize", { v: h, immediate: true, src: "measure-shrink" });
       if (needsPainted) {
         needsPainted = false;
         requestAnimationFrame(() => { scrollToInstant(0); noteContentPainted(); });
@@ -1202,7 +1221,7 @@
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0 && h !== lastH) {
           lastH = h;
-          post("resize", { v: h, immediate: true });
+          post("resize", { v: h, immediate: true, src: "measure-grow" });
         }
         if (needsPainted) {
           needsPainted = false;
@@ -2459,11 +2478,33 @@
     renderChatRunningAction();
   }
 
-  function postChatResize() {
-    requestAnimationFrame(() => {
+  function postChatResize(settleFrames = 0) {
+    schedulePanelHeight(settleFrames);
+  }
+
+  /// Post the panel's height once per frame, latest request winning.
+  ///
+  /// `settleFrames` delays the measurement by that many frames. The close path
+  /// needs it: immediately after a view's class is removed the search surface
+  /// has not been laid out yet, so the panel measures at the clamp floor and
+  /// the window would collapse and then re-expand.
+  function schedulePanelHeight(settleFrames) {
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    const measureNow = () => {
+      resizeRaf = 0;
       const height = Math.ceil(panel.getBoundingClientRect().height);
-      if (height > 0) { lastH = height; post("resize", { v: height, immediate: true }); }
-    });
+      if (height > 0) {
+        lastH = height;
+        post("resize", { v: height, immediate: true, src: "sched" });
+      }
+    };
+    if (settleFrames > 0) {
+      resizeRaf = requestAnimationFrame(() => {
+        resizeRaf = requestAnimationFrame(measureNow);
+      });
+    } else {
+      resizeRaf = requestAnimationFrame(measureNow);
+    }
   }
 
   function resizeChatInput() {
@@ -2564,7 +2605,9 @@
     setChatHistoryOpen(false);
     panel.classList.remove("chat-open");
     if (chatRecognition) { try { chatRecognition.stop(); } catch (_) {} chatRecognition = null; }
-    postChatResize();
+    // Deferred: measured now, the panel is still at the clamp floor because
+    // the search surface restored below has not been laid out yet.
+    postChatResize(2);
     if (restorePrevious && chatReturnToMedia && mediaState && mediaState.active) openMediaView();
     else input.focus();
     chatReturnToMedia = false;
@@ -4715,7 +4758,7 @@
         const h = Math.ceil(panel.getBoundingClientRect().height);
         if (h > 0) {
           lastH = h;
-          post("resize", { v: h, immediate: true });
+          post("resize", { v: h, immediate: true, src: "measure-expand" });
         }
       }
 
@@ -4902,7 +4945,7 @@
       const h = Math.ceil(panel.getBoundingClientRect().height);
       if (h > 0) {
         lastH = h;
-        post("resize", { v: h, immediate: true });
+        post("resize", { v: h, immediate: true, src: "whatsnew" });
       }
     });
   }
@@ -4967,16 +5010,10 @@
     return m + ":" + String(s).padStart(2, "0");
   }
 
-  function postMediaResize() {
+  function postMediaResize(settleFrames = 0) {
     // The panel height changed (search UI hidden/shown) — tell Rust to
     // hug the new content height immediately, like structural resizes.
-    requestAnimationFrame(() => {
-      const h = Math.ceil(panel.getBoundingClientRect().height);
-      if (h > 0) {
-        lastH = h;
-        post("resize", { v: h, immediate: true });
-      }
-    });
+    schedulePanelHeight(settleFrames);
   }
 
   // Calculated playback clock. Rust pushes jitter by fractions of a
@@ -5309,7 +5346,8 @@
       mediaRaf = 0;
     }
     panel.classList.remove("media-open");
-    postMediaResize();
+    // Deferred for the same reason as closing Chat.
+    postMediaResize(2);
   }
 
   // Click/drag-to-seek on the progress bar. The anchor jumps

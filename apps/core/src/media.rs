@@ -214,25 +214,37 @@ fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as S;
 
     let mut out = Vec::new();
+    // Everything the enumeration saw and what it claimed, including sessions
+    // the filter below is about to drop. A player that never appears is the
+    // bug this is for, and the log has to contain the evidence for it.
+    let mut observed: Vec<(String, &'static str)> = Vec::new();
     if let Ok(sessions) = manager.GetSessions() {
         if let Ok(count) = sessions.Size() {
             for index in 0..count {
                 let Ok(session) = sessions.GetAt(index) else {
                     continue;
                 };
-                let Ok(status) = session
+                // The app id is read before the status so a session that is
+                // dropped can still be named in the log. It is a cheap string
+                // read either way.
+                let app_id = session
+                    .SourceAppUserModelId()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+                let status = session
                     .GetPlaybackInfo()
                     .and_then(|info| info.PlaybackStatus())
-                else {
+                    .ok();
+                observed.push((
+                    app_id.clone(),
+                    status.map(status_name).unwrap_or("unreadable"),
+                ));
+                let Some(status) = status else {
                     continue;
                 };
                 if !matches!(status, S::Playing | S::Paused | S::Changing) {
                     continue;
                 }
-                let app_id = session
-                    .SourceAppUserModelId()
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
                 let key = if app_id.is_empty() {
                     let fallback = media_fallback_key(&session_title(&session));
                     warn_once_about_idless_session(&fallback);
@@ -259,6 +271,7 @@ fn live_sessions(manager: &SessionManager) -> Vec<LiveSession> {
             }
         }
     }
+    log_enumeration_change(&observed);
     out
 }
 /// Session liveness probe: a listed session whose app already quit (or a
@@ -587,6 +600,55 @@ fn warn_once_about_idless_session(key: &str) {
     crate::logging::warn(&format!(
         "media: session reported no source app id, using fallback key {key:?}"
     ));
+}
+
+/// Record the enumeration whenever its membership or reported statuses change.
+///
+/// The original report was "a third player never appeared at all", and the
+/// state of that player — what it reported, whether it appeared at all — was
+/// not recoverable afterwards. Sampling every snapshot would bury the log, so
+/// this writes a line per change and nothing in between. Dropped sessions are
+/// included: a player sitting at `closed` is exactly what the status filter
+/// hides, and that has to be visible rather than inferred.
+fn log_enumeration_change(observed: &[(String, &'static str)]) {
+    static LAST: OnceLock<Mutex<String>> = OnceLock::new();
+    let signature = enumeration_signature(observed);
+    let Ok(mut last) = LAST.get_or_init(|| Mutex::new(String::new())).lock() else {
+        return;
+    };
+    if *last == signature {
+        return;
+    }
+    let became_empty = signature.is_empty();
+    *last = signature.clone();
+    // Seeing nothing is normal between tracks and after a player closes; it
+    // only matters when it is a change worth reading.
+    if became_empty {
+        return;
+    }
+    crate::logging::info(&format!(
+        "media: sessions {} [{}]",
+        observed.len(),
+        signature
+    ));
+}
+
+/// Identity of one enumeration, order-independent so a reordering alone is not
+/// reported as a change.
+fn enumeration_signature(observed: &[(String, &'static str)]) -> String {
+    let mut parts: Vec<String> = observed
+        .iter()
+        .map(|(app_id, status)| {
+            let name = if app_id.is_empty() {
+                "(no app id)"
+            } else {
+                app_id.as_str()
+            };
+            format!("{name}={status}")
+        })
+        .collect();
+    parts.sort();
+    parts.join(", ")
 }
 
 fn session_title(session: &Session) -> String {
@@ -1165,6 +1227,39 @@ pub fn control(action: MediaAction) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_enumeration_signature_records_what_was_dropped() {
+        // A player sitting at `closed` is what the status filter hides; the
+        // log line has to carry it rather than only the survivors.
+        let observed = vec![
+            ("Spotify.exe_x!Spotify".to_string(), "closed"),
+            ("Chrome".to_string(), "playing"),
+        ];
+        let signature = enumeration_signature(&observed);
+        assert!(signature.contains("Spotify.exe_x!Spotify=closed"));
+        assert!(signature.contains("Chrome=playing"));
+    }
+
+    #[test]
+    fn the_signature_is_order_independent_and_names_missing_ids() {
+        let a = vec![
+            ("one".to_string(), "paused"),
+            ("".to_string(), "stopped"),
+        ];
+        let b = vec![
+            ("".to_string(), "stopped"),
+            ("one".to_string(), "paused"),
+        ];
+        // Reordering alone must not look like a change in the log.
+        assert_eq!(enumeration_signature(&a), enumeration_signature(&b));
+        assert!(enumeration_signature(&a).contains("(no app id)=stopped"));
+    }
+
+    #[test]
+    fn an_empty_enumeration_has_an_empty_signature() {
+        assert_eq!(enumeration_signature(&[]), "");
+    }
 
     /// The bug: two players that cannot report an app id both became `""`,
     /// and the dedupe dropped the second one. Neither dot nor selection

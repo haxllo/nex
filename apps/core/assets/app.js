@@ -1821,9 +1821,21 @@
     if (!conversation) return;
     const next = typeof path === "string" ? path.trim() : "";
     if (next === currentChatScope()) return;
+    // The card and its result stay in the transcript, so the model may still
+    // believe the folder is set. The next message says otherwise, once.
+    if (!next && currentChatScope()) conversation.scopeCleared = true;
     conversation.scope = next;
     renderChatScope();
     persistChat();
+  }
+
+  // One message after a clear is enough to correct the transcript: repeating it
+  // would keep relitigating a folder nobody is using any more.
+  function takeScopeCleared() {
+    const conversation = chatConversations.find((item) => item.id === chatConversationId);
+    if (!conversation || conversation.scopeCleared !== true) return false;
+    conversation.scopeCleared = false;
+    return true;
   }
 
   function renderChatScope() {
@@ -3493,7 +3505,7 @@
   const chatTextDecoder = new TextDecoder();
 
   function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false) {
-    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null };
+    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared: takeScopeCleared() };
     return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
   }
 
@@ -3724,7 +3736,7 @@
     jumpChatToBottom();
     chatNotice.textContent = ""; chatNotice.classList.remove("error");
     updateChatStreamingState(true);
-    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null });
+    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared: takeScopeCleared() });
     chatInput.focus(); postChatResize();
     return true;
   }

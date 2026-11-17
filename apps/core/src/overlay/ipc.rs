@@ -206,6 +206,10 @@ pub(crate) struct ChatSendPayload {
     /// names against it before validating any path.
     #[serde(default)]
     pub scope: Option<String>,
+    /// True for the one message after the folder was cleared, so the model can
+    /// be told the folder it saw earlier is gone rather than assuming it.
+    #[serde(default)]
+    pub scope_cleared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

@@ -1,4 +1,4 @@
-<!-- release: 3.0.0 -->
+<!-- release: 3.0.1 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -89,59 +89,13 @@
   cut the section instead.
 -->
 
-## Chat works in your files
+## The notes page turns up
 
-Nex can read a file, write one, make a folder, move something, or run a command from the chat. Every step that touches your disk arrives as a card you can refuse.
+One fix. Nex recorded a release as read the moment the What's New page was opened, so if the panel closed before the page had drawn, the notes were spent: never shown, and no pill to bring them back. The version now counts as read once the page has actually been on screen.
 
-A conversation can also carry a folder, so "open last week's invoices" finds them without a path.
+If you updated to 3.0.0 and never saw its notes, this is why, and this build shows them.
 
-### Chat
+### Under the hood
 
-- Ask for a folder or file by name and Nex finds it in the index, without a disk walk.
-- A large file is read in order, so the middle gets read too.
-- Writing, editing and deleting all work, and a delete goes to the Recycle Bin. Something executable is flagged before it is saved.
-- Commands run through PowerShell and print as they go. Stop ends the command, not just the answer.
-- A file the model just made is previewed in the transcript.
-- A reply that runs into the provider's output limit keeps going past it.
-- When the model runs out of steps there is a Continue button.
-- Questions about the machine get checked rather than answered from a stale guess.
-
-### The transcript
-
-- Markdown takes shape as it streams, so a long answer holds its formatting when it ends.
-- Code is coloured and can be copied.
-- A slow step says what it is doing and, once it is done, what it cost.
-- A failure gets its own block, so a dropped connection leaves the reply above it alone.
-- Stop leaves a mark where the answer ended.
-- A long answer has a control that jumps back to the newest message.
-
-### The folder a conversation is working in
-
-- The folder sits in the bar above your message. Clicking it lists what is there and opens anything in it.
-- **+** attaches a file from that folder to your next message, up to three.
-- **×** clears it, and the model is told, so it stops treating bare names as paths.
-- A step the model asks for mid-task can set the folder for the rest of that task.
-
-### Approvals
-
-- The card names what it is about to touch first: the file, the folder, the command.
-- **Allow the rest** covers the remaining steps of that task. Deleting, running commands and opening unfamiliar links still ask every time.
-- The card opens where you can see it.
-- A step that never ran says why.
-
-### The panel and media
-
-- Tab opens Chat from the search box, and the box says so.
-- Closing a view keeps the panel at its full height.
-- Compact view shows no hover hints.
-- Chat settings, conversation history and the composer follow the glass theme.
-- Each playing app keeps its own session, so switching players leaves the right track on screen and the right dot lit.
-- Album art follows the track, with a spinning record when a track has none.
-
-### Fixes
-
-- Log lines start with a local date and time.
-- Quitting does not freeze when the indexer is slow to answer.
-- The hotkey works over a fullscreen game, the tray says when it is being held back, and saving a new one does not flash console windows.
-- Uninstalling an app from the menu returns to the panel.
-- Removing a saved API key is acknowledged, and a provider saved without a URL is refused.
+- A drafted release page no longer comes out empty when the tag it is building is also the newest tag.
+- The draft no longer carries a placeholder line about "limits worth knowing".

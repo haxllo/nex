@@ -3,9 +3,11 @@
 #
 # 1. Strip AI co-author trailers.
 # 2. Require a Linear issue id (CIQ-<n>) when the commit changes code paths.
+# 3. Refuse an issue-tracked commit on master/main: issue work needs a branch.
 #
-# Exceptional commits can bypass the Linear check once with:
-#   NEX_ALLOW_NO_LINEAR=1 git commit ...
+# Exceptional commits can bypass once with:
+#   NEX_ALLOW_NO_LINEAR=1      git commit ...   (no Linear id)
+#   NEX_ALLOW_MASTER_COMMIT=1  git commit ...   (issue commit on master)
 
 msg_file="$1"
 
@@ -22,6 +24,33 @@ case "$subject" in
 esac
 
 if grep -Eq 'CIQ-[0-9]+' "$msg_file"; then
+  # --- 3. Issue work belongs on a branch, not on master ---------------------
+  # A commit naming an issue is work somebody may review; it must not land on
+  # master directly. Release and maintenance commits name no issue, so they
+  # pass. Staged changes survive the rejection, so no work is lost.
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  case "$branch" in
+    master|main)
+      if [ "$NEX_ALLOW_MASTER_COMMIT" = "1" ]; then
+        echo "commit-msg: master guard bypassed (NEX_ALLOW_MASTER_COMMIT=1)" >&2
+        exit 0
+      fi
+      id=$(grep -Eo 'CIQ-[0-9]+' "$msg_file" | head -n 1)
+      cat >&2 <<EOF
+commit-msg: refusing issue commit $id directly on $branch.
+
+            Work on an issue goes on its own branch. Your staged changes are
+            untouched; create the branch and commit again:
+
+              git switch -c <ciq-id>-short-description
+              git commit ...
+
+            If this really belongs on $branch, bypass once with:
+              NEX_ALLOW_MASTER_COMMIT=1 git commit ...
+EOF
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 

@@ -17,6 +17,11 @@
 5. **Process boundaries.** UI (Medium IL) never indexes; indexer (Medium IL)
    never renders; helper (High IL) is a broker, not a supervisor. See
    "Process Model & Privilege Boundaries" below.
+6. **Branch first.** Implementation work for a recorded issue goes on its own
+   branch; never commit it straight to `master`. Work on `master` only when the
+   user explicitly asks. The `commit-msg` hook refuses an issue commit on
+   `master`/`main`. The branch is created from `master` before the first commit,
+   named after the issue (`ciq-42-overlay-focus`).
 
 ## Build & Test
 
@@ -164,11 +169,15 @@ active meanwhile. The snapshot-sync loop respawns a dead indexer.
 ## Agent Tooling
 
 - `scripts/git-hooks/commit-msg` enforces the non-negotiables: it strips AI
-  co-author trailers and rejects a commit that changes `apps/`, `scripts/`, or
-  `manifests/` without a `CIQ-<n>` id. Enable it per clone with
-  `git config core.hooksPath scripts/git-hooks`. Exceptional commits can bypass
-  once via `NEX_ALLOW_NO_LINEAR=1`.
-- `CLAUDE.md`, `.github/copilot-instructions.md`, and `.cursor/rules/nex.mdc`
+  co-author trailers, rejects a commit that changes `apps/`, `scripts/`, or
+  `manifests/` without a `CIQ-<n>` id, and rejects an issue commit made on
+  `master`/`main` (staged changes survive, so the commit is redone on a
+  branch). Enable it per clone with `git config core.hooksPath scripts/git-hooks`.
+  Exceptional commits can bypass once via `NEX_ALLOW_NO_LINEAR=1` (no id) or
+  `NEX_ALLOW_MASTER_COMMIT=1` (issue commit on master).
+- Hooks are opt-in per clone and `--no-verify` skips them, so the branch rule is
+  a guard, not a guarantee; CI and review are the backstop.
+- `CLAUDE.md` and `.github/copilot-instructions.md`
   repeat the non-negotiables for agents that do not load this file.
 - CI rejects pull requests that change code paths without a Linear id in the
   title or body.
@@ -217,15 +226,16 @@ TOML format (primary), with JSON/JSON5 backward compatibility. **Never add new k
 **IMPORTANT**: Release workflows must be run directly by the main agent (me), NOT delegated to subagents. Use subagents only for review/verification of release output if needed.
 
 **Trigger**: When the user asks to run, create, or publish a Nex release, the
-work is: bump the version, optionally rewrite `docs/whats-new.md`, commit, and
+work is: bump the version, rewrite `docs/whats-new.md`, commit, and
 push the tag. Pushing a `v*` tag runs `.github/workflows/release.yml`, which
 verifies the tag matches all three crates, builds, packs the zip and installer,
-and opens the GitHub release. **Do not run the packaging scripts by hand, and
-do not write `docs/releases/v<ver>-notes.md` by hand** — the workflow drafts it
-from the commit log at tag time. Do not bump the version or push a tag unless
+and opens the GitHub release. **The agent never writes
+`docs/releases/v<ver>-notes.md`** — it is generated, not hand-maintained, and
+the workflow drafts it from the commit log at tag time. Do not run the packaging
+scripts by hand either. Do not bump the version or push a tag unless
 the user asked for a release.
 
-**Two separate release documents.** Only the first is required to ship.
+**Two separate release documents.** Both ship; neither substitutes for the other.
 
 | File | Audience | Who reads it |
 |---|---|---|
@@ -241,12 +251,12 @@ Never put tickets, commits, file or function names in it.
 exist before the build. A build without it emits a `cargo:warning` and bakes an
 empty string, which ships the tips fallback.
 
-**Shipping without rewriting the What's New document is allowed. Shipping
-without the document is not.** The file is committed, so its absence means a
-broken tree and fails the release; so does a file with no text outside its
-HTML comments. Text that is merely stale only warns. That marker is how a stale
-document is detected — bump it with the prose, or the app shows last release's
-text. `scripts/windows/release-notes-from-commits.ps1` drafts
+**Rewriting the What's New document every release is required, not optional.**
+Write the prose for this release's user-visible changes and bump its `release:`
+marker in the same commit as the version bump. The marker is how a stale
+document is detected; leaving it alone ships last release's text. The file is
+committed, so its absence means a broken tree and fails the release; so does a
+file with no text outside its HTML comments. `scripts/windows/release-notes-from-commits.ps1` drafts
 `docs/releases/v<ver>-notes.md` from the commit log when that file is absent,
 and the workflow runs it automatically; it is a drafting tool for the release
 page only, never a source for What's New.
@@ -255,7 +265,7 @@ page only, never a source for What's New.
 # 1. bump version in apps/core, apps/ui, and apps/indexer (all three build
 #    scripts stamp FileVersion from their own package)
 # 2. rewrite docs/whats-new.md for this release, and bump its `release:` marker
-#    (optional, but skipping it ships last release's text)
+#    (both required; skipping either ships last release's text)
 #    — do 1-2 in one commit, because the What's New document is compiled in
 
 # NO local release build is needed. CI builds the shipped binaries; a local

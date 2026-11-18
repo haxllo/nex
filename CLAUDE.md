@@ -16,8 +16,12 @@ only repeats the rules that must never be skipped.
 5. **Entry point.** `Nex.exe` no longer exists; the UI binary is
    `NexUIProcess.exe`.
 
-6. **Releasing is CI's job.** Bump the three crate versions, optionally rewrite
-   `docs/whats-new.md`, commit, push a `v*` tag. `.github/workflows/release.yml`
-   drafts the release notes, builds, packages and publishes. Do not write
-   `docs/releases/v<ver>-notes.md` by hand, do not run the packaging scripts,
-   and do not release unless the user asked for one.
+6. **Branch first.** Issue implementation work goes on its own branch, never
+   straight to `master` unless the user explicitly asks for master. The
+   `commit-msg` hook refuses an issue commit on `master`/`main`.
+7. **Releasing is CI's job.** Bump the three crate versions, rewrite
+   `docs/whats-new.md` (prose plus its `release:` marker), commit, push a `v*`
+   tag. `.github/workflows/release.yml` drafts the release notes, builds,
+   packages and publishes. Never write `docs/releases/v<ver>-notes.md` — CI
+   generates it. Do not run the packaging scripts, and do not release unless
+   the user asked for one.

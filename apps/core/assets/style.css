@@ -4180,19 +4180,44 @@ html.glass-native .chat-settings {
 
 .chat-settings-actions {
   display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
   padding: 9px 14px 11px;
   border-top: 1px solid var(--divider);
 }
+/* State reads as text above the row, not as another thing in it: it used to
+   take a full line inside the flex row, which pushed Save onto a line of its
+   own and made the footer grow by a row every time a status appeared. */
 .chat-connection-hint {
-  flex: 1 1 100%;
-  margin-bottom: 2px;
   color: var(--text-faint);
   font-size: 10px;
   line-height: 14px;
+}
+.chat-connection-hint:empty { display: none; }
+.chat-settings-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+/* A hairline between "look at this" and "this ends your session". It draws
+   itself only when one of those buttons is on screen, so the row does not grow
+   a stray tick for a provider that has neither. */
+.chat-settings-split {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: var(--divider);
+}
+.chat-settings-buttons:not(:has(.is-danger:not([hidden]))) .chat-settings-split {
+  display: none;
+}
+
+/* Save sits alone at the far end. `margin-left: auto` rather than a spacer so
+   it stays put when the left-hand buttons appear and disappear with provider. */
+.chat-settings-buttons > .is-primary {
+  margin-left: auto;
 }
 .chat-secondary-button {
   min-height: 28px;
@@ -4207,6 +4232,22 @@ html.glass-native .chat-settings {
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease), transform 160ms var(--ease-out);
 }
 .chat-secondary-button:hover { background: var(--hover); color: var(--text); }
+.chat-secondary-button.is-primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.chat-secondary-button.is-primary:hover:not(:disabled) {
+  background: var(--accent);
+  opacity: 0.88;
+}
+/* Destructive, but not loud until pointed at: these sit next to Save and one
+   of them ends the session. */
+.chat-secondary-button.is-danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger-border);
+  background: var(--danger-wash);
+}
 .chat-secondary-button:active { transform: scale(.98); }
 .chat-secondary-button:disabled { opacity: .6; cursor: wait; }
 .chat-secondary-button[aria-busy="true"]::before {

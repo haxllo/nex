@@ -244,13 +244,20 @@
             </div>
           </div>
           <div class="chat-settings-actions">
+            <!-- Two lines of state, then one row of actions. Everything that
+                 changes the account or the stored key stays on the left; Save
+                 owns the right-hand corner on its own, because it is the reason
+                 the panel is open and it used to look exactly like Log out. -->
             <div id="chat-connection-hint" class="chat-connection-hint">Your ChatGPT sign-in is stored securely in Nex's app data.</div>
-            <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
-            <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
-            <button type="button" id="chat-disconnect-button" class="chat-secondary-button" hidden>Log out</button>
             <div id="chat-save-status" class="chat-connection-hint" role="status" aria-live="polite"></div>
-            <button type="button" id="chat-remove-key-button" class="chat-secondary-button" hidden>Remove saved key</button>
-            <button type="button" id="chat-save-button" class="chat-secondary-button">Save</button>
+            <div class="chat-settings-buttons">
+              <button type="button" id="chat-check-button" class="chat-secondary-button" hidden>Check connection</button>
+              <button type="button" id="chat-connect-button" class="chat-secondary-button" hidden>Connect account</button>
+              <span class="chat-settings-split" aria-hidden="true"></span>
+              <button type="button" id="chat-remove-key-button" class="chat-secondary-button is-danger" hidden>Remove saved key</button>
+              <button type="button" id="chat-disconnect-button" class="chat-secondary-button is-danger" hidden>Log out</button>
+              <button type="button" id="chat-save-button" class="chat-secondary-button is-primary">Save</button>
+            </div>
           </div>
         </div>
 

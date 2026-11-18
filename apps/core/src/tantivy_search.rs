@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
@@ -52,6 +54,12 @@ pub(crate) struct TantivyIndex {
     schema: Schema,
     write_count: Mutex<u32>,
     commit_threshold: u32,
+    /// Bumped on every successful commit. A query reloads the reader only when
+    /// this moved, so an unchanged index costs no searcher rebuild per
+    /// keystroke.
+    commit_generation: AtomicU64,
+    /// The generation the current searcher was reloaded from.
+    loaded_generation: AtomicU64,
 }
 
 impl TantivyIndex {
@@ -114,6 +122,8 @@ impl TantivyIndex {
             schema,
             write_count: Mutex::new(0),
             commit_threshold: 500,
+            commit_generation: AtomicU64::new(0),
+            loaded_generation: AtomicU64::new(0),
         })
     }
 
@@ -122,9 +132,26 @@ impl TantivyIndex {
             return Ok(Vec::new());
         }
 
-        self.reader
-            .reload()
-            .map_err(|e| format!("tantivy reload error: {e}"))?;
+        let started = Instant::now();
+        let (cpu_start_ms, faults_start) = process_cost_counters();
+
+        // Reload only when a commit actually landed, and never wait for one.
+        // `reload()` re-opens every segment reader; doing it per keystroke was
+        // pure work on an unchanged index, and doing it while the writer holds
+        // the lock queued the keystroke behind an in-flight commit - which is
+        // exactly the multi-second window a startup cycle creates. Serving the
+        // previous searcher for one query costs a slightly stale result set;
+        // the next query picks the commit up.
+        let generation = self.commit_generation.load(Ordering::Acquire);
+        let writer_busy = self.writer.try_lock().is_err();
+        let reloaded = !writer_busy && generation != self.loaded_generation.load(Ordering::Relaxed);
+        if reloaded {
+            self.reader
+                .reload()
+                .map_err(|e| format!("tantivy reload error: {e}"))?;
+            self.loaded_generation.store(generation, Ordering::Relaxed);
+        }
+        let reload_ms = started.elapsed();
 
         let searcher = self.reader.searcher();
         let query = build_prefix_query(
@@ -142,6 +169,7 @@ impl TantivyIndex {
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit).order_by_score())
             .map_err(|e| format!("tantivy search error: {e}"))?;
+        let collect_ms = started.elapsed();
 
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
@@ -200,7 +228,37 @@ impl TantivyIndex {
             );
         }
 
+        // One line only when a query is slow enough to be felt. Without it the
+        // cause of a slow first keystroke can only be guessed at: the four
+        // stages below separate page-cache faults (everything equally slow but
+        // warm on the retry), a blocked commit (`writer_busy`), a cold searcher
+        // rebuild (`reload_ms`) and plain CPU starvation (all stages slow).
+        let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if total_ms >= 20.0 {
+            let (cpu_end_ms, faults_end) = process_cost_counters();
+            crate::logging::info(&format!(
+                "[nex] tantivy seed slow q={:?} total={:.1}ms reload={:.1}ms collect={:.1}ms docs={:.1}ms hits={} limit={} reloaded={} writer_busy={} gen={} cpu_ms={} faults={}",
+                query_text,
+                total_ms,
+                reload_ms.as_secs_f64() * 1000.0,
+                (collect_ms - reload_ms).as_secs_f64() * 1000.0,
+                (started.elapsed() - collect_ms).as_secs_f64() * 1000.0,
+                results.len(),
+                limit,
+                reloaded,
+                writer_busy,
+                generation,
+                cpu_end_ms.saturating_sub(cpu_start_ms),
+                faults_end.saturating_sub(faults_start),
+            ));
+        }
+
         Ok(results)
+    }
+
+    /// Record that the on-disk index moved, so the next query reloads.
+    fn note_commit(&self) {
+        self.commit_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn index_items(&self, items: &[SearchItem]) -> Result<(), String> {
@@ -215,6 +273,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *self
             .write_count
             .lock()
@@ -243,6 +302,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *self
             .write_count
             .lock()
@@ -266,6 +326,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *self
             .write_count
             .lock()
@@ -277,6 +338,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *self
             .write_count
             .lock()
@@ -367,6 +429,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *self
             .write_count
             .lock()
@@ -413,6 +476,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         collect_garbage(&writer);
 
         Ok(())
@@ -517,6 +581,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         *count = 0;
         Ok(true)
     }
@@ -529,6 +594,7 @@ impl TantivyIndex {
         writer
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
+        self.note_commit();
         collect_garbage(&writer);
         let mut count = self
             .write_count
@@ -601,9 +667,18 @@ impl TantivyIndex {
 /// warming runs on a background thread and only re-reads files that are
 /// new or changed (segments are immutable), plus a full pass every few
 /// minutes in case the cache was trimmed while idle.
+///
+/// This is the difference between a first keystroke and the second one. The
+/// segmentation files are mapped, not read, so the pages behind them come off
+/// disk on first touch: on the live 222k-document index a prefix query that
+/// touches a new region costs 73-271 ms, and 3-4 ms once those pages are
+/// resident. Warming by reading the files makes the fault soft, which is why
+/// the pass has to run *before* the keystroke and in the process that owns the
+/// reader (the indexer), not where the panel lives.
 #[derive(Default)]
 pub(crate) struct IndexWarmer {
     in_flight: std::sync::atomic::AtomicBool,
+    files_read: std::sync::atomic::AtomicU64,
     state: Mutex<WarmState>,
 }
 
@@ -615,8 +690,38 @@ struct WarmState {
 
 const FULL_REWARM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// A show-triggered pass may ignore the unchanged-file bookkeeping, because a
+/// trimmed page cache leaves lengths and mtimes identical. Throttled so a user
+/// hammering the hotkey does not re-read the index per show.
+const FORCED_REWARM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl IndexWarmer {
     pub(crate) fn warm_in_background(self: &std::sync::Arc<Self>, index_dir: PathBuf) {
+        self.spawn_warm(index_dir, false);
+    }
+
+    /// Warm even when every file looks unchanged. Called from the show path:
+    /// the OS can drop mapped pages while the panel sits idle, and handing out
+    /// identical (length, mtime) stamps to a warmer that trusts them is exactly
+    /// how the first keystroke after an idle period stays slow.
+    pub(crate) fn warm_in_background_forced(self: &std::sync::Arc<Self>, index_dir: PathBuf) {
+        self.spawn_warm(index_dir, true);
+    }
+
+    /// Files read by warm passes so far. Test and log evidence that a pass did
+    /// real work, since a pass that skips everything is otherwise invisible.
+    pub(crate) fn files_read(&self) -> u64 {
+        self.files_read.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Pretend the last full pass is old, so a forced pass is not throttled.
+    #[cfg(test)]
+    pub(crate) fn rewind_throttle_for_test(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_full = None;
+    }
+
+    fn spawn_warm(self: &std::sync::Arc<Self>, index_dir: PathBuf, force: bool) {
         use std::sync::atomic::Ordering;
         if self.in_flight.swap(true, Ordering::AcqRel) {
             return;
@@ -625,7 +730,7 @@ impl IndexWarmer {
         let spawned = std::thread::Builder::new()
             .name("nex-index-warm".into())
             .spawn(move || {
-                this.warm(&index_dir);
+                this.warm(&index_dir, force);
                 this.in_flight.store(false, Ordering::Release);
             });
         if spawned.is_err() {
@@ -633,19 +738,24 @@ impl IndexWarmer {
         }
     }
 
-    fn warm(&self, index_dir: &Path) {
+    fn warm(&self, index_dir: &Path, force: bool) {
         let Ok(entries) = std::fs::read_dir(index_dir) else {
             return;
         };
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state
+        let due = state
             .last_full
-            .is_none_or(|at| at.elapsed() >= FULL_REWARM_INTERVAL)
-        {
+            .is_none_or(|at| at.elapsed() >= FULL_REWARM_INTERVAL);
+        let forced_due = force
+            && state
+                .last_full
+                .is_none_or(|at| at.elapsed() >= FORCED_REWARM_MIN_INTERVAL);
+        if due || forced_due {
             state.files.clear();
             state.last_full = Some(std::time::Instant::now());
         }
         let mut seen = HashSet::new();
+        let mut read = 0_u64;
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(meta) = entry.metadata() else { continue };
@@ -661,9 +771,18 @@ impl IndexWarmer {
             // that tantivy's mmap reads later.
             if std::fs::read(&path).is_ok() {
                 state.files.insert(path, stamp);
+                read += 1;
             }
         }
         state.files.retain(|path, _| seen.contains(path));
+        if read > 0 {
+            self.files_read
+                .fetch_add(read, std::sync::atomic::Ordering::AcqRel);
+            crate::logging::info(&format!(
+                "[nex] index warm: read {read} file(s){} into the page cache",
+                if forced_due || due { " (full pass)" } else { "" }
+            ));
+        }
     }
 }
 
@@ -742,6 +861,54 @@ fn build_prefix_query(
     Ok(Box::new(BooleanQuery::new(all_subqueries)))
 }
 
+/// Process CPU milliseconds and cumulative page-fault count, for telling a
+/// slow query apart by cause: high `faults` with `cpu_ms` close to the wall
+/// time is page-cache work, `cpu_ms` close to the wall time with few faults is
+/// scoring, and `cpu_ms` far below it is disk I/O or CPU starvation.
+#[cfg(target_os = "windows")]
+fn process_cost_counters() -> (u64, u32) {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let filetime_to_u64 = |ft: &FILETIME| ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let cpu_ms = unsafe {
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        ) != 0
+        {
+            (filetime_to_u64(&kernel) + filetime_to_u64(&user)) / 10_000
+        } else {
+            0
+        }
+    };
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let faults = unsafe {
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0 {
+            counters.PageFaultCount
+        } else {
+            0
+        }
+    };
+    (cpu_ms, faults)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_cost_counters() -> (u64, u32) {
+    (0, 0)
+}
+
 fn extract_extension(path: &str) -> &str {
     let filename = path
         .rsplit(std::path::MAIN_SEPARATOR)
@@ -772,7 +939,7 @@ mod tests {
     static TANTIVY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Hold for the whole test: `let _guard = tantivy_guard();`
-    fn tantivy_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn tantivy_guard() -> std::sync::MutexGuard<'static, ()> {
         TANTIVY_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -802,10 +969,72 @@ mod tests {
         }
     }
 
-    fn open_temp_index() -> (TantivyIndex, tempfile::TempDir) {
+    pub(crate) fn open_temp_index() -> (TantivyIndex, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let index = TantivyIndex::open(dir.path()).expect("open tantivy index");
         (index, dir)
+    }
+
+    #[test]
+    fn search_reloads_only_when_a_commit_landed() {
+        let _serial = tantivy_guard();
+        let (index, _dir) = open_temp_index();
+        index
+            .index_items(&[SearchItem::new("1", "app", "Alpha", "/a")])
+            .unwrap();
+
+        assert_eq!(index.search("alpha", 10).unwrap().len(), 1);
+        let loaded = index.loaded_generation.load(Ordering::Relaxed);
+        assert_eq!(
+            loaded,
+            index.commit_generation.load(Ordering::Relaxed),
+            "the first query must reflect the committed state"
+        );
+
+        // A query with nothing committed must not rebuild the searcher.
+        assert_eq!(index.search("alpha", 10).unwrap().len(), 1);
+        assert_eq!(
+            index.loaded_generation.load(Ordering::Relaxed),
+            loaded,
+            "an unchanged index must not reload per keystroke"
+        );
+
+        // Once a commit lands, the next query picks it up.
+        index
+            .index_items(&[
+                SearchItem::new("1", "app", "Alpha", "/a"),
+                SearchItem::new("2", "app", "Alphabet", "/b"),
+            ])
+            .unwrap();
+        assert_eq!(index.search("alpha", 10).unwrap().len(), 2);
+        assert!(
+            index.loaded_generation.load(Ordering::Relaxed) > loaded,
+            "a commit must be picked up by the next query"
+        );
+    }
+
+    #[test]
+    fn search_serves_the_previous_searcher_while_the_writer_holds_the_lock() {
+        let _serial = tantivy_guard();
+        let (index, _dir) = open_temp_index();
+        index
+            .index_items(&[SearchItem::new("1", "app", "Alpha", "/a")])
+            .unwrap();
+        assert_eq!(index.search("alpha", 10).unwrap().len(), 1);
+
+        // Stand in for an in-flight commit: a keystroke must be answered from
+        // the current searcher, not queued behind the writer.
+        let writer = index.writer.lock().unwrap();
+        let started = std::time::Instant::now();
+        let results = index.search("alpha", 10).unwrap();
+        let elapsed = started.elapsed();
+        drop(writer);
+
+        assert_eq!(results.len(), 1, "the previous searcher still answers");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "a query must not wait for the writer, took {elapsed:?}"
+        );
     }
 
     #[test]
@@ -1100,5 +1329,45 @@ mod tests {
         // Flush to persist the delete
         index.flush().unwrap();
         assert_eq!(index.num_docs().unwrap(), 0);
+    }
+
+    /// The first keystroke after a restart or an idle period is the slow one
+    /// because the mapped segment files are cold: measured on a 222k-document
+    /// index, the first query that touches a region costs 73-271 ms and 3-4 ms
+    /// once the pages are resident. The warmer is what prevents that, so it has
+    /// to keep working when a trimmed cache leaves the files byte-identical.
+    #[test]
+    fn warm_pass_reads_files_and_skips_unchanged_ones() {
+        let _serial = tantivy_guard();
+        let (index, dir) = open_temp_index();
+        index
+            .index_items(&[SearchItem::new("1", "app", "Alpha", "/a")])
+            .unwrap();
+        drop(index);
+
+        let warmer = std::sync::Arc::new(IndexWarmer::default());
+        warmer.warm_in_background(dir.path().to_path_buf());
+        assert!(
+            settles(|| warmer.files_read() > 0),
+            "the first pass must read the segment files"
+        );
+
+        // Nothing changed, no force: a second pass has nothing to do.
+        let after_first = warmer.files_read();
+        warmer.warm_in_background(dir.path().to_path_buf());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            warmer.files_read(),
+            after_first,
+            "an unforced pass must not re-read unchanged files"
+        );
+
+        // A show-triggered pass must read them again all the same.
+        warmer.rewind_throttle_for_test();
+        warmer.warm_in_background_forced(dir.path().to_path_buf());
+        assert!(
+            settles(|| warmer.files_read() > after_first),
+            "a forced pass must re-read files whose length and mtime are unchanged"
+        );
     }
 }

@@ -2279,8 +2279,64 @@ impl CoreService {
     /// cold-page-fault latency.  Must be called with the outer service
     /// lock held (read or write).
     pub fn warm_search_cache(&self) {
+        self.warm_search_cache_impl(false);
+    }
+
+    /// Run the seed query for each hot single-character prefix, the way a
+    /// keystroke will, so the first typed character costs what the second one
+    /// does.
+    ///
+    /// Reading the segment files into the page cache (`warm_search_cache`)
+    /// covers the bytes but not the per-query setup: opening every field's
+    /// term dictionary, loading fieldnorms and walking the postings of a
+    /// prefix that matches a sixth of the index. Measured on a 361k-doc
+    /// index, the first `"f"` seed took 787 ms in the collector and the same
+    /// query with the process already warm took 17 ms.
+    ///
+    /// Returns the number of prefixes that produced hits.
+    pub fn warm_seed_queries(&self) -> usize {
+        const LIMIT: usize = 240;
+        let prefixes: Vec<char> = ('a'..='z').chain('0'..='9').collect();
+        let mut warmed = 0;
+        for prefix in prefixes {
+            let query = prefix.to_string();
+            match self.search_tantivy_seed(&query, LIMIT) {
+                Ok(items) if !items.is_empty() => warmed += 1,
+                _ => {}
+            }
+        }
+        warmed
+    }
+
+    /// `warm_seed_queries` at most once per 15 s. The show path calls this
+    /// every time the overlay opens, and 36 prefix queries against a warm
+    /// index is wasted work.
+    pub fn warm_seed_queries_throttled(&self) -> usize {
+        static LAST: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+        {
+            let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|at| at.elapsed() < MIN_INTERVAL) {
+                return 0;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        self.warm_seed_queries()
+    }
+
+    /// Same, but re-reads index files even when their length and mtime are
+    /// unchanged. A trimmed page cache leaves both identical, so the plain
+    /// pass skips exactly the files that went cold; this one is for the show
+    /// path and for the indexer's first cycle after a restart.
+    pub fn warm_search_cache_forced(&self) {
+        self.warm_search_cache_impl(true);
+    }
+
+    fn warm_search_cache_impl(&self, force: bool) {
         // UI client mode owns no Tantivy reader: warming segment files there is
-        // pure I/O on the show path. Only the indexer owns and warms the index.
+        // pure I/O on the show path. Only the indexer owns and warms the index;
+        // the UI asks for a pass over IPC instead (`ipc::warm_index`).
         let has_index = self
             .tantivy_index
             .read()
@@ -2298,7 +2354,11 @@ impl CoreService {
                 .unwrap_or(Path::new("."))
                 .join("index.tantivy")
         };
-        self.index_warmer.warm_in_background(index_dir);
+        if force {
+            self.index_warmer.warm_in_background_forced(index_dir);
+        } else {
+            self.index_warmer.warm_in_background(index_dir);
+        }
     }
 
     fn bump_search_generation(&self) {

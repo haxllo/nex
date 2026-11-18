@@ -166,6 +166,12 @@ fn start_chat_picker_file_read(
 /// Bumped for every working-folder listing request. A slow answer for a folder
 /// the dropdown has already left must not replace what is on screen now.
 static CHAT_FOLDER_GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Epoch ms of the last Show and how many queries have been stamped since.
+/// The message dispatch lives in a different function from the show path, so
+/// the first-keystroke probe needs them here rather than in the event loop.
+static SHOW_EPOCH_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static QUERIES_LOGGED_SINCE_SHOW: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 use crossbeam_channel::Sender;
 use tao::dpi::{LogicalSize, PhysicalPosition};
@@ -1193,6 +1199,14 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 UiCommand::Show => {
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     show_cmd_at = Some(Instant::now());
+                    SHOW_EPOCH_MS.store(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    QUERIES_LOGGED_SINCE_SHOW.store(0, std::sync::atomic::Ordering::Relaxed);
                     push_fg_stack(&mut fg_stack, hwnd);
                     if webview.is_none() {
                         ready = false;
@@ -1213,6 +1227,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             Ok(wv) => {
                                 subscribe_webview2_diagnostics(&wv);
                                 webview = Some(wv);
+                                // A fresh page starts with an empty iconCache:
+                                // everything it had been sent is gone with the
+                                // old WebView.
+                                icon_cache.clear_sent();
                             }
                             Err(e) => {
                                 crate::logging::warn(&format!("[nex] webview build failed: {e}"));
@@ -2059,6 +2077,12 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     s.has_focus = focused;
                 }
                 if focused {
+                    if !was_focused && show_cmd_at.is_some() {
+                        crate::runtime::log_info(&format!(
+                            "[nex] overlay focus gained {}ms after show",
+                            show_cmd_at.map(|s| s.elapsed().as_millis()).unwrap_or(0)
+                        ));
+                    }
                     was_focused = true;
                 }
                 if !focused {
@@ -2437,6 +2461,31 @@ fn handle_ipc(
                 return;
             }
             let q = p.v;
+            // The first few keystrokes after a show are the ones people
+            // notice. Stamp them end to end so a slow one names its own
+            // stage instead of being blamed on the search: `js_to_host_ms` is
+            // the WebView input handler plus the IPC hop, `keydown_to_input_ms`
+            // is how long the WebView took to turn the key into an input event,
+            // and `since_show_ms` says whether the key simply arrived while the
+            // panel was still arming.
+            if QUERIES_LOGGED_SINCE_SHOW.load(std::sync::atomic::Ordering::Relaxed) < 3 {
+                QUERIES_LOGGED_SINCE_SHOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let host_now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let show_at = SHOW_EPOCH_MS.load(std::sync::atomic::Ordering::Relaxed);
+                let show_since_ms = if show_at > 0 { host_now_ms - show_at } else { -1 };
+                let js_lag = p.at.map(|at| host_now_ms - at);
+                let keydelay = p.at.zip(p.key_at).map(|(at, key_at)| at - key_at);
+                crate::runtime::log_info(&format!(
+                    "[nex] query_rx chars={} since_show_ms={} js_to_host_ms={} keydown_to_input_ms={}",
+                    q.chars().count(),
+                    show_since_ms,
+                    js_lag.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                    keydelay.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                ));
+            }
             if let Ok(mut s) = state.lock() {
                 s.query = q.clone();
             }
@@ -3358,7 +3407,7 @@ fn snapshot_icon_subset_json(
         if path.is_empty() || !wanted.contains(path) || !seen.insert(path.to_owned()) {
             continue;
         }
-        if let Some(uri) = icons.data_uri_cached(path) {
+        if let Some(uri) = icons.data_uri_unsent(path) {
             icon_map.insert(path.to_owned(), serde_json::Value::String(uri.as_ref().to_owned()));
         }
     }
@@ -3397,7 +3446,7 @@ fn snapshot_icons_json(s: &ShimState, icons: &Arc<IconCache>, show_pending: bool
         .into_iter()
         .filter(|path| !path.is_empty() && seen.insert((*path).to_owned()))
         .filter_map(|path| {
-            let uri = icons.data_uri_cached(path)?;
+            let uri = icons.data_uri_unsent(path)?;
             Some((path.to_owned(), serde_json::Value::String(uri.as_ref().to_owned())))
         })
         .collect();

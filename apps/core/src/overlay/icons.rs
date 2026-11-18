@@ -25,22 +25,33 @@ use crate::overlay::model::OverlayRow;
 const DEFAULT_MAX_ENTRIES: usize = 128;
 const DEFAULT_IDLE_TRIM_MS: u32 = 90_000;
 
-/// Target square canvas size for normalized icons. Crisp at 2-3x DPI
-/// when CSS displays at 30px. PNG is ~3-8KB each — fits the LRU budget.
-const TARGET_ICON_SIZE: u32 = 128;
+/// Target square canvas size for normalized icons. The overlay renders row
+/// icons at 24 px (36 px in grid view), so 128 px was shipping 11-23 KB of
+/// base64 per app row - ~380 KB per keystroke for a full list - and the
+/// WebView then decoded 16384 px per icon on its main thread. 64 px still
+/// covers a 36 px slot at 1.75x scaling at a quarter of the pixels.
+const TARGET_ICON_SIZE: u32 = 64;
 /// Extraction request size for IShellItemImageFactory and
 /// PrivateExtractIconsW (primary high-res paths). 256px is the Windows
 /// jumbo icon size; larger sources are downscaled with Lanczos while
 /// native smaller sources are kept native-sized to avoid blur.
 const EXTRACT_ICON_SIZE: i32 = 256;
 
-const ICON_NORMALIZATION_VERSION: u8 = 3;
+/// Bumped whenever `TARGET_ICON_SIZE` changes so the disk cache does not
+/// serve 128 px PNGs to a build that renders 64 px slots.
+const ICON_NORMALIZATION_VERSION: u8 = 4;
 /// How long a memory entry is trusted before the prefetch thread re-stats
 /// its source. Keeps per-keystroke prefetch from re-reading every `.lnk`.
 const REVALIDATE_INTERVAL: Duration = Duration::from_secs(2);
 /// Disk budget per in-memory entry, so the disk tier scales with the
 /// memory target (clamped by `IconDiskCache` to 8–32 MiB).
 const DISK_BYTES_PER_MEMORY_ENTRY: u64 = 64 * 1024;
+
+/// The normalized icon canvas size, exposed so other modules' tests assert
+/// against the constant instead of a hardcoded 128.
+pub(crate) fn target_icon_size() -> u32 {
+    TARGET_ICON_SIZE
+}
 
 static PACKAGE_DIR_CACHE: OnceLock<Mutex<HashMap<String, Vec<PathBuf>>>> = OnceLock::new();
 
@@ -68,6 +79,12 @@ struct Inner {
     /// used to re-encode every visible icon each time; the URI is stable
     /// for a cache entry, so encode once and keep it next to its source.
     uri: HashMap<PathBuf, Arc<str>>,
+    /// URIs the page already holds, keyed identically. A state push used to
+    /// carry every warm icon for the current rows, so typing re-sent ~380 KB
+    /// of base64 per keystroke for icons the WebView had already decoded.
+    /// Entries are compared by `Arc` identity, so a re-decoded icon (source
+    /// changed) is not mistaken for one already delivered.
+    sent: HashMap<PathBuf, Arc<str>>,
     last_touch: HashMap<PathBuf, Instant>,
     max_entries: NonZeroUsize,
     idle_trim: Duration,
@@ -104,6 +121,7 @@ impl IconCache {
             inner: Mutex::new(Inner {
                 png: LruCache::new(max_entries),
                 uri: HashMap::new(),
+                sent: HashMap::new(),
                 last_touch: HashMap::new(),
                 max_entries,
                 idle_trim: Duration::from_millis(idle_trim_ms as u64),
@@ -233,6 +251,46 @@ impl IconCache {
     /// visible icon on every state push, which made each show pay for the
     /// same 48 base64 strings again.
     pub fn data_uri_cached(&self, path: &str) -> Option<Arc<str>> {
+        let (uri, _) = self.uri_inner(path)?;
+        Some(uri)
+    }
+
+    /// Like `data_uri_cached`, but only returns the URI when the page does not
+    /// already hold this exact icon, and records it as sent.
+    ///
+    /// This is what a state push must use: without it every keystroke re-sent
+    /// every warm icon for the visible rows (~380 KB of base64 with 128 px
+    /// icons), and the WebView paid to parse and re-decode icons it had. The
+    /// page keeps its own `iconCache`, so a repeat adds nothing.
+    pub fn data_uri_unsent(&self, path: &str) -> Option<Arc<str>> {
+        let (uri, key) = self.uri_inner(path)?;
+        let mut inner = self.inner.lock().ok()?;
+        if inner
+            .sent
+            .get(&key)
+            .is_some_and(|sent| Arc::ptr_eq(sent, &uri))
+        {
+            return None;
+        }
+        if inner.sent.len() > inner.max_entries.get() * 4 {
+            // Bounded: a long session with thousands of distinct paths would
+            // otherwise pin every delivered string. Clearing costs the page one
+            // full resend, which it tolerates.
+            inner.sent.clear();
+        }
+        inner.sent.insert(key, uri.clone());
+        Some(uri)
+    }
+
+    /// Forget what the page holds. Called when a WebView is rebuilt: the new
+    /// page starts with an empty `iconCache` and needs everything again.
+    pub(crate) fn clear_sent(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.sent.clear();
+        }
+    }
+
+    fn uri_inner(&self, path: &str) -> Option<(Arc<str>, PathBuf)> {
         if path.is_empty() {
             return None;
         }
@@ -240,18 +298,18 @@ impl IconCache {
         {
             let mut inner = self.inner.lock().ok()?;
             if let Some(uri) = inner.uri.get(&key).cloned() {
-                inner.touch(key);
-                return Some(uri);
+                inner.touch(key.clone());
+                return Some((uri, key));
             }
         }
         let bytes = self.png_bytes_cached(path)?;
         let uri: Arc<str> = Arc::from(data_uri(&bytes));
         if let Ok(mut inner) = self.inner.lock() {
             inner.uri.insert(key.clone(), uri.clone());
-            inner.touch(key);
+            inner.touch(key.clone());
             inner.clean_orphans();
         }
-        Some(uri)
+        Some((uri, key))
     }
 
     pub(crate) fn trim_unused(&self) -> usize {
@@ -1055,7 +1113,7 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         SetBkMode, TRANSPARENT, GetTextFaceW, SetTextColor,
     };
 
-    const SIZE: i32 = 128;
+    const SIZE: i32 = TARGET_ICON_SIZE as i32;
     let glyph: u16 = crate::settings_catalog::settings_glyph(uri);
     let file_font = crate::settings_catalog::settings_glyph_is_file_font(uri);
     let text = [glyph, 0u16];
@@ -1115,7 +1173,7 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         let mut hfont = std::ptr::null_mut();
         for family in &families {
             let candidate = CreateFontW(
-                -96, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, family.as_ptr(),
+                -(SIZE * 3 / 4), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 4, 0, family.as_ptr(),
             );
             if candidate.is_null() {
                 continue;
@@ -1200,10 +1258,10 @@ fn settings_glyph_png(uri: &str) -> Option<Vec<u8>> {
         DeleteDC(hdc);
 
         let img = image::RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)?;
-        match normalize_to_square_png(img) {
-            Some(png) => Some(png),
-            None => fail("normalize_to_square_png failed"),
-        }
+        // Encode the canvas as-is. `normalize_to_square_png` alpha-crops a
+        // sparse image, which turned a centered glyph into a 64x63 sliver and
+        // made the glyph scale jump around between catalog pages.
+        rgba_to_png(img)
     }
 }
 
@@ -1707,6 +1765,46 @@ pub(crate) fn prefetch_icon_paths(cache: &IconCache, paths: &[String]) -> Vec<St
 mod tests {
     use super::*;
 
+
+    /// A 32x32 PNG on disk, so the cache decodes it through the plain image
+    /// path (no shell, no vendor assets).
+    fn temp_png(dir: &std::path::Path) -> String {
+        let mut out = Vec::new();
+        {
+            let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 20, 30, 255]));
+            let mut enc = image::codecs::png::PngEncoder::new(&mut out);
+            use image::ImageEncoder;
+            enc.write_image(img.as_raw(), 32, 32, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+        let path = dir.join("icon.png");
+        std::fs::write(&path, &out).unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn data_uri_is_sent_once_until_the_page_is_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_png(dir.path());
+        let cache = IconCache::default();
+        assert!(cache.png_bytes(&path).is_some(), "icon decodes");
+        assert!(cache.data_uri_unsent(&path).is_some(), "first push carries it");
+        assert!(
+            cache.data_uri_unsent(&path).is_none(),
+            "a repeat push must not resend an icon the page already holds"
+        );
+        assert!(
+            cache.data_uri_cached(&path).is_some(),
+            "the icon is still cached, it is only not re-sent"
+        );
+        // A rebuilt WebView starts empty again.
+        cache.clear_sent();
+        assert!(
+            cache.data_uri_unsent(&path).is_some(),
+            "a fresh page needs every icon again"
+        );
+    }
+
     #[test]
     fn empty_path_returns_none() {
         let cache = IconCache::default();
@@ -1918,9 +2016,13 @@ mod tests {
         }
         let png = normalize_to_square_png(image).expect("normalization should encode");
         let decoded = image::load_from_memory(&png).expect("normalized PNG should decode").into_rgba8();
-        assert_eq!(decoded.dimensions(), (128, 128));
+        let target = TARGET_ICON_SIZE;
+        assert_eq!(decoded.dimensions(), (target, target));
         let (_, _, width, height) = alpha_bounds(&decoded).expect("tiny artwork should remain visible");
-        assert!(width >= 96 && height >= 96, "tiny source should fill normalized canvas");
+        assert!(
+            width >= target * 3 / 4 && height >= target * 3 / 4,
+            "tiny source should fill normalized canvas"
+        );
     }
 
     #[test]
@@ -1933,7 +2035,7 @@ mod tests {
         }
         let png = normalize_to_square_png(image).expect("normalization should encode");
         let decoded = image::load_from_memory(&png).expect("normalized PNG should decode").into_rgba8();
-        assert_eq!(decoded.dimensions(), (128, 128));
+        assert_eq!(decoded.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
         let (_, _, width, height) = alpha_bounds(&decoded).expect("artwork should remain visible");
         assert!(width > height, "wide logo must remain wide after normalization");
         assert!(width as f32 / height as f32 > 1.2);
@@ -1950,13 +2052,18 @@ mod tests {
         let image = image::load_from_memory(&png)
             .expect("package logo output should be valid PNG")
             .into_rgba8();
-        assert_eq!(image.dimensions(), (128, 128));
+        assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
         let (_, _, width, height) = alpha_bounds(&image).expect("package logo should contain artwork");
         assert!(width > height, "Terminal logo should retain its wide artwork ratio");
     }
 
     #[test]
     #[cfg(target_os = "windows")]
+    // A timing comparison, not a correctness check: it asserts the two Windows
+    // extraction APIs stay within 3x of each other, which depends on the
+    // machine's disk and CPU. It was already failing here at 4.1x before the
+    // icon canvas changed, so it stays out of the default suite.
+    #[ignore = "timing benchmark; machine-speed dependent"]
     fn bench_icon_extraction_paths() {
         let target = concat!(env!("windir"), "\\System32\\notepad.exe");
         let path = std::path::Path::new(target);
@@ -2087,7 +2194,12 @@ mod installed_app_probes {
             let bounds = alpha_bounds(&image).expect("icon output must contain visible artwork");
             eprintln!("remaining icon probe [{label}] dims={:?} alpha_bounds={bounds:?} bytes={}", image.dimensions(), png.len());
             assert_eq!(image.dimensions(), (TARGET_ICON_SIZE, TARGET_ICON_SIZE));
-            assert!(bounds.2 >= 96 && bounds.3 >= 96, "{label} artwork should not be tiny");
+            let min_art = TARGET_ICON_SIZE * 3 / 4;
+            assert!(
+                bounds.2 >= min_art && bounds.3 >= min_art,
+                "{label} artwork should not be tiny ({:?} of {TARGET_ICON_SIZE}px)",
+                (bounds.2, bounds.3)
+            );
         }
     }
 }
@@ -2372,8 +2484,8 @@ mod probe_magnifier {
         }
     }
 
-    /// Every catalog page renders a present 128px glyph (official file
-    /// font or Segoe fallback — no tofu, no blanks).
+    /// Every catalog page renders a present, canvas-filling glyph (official
+    /// file font or Segoe fallback — no tofu, no blanks).
     #[test]
     fn probe_settings_catalog_renders() {
         for page in crate::settings_catalog::SETTINGS_PAGES {
@@ -2383,7 +2495,11 @@ mod probe_magnifier {
                     Ok(img) => {
                         let rgba = img.into_rgba8();
                         let (w, h) = rgba.dimensions();
-                        assert_eq!((w, h), (128, 128), "settings {uri}");
+                        assert_eq!(
+                            (w, h),
+                            (TARGET_ICON_SIZE, TARGET_ICON_SIZE),
+                            "settings {uri}"
+                        );
                         let total = (w * h) as f64;
                         let content = rgba.pixels().filter(|p| p[3] > 8).count() as f64;
                         assert!(

@@ -1513,6 +1513,7 @@
   // Any keyboard interaction abandons the row context menu. This covers
   // navigation and command-mode keys before they produce an input event.
   window.addEventListener("keydown", (e) => {
+    if (e.key && e.key.length === 1) lastKeydownAt = Date.now();
     if (!contextMenu.classList.contains("hidden") && e.key !== "Escape") {
       hideContextMenu();
     }
@@ -1524,6 +1525,10 @@
   // drains stale requests from its mpsc channel.
   let debounce = null;
   let lastInputTime = 0;
+  // Wall-clock stamp of the last printable keydown. Sent with each query so the
+  // host can tell a slow WebView paint (key pressed, input event late) from a
+  // slow search. Epoch ms, so it compares directly against the host clock.
+  let lastKeydownAt = 0;
   input.addEventListener("input", () => {
     if (!contextMenu.classList.contains("hidden")) hideContextMenu();
     let raw = input.value;
@@ -1546,7 +1551,15 @@
     const delay = (query === "" || now - lastInputTime > 300) ? 0 : 40;
     lastInputTime = now;
     clearTimeout(debounce);
-    debounce = setTimeout(() => post("query", query), delay);
+    debounce = setTimeout(() => {
+      const at = Date.now();
+      // A stale keydown (paste, or a key from a previous burst) would make
+      // `keydown_to_input_ms` meaningless, so only report a recent one.
+      const keyAt = at - lastKeydownAt <= 1000 ? lastKeydownAt : at;
+      try {
+        window.ipc.postMessage(JSON.stringify({ t: "query", v: query, at, key_at: keyAt }));
+      } catch (_) {}
+    }, delay);
   });
   // Focus-race safety net. The panel can be revealed a frame before the
   // query input owns keyboard focus, which silently dropped the first typed

@@ -80,6 +80,22 @@ This is how layout and contrast claims should be made — measuring, not reading
 the stylesheet. Keep scratch files out of the repo and delete them before
 committing.
 
+**The glass theme cannot be screenshotted or recorded, and cannot be driven by
+synthetic input.** Both windows call `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
+(`overlay/refraction.rs`, `set_capture_exclusion`), so any capture — Snipping
+Tool, OBS, `CopyFromScreen`, desktop duplication, Playwright — returns whatever
+is *behind* the window where the glass and page are. The same applies to
+mirroring the panel into a Python/JS harness: that renders the page, not the
+material. Screenshotting the live overlay leaves you looking at the desktop
+underneath it and is not evidence about the glass. Both keyboard hooks also drop
+injected input (`kb.flags & LLKHF_INJECTED`), so `keybd_event`/`SendInput` can
+never open the panel — a synthetic `Win` only opens the Start menu. Verify glass
+work with a GPU readback probe of the real effect graph at panel size
+(`refraction.rs` tests, run with `--ignored`), or mirror the maths in Python.
+Ask the user to describe or approve the look. A **phone photo of the screen is
+the one way to capture the glass**: hardware bypasses the affinity flag, so a
+photo is real evidence, a screenshot is not.
+
 
 `vitest --run` for the JS scaffold gate (just checks file existence). Server-side only, no browser.
 

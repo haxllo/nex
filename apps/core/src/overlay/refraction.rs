@@ -151,19 +151,34 @@ fn mark_glass_ok() -> bool {
     GLASS_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
-/// Wide diffusion branch; the center primarily uses the tight branch.
+/// Wide diffusion branch: the frost of the pane's interior.
 const BLUR_STDDEV: f32 = 8.0;
-const CENTER_BLUR_STDDEV: f32 = 3.5;
-/// The RGB sample positions differ by at most 0.4 px at rest. This is
-/// dispersion in the lens, not a colored outline painted over the text.
-const ABERRATION: f32 = 0.07;
+/// The rim's own blur. The wide frost only owns the interior: the bending
+/// happens in the band, and frost laid over it hides the bend (see
+/// `scatter_weight`).
+const RIM_BLUR_STDDEV: f32 = 1.1;
+/// Colour fringe per channel as a share of the shift. The shipped look has
+/// none: with a shift this strong (tens of px at the rim) a fringe reads as a
+/// rainbow flare in the corners, not as dispersion in a lens.
+const ABERRATION: f32 = 0.0;
 /// Backdrop vibrancy: the refracted image is lifted slightly so it does
 /// not read as greyed out behind the tint.
 const SATURATION: f32 = 1.2;
-/// Stronger than the original 14: the user wanted the backdrop to visibly
-/// converge into the rim, not merely soften at it. The bend is still
-/// confined to the bevel, so the interior stays a window.
-const BEND_SCALE: f32 = 24.0;
+/// The shift the map can carry for a panel, logical px: the widest band that
+/// panel can have. A cell holds `shift / range`, so a range fixed at 112 px
+/// left only ~20 of the 255 levels in use and put 0.88 px between them - the
+/// slow part of the bend then moved in visible steps, which read as a zigzag.
+/// Sized to the band, a step is ~0.2 px on the 56 px panel and ~0.17 px on the
+/// 21 px dock.
+fn lens_range(panel_w: u32, panel_h: u32, scale: f32) -> f32 {
+    bezel_band(panel_w.min(panel_h) as f32 / scale.max(0.01)).max(1.0)
+}
+
+/// `D2D1DisplacementMap` scale that turns the encoded share back into px: the
+/// effect samples at `x + 0.4979 * scale * value`.
+fn bend_scale(range: f32) -> f32 {
+    range * 255.0 / 127.0
+}
 /// Show spring settling deadline. No frame-count-dependent animation.
 /// One shot per show; nothing animates while hidden.
 const SWELL_MS: f32 = 420.0;
@@ -173,13 +188,35 @@ const SWELL_MS: f32 = 420.0;
 /// error was noticeable while the strip was still ramping in. Starting
 /// most of the way open keeps the settle, drops the wait.
 const SWELL_START: f32 = 0.85;
-const BEZEL_MARGIN: f32 = 40.0;
-/// Thickness tail: a real pane bends the backdrop across its whole body,
-/// not only inside the 32 px bevel. The extra inward sample decays with
-/// distance, so the rim stays the strong lens and the interior picks up a
-/// sub-pixel draw toward the nearest edge (glass thickness, not a zoom).
-const SLAB_BEND: f32 = 0.30;
-const SLAB_DECAY: f32 = 35.0;
+/// Width of the rim band, logical px. The band is the curved surface: at 40 px
+/// the bend was squeezed into the outer 12 px and read as a soft edge, not as
+/// glass. A third of this panel's short side is 173 px, so 56 stays inside the
+/// share the reference optics allow a small shape.
+const BEZEL_MARGIN: f32 = 56.0;
+/// The rim band a panel of this short side can carry. `BEZEL_MARGIN` on a tall
+/// pane, less on a short one: the two bands must meet before the middle. On a
+/// 60 px strip (the dock) an uncapped 56 px band is still 30 px deep at the mid
+/// row, where `lens_profile`'s normal flips sign, so row 29 sampled one way and
+/// row 30 the other and the backdrop read as sliced horizontally in half.
+fn bezel_band(short_side: f32) -> f32 {
+    BEZEL_MARGIN.min(short_side.max(0.0) * 0.35)
+}
+
+/// Narrowing of the rim band where the outline turns a corner. The silhouette
+/// keeps its 8 px radius; the band must not be forced around it. A band far
+/// wider than the corner can only turn all at the 45 degree diagonal, which
+/// reads as a diamond instead of a circular reflection, so the band gives way
+/// there. `1` along a straight side, `0.55` on the diagonal.
+fn corner_taper(nx: f32, ny: f32) -> f32 {
+    let diagonal = (4.0 * (nx * ny).abs()).clamp(0.0, 1.0);
+    1.0 - 0.45 * diagonal
+}
+
+/// Thickness of the rim relative to its width (`T = B * RIM_THICKNESS`). What
+/// sets how far the rim reads the backdrop: Snell over this thickness.
+const RIM_THICKNESS: f32 = 1.6;
+/// Refractive index of the pane. Constant, as in the reference optics.
+const IOR: f32 = 1.5;
 /// Device-pixel growth for the main window's native region. The page's
 /// own clip-path is antialiased; letting the region sit a pixel outside
 /// it keeps GDI's hard polygon edge from shaving that antialiasing off.
@@ -229,12 +266,15 @@ const INK_RATE_MS: u64 = 150;
 /// Per-frame exponential smoothing on backdrop luminance (~150ms at
 /// 60fps) so a scene cut eases the tint instead of snapping it.
 const LUMA_EMA: f32 = 0.10;
-/// Extra desktop pixels around the panel keep the blur kernel away from
-/// the capture boundary: 3σ + 2, the reference renderer's rule, now
-/// scaled up with the blur. The panel must sit this far inside the
-/// monitor or the crop clamps and the worker drops frames, so the pad
-/// is kept to the blur's actual reach rather than padded for comfort.
-const BLUR_PAD: u32 = (BLUR_STDDEV as u32) * 3 + 2;
+/// Extra desktop pixels around the panel keep the blur kernel away from the
+/// capture boundary and give the rim somewhere to read from. The rim samples
+/// up to one band *outside* the pane - that is what makes it show the
+/// surroundings converging instead of a copy of the pane's own middle, which
+/// read as a mirror - so the crop has to carry that much desktop past the
+/// edge. 58 covers the blur's 26 px reach too. The panel must sit this far
+/// inside the monitor or the crop clamps; a clamped crop is copied at its true
+/// offset and the off-screen remainder stays cleared.
+const BLUR_PAD: u32 = BEZEL_MARGIN as u32 + 2;
 
 /// Room outside the panel for the contact shadow. A pane can only cast one
 /// if the surface it is drawn on reaches past its own edges, so the glass
@@ -1079,8 +1119,10 @@ impl Engine {
         crate::logging::info("[nex][refract] swapchain ok via composition+premultiplied");
 
         let d2d = d2d_setup(&device)?;
+        let range = lens_range(panel_w, panel_h, 1.0);
         crate::logging::info(&format!(
-            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} sat={SATURATION} bend={BEND_SCALE} margin={BEZEL_MARGIN}px pad={BLUR_PAD}"
+            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} sat={SATURATION} bend={} range={range}px margin={BEZEL_MARGIN}px pad={BLUR_PAD}",
+            bend_scale(range)
         ));
         let tint_brush: ID2D1SolidColorBrush = unsafe {
             d2d.CreateSolidColorBrush(
@@ -1123,7 +1165,7 @@ impl Engine {
         }
         let displace = displacement_effect(&d2d)?;
         let tight_blur = create_effect(&d2d, &CLSID_D2D1GaussianBlur)?;
-        set_float(&tight_blur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0, CENTER_BLUR_STDDEV)?;
+        set_float(&tight_blur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0, RIM_BLUR_STDDEV)?;
         // The map's blue channel carries a smooth wide-blur weight. RG
         // remain the signed lens normals; alpha remains fully opaque.
         let scatter_mask = create_effect(&d2d, &CLSID_D2D1ColorMatrix)?;
@@ -1569,8 +1611,9 @@ impl Engine {
     /// Lens strength: 0 is flat, 1 is resting curvature. Small overshoot
     /// survives the clamp. Each RGB branch gets its own dispersion scale.
     fn set_bend(&self, bend: f32) {
+        let range = lens_range(self.panel_w, self.panel_h, self.scale as f32);
         for (lens, scale) in [&self.red_displace, &self.displace, &self.blue_displace]
-            .iter().zip(dispersion_scales(bend)) {
+            .iter().zip(dispersion_scales(bend, range)) {
             let _ = set_float(lens, D2D1_DISPLACEMENTMAP_PROP_SCALE.0, scale);
         }
     }
@@ -1591,7 +1634,6 @@ impl Engine {
     /// Draw the effect into the current backbuffer and present it. The
     /// target rebinds every frame: bitblt-model buffers rotate.
     fn render_frame(&self) -> Result<(), String> {
-        let displace = &self.optical_output;
         let texture: ID3D11Texture2D = unsafe {
             self.swapchain
                 .GetBuffer(0)
@@ -1621,8 +1663,26 @@ impl Engine {
                 }
             }
         };
+        self.draw_frame(&target)?;
+        // Keep the newest desktop frame flowing. In a composed window,
+        // Present(0) avoids the extra vblank wait that was throttling the
+        // glass to ~20 FPS when the desktop was also presenting video.
         unsafe {
-            self.d2d.SetTarget(&target);
+            self.swapchain
+                .Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
+        }
+        .ok()
+        .map_err(|e| format!("Present failed: {e:?}"))?;
+        Ok(())
+    }
+
+    /// Draw the whole material into `target`. `render_frame` passes the
+    /// swapchain buffer; a probe passes a CPU-readable bitmap, which is the
+    /// only way to see the glass: the live window is excluded from capture.
+    fn draw_frame(&self, target: &ID2D1Bitmap1) -> Result<(), String> {
+        let displace = &self.optical_output;
+        unsafe {
+            self.d2d.SetTarget(target);
             self.d2d.BeginDraw();
             // Composition swapchain carries premultiplied alpha: start from
             // fully transparent so the mask below owns the silhouette.
@@ -1698,13 +1758,6 @@ impl Engine {
             self.d2d
                 .EndDraw(None, None)
                 .map_err(|e| format!("EndDraw failed: {e:?}"))?;
-            // Keep the newest desktop frame flowing. In a composed window,
-            // Present(0) avoids the extra vblank wait that was throttling the
-            // glass to ~20 FPS when the desktop was also presenting video.
-            self.swapchain
-                .Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
-                .ok()
-                .map_err(|e| format!("Present failed: {e:?}"))?;
         }
         Ok(())
     }
@@ -1880,15 +1933,42 @@ fn saturation_matrix(amount: f32) -> [f32; 20] {
     matrix
 }
 
-fn dispersion_scales(bend: f32) -> [f32; 3] {
-    let scale = BEND_SCALE * bend.clamp(0.0, 1.12);
+fn dispersion_scales(bend: f32, range: f32) -> [f32; 3] {
+    let scale = bend_scale(range) * bend.clamp(0.0, 1.12);
     [scale * (1.0 + ABERRATION), scale, scale * (1.0 - ABERRATION)]
 }
 
-fn scatter_weight(depth: f32) -> f32 {
-    let t = (depth / BEZEL_MARGIN).clamp(0.0, 1.0);
-    // Modest diffusion even at the center; smooth derivative at both ends.
-    0.10 + 0.45 * (1.0 - t * t * (3.0 - 2.0 * t))
+/// Share of the wide frost across the pane. The pane is a window: the backdrop
+/// keeps its detail, and the rim's own narrow blur is all the softening it
+/// gets. `t` is the depth into the pane over the band's width. A frosted
+/// interior made the middle of a short pane read as a *blurrier* strip than
+/// its bending ends, which is backwards for glass.
+fn scatter_weight(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    0.05 + 0.05 * t
+}
+
+/// Height profile of the rim: a squircle. Vertical at the edge (t = 0), flat on
+/// top (t = 1). `1 - (1-t)^4` written without the cancellation.
+fn height_profile(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    (t * (4.0 - t * (6.0 - t * (4.0 - t)))).max(0.0).powf(0.25)
+}
+
+/// Inward shift of the read position at a rim depth, logical px: the slope of
+/// the profile, taken as an incidence angle and bent through the pane by
+/// Snell's law. This is what makes the band read as bending glass; a linear or
+/// quadratic falloff only pulls the picture inward.
+fn rim_shift(t: f32, band: f32, thickness: f32) -> f32 {
+    if t >= 1.0 {
+        return 0.0;
+    }
+    let t0 = t.max(0.001); // keeps the very edge finite
+    let t1 = (t0 + 0.001).min(1.0);
+    let slope = (height_profile(t1) - height_profile(t0)) / 0.001 * thickness / band;
+    let incidence = slope.atan();
+    let refracted = (incidence.sin() / IOR).clamp(-1.0, 1.0).asin();
+    thickness * (incidence - refracted).tan()
 }
 
 /// Rounded-rectangle signed-distance field with a circular corner arc.
@@ -1912,12 +1992,19 @@ fn lens_profile(x: f32, y: f32, w: f32, h: f32, radius: f32) -> (f32, f32, f32) 
 }
 
 fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
+    let band = bezel_band(w.min(h) as f32 / scale);
+    // Same direction box the displacement map uses, so the specular hairline
+    // and the bend taper together at the corners.
+    let r_dir = (band * scale).max(CORNER_RADIUS * scale);
     let mut layers = vec![Vec::with_capacity(w * h * 4); 5];
     for y in 0..h {
         for x in 0..w {
-            let (depth, nx, ny) = lens_profile(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, CORNER_RADIUS * scale);
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (depth, nx, ny) = lens_profile(px, py, w as f32, h as f32, CORNER_RADIUS * scale);
+            let (_, dx, dy) = lens_profile(px, py, w as f32, h as f32, r_dir);
             let depth = depth / scale;
-            let ridge = rim_light(depth);
+            let band_here = band * corner_taper(dx, dy);
+            let ridge = rim_light(depth, band_here);
             // Uniform along each edge: directional variation is applied once
             // per frame from the pointer light, so all four corners read the
             // same brightness instead of two lit diagonals.
@@ -1933,7 +2020,7 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
             hash = hash.wrapping_mul(0x7feb352d);
             hash ^= hash >> 15;
             let white = hash & 1 != 0;
-            let shade = if depth < BEZEL_MARGIN {
+            let shade = if depth < band_here {
                 ((nx + ny).max(0.0) * (-depth.max(0.0) / 6.0).exp() * 0.09 * 255.0) as u8
             } else { 0 };
             let alpha = shade.saturating_add(1);
@@ -1944,12 +2031,12 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
     layers
 }
 
-fn rim_light(depth: f32) -> f32 {
+fn rim_light(depth: f32, band: f32) -> f32 {
     // Peak at the boundary, never an offset ridge/double outline. A
     // narrow specular hairline sits on a wider glow; the glow is what
     // makes the pane read as thick glass under a moving light.
     let depth = depth.max(0.0);
-    if depth >= BEZEL_MARGIN { return 0.0; }
+    if depth >= band { return 0.0; }
     0.34 * (-(depth / 0.9).powi(2)).exp() + 0.055 * (-depth / 14.0).exp()
 }
 
@@ -1998,37 +2085,43 @@ fn bezel_bytes(w: usize, h: usize) -> Vec<u8> {
 fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * 4);
     let (width, height) = (w as f32, h as f32);
+    let (half_w, half_h) = (width * 0.5, height * 0.5);
+    let band_logical = bezel_band(w.min(h) as f32 / scale);
+    let band = band_logical * scale;
+    let thickness = band_logical * RIM_THICKNESS;
+    let r_true = (CORNER_RADIUS * scale).min(half_w).min(half_h);
+    // The bend's DEPTH comes from the true outline, so the band hugs the real
+    // corner. Its DIRECTION comes from a box rounder than that outline: the
+    // outline's own normal jumps to the nearest edge a few px inside a corner,
+    // which folds a band this wide into a fan.
+    let r_dir = band.max(r_true).min(half_w).min(half_h);
     for y in 0..h {
         for x in 0..w {
-            // Rounded-rectangle signed-distance field from the lab:
-            // the center remains undistorted while the curved rim eases
-            // the captured image toward the pane's center.
-            let (depth, nx, ny) = lens_profile(x as f32 + 0.5, y as f32 + 0.5, width, height, CORNER_RADIUS * scale);
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (depth, _, _) = lens_profile(px, py, width, height, r_true);
+            let (_, nx, ny) = lens_profile(px, py, width, height, r_dir);
             let depth = depth / scale;
-            let t = (depth / BEZEL_MARGIN).clamp(0.0, 1.0);
-            // Rim bevel plus a slowly decaying thickness tail. The tail
-            // is continuous across the 32 px boundary (the rim term is
-            // already zero there), so the pane reads as one slab rather
-            // than a bevelled frame around a window. Its direction is
-            // radial from the pane center, not the nearest-edge normal:
-            // the latter flips across the medial axis and would leave a
-            // one-pixel seam through the middle of the glass.
-            let rim = if t >= 1.0 { 0.0 } else { (1.0 - t) * (1.0 - t) };
-            let px = x as f32 + 0.5 - width * 0.5;
-            let py = y as f32 + 0.5 - height * 0.5;
-            // Optical centre stays neutral; the radial bend grows toward
-            // the edges, like a slab whose thickness is felt at the rim.
-            let span = (width.min(height) * 0.5).max(1.0);
-            let reach = (px.hypot(py) / span).clamp(0.0, 1.0);
-            let slab = SLAB_BEND * reach * (-depth.max(0.0) / SLAB_DECAY).exp();
-            let radial = 1.0 / px.hypot(py).max(1.0);
-            let (dx, dy) = (
-                -nx * rim - px * radial * slab,
-                -ny * rim - py * radial * slab,
-            );
+            // The band gives way where the outline turns a corner, so the
+            // reflection curves around it instead of bunching on the diagonal.
+            let band_here = band_logical * corner_taper(nx, ny);
+            let t = (depth / band_here).clamp(0.0, 1.0);
+            // Rim bend, in logical px, then encoded over the map's range. The
+            // interior is not displaced at all: the reference look has no zoom
+            // and no slab, so the pane's middle stays a window.
+            //
+            // The read goes OUTWARD (`+nx`), so the rim shows the desktop just
+            // beyond the edge, compressed as it bends. Sampling inward showed
+            // backdrop the pane's own middle also shows: the same picture twice,
+            // which is the mirror. Outward is also monotone by construction -
+            // the read distance only grows as the shift falls - so the mapping
+            // compresses instead of folding. One band is the furthest it may
+            // read, which is what the pad carries.
+            let shift = rim_shift(t, band_here, thickness).min(band_here);
+            let dx = nx * shift / band_logical;
+            let dy = ny * shift / band_logical;
             let r = (128.0 + dx * 127.0).round().clamp(0.0, 255.0) as u8;
             let g = (128.0 + dy * 127.0).round().clamp(0.0, 255.0) as u8;
-            let scatter = (scatter_weight(depth) * 255.0).round() as u8;
+            let scatter = (scatter_weight(t) * 255.0).round() as u8;
             out.extend_from_slice(&[scatter, g, r, 255]);
         }
     }
@@ -3507,35 +3600,46 @@ mod tests {
     }
 
     #[test]
-    fn optics_keep_center_neutral_and_dispersion_at_the_rim() {
-        let (w, h) = (160, 96);
+    fn optics_keep_center_neutral_and_bend_the_rim_outward() {
+        // Wide enough that the band ends before the middle (the map is built
+        // for the real 760x520 panel, not for this size).
+        let (w, h) = (480, 320);
         let map = super::bezel_bytes(w, h);
         let pixel = |x: usize, y: usize| &map[(y * w + x) * 4..(y * w + x) * 4 + 4];
-        // The thickness tail shifts the center by a fraction of a pixel,
-        // but must stay neutral (no RGB split) and within one level.
+        // The middle of the pane is not displaced at all: no shift, no RGB
+        // split (there is no dispersion in the shipped look).
         let centre = pixel(w / 2, h / 2);
-        assert!((centre[1] as i32 - 128).abs() <= 1, "center green: {centre:?}");
-        assert_eq!(centre[1], centre[2], "center must not split channels");
+        assert_eq!(centre[1], 128, "center green: {centre:?}");
+        assert_eq!(centre[2], 128, "center red: {centre:?}");
         assert_eq!(centre[3], 255);
-        assert!(pixel(1, h / 2)[2] > 240, "left edge samples inward");
-        assert!(pixel(w - 2, h / 2)[2] < 16, "right edge samples inward");
-        assert!(pixel(1, h / 2)[0] > pixel(w / 2, h / 2)[0]);
-        let scales = super::dispersion_scales(1.0);
-        assert!(scales[0] > scales[1] && scales[1] > scales[2]);
-        // Dispersion belongs to the lens, so it scales with the bend. 7%
-        // each side of a 24 px rim sample: under 1.7 px at the outermost
-        // pixel, under 1 px one bevel in — a chromatic edge, not a painted
-        // fringe.
-        let spread = (scales[0] - scales[2]) * 0.5;
-        assert!(spread > 0.5 && spread < 2.0, "rim dispersion {spread}px");
-        assert_eq!(super::dispersion_scales(0.0), [0.0; 3]);
+        // A cell holds shift / range, so the rim's own shift is readable
+        // straight out of the red channel.
+        let left = pixel(1, h / 2);
+        let right = pixel(w - 2, h / 2);
+        assert!(left[2] < 96, "left edge samples inward: {}", left[2]);
+        assert!(right[2] > 160, "right edge samples inward: {}", right[2]);
+        assert!(
+            left[0] < 128,
+            "the rim must take less frost than the centre: {}",
+            left[0]
+        );
+        let range = super::lens_range(w as u32, h as u32, 1.0);
+        assert_eq!(super::dispersion_scales(1.0, range), [super::bend_scale(range); 3]);
+        assert_eq!(super::dispersion_scales(0.0, range), [0.0; 3]);
         let matrix = super::saturation_matrix(super::SATURATION);
         for output in 0..3 {
             let neutral: f32 = (0..3).map(|input| matrix[input * 4 + output] * 0.5).sum();
             assert!((neutral - 0.5).abs() < 0.0001, "vibrancy must preserve gray");
         }
-        for depth in 0..32 {
-            assert!(super::scatter_weight(depth as f32) >= super::scatter_weight(depth as f32 + 1.0));
+        assert!(super::scatter_weight(0.0) < 0.2, "the very edge is nearly sharp");
+        // The pane stays a window: no frost cliff at the band's end, so the
+        // middle of a short pane cannot read as a blurrier strip than its rim.
+        assert!(super::scatter_weight(1.0) < 0.2, "the interior stays clear");
+        for step in 0..32 {
+            assert!(
+                super::scatter_weight(step as f32 / 32.0) <= super::scatter_weight((step + 1) as f32 / 32.0),
+                "frost must grow inward"
+            );
         }
     }
 
@@ -4055,22 +4159,118 @@ mod tests {
     }
 
     #[test]
-    fn thickness_tail_bends_past_the_bevel_but_not_the_center() {
-        let (w, h) = (160usize, 96usize);
+    fn the_rim_bends_hard_and_the_band_ends_at_its_width() {
+        let (w, h) = (480usize, 320usize);
         let map = super::bezel_bytes(w, h);
         let red = |x: usize, y: usize| map[(y * w + x) * 4 + 2] as i32;
         let mid = h / 2;
-        // 40 px in, the 32 px rim is already zero; the slab tail must
-        // still bend toward the pane, and monotonically fall off inward.
+        // 4 px in, the rim already reads tens of px of backdrop; at the band's
+        // own width the bend is gone and the middle is neutral.
         let rim = red(4, mid);
-        let tail = red(40, mid);
+        let band_end = red(super::BEZEL_MARGIN as usize, mid);
         let centre = red(w / 2, mid);
-        assert!(rim > tail, "rim {rim} must bend more than tail {tail}");
-        assert!(tail > centre + 2, "slab tail is gone at 40 px ({tail})");
-        assert!(
-            (centre - 128).abs() <= 1,
-            "center must stay neutral, got {centre}"
+        assert!(rim < 40, "rim {rim} must bend hard");
+        assert_eq!(
+            band_end, 128,
+            "the band must end at {} px, got {band_end}",
+            super::BEZEL_MARGIN
         );
+        assert_eq!(centre, 128, "center must stay neutral, got {centre}");
+    }
+
+    /// A short panel must not carry a band past its own middle. The dock is
+    /// 760x60: with the uncapped 56 px band the bend was still 30 px deep at
+    /// the mid row, where `lens_profile`'s normal flips sign, so the backdrop
+    /// read as sliced horizontally in half.
+    #[test]
+    fn the_rim_band_never_reaches_the_middle_of_a_short_panel() {
+        let (w, h) = (760usize, 60usize);
+        let band = super::bezel_band(h as f32);
+        assert!(band < h as f32 * 0.5, "band {band} still overlaps the middle");
+        let map = super::bezel_bytes(w, h);
+        let red = |x: usize, y: usize| map[(y * w + x) * 4 + 2] as i32;
+        let green = |x: usize, y: usize| map[(y * w + x) * 4 + 1] as i32;
+        // The rim still bends at the top edge and on the left edge.
+        assert!((green(w / 2, 2) - 128).abs() > 10, "top rim lost its bend");
+        assert!((red(1, h / 2) - 128).abs() > 10, "side rim lost its bend");
+        // Nothing moves across the middle: the two halves agree.
+        for y in [h / 2 - 1, h / 2, h / 2 + 1] {
+            assert_eq!(green(w / 2, y), 128, "vertical shift at mid row {y}");
+        }
+        // A tall pane keeps the full band.
+        assert_eq!(super::bezel_band(417.0), super::BEZEL_MARGIN);
+        // The band gives way on the diagonal so it can turn a corner narrower
+        // than itself; that is what stops the reflection bunching into a
+        // diamond. Along a straight side it is untouched.
+        assert_eq!(super::corner_taper(1.0, 0.0), 1.0);
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        let diagonal = super::corner_taper(s, s);
+        assert!(diagonal > 0.5 && diagonal < 0.7, "diagonal taper {diagonal}");
+    }
+
+    #[test]
+    fn the_rim_read_goes_outward_and_never_folds() {
+        // A read position that goes out and comes back shows the same backdrop
+        // twice - that is the mirror the rim had. Outward sampling is monotone
+        // by construction: the shift only falls as the depth grows.
+        for (w, h) in [(760usize, 60usize), (760, 520)] {
+            let map = super::bezel_bytes(w, h);
+            let band = super::bezel_band(w.min(h) as f32);
+            let range = super::lens_range(w as u32, h as u32, 1.0);
+            assert_eq!(range, band, "the map's range must be the band it bends");
+            let y = h / 2;
+            let read = |x: usize| {
+                let red = map[(y * w + x) * 4 + 2] as f32;
+                x as f32 + (red - 128.0) / 127.0 * range
+            };
+            let first = read(0);
+            assert!(first < 0.0, "the edge must read outside the pane, got {first}");
+            let mut previous = f32::NEG_INFINITY;
+            for x in 0..(band as usize * 2) {
+                let s = read(x);
+                // One 8-bit level is ~0.2 px, so a real fold (several px per
+                // column) cannot hide behind the tolerance.
+                assert!(s >= previous - 0.5, "fold at x = {x}: {previous} -> {s}");
+                previous = s;
+            }
+            // Precision in use: the edge cell sits at the end of the range.
+            assert!(map[(y * w) * 4 + 2] < 8, "edge cell is not at the range");
+        }
+    }
+
+    /// The band's depth comes from the true 8 px outline, its direction from a
+    /// box rounder than that outline. With the outline's own normal the
+    /// direction snaps to the nearest edge a few px inside a corner, which
+    /// folds a band this wide into a fan.
+    #[test]
+    fn the_rim_direction_comes_from_a_rounder_box_than_its_depth() {
+        let (w, h) = (160.0, 96.0);
+        let r = super::CORNER_RADIUS;
+        let r_dir = super::BEZEL_MARGIN.max(r);
+        let (x, y) = (20.0, 20.0);
+        let (depth, tx, ty) = super::lens_profile(x, y, w, h, r);
+        assert!(depth > 10.0, "the point must be inside the pane, got {depth}");
+        assert!(tx == 0.0 || ty == 0.0, "the outline's own normal is axis aligned: {tx},{ty}");
+        let (_, dx, dy) = super::lens_profile(x, y, w, h, r_dir);
+        assert!(dx.abs() > 0.3 && dy.abs() > 0.3, "the rounder box still turns: {dx},{dy}");
+    }
+
+    #[test]
+    fn the_rim_profile_is_vertical_at_the_edge_and_bends_like_glass() {
+        // A parabola (the old (1-t)^2 rim) leaves the edge almost flat; a
+        // squircle stands up at t = 0, which is what puts the bend at the rim.
+        assert!(super::height_profile(0.01) > 0.44, "edge is not vertical");
+        assert!((super::height_profile(1.0) - 1.0).abs() < 1e-6);
+        let band = super::BEZEL_MARGIN;
+        let thickness = band * super::RIM_THICKNESS;
+        let mut previous = super::rim_shift(0.0, band, thickness);
+        assert!(previous > 55.0, "the rim must read tens of px in, got {previous}");
+        for step in 1..=100 {
+            let current = super::rim_shift(step as f32 / 100.0, band, thickness);
+            assert!(current <= previous + 0.5, "the shift must fall inward");
+            previous = current;
+        }
+        assert_eq!(super::rim_shift(1.0, band, thickness), 0.0);
     }
 
     #[test]
@@ -4172,13 +4372,14 @@ mod tests {
 
     #[test]
     fn rim_is_a_fading_glint_not_an_inset_outline() {
-        let mut previous = super::rim_light(0.0);
+        let band = super::BEZEL_MARGIN;
+        let mut previous = super::rim_light(0.0, band);
         for step in 1..=320 {
-            let current = super::rim_light(step as f32 / 10.0);
+            let current = super::rim_light(step as f32 / 10.0, band);
             assert!(current <= previous, "secondary ridge at depth {}", step as f32 / 10.0);
             previous = current;
         }
-        assert!(super::rim_light(2.0) < 0.055);
+        assert!(super::rim_light(2.0, band) < 0.055);
         // Diagonal of a circular corner removes 0.293R, not the
         // 0.159R a sqrt-cos profile did (which read as square).
         let mid = super::corner_offsets();
@@ -4546,6 +4747,367 @@ mod tests {
         assert!(super::mark_glass_ok());
         assert!(!super::glass_failed());
         assert!(!super::mark_glass_ok());
+    }
+
+    /// Probe: draw the production material over a *real* desktop frame and
+    /// dump it. This is the only way to see the glass — the live window is
+    /// excluded from capture.
+    #[test]
+    #[ignore = "requires Windows GPU; run explicitly with --ignored"]
+    fn probe_dump_material_over_desktop() {
+        use super::*;
+        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
+        let (pw, ph) = (760u32, 417u32);
+        let (bw, bh) = (pw + SHADOW_MARGIN * 2, ph + SHADOW_MARGIN * 2);
+        let window = GlassWindow::create(0, bw, bh).expect("cloaked probe window");
+        let mut engine = Engine::build(window.hwnd(), bw, bh, pw, ph).expect("engine");
+        // Real desktop behind the panel: a monotone source would hide a slice.
+        let monitor = unsafe {
+            MonitorFromWindow(
+                window.hwnd(),
+                MONITOR_DEFAULTTONEAREST,
+            )
+        };
+        let mut cap = Capture::start(&engine.device, monitor).expect("desktop duplication");
+        let ok = refresh_mirror(&mut cap, &engine.context, 500);
+        eprintln!("mirror refreshed: {ok}");
+        let pad = BLUR_PAD as i32;
+        let want_x = (cap.frame_w as i32 - pw as i32) / 2 - pad;
+        let want_y = (cap.frame_h as i32 - ph as i32) / 2 - pad;
+        let (bx, by, cw, ch) = clamp_panel_box(
+            want_x,
+            want_y,
+            pw + BLUR_PAD * 2,
+            ph + BLUR_PAD * 2,
+            0,
+            0,
+            cap.frame_w,
+            cap.frame_h,
+        );
+        let dx = (bx as i32 - want_x.max(0)).max(0) as u32;
+        let dy = (by as i32 - want_y.max(0)).max(0) as u32;
+        engine
+            .copy_crop(&cap.mirror, bx, by, cw, ch, dx, dy)
+            .expect("crop");
+        let sample = engine.sample_backdrop().expect("sample");
+        let mut material = Material { luma: None, light: true, dwell: 0, fresh: true };
+        material.update(&sample);
+        engine
+            .update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material)
+            .expect("tint");
+        engine.set_tint(material.wash());
+        engine.set_bend(1.0);
+        let target = unsafe {
+            engine.d2d.CreateBitmap(
+                D2D_SIZE_U { width: bw, height: bh },
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
+            )
+        }
+        .expect("probe target");
+        let readback = unsafe {
+            engine.d2d.CreateBitmap(
+                D2D_SIZE_U { width: bw, height: bh },
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+            )
+        }
+        .expect("probe readback");
+        engine.draw_frame(&target).expect("draw");
+        unsafe {
+            readback.CopyFromBitmap(None, &target, None).expect("copy");
+            let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).expect("map");
+            let mut out = Vec::with_capacity((bw * bh * 4) as usize);
+            for y in 0..bh {
+                out.extend_from_slice(std::slice::from_raw_parts(
+                    mapped.bits.add(y as usize * mapped.pitch as usize),
+                    bw as usize * 4,
+                ));
+            }
+            readback.Unmap().expect("unmap");
+            let header = format!("{bw} {bh} {} {}\n", SHADOW_MARGIN, SHADOW_MARGIN);
+            let mut bytes = header.into_bytes();
+            bytes.extend_from_slice(&out);
+            std::fs::write(r"D:\glass-frame.bin", &bytes).expect("dump");
+        }
+        eprintln!("dumped {bw}x{bh} from {}x{} frame", cap.frame_w, cap.frame_h);
+    }
+
+    /// Probe: find a horizontal *blur* strip. The source is vertical stripes
+    /// constant down every column, so each row's contrast in x measures how
+    /// much that row is blurred. A strip is a run of rows whose contrast
+    /// differs from the rows around it - visible as a band, not a shift.
+    #[test]
+    #[ignore = "requires Windows GPU; run explicitly with --ignored"]
+    fn probe_scan_rows_for_a_blur_strip() {
+        use super::*;
+        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
+        for (pw, ph) in [(760u32, 60u32), (760, 120), (760, 417), (760, 520)] {
+            let (bw, bh) = (pw + SHADOW_MARGIN * 2, ph + SHADOW_MARGIN * 2);
+            let window = GlassWindow::create(0, bw, bh).expect("cloaked probe window");
+            let mut engine = Engine::build(window.hwnd(), bw, bh, pw, ph).expect("engine");
+            let (sw, sh) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
+            let mut stripes = Vec::with_capacity((sw * sh * 4) as usize);
+            for _ in 0..sh {
+                for x in 0..sw {
+                    let level = if (x / 3) % 2 == 0 { 60u8 } else { 225 };
+                    stripes.extend_from_slice(&[level, level, level, 255]);
+                }
+            }
+            engine.upload_source(&stripes, sw, sh).expect("upload");
+            // Production material state: tint, local tint and resting bend.
+            let mut sample = vec![0u8; (SAMPLE_W * SAMPLE_H * 4) as usize];
+            for (i, px) in sample.chunks_mut(4).enumerate() {
+                let v = if (i as u32 / SAMPLE_W) < SAMPLE_H / 2 { 200u8 } else { 120 };
+                px.copy_from_slice(&[v, v, v, 255]);
+            }
+            let mut material = Material { luma: None, light: true, dwell: 0, fresh: true };
+            material.update(&sample);
+            engine.update_local_tint(&sample, SAMPLE_W, SAMPLE_H, &material).expect("tint");
+            engine.set_tint(material.wash());
+            engine.set_bend(1.0);
+            let target = unsafe {
+                engine.d2d.CreateBitmap(
+                    D2D_SIZE_U { width: bw, height: bh },
+                    None,
+                    0,
+                    &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
+                )
+            }
+            .expect("target");
+            let readback = unsafe {
+                engine.d2d.CreateBitmap(
+                    D2D_SIZE_U { width: bw, height: bh },
+                    None,
+                    0,
+                    &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+                )
+            }
+            .expect("readback");
+            engine.draw_frame(&target).expect("draw");
+            let band = super::bezel_band(ph.min(pw) as f32) as u32 + 3;
+            let rows: Vec<f32> = unsafe {
+                readback.CopyFromBitmap(None, &target, None).expect("copy");
+                let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).expect("map");
+                let mut series = Vec::with_capacity(ph as usize);
+                for y in 0..ph {
+                    let row = std::slice::from_raw_parts(
+                        mapped.bits.add((SHADOW_MARGIN + y) as usize * mapped.pitch as usize),
+                        bw as usize * 4,
+                    );
+                    let (mut sum, mut sum2, mut n) = (0.0f32, 0.0f32, 0.0f32);
+                    for x in band..pw - band {
+                        let v = row[((SHADOW_MARGIN + x) * 4) as usize] as f32;
+                        sum += v;
+                        sum2 += v * v;
+                        n += 1.0;
+                    }
+                    let mean = sum / n;
+                    series.push((sum2 / n - mean * mean).max(0.0).sqrt());
+                }
+                readback.Unmap().expect("unmap");
+                series
+            };
+            let mut worst: Vec<(f32, u32)> = Vec::new();
+            for y in 0..ph {
+                let mut around = Vec::new();
+                for d in -8i32..=8 {
+                    let j = y as i32 + d;
+                    if d != 0 && j >= 0 && (j as u32) < ph {
+                        around.push(rows[j as usize]);
+                    }
+                }
+                around.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let base = around[around.len() / 2];
+                worst.push(((rows[y as usize] - base).abs(), y));
+            }
+            worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            eprintln!(
+                "panel {pw}x{ph}: band {:.1}, interior columns {band}..{}, worst rows (delta contrast, row): {:?}",
+                super::bezel_band(ph.min(pw) as f32),
+                pw - band,
+                &worst[..10.min(worst.len())]
+            );
+            if ph <= 64 {
+                let series: Vec<String> = rows.iter().map(|v| format!("{v:.0}")).collect();
+                eprintln!("  per-row contrast: {}", series.join(" "));
+            }
+        }
+    }
+
+    /// Probe: the effect graph must treat every output row alike. The source
+    /// is constant down each column, so any row-to-row difference in the
+    /// output is a graph artifact, not the picture.
+    #[test]
+    #[ignore = "requires Windows GPU; run explicitly with --ignored"]
+    fn probe_row_invariance_at_panel_size() {
+        use super::*;
+        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
+        let (pw, ph) = (760u32, 417u32);
+        let window = GlassWindow::create(0, pw + SHADOW_MARGIN * 2, ph + SHADOW_MARGIN * 2)
+            .expect("cloaked probe window");
+        let mut engine = Engine::build(
+            window.hwnd(),
+            pw + SHADOW_MARGIN * 2,
+            ph + SHADOW_MARGIN * 2,
+            pw,
+            ph,
+        )
+        .expect("engine");
+        let (w, h) = (pw + BLUR_PAD * 2, ph + BLUR_PAD * 2);
+        let target = unsafe {
+            engine.d2d.CreateBitmap(
+                D2D_SIZE_U { width: pw, height: ph },
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
+            )
+        }
+        .expect("target");
+        let readback = unsafe {
+            engine.d2d.CreateBitmap(
+                D2D_SIZE_U { width: pw, height: ph },
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+            )
+        }
+        .expect("readback");
+        let draw = |engine: &Engine, pixels: &[u8], bend: f32| -> Vec<u8> {
+            engine.upload_source(pixels, w, h).expect("upload");
+            engine.set_bend(bend);
+            unsafe {
+                engine.d2d.SetTarget(&target);
+                engine.d2d.BeginDraw();
+                let rect = D2D_RECT_F {
+                    left: BLUR_PAD as f32,
+                    top: BLUR_PAD as f32,
+                    right: (BLUR_PAD + pw) as f32,
+                    bottom: (BLUR_PAD + ph) as f32,
+                };
+                let image = effect_output(&engine.optical_output).unwrap();
+                engine
+                    .d2d
+                    .DrawImage(
+                        Some(&image),
+                        None,
+                        Some(&rect),
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                    );
+                engine.d2d.EndDraw(None, None).expect("probe draw");
+                engine.d2d.SetTarget(None);
+                readback.CopyFromBitmap(None, &target, None).expect("copy");
+                let mapped = readback.Map(D2D1_MAP_OPTIONS_READ).expect("map");
+                let mut out = Vec::with_capacity((pw * ph * 4) as usize);
+                for y in 0..ph {
+                    out.extend_from_slice(std::slice::from_raw_parts(
+                        mapped.bits.add(y as usize * mapped.pitch as usize),
+                        pw as usize * 4,
+                    ));
+                }
+                readback.Unmap().expect("unmap");
+                out
+            }
+        };
+        // Vertical stripes: constant down every column.
+        let mut stripes = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                let level = if (x / 8) % 2 == 0 { 40 } else { 230 } as u8;
+                stripes.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        for bend in [0.0f32, 1.0] {
+            let out = draw(&engine, &stripes, bend);
+            let row = |y: u32| -> &[u8] {
+                let start = (y * pw * 4) as usize;
+                &out[start..start + (pw * 4) as usize]
+            };
+            // Interior columns only: the rim is meant to differ row to row.
+            let inner = |r: &[u8]| -> Vec<i32> {
+                (60..pw - 60).map(|x| r[(x * 4) as usize] as i32).collect()
+            };
+            let mut worst = (0i32, 0u32);
+            for y in 1..ph {
+                let (a, b) = (inner(row(y - 1)), inner(row(y)));
+                let d = a.iter().zip(&b).map(|(p, q)| (p - q).abs()).max().unwrap_or(0);
+                if d > worst.0 {
+                    worst = (d, y);
+                }
+            }
+            eprintln!(
+                "bend {bend}: worst row-to-row diff {} at row {} of {ph}",
+                worst.0, worst.1
+            );
+            // A shift shows as a spike; report every row that is off the norm.
+            let mut spikes = Vec::new();
+            for y in 1..ph {
+                let (a, b) = (inner(row(y - 1)), inner(row(y)));
+                let d: i32 = a.iter().zip(&b).map(|(p, q)| (p - q).abs()).sum();
+                if d > 4000 {
+                    spikes.push((y, d));
+                }
+            }
+            eprintln!("bend {bend}: {} rows over threshold: {:?}", spikes.len(), spikes);
+        }
+        // A hard vertical edge at the panel's horizontal centre: the lens does
+        // not displace there, so any per-row drift of the edge is a graph
+        // artifact. Sub-pixel, from the 50% crossing of the blurred step.
+        let mut step = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                let level = if x < BLUR_PAD + pw / 2 { 40u8 } else { 230 };
+                step.extend_from_slice(&[level, level, level, 255]);
+            }
+        }
+        for bend in [0.0f32, 1.0] {
+            let out = draw(&engine, &step, bend);
+            let mut drift = (0.0f32, 0.0f32, 0u32); // min, max, row of max
+            let mut at = |y: u32| {
+                let row = &out[(y * pw * 4) as usize..((y + 1) * pw * 4) as usize];
+                // Walk the crossing left to right, interpolating the 50% point.
+                for x in 260..500u32 {
+                    let a = row[(x * 4) as usize] as f32;
+                    let b = row[((x + 1) * 4) as usize] as f32;
+                    if a < 135.0 && b >= 135.0 {
+                        return x as f32 + (135.0 - a) / (b - a).max(0.001);
+                    }
+                }
+                f32::NAN
+            };
+            let mut xs = Vec::new();
+            for y in 0..ph {
+                let x = at(y);
+                if x.is_finite() {
+                    xs.push((y, x));
+                }
+            }
+            let base = xs.iter().map(|(_, x)| *x).sum::<f32>() / xs.len() as f32;
+            for (y, x) in &xs {
+                let d = x - base;
+                if d < drift.0 {
+                    drift.0 = d;
+                }
+                if d > drift.1 {
+                    drift = (drift.0, d, *y);
+                }
+            }
+            let upper: Vec<f32> = xs.iter().filter(|(y, _)| *y + 40 < ph / 2).map(|(_, x)| *x).collect();
+            let lower: Vec<f32> = xs.iter().filter(|(y, _)| *y > ph / 2 + 40).map(|(_, x)| *x).collect();
+            let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+            eprintln!(
+                "bend {bend}: edge x mean {base:.3}, drift {:.3}..{:.3} at row {}, upper {:.3} lower {:.3} (delta {:.3})",
+                drift.0,
+                drift.1,
+                drift.2,
+                mean(&upper),
+                mean(&lower),
+                mean(&lower) - mean(&upper),
+            );
+        }
     }
 
 }

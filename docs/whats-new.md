@@ -1,4 +1,4 @@
-<!-- release: 3.0.1 -->
+<!-- release: 3.0.2 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -89,13 +89,11 @@
   cut the section instead.
 -->
 
-## The notes page turns up
+## The first letter is quick now
 
-Nex recorded a release as read the moment the What's New page was opened. If the panel closed before the page had drawn, the notes were spent: never shown, and no pill left to bring them back. It counts as read now once the page has actually been on screen.
-
-That is why 3.0.0's notes never appeared. This page is the one you were owed.
+Typing the first character after opening the panel used to sit there for a second or two. Nex was reading its startup cache every time, and one lookup in it was slow: asking which apps were installed walked every title in a 221,000-row index to find 135 apps. That is a single index away, and the whole read now takes about 50 ms instead of one to two seconds.
 
 ### Under the hood
 
-- A drafted release page no longer comes out empty when the tag it is building is also the newest tag.
-- The draft no longer carries a placeholder line about "limits worth knowing".
+- An index on the item kind and title, so the app lookup stops scanning the whole store.
+- The startup load reports its stages, which is how the slow one was found rather than guessed.

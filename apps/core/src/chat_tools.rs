@@ -6038,6 +6038,16 @@ mod tests {
         // buffer (~64 KB) blocked the process on its write syscall, so a command
         // that finished in milliseconds was killed at the deadline and reported
         // as "still running after 30s".
+        // A cold CI runner can take most of the budget just starting PowerShell
+        // - it was 20.9s on the shared Windows runner and under a second here, so
+        // a fixed ceiling accused the pipe of blocking when the machine was the
+        // problem. Measure what starting this binary costs on this machine once,
+        // then judge the large-output run against that, not against a stopwatch
+        // calibrated on a fast developer box.
+        let baseline_started = std::time::Instant::now();
+        run_powershell("'warm'", 30).expect("PowerShell must start at all");
+        let baseline = baseline_started.elapsed();
+
         let started = std::time::Instant::now();
         let out = run_powershell("1..4000 | ForEach-Object { 'line ' + $_ }", 30)
             .expect("a large-output command must complete, not be killed");
@@ -6045,8 +6055,8 @@ mod tests {
 
         assert_eq!(out.exit_code, 0);
         assert!(
-            elapsed < std::time::Duration::from_secs(20),
-            "this command is not slow; {elapsed:?} means the pipe blocked: {}",
+            elapsed < baseline + std::time::Duration::from_secs(10),
+            "4000 lines cost {elapsed:?} against {baseline:?} to start the same binary;              that gap means the pipe blocked, not that the command was slow: {}",
             out.summary
         );
         assert!(

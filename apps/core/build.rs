@@ -10,13 +10,12 @@
 //! * `docs/releases/v<version>-notes.md` — the GitHub release page, including
 //!   the commit log. Not used by the app at all.
 //!
-//! It also bakes the page's banner from `docs/releases/assets/`: the
-//! `v<version>-hero.webp` if that exists, otherwise `whats-new-hero.webp`,
-//! encoded as a data URI. The picture is compiled in for the same reason the
-//! text is: the notes appear immediately after an update, and a page that
-//! fetches its own banner opens as a heading over a gap whenever the network
-//! is slow. Nothing here needs a protocol route, a cache directory, or an
-//! invalidation rule.
+//! It also bakes an optional picture for the page, if one happens to exist at
+//! `docs/releases/assets/v<version>-hero.webp` or `whats-new-hero.webp`. No
+//! release needs one: the page is the heading and the text, and a missing
+//! picture is the normal case, not a warning. Baking it rather than fetching
+//! it keeps the page whole when the network is slow; a release that wants a
+//! banner gets the same treatment, and one that does not notices nothing.
 //!
 //! Stripping the comments here rather than in the app was considered and
 //! rejected: a build script is compiled without the test harness, so the
@@ -74,12 +73,7 @@ fn main() {
     }
     let hero = match candidates.iter().find_map(|path| std::fs::read(path).ok()) {
         Some(bytes) => format!("data:image/webp;base64,{}", base64(&bytes)),
-        None => {
-            println!(
-                "cargo:warning=no What's New banner at docs/releases/assets/v{version}-hero.webp                  or whats-new-hero.webp; the view will render without a picture"
-            );
-            String::new()
-        }
+        None => String::new(),
     };
     let hero_out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default()).join("whats_new_hero.txt");
     write_if_changed(&hero_out, &hero, "the baked What's New banner");

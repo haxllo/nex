@@ -1,4 +1,4 @@
-<!-- release: 3.0.2 -->
+<!-- release: 3.1.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -38,23 +38,20 @@
 
   ## What the app draws around this text
 
-  The page is built from three parts, and only the middle one comes from here:
+  The page is built from two parts, and only the second one comes from here:
 
-  1. The banner. docs/releases/assets/v<version>-hero.webp, or
-     whats-new-hero.webp when no versioned file exists. It is baked into the
-     binary as a data URI and placed between the heading and the first
-     paragraph. Roughly 2.2:1, dark, no text in the image. A missing file warns
-     at build time and draws no picture; it never fails a build. This markdown
-     cannot include a picture of its own: there is one banner per release.
-  2. The heading row. The first "## " line, printed heavy and short. The app
+  1. The heading row. The first "## " line, printed heavy and short. The app
      puts this build's version on the same baseline at the right end of that
      row, as a button that opens the release page. Never write a version, a
      date, or a "changelog" label into the text: the page already has all
      three, and repeating them is what made three competing titles the first
      time this page was built.
-  3. The body, from here. Everything between the heading and the first "### "
+  2. The body, from here. Everything between the heading and the first "### "
      is the intro and stays visible. Every "### " becomes a collapsed drawer
      that opens when clicked.
+
+  There is no banner. A release does not need a picture, ship no image, and a
+  build that finds none says nothing about it.
 
   ## Format
 
@@ -89,11 +86,22 @@
   cut the section instead.
 -->
 
-## The first letter is quick now
 
-Typing the first character after opening the panel used to sit there for a second or two. Nex was reading its startup cache every time, and one lookup in it was slow: asking which apps were installed walked every title in a 221,000-row index to find 135 apps. That is a single index away, and the whole read now takes about 50 ms instead of one to two seconds.
+## The first key answers at once
 
-### Under the hood
+Typing a letter as soon as the panel opens used to leave the list sitting there for a moment. The search index is now prepared while the panel is still hidden, so the work happens before you press a key.
 
-- An index on the item kind and title, so the app lookup stops scanning the whole store.
-- The startup load reports its stages, which is how the slow one was found rather than guessed.
+The glass edge changed as well. It bends the desktop behind the panel the way a lens edge does, and the line across the border is gone.
+
+### Typing
+
+- **The index is ready before you type.** Opening the panel starts a background pass that reads what one letter will search, and it repeats after new files are added.
+- **Icons are sent once.** App icons were pushed to the panel with every keystroke, which is why a letter matching installed apps felt heavier than one that did not. Each icon now goes once and stays.
+- **Search answers while the index is being written.** A keystroke reads the previous snapshot, and the next one already includes the change.
+
+### The glass edge
+
+- **The rim bends the desktop.** The border reads the desktop outside the window and curves it, so the panel looks like thick glass with the desktop running through its edge.
+- **The seam is gone.** The bend used to end in a hard line with a flat, unbent strip beyond it. The stretch now eases out as it reaches the end of the band.
+- **Corners turn properly.** The bend narrows through the rounded corner, so the glass wraps it with no fanned patch.
+- **A clearer middle.** The frost across the pane is even and light, so what you see through the glass is the desktop rather than a blurred band.

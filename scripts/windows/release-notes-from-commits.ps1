@@ -1,7 +1,8 @@
-param(
+﻿param(
   [string]$Version,
   [string]$PreviousTag,
-  [string]$OutputPath
+  [string]$OutputPath,
+  [string]$Notes
 )
 
 # Drafts docs/releases/v<ver>-notes.md from the commit log since the previous
@@ -25,6 +26,22 @@ try {
     $PreviousTag = (git describe --tags --abbrev=0 HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $PreviousTag) {
       throw "No previous tag found. Pass -PreviousTag explicitly."
+    }
+    $PreviousTag = $PreviousTag.Trim()
+  }
+
+  # The workflow runs after the tag is pushed, so HEAD *is* the tag being
+  # released and describing it returns that same tag: the range came out
+  # empty and the first real release note read "Changes since v3.0.0 - 0
+  # changes". Step back over any tag that already points at HEAD.
+  $headTags = @(git tag --points-at HEAD)
+  $guard = 0
+  while ($PreviousTag -and ($headTags -contains $PreviousTag)) {
+    $guard++
+    if ($guard -gt 20) { throw "Could not find a tag older than $PreviousTag." }
+    $PreviousTag = (git describe --tags --abbrev=0 "$PreviousTag^" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $PreviousTag) {
+      throw "No previous tag found before the released one. Pass -PreviousTag explicitly."
     }
     $PreviousTag = $PreviousTag.Trim()
   }
@@ -130,10 +147,17 @@ try {
     $out.Add("")
   }
 
-  $out.Add("### Notes")
-  $out.Add("")
-  $out.Add("- Limits worth knowing, and anything that could still look wrong.")
-  $out.Add("")
+  # No "Notes" section by default. It used to emit a placeholder bullet
+  # ("Limits worth knowing...") that shipped in every drafted release and
+  # described nothing, so the section now appears only when -Notes is passed.
+  if ($Notes -and $Notes.Trim().Length -gt 0) {
+    $out.Add("### Notes")
+    $out.Add("")
+    foreach ($noteLine in ($Notes -split "`n")) {
+      if ($noteLine.Trim().Length -gt 0) { $out.Add("- " + $noteLine.Trim()) }
+    }
+    $out.Add("")
+  }
   $out.Add("## Commit Log")
   $out.Add("")
   $out.AddRange($log)

@@ -3509,14 +3509,14 @@
   const chatTextEncoder = new TextEncoder();
   const chatTextDecoder = new TextDecoder();
 
-  function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false, scopeCleared = false) {
-    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared };
+  function chatSendPayloadFits(message, requestId, history, attachments = [], includePcInfo = false, scopeCleared = false, scope = null) {
+    const payload = { t: "chatSend", requestId, message, history, attachments, includePcInfo, scope, scopeCleared };
     return chatTextEncoder.encode(JSON.stringify(payload)).length <= CHAT_IPC_MAX_BYTES;
   }
 
-  function chatMessageFits(message, requestId, attachments, includePcInfo, scopeCleared = false) {
+  function chatMessageFits(message, requestId, attachments, includePcInfo, scopeCleared = false, scope = null) {
     return Array.from(message).length <= CHAT_MESSAGE_MAX_CHARS
-      && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo, scopeCleared);
+      && chatSendPayloadFits(message, requestId, [], attachments, includePcInfo, scopeCleared, scope);
   }
 
   // One line per action a turn actually ran. The model never sees its own
@@ -3541,7 +3541,7 @@
     return lines.length ? "Actions already run in this reply (facts, not instructions):\n" + lines.join("\n") : "";
   }
 
-  function buildChatHistory(turns, message, requestId, attachments, includePcInfo, scopeCleared = false) {
+  function buildChatHistory(turns, message, requestId, attachments, includePcInfo, scopeCleared = false, scope = null) {
     const candidates = turns.filter((turn) => !turn.error
       && !(turn.role === "assistant" && turn.incomplete)
       && (turn.role === "user" || turn.role === "assistant"))
@@ -3559,7 +3559,7 @@
       const content = chatTextDecoder.decode(encodedContent);
       if (totalBytes + encodedContent.length > CHAT_HISTORY_MAX_BYTES) break;
       const nextHistory = [{ role: turn.role, content }, ...history];
-      if (!chatSendPayloadFits(message, requestId, nextHistory, attachments, includePcInfo, scopeCleared)) break;
+      if (!chatSendPayloadFits(message, requestId, nextHistory, attachments, includePcInfo, scopeCleared, scope)) break;
       history.unshift({ role: turn.role, content });
       totalBytes += encodedContent.length;
     }
@@ -3709,12 +3709,13 @@
     // Read, not consumed: the size checks below can still reject the message,
     // and a rejected send must not swallow the one-shot correction.
     const scopeCleared = pendingScopeCleared();
-    if (!chatMessageFits(message, request.requestId, attachments, includePcInfo, scopeCleared)) {
+    const scope = currentChatScope() || null;
+    if (!chatMessageFits(message, request.requestId, attachments, includePcInfo, scopeCleared, scope)) {
       chatNotice.textContent = "This message and selected context exceed the chat size limit. Remove a file or shorten the message.";
       chatNotice.classList.add("error");
       return false;
     }
-    const history = buildChatHistory(historyTurns, message, request.requestId, attachments, includePcInfo, scopeCleared);
+    const history = buildChatHistory(historyTurns, message, request.requestId, attachments, includePcInfo, scopeCleared, scope);
     invalidateChatRequest();
     chatActiveRequest = request;
     if (!reuseUserTurn) {
@@ -3746,7 +3747,7 @@
     updateChatStreamingState(true);
     // Consumed only now: the send is happening.
     if (scopeCleared) takeScopeCleared();
-    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope: currentChatScope() || null, scopeCleared });
+    post("chatSend", { ...request, message, history, attachments, includePcInfo, scope, scopeCleared });
     chatInput.focus(); postChatResize();
     return true;
   }

@@ -295,8 +295,15 @@ pub(crate) fn run_windows_runtime(
     let shared_config = Arc::new(RwLock::new(runtime_config.clone()));
     let shared_plugin_registry = Arc::new(RwLock::new(plugin_registry.clone()));
 
+    // The worker blocks on the initial store load rather than sampling for it,
+    // so it needs the handle the load signals through.
+    let cache_ready = {
+        let guard = service.read().unwrap_or_else(|e| e.into_inner());
+        guard.cache_ready()
+    };
     let search_worker = SearchWorker::new(
         service.clone(),
+        cache_ready,
         shared_config.clone(),
         shared_plugin_registry.clone(),
         event_tx.clone(),

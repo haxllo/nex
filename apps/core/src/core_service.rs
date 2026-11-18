@@ -13,8 +13,67 @@ use crate::tantivy_search::{TantivyIndex, TantivyOpenError};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// One-shot notification that the initial store load has finished.
+///
+/// The search worker used to discover this by sampling the cache state every
+/// 10 ms, which quantised the first keystroke: a load that finished 1 ms after
+/// a poll still cost the reader the rest of that poll. It now blocks on this
+/// and wakes when the load actually lands, so the first query waits for the
+/// data and nothing else.
+#[derive(Debug, Default)]
+pub(crate) struct CacheReady {
+    finished: Mutex<bool>,
+    notify: Condvar,
+}
+
+impl CacheReady {
+    /// Marks the load finished and wakes every waiter. Idempotent.
+    pub(crate) fn mark_finished(&self) {
+        let mut finished = match self.finished.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !*finished {
+            *finished = true;
+            self.notify.notify_all();
+        }
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        match self.finished.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Blocks until the load finishes or `limit` passes; returns how long it
+    /// actually blocked, so the caller can log a wait worth investigating.
+    pub(crate) fn wait_timeout(&self, limit: Duration) -> Duration {
+        let started = Instant::now();
+        let mut finished = match self.finished.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        while !*finished {
+            let remaining = limit.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, timed_out) = match self.notify.wait_timeout(finished, remaining) {
+                Ok(pair) => pair,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            finished = guard;
+            if timed_out.timed_out() {
+                break;
+            }
+        }
+        started.elapsed()
+    }
+}
 
 const STALE_PRUNE_INTERVAL: Duration = Duration::from_secs(15);
 const PROVIDER_RECONCILE_INTERVAL_SECS: i64 = 30 * 60;
@@ -147,6 +206,9 @@ pub struct CoreService {
     /// True when the resident cache is the bounded hot set rather than every
     /// store row (the indexer and the UI after CIQ-78 Phase 3).
     hot_cache: bool,
+    /// Signalled once the initial store load has finished; the search worker
+    /// blocks on it instead of polling.
+    cache_ready: Arc<CacheReady>,
     /// True for the UI-process service: it reads the store but must never
     /// write it. Mutations are forwarded to the indexer, which owns writes.
     ui_client: bool,
@@ -476,6 +538,7 @@ impl CoreService {
             last_drift_store_count: Mutex::new(None),
             cache_complete: AtomicBool::new(cache_complete),
             hot_cache,
+            cache_ready: Arc::new(CacheReady::default()),
             ui_client: !enable_tantivy,
             last_stale_prune: Mutex::new(None),
             stale_prune_cursor: Mutex::new(None),
@@ -906,8 +969,19 @@ impl CoreService {
     }
 
     pub fn reload_cache_from_store(&self) -> Result<usize, ServiceError> {
-        self.refresh_cache_from_store()?;
+        let result = self.refresh_cache_from_store();
+        // Wakes the search worker even when the load failed: an empty store is
+        // an answer, and blocking a query for the full ceiling would only add
+        // the wait back for nothing.
+        self.cache_ready.mark_finished();
+        result?;
         Ok(self.cached_len())
+    }
+
+    /// Handle the search worker collects at construction so it can block on
+    /// the initial load instead of sampling for it.
+    pub(crate) fn cache_ready(&self) -> Arc<CacheReady> {
+        Arc::clone(&self.cache_ready)
     }
 
     /// Bounded first-sync snapshot read from SQLite, without cloning the
@@ -2466,6 +2540,7 @@ impl CoreService {
         *apps_guard = latest_apps;
         drop(apps_guard);
         self.bump_search_generation();
+        self.cache_ready.mark_finished();
         Ok(())
     }
 
@@ -3880,5 +3955,17 @@ mod tests {
         let (_generation, items) = service.cached_snapshot();
         assert_eq!(items.len(), expected);
         assert!(items.iter().any(|item| item.id == "swap-1"));
+    }
+
+    // The worker's first query blocks until this fires. If the load never
+    // signals, every cold panel pays the 2.5 s ceiling instead of the load.
+    #[test]
+    fn reload_cache_from_store_signals_cache_ready() {
+        let (service, _dir) = isolated_service();
+        assert!(!service.cache_ready().is_finished(), "a fresh service has not loaded yet");
+
+        service.reload_cache_from_store().expect("cache reload");
+
+        assert!(service.cache_ready().is_finished(), "the load must signal the worker");
     }
 }

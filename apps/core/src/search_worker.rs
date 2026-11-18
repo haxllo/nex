@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::Sender;
 
 use crate::config::Config;
-use crate::core_service::CoreService;
+use crate::core_service::{CacheReady, CoreService};
 use crate::model::SearchItem;
 use crate::overlay::model::OverlayEvent;
 use crate::plugin_sdk::PluginRegistry;
@@ -41,6 +41,7 @@ pub(crate) struct SearchWorker {
 impl SearchWorker {
     pub(crate) fn new(
         service: Arc<RwLock<CoreService>>,
+        cache_ready: Arc<CacheReady>,
         shared_config: Arc<RwLock<Config>>,
         shared_plugin_registry: Arc<RwLock<PluginRegistry>>,
         event_tx: Sender<OverlayEvent>,
@@ -109,7 +110,9 @@ impl SearchWorker {
                             // set returns nothing, and nothing re-runs the
                             // query, so the first results only appeared on a
                             // later keystroke (1-2 s at login).
-                            wait_for_initial_cache(&service);
+                            let query_started = std::time::Instant::now();
+                            let waited = wait_for_initial_cache(&service, &cache_ready);
+                            let wait_ms = waited.as_millis();
 
                             // Bounded retry on lock contention: a refresh or
                             // watcher batch can hold the service write lock
@@ -172,6 +175,19 @@ impl SearchWorker {
                                     )
                                 }
                             };
+
+                            // The first keystroke is the only query that pays
+                            // for a cold reader, a cold icon cache and the
+                            // store load at once, so the split is logged for
+                            // every query that waited or ran long.
+                            let total_ms = query_started.elapsed().as_millis();
+                            if wait_ms > 0 || total_ms >= 50 {
+                                crate::logging::info(&format!(
+                                    "[nex] search_waited wait_ms={wait_ms} total_ms={total_ms} rows={} cache_ready={}",
+                                    results.len(),
+                                    cache_ready.is_finished()
+                                ));
+                            }
 
                             let _ = res_tx.send(SearchResult {
                                 generation: latest.generation,
@@ -241,35 +257,80 @@ impl Drop for SearchWorker {
 /// what makes the first keystroke show results without a second keystroke.
 /// Bounded so a failed load (or a genuinely empty store) cannot wedge the
 /// worker.
-fn wait_for_initial_cache(service: &Arc<RwLock<CoreService>>) {
+fn wait_for_initial_cache(
+    service: &Arc<RwLock<CoreService>>,
+    ready: &CacheReady,
+) -> std::time::Duration {
     const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(2_500);
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-    let started = std::time::Instant::now();
-    loop {
-        let still_loading = match service.try_read() {
-            Ok(guard) => {
-                guard.is_ui_client()
-                    && guard.cached_items_len() == 0
-                    && !guard.cache_is_complete()
-            }
-            Err(_) => true,
-        };
-        if !still_loading {
-            break;
+
+    // Cheap gate first: most queries arrive long after the load and must not
+    // touch the signal at all.
+    let still_loading = match service.try_read() {
+        Ok(guard) => {
+            guard.is_ui_client()
+                && guard.cached_items_len() == 0
+                && !guard.cache_is_complete()
         }
-        if started.elapsed() >= WAIT_LIMIT {
-            crate::logging::info(
-                "[nex] search_waited_for_cache timed_out=true elapsed_ms=2500",
-            );
-            break;
-        }
-        std::thread::sleep(POLL_INTERVAL);
+        // The loader holds the write lock, so it is mid-load by definition.
+        Err(_) => true,
+    };
+    if !still_loading {
+        return std::time::Duration::ZERO;
     }
-    let waited = started.elapsed();
-    if waited >= std::time::Duration::from_millis(50) {
-        crate::logging::info(&format!(
-            "[nex] search_waited_for_cache elapsed_ms={}",
-            waited.as_millis()
-        ));
+
+    // The load already finished and the cache is still empty: the store is
+    // genuinely empty. Waiting cannot change that answer.
+    if ready.is_finished() {
+        return std::time::Duration::ZERO;
+    }
+
+    // Block on the load instead of sampling it every 10 ms. The poll used to
+    // quantise the first keystroke: a load that landed 1 ms after a sample
+    // still cost the rest of that sample.
+    let waited = ready.wait_timeout(WAIT_LIMIT);
+    if waited >= WAIT_LIMIT {
+        crate::logging::info("[nex] search_waited_for_cache timed_out=true elapsed_ms=2500");
+    }
+    waited
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // The wait must be a wake-up, not a poll: the whole point of the change is
+    // that a load landing between samples is visible immediately.
+    #[test]
+    fn cache_ready_wakes_a_waiter_instead_of_timing_out() {
+        let ready = Arc::new(CacheReady::default());
+        let waiter = Arc::clone(&ready);
+        let handle = std::thread::spawn(move || waiter.wait_timeout(Duration::from_secs(2)));
+
+        std::thread::sleep(Duration::from_millis(20));
+        ready.mark_finished();
+
+        let waited = handle.join().expect("waiter thread");
+        assert!(
+            waited < Duration::from_millis(500),
+            "waiter should be woken by the signal, waited {waited:?}"
+        );
+        assert!(ready.is_finished());
+    }
+
+    #[test]
+    fn cache_ready_does_not_block_when_the_load_already_finished() {
+        let ready = CacheReady::default();
+        ready.mark_finished();
+        assert!(ready.wait_timeout(Duration::from_secs(5)) < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn cache_ready_is_bounded_when_nothing_signals() {
+        let ready = CacheReady::default();
+        let waited = ready.wait_timeout(Duration::from_millis(60));
+        assert!(waited >= Duration::from_millis(50));
+        assert!(waited < Duration::from_millis(400));
+        assert!(!ready.is_finished());
     }
 }

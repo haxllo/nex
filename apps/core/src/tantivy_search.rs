@@ -82,7 +82,9 @@ impl TantivyIndex {
             .map_err(|e| other(format!("failed to open/create tantivy index: {e}")))?;
 
         let reader = index
-            .reader()
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
+            .try_into()
             .map_err(|e| other(format!("failed to create tantivy reader: {e}")))?;
 
         let writer = index.writer(16_000_000).map_err(|e| match e {
@@ -122,10 +124,11 @@ impl TantivyIndex {
             return Ok(Vec::new());
         }
 
-        self.reader
-            .reload()
-            .map_err(|e| format!("tantivy reload error: {e}"))?;
-
+        // No explicit reload here. `ReloadPolicy::OnCommitWithDelay` reloads
+        // in the background after every commit, and a synchronous reload on
+        // each query cost 150-350 ms per keystroke: it re-opened segment
+        // readers on the search path instead of once per commit. Freshness
+        // that must be immediate (deletion bookkeeping) calls `reload` itself.
         let searcher = self.reader.searcher();
         let query = build_prefix_query(
             &searcher.index(),
@@ -518,6 +521,11 @@ impl TantivyIndex {
             .commit()
             .map_err(|e| format!("tantivy commit error: {e}"))?;
         *count = 0;
+        // Publish now rather than after the policy's delay: this runs once per
+        // batch, not once per query, so the reload is affordable here.
+        self.reader
+            .reload()
+            .map_err(|e| format!("tantivy reload error: {e}"))?;
         Ok(true)
     }
 
@@ -781,7 +789,8 @@ mod tests {
     /// Wait for `predicate` to hold, allowing for the fact that a commit is not
     /// instantly observable through a reader.
     ///
-    /// `num_docs()` and `search()` each call `reader.reload()` separately, and
+    /// `num_docs()` reloads before reading, `search()` sees whatever the
+    /// reader's reload policy has published, and
     /// `index_items` finishes with `collect_garbage`, which on Windows defers
     /// deletion while a reader still maps a file (see the comment there). A
     /// single read straight after a write can therefore observe the previous

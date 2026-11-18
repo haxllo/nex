@@ -33,6 +33,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT,
     D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+    D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
     D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT,
     D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_BOOL,
@@ -153,10 +154,11 @@ fn mark_glass_ok() -> bool {
 
 /// Wide diffusion branch: the frost of the pane's interior.
 const BLUR_STDDEV: f32 = 8.0;
-/// The rim's own blur. The wide frost only owns the interior: the bending
-/// happens in the band, and frost laid over it hides the bend (see
-/// `scatter_weight`).
-const RIM_BLUR_STDDEV: f32 = 1.1;
+/// The rim's own blur. A bending edge is not razor sharp either: the whole
+/// pane is seen through the same glass, so the rim gets a soft version of the
+/// tight blur (true Gaussian passes, `OPTIMIZATION_QUALITY`) plus its share of
+/// the wide frost.
+const RIM_BLUR_STDDEV: f32 = 2.2;
 /// Colour fringe per channel as a share of the shift. The shipped look has
 /// none: with a shift this strong (tens of px at the rim) a fringe reads as a
 /// rainbow flare in the corners, not as dispersion in a lens.
@@ -166,10 +168,9 @@ const ABERRATION: f32 = 0.0;
 const SATURATION: f32 = 1.2;
 /// The shift the map can carry for a panel, logical px: the widest band that
 /// panel can have. A cell holds `shift / range`, so a range fixed at 112 px
-/// left only ~20 of the 255 levels in use and put 0.88 px between them - the
-/// slow part of the bend then moved in visible steps, which read as a zigzag.
-/// Sized to the band, a step is ~0.2 px on the 56 px panel and ~0.17 px on the
-/// 21 px dock.
+/// left most of the 255 levels unused and put 0.88 px between them - the slow
+/// part of the bend then moved in visible steps, which read as a zigzag. Sized
+/// to the band, a step is ~0.2 px on the 56 px panel and ~0.17 px on the dock.
 fn lens_range(panel_w: u32, panel_h: u32, scale: f32) -> f32 {
     bezel_band(panel_w.min(panel_h) as f32 / scale.max(0.01)).max(1.0)
 }
@@ -209,7 +210,11 @@ fn bezel_band(short_side: f32) -> f32 {
 /// there. `1` along a straight side, `0.55` on the diagonal.
 fn corner_taper(nx: f32, ny: f32) -> f32 {
     let diagonal = (4.0 * (nx * ny).abs()).clamp(0.0, 1.0);
-    1.0 - 0.45 * diagonal
+    // Eased at both ends, so the band's width has no kink where the taper
+    // starts on a straight side or where it bottoms out on the diagonal: the
+    // corner reads as one continuous turn instead of an arc with a seam.
+    let eased = diagonal * diagonal * (3.0 - 2.0 * diagonal);
+    1.0 - 0.45 * eased
 }
 
 /// Thickness of the rim relative to its width (`T = B * RIM_THICKNESS`). What
@@ -268,8 +273,8 @@ const INK_RATE_MS: u64 = 150;
 const LUMA_EMA: f32 = 0.10;
 /// Extra desktop pixels around the panel keep the blur kernel away from the
 /// capture boundary and give the rim somewhere to read from. The rim samples
-/// up to one band *outside* the pane - that is what makes it show the
-/// surroundings converging instead of a copy of the pane's own middle, which
+/// up to one band *outside* the pane - that is what wraps the surrounding
+/// desktop around the curve instead of copying the pane's own middle, which
 /// read as a mirror - so the crop has to carry that much desktop past the
 /// edge. 58 covers the blur's 26 px reach too. The panel must sit this far
 /// inside the monitor or the crop clamps; a clamped crop is copied at its true
@@ -1149,6 +1154,7 @@ impl Engine {
                 )
                 .map_err(|e| format!("blur SetValue failed: {e:?}"))?;
         }
+        set_blur_quality(&blur)?;
         let saturate: ID2D1Effect = unsafe {
             d2d.CreateEffect(&CLSID_D2D1ColorMatrix as *const _)
                 .map_err(|e| format!("saturation CreateEffect failed: {e:?}"))?
@@ -1166,6 +1172,7 @@ impl Engine {
         let displace = displacement_effect(&d2d)?;
         let tight_blur = create_effect(&d2d, &CLSID_D2D1GaussianBlur)?;
         set_float(&tight_blur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0, RIM_BLUR_STDDEV)?;
+        set_blur_quality(&tight_blur)?;
         // The map's blue channel carries a smooth wide-blur weight. RG
         // remain the signed lens normals; alpha remains fully opaque.
         let scatter_mask = create_effect(&d2d, &CLSID_D2D1ColorMatrix)?;
@@ -1903,6 +1910,21 @@ fn set_float(effect: &ID2D1Effect, property: i32, value: f32) -> Result<(), Stri
         .map_err(|e| format!("glass property {property}: {e:?}"))
 }
 
+/// D2D's default Gaussian is three box passes, which leaves a slightly
+/// boxy/blocky falloff (it reads murky on a large radius). Quality runs true
+/// Gaussian passes instead and costs a little more GPU time on a small pane.
+fn set_blur_quality(effect: &ID2D1Effect) -> Result<(), String> {
+    let quality: u32 = 2; // D2D1_GAUSSIANBLUR_OPTIMIZATION_QUALITY
+    unsafe {
+        effect.SetValue(
+            D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION.0 as u32,
+            D2D1_PROPERTY_TYPE_ENUM,
+            &quality.to_ne_bytes(),
+        )
+    }
+    .map_err(|e| format!("glass blur quality: {e:?}"))
+}
+
 fn set_color_matrix(effect: &ID2D1Effect, matrix: &[f32; 20]) -> Result<(), String> {
     let bytes: Vec<u8> = matrix.iter().flat_map(|v| v.to_ne_bytes()).collect();
     unsafe { effect.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, &bytes) }
@@ -1938,15 +1960,11 @@ fn dispersion_scales(bend: f32, range: f32) -> [f32; 3] {
     [scale * (1.0 + ABERRATION), scale, scale * (1.0 - ABERRATION)]
 }
 
-/// Share of the wide frost across the pane. The pane is a window: the backdrop
-/// keeps its detail, and the rim's own narrow blur is all the softening it
-/// gets. `t` is the depth into the pane over the band's width. A frosted
-/// interior made the middle of a short pane read as a *blurrier* strip than
-/// its bending ends, which is backwards for glass.
-fn scatter_weight(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    0.05 + 0.05 * t
-}
+/// Share of the wide frost over the pane. One value everywhere: a ramp made a
+/// short pane's middle blurrier than its ends, which read as a strip across
+/// it. Ten percent of the 8 px blur softens the backdrop without stealing the
+/// rim's bend, which the narrow `RIM_BLUR_STDDEV` already handles.
+const FROST: f32 = 0.10;
 
 /// Height profile of the rim: a squircle. Vertical at the edge (t = 0), flat on
 /// top (t = 1). `1 - (1-t)^4` written without the cancellation.
@@ -1955,10 +1973,13 @@ fn height_profile(t: f32) -> f32 {
     (t * (4.0 - t * (6.0 - t * (4.0 - t)))).max(0.0).powf(0.25)
 }
 
-/// Inward shift of the read position at a rim depth, logical px: the slope of
-/// the profile, taken as an incidence angle and bent through the pane by
-/// Snell's law. This is what makes the band read as bending glass; a linear or
-/// quadratic falloff only pulls the picture inward.
+/// Shift of the read position at a rim depth, logical px: the slope of the
+/// profile taken as an incidence angle and bent through the pane by Snell's
+/// law. This is what makes the band read as bending glass. The read is placed
+/// OUTWARD (`+n * shift`), so the rim shows the surrounding desktop wrapped
+/// around the curve - convex, converging, the reference look - and it is
+/// monotone by construction: the shift only falls as the depth grows, so the
+/// sampled position only ever moves outward.
 fn rim_shift(t: f32, band: f32, thickness: f32) -> f32 {
     if t >= 1.0 {
         return 0.0;
@@ -1969,6 +1990,16 @@ fn rim_shift(t: f32, band: f32, thickness: f32) -> f32 {
     let incidence = slope.atan();
     let refracted = (incidence.sin() / IOR).clamp(-1.0, 1.0).asin();
     thickness * (incidence - refracted).tan()
+}
+
+/// Squeezes the shift into the band the map can carry. Clamping does that with
+/// a `min`, which leaves the outermost few px an unbent, translated copy of the
+/// desktop and then jumps the stretch from 1x to ~6x where the cap engages - a
+/// hard line parallel to the border. `tanh` bends the excess away instead, so
+/// the stretch ramps up smoothly; its peak is 0.94 of the band, which still fits
+/// the range the map encodes.
+fn soft_cap(shift: f32, band: f32) -> f32 {
+    band * (shift / band.max(0.001)).tanh()
 }
 
 /// Rounded-rectangle signed-distance field with a circular corner arc.
@@ -2089,6 +2120,8 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
     let band_logical = bezel_band(w.min(h) as f32 / scale);
     let band = band_logical * scale;
     let thickness = band_logical * RIM_THICKNESS;
+    // The one 8-bit range the map can carry: the widest shift it can hold.
+    let range = band_logical;
     let r_true = (CORNER_RADIUS * scale).min(half_w).min(half_h);
     // The bend's DEPTH comes from the true outline, so the band hugs the real
     // corner. Its DIRECTION comes from a box rounder than that outline: the
@@ -2109,19 +2142,19 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
             // interior is not displaced at all: the reference look has no zoom
             // and no slab, so the pane's middle stays a window.
             //
-            // The read goes OUTWARD (`+nx`), so the rim shows the desktop just
-            // beyond the edge, compressed as it bends. Sampling inward showed
-            // backdrop the pane's own middle also shows: the same picture twice,
-            // which is the mirror. Outward is also monotone by construction -
-            // the read distance only grows as the shift falls - so the mapping
-            // compresses instead of folding. One band is the furthest it may
-            // read, which is what the pad carries.
-            let shift = rim_shift(t, band_here, thickness).min(band_here);
-            let dx = nx * shift / band_logical;
-            let dy = ny * shift / band_logical;
+            // The read goes OUTWARD (`+nx`): the rim shows the desktop wrapped
+            // around the curve, which is what makes it read as convex glass
+            // rather than a magnified copy of the pane. Sampling inward showed
+            // backdrop the pane's own middle also shows - the same picture
+            // twice, which is the mirror. Outward is monotone too: the shift
+            // only falls with depth, so the read only moves further out. One
+            // band is the furthest it may read, which is what the pad carries.
+            let shift = soft_cap(rim_shift(t, band_here, thickness), band_here);
+            let dx = nx * shift / range;
+            let dy = ny * shift / range;
             let r = (128.0 + dx * 127.0).round().clamp(0.0, 255.0) as u8;
             let g = (128.0 + dy * 127.0).round().clamp(0.0, 255.0) as u8;
-            let scatter = (scatter_weight(t) * 255.0).round() as u8;
+            let scatter = (FROST * 255.0).round() as u8;
             out.extend_from_slice(&[scatter, g, r, 255]);
         }
     }
@@ -3616,13 +3649,11 @@ mod tests {
         // straight out of the red channel.
         let left = pixel(1, h / 2);
         let right = pixel(w - 2, h / 2);
-        assert!(left[2] < 96, "left edge samples inward: {}", left[2]);
-        assert!(right[2] > 160, "right edge samples inward: {}", right[2]);
-        assert!(
-            left[0] < 128,
-            "the rim must take less frost than the centre: {}",
-            left[0]
-        );
+        assert!(left[2] < 96, "left edge must read outward: {}", left[2]);
+        assert!(right[2] > 160, "right edge must read outward: {}", right[2]);
+        // Frost is one value over the whole pane: even, so no depth can read
+        // as a blurrier strip than its neighbour.
+        assert_eq!(left[0], centre[0], "frost must be even at the rim");
         let range = super::lens_range(w as u32, h as u32, 1.0);
         assert_eq!(super::dispersion_scales(1.0, range), [super::bend_scale(range); 3]);
         assert_eq!(super::dispersion_scales(0.0, range), [0.0; 3]);
@@ -3631,16 +3662,7 @@ mod tests {
             let neutral: f32 = (0..3).map(|input| matrix[input * 4 + output] * 0.5).sum();
             assert!((neutral - 0.5).abs() < 0.0001, "vibrancy must preserve gray");
         }
-        assert!(super::scatter_weight(0.0) < 0.2, "the very edge is nearly sharp");
-        // The pane stays a window: no frost cliff at the band's end, so the
-        // middle of a short pane cannot read as a blurrier strip than its rim.
-        assert!(super::scatter_weight(1.0) < 0.2, "the interior stays clear");
-        for step in 0..32 {
-            assert!(
-                super::scatter_weight(step as f32 / 32.0) <= super::scatter_weight((step + 1) as f32 / 32.0),
-                "frost must grow inward"
-            );
-        }
+        assert!((super::FROST - 0.10).abs() < 1e-6, "frost is ten percent");
     }
 
     /// Real effect-graph readback. Explicit opt-in: needs a Windows GPU and
@@ -4223,18 +4245,35 @@ mod tests {
                 let red = map[(y * w + x) * 4 + 2] as f32;
                 x as f32 + (red - 128.0) / 127.0 * range
             };
+            // The edge wraps the desktop outside the pane around the curve.
             let first = read(0);
             assert!(first < 0.0, "the edge must read outside the pane, got {first}");
+            // The shift must also change smoothly: a cap that clamps leaves a
+            // flat 1:1 strip at the border and then jumps the stretch to ~6x,
+            // which reads as a hard line parallel to the edge.
             let mut previous = f32::NEG_INFINITY;
+            let mut previous_stretch: Option<f32> = None;
             for x in 0..(band as usize * 2) {
                 let s = read(x);
                 // One 8-bit level is ~0.2 px, so a real fold (several px per
                 // column) cannot hide behind the tolerance.
                 assert!(s >= previous - 0.5, "fold at x = {x}: {previous} -> {s}");
+                if x > 0 {
+                    let stretch = s - previous;
+                    assert!(stretch < 5.0, "stretch {stretch}x at x = {x} is a cliff");
+                    if let Some(last) = previous_stretch {
+                        assert!(
+                            (stretch - last).abs() < 1.5,
+                            "stretch jumps {last} -> {stretch} at x = {x}"
+                        );
+                    }
+                    previous_stretch = Some(stretch);
+                }
                 previous = s;
             }
-            // Precision in use: the edge cell sits at the end of the range.
-            assert!(map[(y * w) * 4 + 2] < 8, "edge cell is not at the range");
+            // Precision in use: the edge cell carries most of the range.
+            let edge = map[(y * w) * 4 + 2];
+            assert!(edge < 24, "edge cell only reaches {edge} of the range");
         }
     }
 

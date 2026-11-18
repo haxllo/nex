@@ -1839,6 +1839,13 @@ impl RuntimeWorker {
                             Ok(guard) => guard.warm_search_cache(),
                             Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
                         }
+                        // This process owns no Tantivy reader; the pages the
+                        // next keystroke needs are mapped in the indexer. Ask
+                        // it for a pass so the first character after a restart
+                        // or an idle period is not the slow one.
+                        std::thread::spawn(|| {
+                            crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                        });
                         spawn_recent_documents_refresh(&self.service);
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
@@ -1906,6 +1913,9 @@ impl RuntimeWorker {
                 if let Ok(guard) = self.service.try_read() {
                     guard.warm_search_cache();
                 }
+                std::thread::spawn(|| {
+                    crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                });
                 spawn_recent_documents_refresh(&self.service);
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
                 if self.overlay.query_text().trim().is_empty() {

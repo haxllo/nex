@@ -310,6 +310,26 @@ fn dispatch(
                 Err(error) => IpcResponse::error(error.to_string()),
             }
         }
+        // The panel's first keystroke after a restart or an idle period pays
+        // cold, file-backed page faults for the mapped index (~270 ms on a
+        // 222k-document index, against ~4 ms once the pages are resident).
+        // Only this process maps those files, so the show path asks for a
+        // pass: acknowledge at once, read the files on a background thread.
+        "warm_index" => {
+            let service = Arc::clone(service);
+            std::thread::spawn(move || {
+                if let Ok(guard) = service.try_read() {
+                    guard.warm_search_cache_forced();
+                    let warmed = guard.warm_seed_queries_throttled();
+                    if warmed > 0 {
+                        crate::logging::info(&format!(
+                            "[nex] seed warm: {warmed} prefix queries"
+                        ));
+                    }
+                }
+            });
+            IpcResponse::ok(json!({ "warming": true }))
+        }
         // Tantivy-only seed for the UI process. The UI re-ranks these
         // candidates with its own filter and personalization; this avoids
         // the UI's full-cache scan at scale.
@@ -572,6 +592,23 @@ pub fn search_seed(
     Ok(items)
 }
 
+/// Ask the indexer to re-warm its index files.
+///
+/// Called from the show path of the UI process, which owns no Tantivy reader:
+/// the mapped pages the next keystroke needs live in the indexer, and only a
+/// pass there can turn a cold first touch into a soft fault. The answer comes
+/// back before the pass runs, so this never delays the show.
+///
+/// Failures are silent by design - no indexer means the keystroke falls back to
+/// the local cache, which is a latency question, not an error one.
+pub fn warm_index(addr: &str) {
+    let _ = ipc_call_with_timeout(
+        addr,
+        &IpcRequest::new("warm_index", Value::Null),
+        LIVE_PROBE_TIMEOUT,
+    );
+}
+
 /// Liveness probe with a short budget.
 ///
 /// Called from teardown paths and from a poll loop, so it must not carry the
@@ -705,6 +742,34 @@ pub fn ensure_indexer_running(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The show path must never wait for the warm pass. It runs in the
+    /// indexer, and the panel is opening while it runs, so the request is
+    /// acknowledged before a single file is read.
+    #[test]
+    fn warm_index_is_acknowledged_before_the_pass_runs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut cfg = crate::config::Config::default();
+        cfg.config_path = dir.path().join("cfg.toml");
+        cfg.index_db_path = dir.path().join("index.sqlite3");
+        cfg.clipboard_enabled = false;
+        cfg.plugins_enabled = false;
+        let db = crate::index_store::open_memory().expect("memory db");
+        let service = Arc::new(RwLock::new(
+            CoreService::with_connection(cfg, db).expect("service initializes"),
+        ));
+        let indexing = AtomicBool::new(false);
+
+        let started = Instant::now();
+        let response = dispatch(&IpcRequest::new("warm_index", Value::Null), &service, &indexing);
+        let elapsed = started.elapsed();
+
+        assert!(response.ok, "warm_index must be accepted: {:?}", response.error);
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "the show path must not wait for the pass, took {elapsed:?}"
+        );
+    }
 
     /// Quitting used to wait up to 60 s on the indexer, on the thread that
     /// owns the window, so a busy indexer froze the UI before exit. The bound

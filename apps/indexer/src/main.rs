@@ -43,9 +43,15 @@ fn main() {
         }
     }
 
-    // Background daemon: a startup rescan must never starve the desktop or the
-    // first overlay show (login startup already saturates the disks).
-    lower_process_priority();
+    // Deliberately no process-wide priority cut here. The heavy work - the
+    // discovery scan and the index sync - already enters Windows background
+    // mode per thread (`enter_background_priority`), which lowers CPU *and*
+    // I/O priority for exactly that thread. Reducing the whole process instead
+    // put the keystroke path below normal too: this process answers
+    // `search_seed`, so a first keypress arriving during the startup cycle
+    // waited on the scheduler (~105-348 ms measured, against 35 ms idle) while
+    // the desktop looked fine. Keep the scan throttled, keep the search
+    // responsive.
 
     // Bind first: a second instance must not run a duplicate discovery pass.
     let Some(listener) = ipc::bind_indexer_listener(&addr) else {
@@ -97,6 +103,30 @@ fn main() {
     start_watchers(&service);
 
     run_index_cycle(&service, &indexing, stdio_enabled);
+
+    // The restart case: a cycle that found nothing to rewrite leaves the mapped
+    // segment files cold from the previous process, and the next keystroke
+    // would fault them in one 70-270 ms region at a time. Read them now, while
+    // nobody is waiting, so the first character costs what the second one does.
+    if let Ok(service_guard) = service.read() {
+        service_guard.warm_search_cache_forced();
+    }
+    // The bytes are resident now, but the first query still pays to open the
+    // term dictionaries and walk the postings of a common prefix. Run the
+    // seed queries a keystroke would run while the panel is still closed.
+    {
+        let service = Arc::clone(&service);
+        std::thread::Builder::new()
+            .name("nex-seed-warm".into())
+            .spawn(move || {
+                let Ok(guard) = service.read() else { return };
+                let warmed = guard.warm_seed_queries();
+                nex_core::logging::info(&format!(
+                    "[nex-indexer] seed warm: {warmed} prefix queries"
+                ));
+            })
+            .ok();
+    }
 
     {
         let service = Arc::clone(&service);
@@ -266,19 +296,6 @@ fn maintenance_loop(
         }
     }
 }
-
-#[cfg(windows)]
-fn lower_process_priority() {
-    use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
-    };
-    unsafe {
-        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-    }
-}
-
-#[cfg(not(windows))]
-fn lower_process_priority() {}
 
 /// Windows background mode lowers both CPU and I/O priority for this thread.
 #[cfg(windows)]

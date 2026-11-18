@@ -114,6 +114,14 @@ pub(crate) struct ChatAttachPathsPayload {
 #[serde(deny_unknown_fields)]
 pub(crate) struct QueryPayload {
     pub v: String,
+    /// Wall-clock (epoch ms) the WebView fired its `input` event, and the
+    /// keydown that caused it. Optional: an older webview or a paste may
+    /// omit them. They exist so a slow first keystroke can be attributed to
+    /// the WebView, the IPC hop or the search instead of guessed at.
+    #[serde(default)]
+    pub at: Option<i64>,
+    #[serde(default)]
+    pub key_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

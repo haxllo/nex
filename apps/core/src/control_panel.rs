@@ -164,7 +164,13 @@ mod tests {
             .expect("services.msc");
         let png = cache.png_bytes(&services.path).expect("mmc icon extracts");
         let img = image::load_from_memory(&png).expect("mmc png decodes");
-        assert_eq!(img.into_rgba8().dimensions(), (128, 128));
+        assert_eq!(
+            img.into_rgba8().dimensions(),
+            (
+                crate::overlay::icons::target_icon_size(),
+                crate::overlay::icons::target_icon_size()
+            )
+        );
     }
 
     #[test]

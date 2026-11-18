@@ -10,6 +10,14 @@
 //! * `docs/releases/v<version>-notes.md` — the GitHub release page, including
 //!   the commit log. Not used by the app at all.
 //!
+//! It also bakes the page's banner from `docs/releases/assets/`: the
+//! `v<version>-hero.webp` if that exists, otherwise `whats-new-hero.webp`,
+//! encoded as a data URI. The picture is compiled in for the same reason the
+//! text is: the notes appear immediately after an update, and a page that
+//! fetches its own banner opens as a heading over a gap whenever the network
+//! is slow. Nothing here needs a protocol route, a cache directory, or an
+//! invalidation rule.
+//!
 //! Stripping the comments here rather than in the app was considered and
 //! rejected: a build script is compiled without the test harness, so the
 //! stripper's tests would never run and the rules would be unverified.

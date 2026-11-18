@@ -11,10 +11,16 @@
 //! - `seen == current` → already viewed/dismissed → nothing
 //!
 //! Notes content is baked into the binary at build time from
-//! `docs/releases/v<version>-notes.md` (see `build.rs`), trimmed to the
-//! user-facing part with technical commit logs and binary links removed. A
-//! build without that document bakes an empty string and the page renders its
-//! generic fallback + tips.
+//! `docs/whats-new.md` (see `build.rs`), a hand-written document with its
+//! editing instructions in HTML comments. Those comments are stripped here
+//! before the text reaches the page, which is why the stripper has tests: the
+//! document explains its own format, and a build script has no test harness.
+//! The GitHub release page is a separate document
+//! (`docs/releases/v<version>-notes.md`) that the app never reads.
+//!
+//! A build without the document bakes an empty string and the page renders its
+//! generic fallback + tips. A build without the banner bakes an empty URI and
+//! the page renders without a picture; neither state fails a build.
 
 use std::path::{Path, PathBuf};
 

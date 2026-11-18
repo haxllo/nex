@@ -50,7 +50,12 @@
   THE HEADING IS ONE SHORT HEAVY LINE
   Four words or so, naming what the release does for the reader. It is the
   only loud line on the page: no eyebrow above it, no second title, no version
-  number in it. The version lives in the header row as metadata.
+  number in it.
+
+  The version is printed by the app, not by this file, on the heading's
+  baseline at the right end of the same row. It is a button: clicking it opens
+  this build's release page. So do not write the version, a date, or a
+  "changelog" label into the text - the page already has all three.
 
   RUN THE PROSE THROUGH THE HUMANIZER SKILL BEFORE FINISHING
   ~/.agents/skills/humanizer/SKILL.md. The tells it removes are the ones this

@@ -77,6 +77,10 @@ try {
     # release note is read by people who do not have Linear access.
     $clean = ($subject -replace '^CIQ-[0-9]+:\s*', '').Trim()
     $clean = ($clean -replace '\s*\(?CIQ-[0-9]+\)?\s*', ' ').Trim()
+    # Stripping an id that sat inside a list leaves the punctuation that
+    # separated it: "(CIQ-179, CIQ-180)" became "delete to the Recycle Bin ,".
+    $clean = ($clean -replace '\s+,', ',') -replace '\s{2,}', ' '
+    $clean = $clean.TrimEnd(' ', ',', ';', ':')
     $item = $clean
     $bucket = $null
     if ($clean -match '^([a-zA-Z]+)(\(([^)]*)\))?!?:\s*(.+)$') {

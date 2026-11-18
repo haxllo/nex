@@ -1269,7 +1269,16 @@
       tipEl = null;
     }
   }
+  // Compact view is a bar of icons with no room beside them: the panel is a
+  // little taller than a hint, so a tip can only be clamped over the control it
+  // describes or pressed against the window edge. Neither is a hint. Nothing
+  // here is undiscoverable without it either - every compact control carries
+  // its own glyph and an aria-label.
+  function tipsOff() {
+    return document.documentElement.classList.contains("compact-view");
+  }
   function showTip(target) {
+    if (tipsOff()) return;
     hideTip();
     tipEl = document.createElement("div");
     tipEl.className = "nex-tip";
@@ -1297,7 +1306,7 @@
     tipEl.style.top = `${y}px`;
   }
   document.addEventListener("mouseover", (event) => {
-    if (!tipsArmed) return;
+    if (!tipsArmed || tipsOff()) return;
     const target = event.target && event.target.closest ? event.target.closest("[data-tip]") : null;
     if (!target || target.disabled) return;
     window.clearTimeout(tipTimer);
@@ -4874,6 +4883,8 @@
         if (state.compactView) {
           topPower.closeMenu();
           topPower.closeConfirm();
+          // A tip shown a moment before the switch would hang over the new bar.
+          hideTip();
         }
         if (switched) {
           // Re-measure after the view switch re-flows the bar; scrolling in

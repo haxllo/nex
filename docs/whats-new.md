@@ -1,4 +1,4 @@
-<!-- release: 2.41.0 -->
+<!-- release: 3.0.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.

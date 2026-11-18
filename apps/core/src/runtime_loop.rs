@@ -1979,12 +1979,12 @@ impl RuntimeWorker {
                 // version is deliberately not part of the notes path.
             }
             OverlayEvent::WhatsNew => {
-                // The view is opening — this counts as seen even if the
-                // notes fetch below fails (the fallback still renders).
-                // Silent update flow untouched: this only reads state.
+                // Fetching is not reading. Recording the version here spent
+                // the pending state before the page had been painted, so a
+                // panel that hid between the click and the first frame left
+                // the release unread and unofferable. WhatsNewSeen carries
+                // that confirmation instead.
                 if let Some(version) = self.overlay.whats_new_pending() {
-                    crate::whats_new::mark_seen(&version);
-                    self.overlay.clear_whats_new_pending();
                     // Baked at compile time, so there is nothing to wait for:
                     // sending it straight through removes a thread and the
                     // window where the view sat empty until a network call
@@ -1998,6 +1998,14 @@ impl RuntimeWorker {
                     })
                     .to_string();
                     let _ = self.event_tx.send(OverlayEvent::WhatsNewReady(json));
+                }
+            }
+            OverlayEvent::WhatsNewSeen => {
+                // The page has been on screen with the panel visible.
+                if let Some(version) = self.overlay.whats_new_pending() {
+                    crate::whats_new::mark_seen(&version);
+                    self.overlay.clear_whats_new_pending();
+                    log_info(&format!("[nex] whats-new seen for v{version}"));
                 }
             }
             OverlayEvent::WhatsNewReady(json) => {

@@ -386,6 +386,11 @@ pub(crate) enum OverlayMessage {
     WhatsNew(NoPayload),
     #[serde(rename = "whatsNewRelease")]
     WhatsNewRelease(NoPayload),
+    /// The notes page has been painted with the panel visible. Sent on close,
+    /// not on open: fetching something that never reached the screen must not
+    /// record the version as read.
+    #[serde(rename = "whatsNewSeen")]
+    WhatsNewSeen(NoPayload),
     #[serde(rename = "chatState")]
     ChatState(NoPayload),
     #[serde(rename = "chatConfigure")]
@@ -487,6 +492,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "mediaMute",
         "mediaSession",
         "whatsNew",
+        "whatsNewSeen",
         "chatState",
         "chatConfigure",
         "chatFetchModels",
@@ -1081,6 +1087,16 @@ mod tests {
     #[test]
     fn whats_new_request_parses() {
         assert!(parse_overlay(r#"{"t":"whatsNew"}"#).is_ok());
+    }
+
+    // Reading and fetching are separate messages: the page asks for the notes,
+    // and says later that they were on screen. Collapsing them into one is the
+    // bug that made a hid panel spend the release without showing it.
+    #[test]
+    fn whats_new_seen_is_its_own_message() {
+        let seen = parse_overlay(r#"{"t":"whatsNewSeen"}"#).expect("whatsNewSeen parses");
+        assert!(matches!(seen, OverlayMessage::WhatsNewSeen(_)));
+        assert!(!matches!(seen, OverlayMessage::WhatsNew(_)));
     }
 
     #[test]

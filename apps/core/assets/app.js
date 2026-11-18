@@ -196,6 +196,12 @@
   let whatsNewPending = null;
   let whatsNewOpen = false;
   let whatsNewContent = null;
+  // Seen is reported when the page has been on screen, not when it is asked
+  // for. Opening used to spend the pending version immediately, so a click
+  // followed by the panel hiding before the first frame left the release
+  // unread with no way back to it.
+  let whatsNewPainted = false;
+  let whatsNewSeenSent = false;
 
   // Local mirror of pushed state.
   let rows = [];
@@ -5325,18 +5331,31 @@
     // Fetch only without cached notes: a close-then-reopen while the
     // first fetch is in flight must not spend a second fetch, and the
     // late arrival renders via nex.apply below.
-    if (!whatsNewContent) {
-      post("whatsNew");
-      // The pending flag is spent locally — Rust confirms via snapshot.
-      whatsNewPending = null;
-      syncUpdateNotice();
-    }
+    if (!whatsNewContent) post("whatsNew");
     renderWhatsNew();
     postWhatsNewResize();
+    // The pill keeps saying what it said until this frame is on screen.
+    whatsNewPainted = false;
+    requestAnimationFrame(() => {
+      if (whatsNewOpen && overlayVisible) whatsNewPainted = true;
+    });
+  }
+
+  // Report what the user has actually been shown. Called on every close,
+  // including the one a hide push causes: by then the page either painted
+  // while visible or it did not, and only the first case is "seen".
+  function reportWhatsNewSeen() {
+    if (!whatsNewPainted || whatsNewSeenSent) return;
+    whatsNewSeenSent = true;
+    whatsNewPainted = false;
+    whatsNewPending = null;
+    syncUpdateNotice();
+    post("whatsNewSeen");
   }
 
   function closeWhatsNew() {
     if (!whatsNewOpen) return;
+    reportWhatsNewSeen();
     whatsNewOpen = false;
     // Cached notes stay: reopening renders instantly without refetching.
     panel.classList.remove("whats-new-open");

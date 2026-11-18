@@ -2515,6 +2515,11 @@ impl CoreService {
     }
 
     fn refresh_cache_from_store(&self) -> Result<(), ServiceError> {
+        // The first keystroke blocks on this load, so its stages are timed:
+        // 2-3.6 s for 10k rows is far slower than a SQLite read should be, and
+        // the number says whether the read, the swap or the index rebuild owns
+        // it. Guessing here means optimising the cheap part.
+        let load_started = Instant::now();
         let (latest, latest_apps) = if self.hot_cache {
             let hot = index_store::list_hot_items(&*self.db(), UI_CACHE_MAX_ITEMS)?;
             let apps = collect_app_items(&hot);
@@ -2526,12 +2531,18 @@ impl CoreService {
             self.cache_complete.store(true, Ordering::SeqCst);
             (latest, apps)
         };
+        let read_ms = load_started.elapsed().as_millis();
+        let assign_started = Instant::now();
         let mut items_guard = match self.cached_items.write() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         *items_guard = latest;
+        let assign_ms = assign_started.elapsed().as_millis();
+        let index_started = Instant::now();
         self.rebuild_search_index_for_cache(&items_guard);
+        let index_ms = index_started.elapsed().as_millis();
+        let items = items_guard.len();
         drop(items_guard);
         let mut apps_guard = match self.cached_app_items.write() {
             Ok(guard) => guard,
@@ -2541,6 +2552,10 @@ impl CoreService {
         drop(apps_guard);
         self.bump_search_generation();
         self.cache_ready.mark_finished();
+        crate::logging::info(&format!(
+            "[nex] cache_load items={items} read_ms={read_ms} assign_ms={assign_ms} index_ms={index_ms} total_ms={}",
+            load_started.elapsed().as_millis()
+        ));
         Ok(())
     }
 

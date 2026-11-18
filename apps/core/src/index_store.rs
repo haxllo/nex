@@ -826,9 +826,12 @@ fn init_schema(conn: &Connection) -> Result<(), StoreError> {
         if current_version < 7 {
             migration_v7(conn)?;
         }
+        if current_version < 8 {
+            migration_v8(conn)?;
+        }
 
-        if current_version < 7 {
-            conn.pragma_update(None, "user_version", 7_i64)?;
+        if current_version < 8 {
+            conn.pragma_update(None, "user_version", 8_i64)?;
         }
 
         Ok::<(), StoreError>(())
@@ -915,6 +918,21 @@ fn migration_v4(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// Cover the bounded-UI snapshot ordering (apps are fetched separately).
+/// Index the app lookup the startup cache runs.
+///
+/// `HOT_APPS_SQL` asks for `kind = 'app' ORDER BY title COLLATE NOCASE`. With
+/// only the title index available, SQLite walked every title in the store to
+/// find the app rows: 135 apps out of 221k rows took 549 ms, and it runs on
+/// the load the first keystroke waits for. The composite index answers it
+/// directly in under a millisecond.
+fn migration_v8(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_item_kind_title
+             ON item(kind, title COLLATE NOCASE);",
+    )?;
+    Ok(())
+}
+
 fn migration_v7(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_item_hot

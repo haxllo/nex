@@ -1,96 +1,50 @@
 <!-- release: 2.41.0 -->
-<!--
-  WHAT THIS FILE IS
-  The page people see inside Nex, in the What's New view, after they update.
-  It is NOT the GitHub release page: that one is
-  docs/releases/v<version>-notes.md and carries the commit log. Do not copy one
-  into the other.
 
-  apps/core/build.rs bakes this file into the binary at compile time. Nothing
-  is fetched at runtime.
+## Chat works in your files
 
-  ## Where this page sits
+Nex can read a file, write one, make a folder, move something, or run a command from the same chat, and every step that touches your disk arrives as a card you can refuse.
 
-  It does not open by itself. At launch the app compares the version actually
-  running with whats_new_seen in state.json and, when they differ, shows a
-  "See what's new" pill. The page opens when that pill is clicked, once per
-  update. A fresh install records the version silently and never sees it.
+A conversation can also carry a folder. Point one at your invoices and "open last week's" finds them without a path.
 
-  A page over an empty body is a working state while a release is being
-  written: local builds render the fallback line, and the release workflow
-  refuses to ship a file with no text outside these comments. That failure is
-  the point of the rule, so do not "fix" it with placeholder prose.
+Elsewhere the panel got quieter. You can see what a step is doing while it runs, and jump to the newest message in a long answer.
 
-  ## The marker
+### Chat
 
-  The first line names the release this text is for. Update it with the prose.
-  If it does not match the version being released the workflow warns and still
-  ships, and the app shows whatever was written last time, which is worse than
-  showing nothing.
+- **Reading is paged.** A large file is read in order with the marker below it, instead of both ends and a guess at the middle.
+- **Writing, editing and deleting** are all there, and a delete goes to the Recycle Bin.
+- **Commands run through PowerShell**, printed as they go rather than all at the end, and Stop stops the command too.
+- When the model runs out of steps it offers Continue instead of asking you to retype the request.
+- A failed answer has its own block, so one network drop no longer wipes the reply above it.
 
-  Do not quote comment syntax inside this block: a nested opener or a stray
-  terminator closes the block early and these instructions appear as literal
-  text in the app.
+### The folder a conversation is working in
 
-  HTML comments are removed before the text reaches the page (build.rs strips
-  them), so use them freely for notes to yourself and to whoever edits this
-  next. Everything outside a comment is shown to the user verbatim.
+- The folder sits in the bar above your message. Clicking it lists what is there and opens anything in it.
+- **+** attaches a file from that folder to your next message, up to three.
+- **×** clears it, and the model is told, so it stops treating bare names as paths.
+- A step the model asks for mid-task can set the folder for the rest of that task.
 
-  ## What the app draws around this text
+### Approvals
 
-  The page is built from three parts, and only the middle one comes from here:
+- The card names the target first: the file, the folder, the command.
+- **Allow the rest** covers the remaining steps of that task. Deleting, running commands and opening unfamiliar links still ask every time.
+- A step that never ran says why rather than going quiet.
 
-  1. The banner. docs/releases/assets/v<version>-hero.webp, or
-     whats-new-hero.webp when no versioned file exists. It is baked into the
-     binary as a data URI and placed between the heading and the first
-     paragraph. Roughly 2.2:1, dark, no text in the image. A missing file warns
-     at build time and draws no picture; it never fails a build. This markdown
-     cannot include a picture of its own: there is one banner per release.
-  2. The heading row. The first "## " line, printed heavy and short. The app
-     puts this build's version on the same baseline at the right end of that
-     row, as a button that opens the release page. Never write a version, a
-     date, or a "changelog" label into the text: the page already has all
-     three, and repeating them is what made three competing titles the first
-     time this page was built.
-  3. The body, from here. Everything between the heading and the first "### "
-     is the intro and stays visible. Every "### " becomes a collapsed drawer
-     that opens when clicked.
+### Search and the panel
 
-  ## Format
+- Tab now opens Chat from the search box, and the placeholder says so.
+- Closing a view no longer collapses the panel to a sliver.
+- Compact view drops the hover hints it has no room to show.
+- This page is a banner, a heading and collapsed sections, so a release reads as a changelog.
 
-  - The FIRST "## " line is the heading. Four words or so, naming what the
-    release does for the reader. A second "## " becomes another drawer, so one
-    heading only.
-  - The intro is two or three short paragraphs, always visible. Bullets are
-    allowed there only when the list really is the whole story.
-  - "### " is a drawer: a section title and its bullets. Order them by what
-    people will look for first, keep each to a handful of lines, and stop at
-    four or five. Drawers are cheap, but the page still has to be read.
-  - "#### " inside a drawer is a bold sub-line, not a new drawer.
-  - "- " is a bullet. Bold the part that names the thing, then say what
-    changed in the reader's words: "closing a view no longer drops the panel",
-    not a walkthrough of the fix. An indented line continues the bullet above
-    it, so a long item can be written across lines.
-  - Keep to what someone will notice. A change with no visible effect belongs
-    in the release notes' commit log, not here.
+### Media
 
-  ## Voice
+- Each playing app keeps its own session, so switching players no longer scrambles the track that is shown.
+- Album art is fetched per track, with a spinning record when a track has none.
 
-  Write to the person using Nex. Never mention tickets, commits, files,
-  functions or tests. Aim for one screen before anything is opened.
+### Fixes
 
-  Run the prose through the humanizer skill before finishing:
-  ~/.agents/skills/humanizer/SKILL.md. The tells it removes are the ones this
-  page had the first time it was written: "not X but Y" contrasts, a staged
-  opener ("The rest is..."), forced triads, dashes where a full stop belongs,
-  borrowed marketing words ("seamless", "powerful", "effortless"), bold labels
-  doing the work of a sentence, and the same "used to X, now Y" shape in every
-  bullet. Read the result out loud. If a line sounds written to fill a section,
-  cut the section instead.
--->
-
-<!-- The 2.41.0 body is deliberately absent. The draft that stood here was
-     written to exercise the layout - banner, heading row, drawers, height -
-     and it described the release in my words rather than the release's. Write
-     the real prose here, above the first "## ", when the changes for this
-     version are settled, then remove this note. -->
+- Log lines start with a local date and time.
+- Quitting no longer freezes when the indexer is slow to answer.
+- The hotkey works over a fullscreen game, and the tray says when it is suppressed.
+- Uninstalling an app from the menu no longer deadlocks the panel.
+- Removing a saved API key is acknowledged, and a provider saved without a URL is refused.

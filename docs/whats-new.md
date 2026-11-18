@@ -1,63 +1,85 @@
 <!-- release: 2.41.0 -->
 <!--
   WHAT THIS FILE IS
-  This is the page people see inside Nex, in the What's New view, after they
-  update. It is NOT the GitHub release page — that one is
-  docs/releases/v<version>-notes.md and carries the commit log.
+  The page people see inside Nex, in the What's New view, after they update.
+  It is NOT the GitHub release page: that one is
+  docs/releases/v<version>-notes.md and carries the commit log. Do not copy one
+  into the other.
 
-  EDIT THIS FILE BEFORE EACH RELEASE, IN THE SAME COMMIT AS THE VERSION BUMP.
-  apps/core/build.rs bakes it into the binary at compile time.
+  apps/core/build.rs bakes this file into the binary at compile time. Nothing
+  is fetched at runtime.
 
-  THE FIRST LINE OF THIS FILE IS A MARKER THAT NAMES THE RELEASE THIS TEXT IS
-  FOR. Update it to the version being released. If it does not match, the
-  release workflow still succeeds — it logs a warning and never blocks — but
-  the What's New view will show whatever was written last time, which is worse
-  than showing nothing. Update the marker and the prose together.
+  ## Where this page sits
+
+  It does not open by itself. At launch the app compares the version actually
+  running with whats_new_seen in state.json and, when they differ, shows a
+  "See what's new" pill. The page opens when that pill is clicked, once per
+  update. A fresh install records the version silently and never sees it.
+
+  A page over an empty body is a working state while a release is being
+  written: local builds render the fallback line, and the release workflow
+  refuses to ship a file with no text outside these comments. That failure is
+  the point of the rule, so do not "fix" it with placeholder prose.
+
+  ## The marker
+
+  The first line names the release this text is for. Update it with the prose.
+  If it does not match the version being released the workflow warns and still
+  ships, and the app shows whatever was written last time, which is worse than
+  showing nothing.
 
   Do not quote comment syntax inside this block: a nested opener or a stray
-  terminator closes the block early and the rest of these instructions appear
-  as literal text in the app.
+  terminator closes the block early and these instructions appear as literal
+  text in the app.
 
-  HTML COMMENTS ARE REMOVED BEFORE THEY REACH THE APP (build.rs strips them),
-  so use them freely for notes to yourself and to whatever agent edits this
+  HTML comments are removed before the text reaches the page (build.rs strips
+  them), so use them freely for notes to yourself and to whoever edits this
   next. Everything outside a comment is shown to the user verbatim.
 
-  THE BANNER
-  The picture at the top is docs/releases/assets/v<version>-hero.webp, or
-  whats-new-hero.webp when there is no versioned file. It is baked into the
-  binary as a data URI by apps/core/build.rs, so it needs no network and no
-  cache. Missing file = no picture, with a build warning; it never fails a
-  build. Roughly 2.2:1, dark, no text in the image. This markdown cannot
-  include a picture itself: there is exactly one banner per release, and it is
-  placed between the heading and the first paragraph.
+  ## What the app draws around this text
 
-  FORMAT
-  - The FIRST "## " line is the page heading: a phrase that says what this
-    release means to the person reading it, not a version number.
-  - Everything between that line and the first "### " is the intro: two or
-    three short paragraphs, always visible, no bullets unless the list really
-    is the whole story.
-  - Every "### " becomes a COLLAPSED DRAWER with its bullets inside. Order
-    them by what people will look for first, and keep each one to a handful of
-    lines. A "#### " inside a drawer is a bold sub-line.
+  The page is built from three parts, and only the middle one comes from here:
+
+  1. The banner. docs/releases/assets/v<version>-hero.webp, or
+     whats-new-hero.webp when no versioned file exists. It is baked into the
+     binary as a data URI and placed between the heading and the first
+     paragraph. Roughly 2.2:1, dark, no text in the image. A missing file warns
+     at build time and draws no picture; it never fails a build. This markdown
+     cannot include a picture of its own: there is one banner per release.
+  2. The heading row. The first "## " line, printed heavy and short. The app
+     puts this build's version on the same baseline at the right end of that
+     row, as a button that opens the release page. Never write a version, a
+     date, or a "changelog" label into the text: the page already has all
+     three, and repeating them is what made three competing titles the first
+     time this page was built.
+  3. The body, from here. Everything between the heading and the first "### "
+     is the intro and stays visible. Every "### " becomes a collapsed drawer
+     that opens when clicked.
+
+  ## Format
+
+  - The FIRST "## " line is the heading. Four words or so, naming what the
+    release does for the reader. A second "## " becomes another drawer, so one
+    heading only.
+  - The intro is two or three short paragraphs, always visible. Bullets are
+    allowed there only when the list really is the whole story.
+  - "### " is a drawer: a section title and its bullets. Order them by what
+    people will look for first, keep each to a handful of lines, and stop at
+    four or five. Drawers are cheap, but the page still has to be read.
+  - "#### " inside a drawer is a bold sub-line, not a new drawer.
   - "- " is a bullet. Bold the part that names the thing, then say what
     changed in the reader's words: "closing a view no longer drops the panel",
-    not a walkthrough of the fix.
-  - Keep it to what someone will notice. A change with no visible effect
-    belongs in the release notes' Commit Log, not here. Drawers are cheap, so
-    four of them is fine; ten is not.
+    not a walkthrough of the fix. An indented line continues the bullet above
+    it, so a long item can be written across lines.
+  - Keep to what someone will notice. A change with no visible effect belongs
+    in the release notes' commit log, not here.
 
-  THE HEADING IS ONE SHORT HEAVY LINE
-  Four words or so, naming what the release does for the reader. It is the
-  only loud line on the page: no eyebrow above it, no second title, no version
-  number in it.
+  ## Voice
 
-  The version is printed by the app, not by this file, on the heading's
-  baseline at the right end of the same row. It is a button: clicking it opens
-  this build's release page. So do not write the version, a date, or a
-  "changelog" label into the text - the page already has all three.
+  Write to the person using Nex. Never mention tickets, commits, files,
+  functions or tests. Aim for one screen before anything is opened.
 
-  RUN THE PROSE THROUGH THE HUMANIZER SKILL BEFORE FINISHING
+  Run the prose through the humanizer skill before finishing:
   ~/.agents/skills/humanizer/SKILL.md. The tells it removes are the ones this
   page had the first time it was written: "not X but Y" contrasts, a staged
   opener ("The rest is..."), forced triads, dashes where a full stop belongs,
@@ -65,49 +87,10 @@
   doing the work of a sentence, and the same "used to X, now Y" shape in every
   bullet. Read the result out loud. If a line sounds written to fill a section,
   cut the section instead.
-
-  VOICE
-  Write to the person using Nex. Never mention tickets, commits, files,
-  functions or tests — those are for docs/releases/v<version>-notes.md. Aim
-  for one screen before anything is opened.
 -->
 
-## Chat knows your folder
-
-Chat can hold a folder for as long as a conversation lasts, so "fix the build
-in here" works without a pasted path. One approval now covers the rest of a
-task. Closing a view no longer drops the panel to a sliver, and Tab opens Chat.
-
-### Chat
-
-- **A folder for the conversation**: a chip in the header names the folder you
-  picked. Click it to see what is inside, open a file, attach one to the next
-  message, or clear it and go back to full paths.
-- **One approval covers the task**: approve once and the remaining steps run
-  without asking again. Deleting, running commands and changing the folder
-  still ask every time.
-- **The card says what will happen**: the sentence at the top matches the line
-  left in the transcript, and the target it will touch is a full path.
-- **The message box has depth**: a slightly raised surface, so it reads as a
-  field in both themes.
-
-### Search and the panel
-
-- **Closing a view keeps the panel still**: it used to fall to a thin sliver
-  for a moment before the right height came back.
-- **Your message stays in view**: sending from halfway up the transcript left
-  what you just wrote below the fold. There is a jump-to-newest button once you
-  have scrolled away.
-- **Tab opens Chat**: the first Tab goes there, and the placeholder says so.
-
-### Media
-
-- **Players keep their place**: sessions are tracked separately now, so the
-  switcher no longer shuffles and one player cannot stand in for another.
-
-### Fixes
-
-- Quitting no longer leaves the mouse and keyboard unresponsive before the
-  window closes.
-- Opening Nex right after launch uses the same glass surface as every other
-  time. It used to fall back to a flat dark panel while the page loaded.
+<!-- The 2.41.0 body is deliberately absent. The draft that stood here was
+     written to exercise the layout - banner, heading row, drawers, height -
+     and it described the release in my words rather than the release's. Write
+     the real prose here, above the first "## ", when the changes for this
+     version are settled, then remove this note. -->

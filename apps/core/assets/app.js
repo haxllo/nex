@@ -39,7 +39,6 @@
   const updateBtn = $("update-btn");
   const updateBtnLabel = updateBtn.querySelector("span");
   const whatsNewBtn = $("whats-new-btn");
-  const whatsNewTitle = $("whats-new-title");
   const whatsNewItems = $("whats-new-items");
   const whatsNewTips = $("whats-new-tips");
   const whatsNewScroll = $("whats-new-scroll");
@@ -5147,24 +5146,20 @@
     return out;
   }
 
-  function renderWhatsNewMarkdown(md) {
-    const blocks = [];
+  // Two levels, and they behave differently: the intro is always visible, and
+  // each "###" is a drawer. A release this size is a wall as one block, and a
+  // wall people scroll past is the same as no notes at all.
+  function renderWhatsNewMarkdown(md, heroUri) {
+    const intro = { paragraphs: [], items: [] };
+    const sections = [];
+    let target = intro;
     let paragraph = [];
-    let list = [];
+    let title = "";
 
     const flushParagraph = () => {
       if (!paragraph.length) return;
-      blocks.push(`<p class="whats-new-copy">${renderInlineMd(paragraph.join(" "))}</p>`);
+      target.paragraphs.push(paragraph.join(" "));
       paragraph = [];
-    };
-    const flushList = () => {
-      if (!list.length) return;
-      blocks.push(
-        `<div class="whats-new-list">${list
-          .map((item) => `<div class="whats-new-item"><span>${renderInlineMd(item)}</span></div>`)
-          .join("")}</div>`
-      );
-      list = [];
     };
 
     for (const raw of md.replace(/\r\n/g, "\n").split("\n")) {
@@ -5172,37 +5167,71 @@
       const text = line.trim();
       if (!text) {
         flushParagraph();
-        flushList();
         continue;
       }
 
       const heading = text.match(/^(#{2,4})\s+(.+)$/);
       if (heading) {
         flushParagraph();
-        flushList();
-        const tag = heading[1].length === 2 ? "h2" : heading[1].length === 3 ? "h3" : "h4";
-        blocks.push(`<${tag}>${renderInlineMd(heading[2])}</${tag}>`);
+        const level = heading[1].length;
+        const label = heading[2].trim();
+        // The first "##" names the page. Every later one is a drawer, same as
+        // "###": the header above already carries the version, so a second
+        // title would just compete with it.
+        if (level === 2 && !title && !sections.length) {
+          title = label;
+          continue;
+        }
+        if (level === 2 || level === 3) {
+          const section = { title: label, paragraphs: [], items: [] };
+          sections.push(section);
+          target = section;
+          continue;
+        }
+        target.paragraphs.push(`**${label}**`);
         continue;
       }
 
       const bullet = text.match(/^[-*]\s+(.+)$/);
       if (bullet) {
         flushParagraph();
-        list.push(bullet[1]);
+        target.items.push(bullet[1]);
         continue;
       }
 
-      if (list.length && /^\s{2,}\S/.test(line)) {
-        list[list.length - 1] += ` ${text}`;
+      // An indented line continues the bullet above it, so a long item can be
+      // written across lines in the document without becoming a new one.
+      if (target.items.length && /^\s{2,}\S/.test(line)) {
+        target.items[target.items.length - 1] += ` ${text}`;
         continue;
       }
 
-      flushList();
+      flushParagraph();
       paragraph.push(text);
     }
     flushParagraph();
-    flushList();
-    return blocks.join("");
+
+    const renderList = (items) => (items.length
+      ? `<div class="whats-new-list">${items
+        .map((item) => `<div class="whats-new-item"><span>${renderInlineMd(item)}</span></div>`)
+        .join("")}</div>`
+      : "");
+    const renderParagraphs = (paragraphs) => paragraphs
+      .map((entry) => `<p class="whats-new-copy">${renderInlineMd(entry)}</p>`)
+      .join("");
+
+    const titleHtml = title ? `<h2 class="wn-heading">${renderInlineMd(title)}</h2>` : "";
+    const heroHtml = heroUri ? `<img class="wn-hero" alt="" src="${escapeHtml(heroUri)}">` : "";
+    const introHtml = renderParagraphs(intro.paragraphs) + renderList(intro.items);
+    const sectionsHtml = sections
+      .map((section) => `<details class="wn-section"><summary>`
+        + `<svg class="wn-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>`
+        + `<span>${renderInlineMd(section.title)}</span></summary>`
+        + `<div class="wn-section-body">${renderParagraphs(section.paragraphs) + renderList(section.items)}</div>`
+        + `</details>`)
+      .join("");
+
+    return titleHtml + heroHtml + introHtml + sectionsHtml;
   }
 
   function postWhatsNewResize() {
@@ -5215,16 +5244,57 @@
     });
   }
 
+  // The version is metadata, so it sits on the heading's baseline at the far
+  // end of the same row rather than on a line of its own above it. It is also
+  // the way out of the page: clicking it opens the release it describes.
+  function pairHeadingWithVersion(version) {
+    const label = version ? "v" + version : "";
+    if (!label) return;
+    let row = whatsNewItems.querySelector(".wn-title-row");
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "wn-title-row";
+      whatsNewItems.prepend(row);
+    }
+    const heading = row.querySelector(".wn-heading");
+    if (!heading) {
+      const existing = whatsNewItems.querySelector(".wn-heading");
+      if (existing) row.prepend(existing);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wn-version";
+    button.textContent = label;
+    button.title = "Open the release page";
+    button.setAttribute("aria-label", "Open the release page for " + label);
+    button.addEventListener("click", () => post("whatsNewRelease"));
+    row.append(button);
+  }
+
   function renderWhatsNew() {
     if (!whatsNewOpen) return;
     const version = whatsNewContent?.version || whatsNewPending || "";
-    whatsNewTitle.textContent = version ? "Nex v" + version + " is here" : "Nex updated";
     const md = whatsNewContent && typeof whatsNewContent.markdown === "string"
       ? whatsNewContent.markdown.trim()
       : "";
+    const heroUri = whatsNewContent && typeof whatsNewContent.hero === "string"
+      ? whatsNewContent.hero
+      : "";
     whatsNewItems.innerHTML = md
-      ? renderWhatsNewMarkdown(md)
+      ? renderWhatsNewMarkdown(md, heroUri)
       : `<p class="whats-new-copy">This release brings fixes and polish. You're all set.</p>`;
+    pairHeadingWithVersion(version);
+    // Two things change this page's height after the first measurement: the
+    // banner decodes, and a drawer opens. Without a re-measure the window keeps
+    // whatever height the page had while it was still assembling - which is how
+    // the release page opened as a short box with the copy cut off.
+    for (const drawer of whatsNewItems.querySelectorAll("details.wn-section")) {
+      drawer.addEventListener("toggle", postWhatsNewResize);
+    }
+    const hero = whatsNewItems.querySelector(".wn-hero");
+    if (hero && !hero.complete) {
+      hero.addEventListener("load", postWhatsNewResize, { once: true });
+    }
     whatsNewTips.innerHTML =
       `<div class="tips-heading">Good to know</div>` +
       WHATS_NEW_TIPS.map(([k, v]) => `<div><kbd>${escapeHtml(k)}</kbd> ${escapeHtml(v)}</div>`).join("");

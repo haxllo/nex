@@ -384,6 +384,8 @@ pub(crate) enum OverlayMessage {
     MediaSession(TextPayload),
     #[serde(rename = "whatsNew")]
     WhatsNew(NoPayload),
+    #[serde(rename = "whatsNewRelease")]
+    WhatsNewRelease(NoPayload),
     #[serde(rename = "chatState")]
     ChatState(NoPayload),
     #[serde(rename = "chatConfigure")]

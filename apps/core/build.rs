@@ -47,9 +47,58 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default()).join("whats_new.md");
     // Only rewrite when the content changed: an unconditional write makes
     // every build look dirty to the compiler.
-    if std::fs::read_to_string(&out).ok().as_deref() != Some(body.as_str()) {
-        if let Err(error) = std::fs::write(&out, &body) {
-            println!("cargo:warning=could not write the baked What's New document: {error}");
+    write_if_changed(&out, &body, "the baked What's New document");
+
+    // The page's banner. Baked the same way and for the same reason as the
+    // text: a release page that fetches its own picture shows a hole whenever
+    // the network is slow, and the picture has to match the notes beside it.
+    // A data URI keeps the asset pipeline out of it entirely - no protocol
+    // route, no cache directory, nothing to invalidate. 40 KB of WebP is about
+    // 55 KB of base64, which is a fair price for one image per release.
+    let assets = manifest.join("..").join("..").join("docs").join("releases").join("assets");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let candidates = [
+        assets.join(format!("v{version}-hero.webp")),
+        assets.join("whats-new-hero.webp"),
+    ];
+    for candidate in &candidates {
+        println!("cargo:rerun-if-changed={}", candidate.display());
+    }
+    let hero = match candidates.iter().find_map(|path| std::fs::read(path).ok()) {
+        Some(bytes) => format!("data:image/webp;base64,{}", base64(&bytes)),
+        None => {
+            println!(
+                "cargo:warning=no What's New banner at docs/releases/assets/v{version}-hero.webp                  or whats-new-hero.webp; the view will render without a picture"
+            );
+            String::new()
+        }
+    };
+    let hero_out = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default()).join("whats_new_hero.txt");
+    write_if_changed(&hero_out, &hero, "the baked What's New banner");
+}
+
+fn write_if_changed(path: &PathBuf, body: &str, what: &str) {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(body) {
+        if let Err(error) = std::fs::write(path, body) {
+            println!("cargo:warning=could not write {what}: {error}");
         }
     }
+}
+
+/// Standard base64, written out rather than pulled in: a build script with no
+/// dependencies stays cheap, and this is the whole alphabet.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(triple >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[triple as usize & 63] as char } else { '=' });
+    }
+    out
 }

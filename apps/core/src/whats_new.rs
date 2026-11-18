@@ -95,6 +95,17 @@ fn mark_seen_in(dir: &Path, version: &str) {
 /// dump that got worse every release and could not be curated.
 const BAKED_NOTES: &str = include_str!(concat!(env!("OUT_DIR"), "/whats_new.md"));
 
+/// The page banner as a data URI, or empty when this build has no asset.
+///
+/// Baked rather than fetched: the notes are compiled in, so the picture has to
+/// arrive with them or the page opens as a heading over a gap.
+const BAKED_HERO: &str = include_str!(concat!(env!("OUT_DIR"), "/whats_new_hero.txt"));
+
+/// Banner for the What's New page, or `""` when the build carried none.
+pub fn hero_uri() -> &'static str {
+    BAKED_HERO.trim()
+}
+
 /// The What's New text to show for this build.
 ///
 /// The document explains its own format in HTML comments so whoever edits it

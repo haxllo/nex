@@ -2541,6 +2541,9 @@ fn handle_ipc(
         OverlayMessage::WhatsNew(_) => {
             let _ = event_tx.send(OverlayEvent::WhatsNew);
         }
+        OverlayMessage::WhatsNewRelease(_) => {
+            let _ = event_tx.send(OverlayEvent::WhatsNewRelease);
+        }
         OverlayMessage::ChatState(_) => {
             let _ = event_tx.send(OverlayEvent::ChatState);
         }

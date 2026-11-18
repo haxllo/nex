@@ -118,6 +118,10 @@ pub enum OverlayEvent {
     WhatsNew,
     /// Fetched What's New content JSON for the page.
     WhatsNewReady(String),
+    /// The page asked for the release it is describing. Opened in the
+    /// default browser; the URL is built here, not in the page, so the page
+    /// does not need to know where the source lives.
+    WhatsNewRelease,
     /// Chat provider settings were requested or saved.
     ChatState,
     ChatConfigure(String),

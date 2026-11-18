@@ -1993,6 +1993,7 @@ impl RuntimeWorker {
                         "whatsNew": {
                             "version": version,
                             "markdown": crate::whats_new::notes_markdown(),
+                            "hero": crate::whats_new::hero_uri(),
                         },
                     })
                     .to_string();
@@ -2001,6 +2002,22 @@ impl RuntimeWorker {
             }
             OverlayEvent::WhatsNewReady(json) => {
                 self.overlay.push_whats_new(json);
+            }
+            OverlayEvent::WhatsNewRelease => {
+                // The repository comes from the crate metadata, so a rename
+                // does not leave a dead link in the page, and the version is
+                // the one actually running rather than whatever the notes say.
+                let url = format!(
+                    "{}/releases/tag/v{}",
+                    env!("CARGO_PKG_REPOSITORY"),
+                    env!("CARGO_PKG_VERSION")
+                );
+                match crate::action_executor::launch_open_target(&url) {
+                    Ok(()) => log_info(&format!("[nex] opened release page: {url}")),
+                    Err(error) => {
+                        log_warn(&format!("[nex] could not open release page {url}: {error}"))
+                    }
+                }
             }
             OverlayEvent::ChatState => {
                 self.overlay.push_chat(

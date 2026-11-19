@@ -70,7 +70,7 @@ struct MftEnumDataV0 {
 }
 
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct UsnJournalDataV0 {
     usn_journal_id: u64,
     first_usn: i64,
@@ -607,9 +607,15 @@ fn stream_deltas(
     writer: &mut impl Write,
     stats: &mut StreamStats,
 ) -> Result<i64, String> {
+    // How many times a moving journal may interrupt this stream before the gap
+    // is treated as real. The journal churns hard at login, which is exactly
+    // when a delta is asked for.
+    const MAX_READ_RECOVERIES: u32 = 3;
     let mut buffer = vec![0u8; ENUM_BUFFER_BYTES];
     let mut next = start_usn;
     let mut final_next = start_usn;
+    let mut journal = *journal;
+    let mut recoveries = 0u32;
     for _ in 0..100_000 {
         let input = ReadUsnJournalDataV0 {
             start_usn: next,
@@ -636,6 +642,53 @@ fn stream_deltas(
             let error = unsafe { GetLastError() };
             if error == ERROR_HANDLE_EOF {
                 break;
+            }
+            // A journal that is deleted, recreated or wrapped while we read it
+            // fails the read without meaning the volume changed by more than
+            // the journal can say. Retry from where the stream stopped; only a
+            // position that no longer exists is a gap worth a full pass.
+            let refreshed = query_journal(handle).ok();
+            let recovery = mft_protocol::delta_read_recovery(
+                error,
+                next,
+                journal.usn_journal_id,
+                refreshed
+                    .as_ref()
+                    .map(|j| (j.usn_journal_id, j.lowest_valid_usn, j.next_usn)),
+            );
+            if recovery == mft_protocol::DeltaReadRecovery::Retry
+                && recoveries < MAX_READ_RECOVERIES
+            {
+                recoveries += 1;
+                if let Some(refresh) = refreshed {
+                    journal = refresh;
+                }
+                debug_log(&format!(
+                    "[mft] {letter}: read at usn {next} failed ({error}); retry {recoveries}/{MAX_READ_RECOVERIES} journal={} first_usn={} next_usn={}",
+                    journal.usn_journal_id, journal.lowest_valid_usn, journal.next_usn
+                ));
+                if matches!(
+                    error,
+                    mft_protocol::ERROR_JOURNAL_DELETE_IN_PROGRESS
+                        | mft_protocol::ERROR_JOURNAL_NOT_ACTIVE
+                ) {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                continue;
+            }
+            if recovery == mft_protocol::DeltaReadRecovery::Gap
+                || recovery == mft_protocol::DeltaReadRecovery::Retry
+            {
+                // The journal was replaced under us, or it wrapped past the
+                // saved position: what happened in between is no longer
+                // recorded, so the indexer has to rescan that volume.
+                debug_log(&format!(
+                    "[mft] {letter}: read at usn {next} failed ({error}); journal={} first_usn={} next_usn={} gap",
+                    journal.usn_journal_id, journal.lowest_valid_usn, journal.next_usn
+                ));
+                return Err(format!(
+                    "{JOURNAL_INVALID_PREFIX}journal moved past usn {next} on {letter}: {error}"
+                ));
             }
             return Err(format!("FSCTL_READ_USN_JOURNAL failed: {error}"));
         }

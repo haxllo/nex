@@ -62,6 +62,62 @@ pub fn error_code_for(message: &str) -> (u8, &str) {
     }
 }
 
+/// `FSCTL_READ_USN_JOURNAL` answers these while the journal is moving under
+/// the reader. They are not a verdict on the saved position.
+pub const ERROR_JOURNAL_DELETE_IN_PROGRESS: u32 = 1178;
+pub const ERROR_JOURNAL_NOT_ACTIVE: u32 = 1179;
+/// The range asked for is no longer in the journal: the entry was deleted, or
+/// the journal wrapped past it between the query and the read.
+pub const ERROR_JOURNAL_ENTRY_DELETED: u32 = 1181;
+
+/// What a failed mid-stream journal read means for the delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaReadRecovery {
+    /// The saved position is still inside the journal: re-query it and read
+    /// again from where the stream stopped. Nothing was lost.
+    Retry,
+    /// The journal we were reading was replaced or wrapped past our position,
+    /// so the records in between are gone. Only a full pass can fill the gap.
+    Gap,
+    /// Not a journal condition; report the read as failed.
+    Fatal,
+}
+
+/// Decide how to answer a failed `FSCTL_READ_USN_JOURNAL`.
+///
+/// `position` is where the stream had got to, `journal_id` the one the stream
+/// was opened against, and `fresh` a journal re-query taken after the failure
+/// as `(journal_id, lowest_valid_usn, next_usn)`; `None` when that query also
+/// failed, which means the journal cannot be read at all right now.
+///
+/// 1178 and 1179 are the journal being deleted or not yet active: a retry
+/// after a pause is right either way, and the retry budget bounds a journal
+/// that never comes back. 1181 says the entries are gone, so it is only worth
+/// retrying while the saved position is still valid in the refreshed journal;
+/// otherwise the range really was lost.
+pub fn delta_read_recovery(
+    error: u32,
+    position: i64,
+    journal_id: u64,
+    fresh: Option<(u64, i64, i64)>,
+) -> DeltaReadRecovery {
+    match error {
+        ERROR_JOURNAL_DELETE_IN_PROGRESS | ERROR_JOURNAL_NOT_ACTIVE => DeltaReadRecovery::Retry,
+        ERROR_JOURNAL_ENTRY_DELETED => match fresh {
+            // Same journal and the position is still readable: the failure was
+            // the journal moving mid-read.
+            Some((id, lowest_valid, next)) if id == journal_id && position >= lowest_valid && position <= next => {
+                DeltaReadRecovery::Retry
+            }
+            // The journal was replaced (new id) or wrapped past us.
+            Some(_) => DeltaReadRecovery::Gap,
+            // Cannot tell; a retry costs one ioctl and can still succeed.
+            None => DeltaReadRecovery::Retry,
+        },
+        _ => DeltaReadRecovery::Fatal,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Full,
@@ -610,6 +666,71 @@ mod tests {
         let error = parse(framed(5, &snapshot_bytes(3, false)), 6).unwrap_err();
         assert!(error.message.contains("request id mismatch"), "{error}");
         assert!(!error.journal_invalid);
+    }
+
+    #[test]
+    fn a_journal_being_deleted_is_retried_not_rescanned() {
+        // 1178 and 1179 happen at mount and at delete time; the journal comes
+        // back, and the saved position is untouched.
+        assert_eq!(
+            delta_read_recovery(ERROR_JOURNAL_DELETE_IN_PROGRESS, 500, 7, None),
+            DeltaReadRecovery::Retry
+        );
+        assert_eq!(
+            delta_read_recovery(ERROR_JOURNAL_NOT_ACTIVE, 500, 7, None),
+            DeltaReadRecovery::Retry
+        );
+    }
+
+    #[test]
+    fn a_purged_range_is_a_gap_rather_than_a_retry_loop() {
+        // The journal wrapped: the position we stopped at is below what is
+        // still readable, so the records in between are gone for good.
+        assert_eq!(
+            delta_read_recovery(
+                ERROR_JOURNAL_ENTRY_DELETED,
+                500,
+                7,
+                Some((7, 900, 5_000)),
+            ),
+            DeltaReadRecovery::Gap
+        );
+        // Deleted and recreated: a different journal id.
+        assert_eq!(
+            delta_read_recovery(ERROR_JOURNAL_ENTRY_DELETED, 500, 7, Some((8, 0, 5_000))),
+            DeltaReadRecovery::Gap
+        );
+    }
+
+    #[test]
+    fn an_entry_deleted_with_the_position_still_valid_is_retried() {
+        // 1181 also fires when the journal moves between the query and the
+        // read; the position is still readable, so nothing was lost.
+        assert_eq!(
+            delta_read_recovery(
+                ERROR_JOURNAL_ENTRY_DELETED,
+                1_000,
+                7,
+                Some((7, 900, 5_000)),
+            ),
+            DeltaReadRecovery::Retry
+        );
+        // A failed re-query cannot prove the range is gone; retry once more.
+        assert_eq!(
+            delta_read_recovery(ERROR_JOURNAL_ENTRY_DELETED, 1_000, 7, None),
+            DeltaReadRecovery::Retry
+        );
+    }
+
+    #[test]
+    fn other_read_failures_stay_fatal() {
+        for error in [5, 87, 1117, 1450] {
+            assert_eq!(
+                delta_read_recovery(error, 1_000, 7, Some((7, 900, 5_000))),
+                DeltaReadRecovery::Fatal,
+                "error {error}"
+            );
+        }
     }
 
     #[test]

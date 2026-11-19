@@ -152,8 +152,10 @@ fn mark_glass_ok() -> bool {
     GLASS_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
-/// Wide diffusion branch: the frost of the pane's interior.
-const BLUR_STDDEV: f32 = 8.0;
+/// Wide diffusion branch: the frost of the pane's interior. At zero the
+/// backdrop shows through the tight rim blur alone, which is the look to judge
+/// the bend by.
+const BLUR_STDDEV: f32 = 0.0;
 /// The rim's own blur. A bending edge is not razor sharp either: the whole
 /// pane is seen through the same glass, so the rim gets a soft version of the
 /// tight blur (true Gaussian passes, `OPTIMIZATION_QUALITY`) plus its share of
@@ -223,14 +225,25 @@ fn corner_taper(nx: f32, ny: f32) -> f32 {
 /// sets how far the rim reads the backdrop: Snell over this thickness.
 const RIM_THICKNESS: f32 = 1.6;
 /// Fan of the read along the rim at the border, as a share of the band. The
-/// radial bend pulls the backdrop straight out of the pane, which is a column
-/// stretched outward; a bubble instead carries what it gathers around the edge,
-/// so the sampled point slides along the border as it comes in. It slides AWAY
-/// from the edge's midpoint, so both halves of an edge pull toward their own
-/// corner and the corner gathers the two. A single tangent direction made the
-/// top edge travel one way and the bottom the other, which read as a spin.
-/// Strongest at the border, gone by the band's end. 0 is the plain radial bend.
+/// radial read pulls the backdrop out of (or in from) the pane, which on its own
+/// is a column stretched along that one direction; the fan slides the sampled
+/// point along the border as well, so the band reads as a sweep of the scene.
+/// It slides AWAY from the edge's midpoint, so both halves of an edge pull
+/// toward their own corner and the corner gathers the two. A single tangent
+/// direction made the top edge travel one way and the bottom the other, which
+/// read as a spin. Strongest at the border, gone by the band's end. 0 is the
+/// plain radial read.
 const RIM_SWIRL: f32 = 0.35;
+/// Which side of the edge the band reads. `true` reads the desktop BEYOND the
+/// pane, so the rim shows the surroundings wrapped around the curve. `false`
+/// reads the pane's own backdrop, pulled from just inside and stretched toward
+/// the edge, so the rim never borrows what sits beside the pane.
+const SAMPLE_OUTWARD: bool = false;
+/// Reach of that inward pull at the border, as a share of the band. The mapping
+/// has to stay monotone or the band becomes a mirror of the middle; with the
+/// `(1 - t)^2` profile the sampled depth is `d + pull * (1 - t)^2`, whose slope
+/// is `1 - 2 * pull / band`, so anything above half the band folds.
+const RIM_PULL: f32 = 0.5;
 /// Refractive index of the pane. Constant, as in the reference optics.
 const IOR: f32 = 1.5;
 /// Device-pixel growth for the main window's native region. The page's
@@ -1988,9 +2001,8 @@ fn height_profile(t: f32) -> f32 {
 /// profile taken as an incidence angle and bent through the pane by Snell's
 /// law. This is what makes the band read as bending glass. The read is placed
 /// OUTWARD (`+n * shift`), so the rim shows the surrounding desktop wrapped
-/// around the curve - convex, converging, the reference look - and it is
-/// monotone by construction: the shift only falls as the depth grows, so the
-/// sampled position only ever moves outward.
+/// around the curve, and it is monotone by construction: the shift only falls
+/// as the depth grows, so the sampled position only ever moves outward.
 fn rim_shift(t: f32, band: f32, thickness: f32) -> f32 {
     if t >= 1.0 {
         return 0.0;
@@ -2149,34 +2161,41 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
             let (_, nx, ny) = lens_profile(px, py, width, height, r_dir);
             let depth = depth / scale;
             let t = (depth / band_logical).clamp(0.0, 1.0);
-            // Rim bend, in logical px, then encoded over the map's range. The
-            // interior is not displaced at all: the reference look has no zoom
-            // and no slab, so the pane's middle stays a window.
-            //
-            // The read goes OUTWARD (`+n * shift`): the rim shows the desktop
-            // wrapped around the curve, which is what makes it read as convex
-            // glass rather than a magnified copy of the pane. Outward is also
-            // monotone - the shift only falls with depth, so the sampled point
-            // only ever moves further out - and one band is the furthest it
-            // reads, which is what the pad carries.
+            // Rim read, in logical px, then encoded over the map's range. The
+            // interior is not displaced at all: by the band's end the read is
+            // 1:1 and the pane's middle stays a plain window.
             //
             // A corner reaches less far, not more shallowly: the taper scales
-            // the shift, so the bend keeps the sides' shape and depth there.
-            let shift = soft_cap(rim_shift(t, band_logical, thickness), band_logical)
-                * corner_taper(nx, ny);
-            // Circumferential slide: what the radial pull gathers is carried
-            // along the border rather than only straight out of it, so the band
-            // reads as a sweep around the curve. The slide points away from the
-            // edge's midpoint (`ux`/`uy` are the signed position along that
-            // edge), so the two halves of an edge fan toward their own corner
-            // and the corner resolves both into one outward read.
+            // the read, so the band keeps the sides' shape and depth there.
+            let taper = corner_taper(nx, ny);
+            let (radial_x, radial_y) = if SAMPLE_OUTWARD {
+                // OUTWARD: the rim shows the desktop wrapped around the curve,
+                // which is what makes it read as raised glass. Monotone because
+                // the shift only falls with depth, so the read only moves
+                // further out, and one band is the furthest it reads.
+                let shift = soft_cap(rim_shift(t, band_logical, thickness), band_logical) * taper;
+                (nx * shift, ny * shift)
+            } else {
+                // INWARD: the band shows the pane's own backdrop, taken from
+                // just inside it and stretched toward the edge - a lens over
+                // its own content, nothing read from beside the pane. The pull
+                // has to vanish at the band's end and stay monotone, or the
+                // band folds into a mirror of the middle; `RIM_PULL` is capped
+                // for exactly that.
+                let pull = RIM_PULL * band_logical * (1.0 - t) * (1.0 - t) * taper;
+                (-nx * pull, -ny * pull)
+            };
+            // Fan: what the radial read gathers is also carried along the
+            // border rather than only straight across it. The slide points away
+            // from the edge's midpoint, so the two halves of an edge travel
+            // toward their own corner and the corner resolves both.
             let fan = RIM_SWIRL * band_logical * (1.0 - t) * (1.0 - t);
             let ux = (px - half_w) / half_w;
             let uy = (py - half_h) / half_h;
-            let mut vx = nx * shift + fan * ux * ny.abs();
-            let mut vy = ny * shift + fan * uy * nx.abs();
-            // The two components can line up at a corner; keep the sampled
-            // point inside one band, which is what `range` encodes.
+            let mut vx = radial_x + fan * ux * ny.abs();
+            let mut vy = radial_y + fan * uy * nx.abs();
+            // The components can line up at a corner; keep the read inside one
+            // band, which is what `range` encodes.
             let len = (vx * vx + vy * vy).sqrt();
             if len > band_logical {
                 let k = band_logical / len;
@@ -3666,7 +3685,7 @@ mod tests {
     }
 
     #[test]
-    fn optics_keep_center_neutral_and_bend_the_rim_outward() {
+    fn optics_keep_center_neutral_and_bend_the_rim_at_the_edge() {
         // Wide enough that the band ends before the middle (the map is built
         // for the real 760x520 panel, not for this size).
         let (w, h) = (480, 320);
@@ -3679,11 +3698,18 @@ mod tests {
         assert_eq!(centre[2], 128, "center red: {centre:?}");
         assert_eq!(centre[3], 255);
         // A cell holds shift / range, so the rim's own shift is readable
-        // straight out of the red channel.
+        // straight out of the red channel. Which way it reads is the model
+        // choice: outward borrows the desktop beyond the pane, inward pulls the
+        // pane's own backdrop toward the edge.
         let left = pixel(1, h / 2);
         let right = pixel(w - 2, h / 2);
-        assert!(left[2] < 96, "left edge must read outward: {}", left[2]);
-        assert!(right[2] > 160, "right edge must read outward: {}", right[2]);
+        if super::SAMPLE_OUTWARD {
+            assert!(left[2] < 96, "left edge must read outward: {}", left[2]);
+            assert!(right[2] > 160, "right edge must read outward: {}", right[2]);
+        } else {
+            assert!(left[2] > 160, "left edge must read inward: {}", left[2]);
+            assert!(right[2] < 96, "right edge must read inward: {}", right[2]);
+        }
         // Frost is one value over the whole pane: even, so no depth can read
         // as a blurrier strip than its neighbour.
         assert_eq!(left[0], centre[0], "frost must be even at the rim");
@@ -4220,11 +4246,15 @@ mod tests {
         let red = |x: usize, y: usize| map[(y * w + x) * 4 + 2] as i32;
         let mid = h / 2;
         // 4 px in, the rim already reads tens of px of backdrop; at the band's
-        // own width the bend is gone and the middle is neutral.
+        // own width the read is gone and the middle is neutral.
         let rim = red(4, mid);
         let band_end = red(super::BEZEL_MARGIN as usize, mid);
         let centre = red(w / 2, mid);
-        assert!(rim < 40, "rim {rim} must bend hard");
+        if super::SAMPLE_OUTWARD {
+            assert!(rim < 40, "rim {rim} must bend hard");
+        } else {
+            assert!(rim > 170, "rim {rim} must pull hard");
+        }
         assert_eq!(
             band_end, 128,
             "the band must end at {} px, got {band_end}",
@@ -4265,10 +4295,10 @@ mod tests {
     }
 
     #[test]
-    fn the_rim_read_goes_outward_and_never_folds() {
+    fn the_rim_read_never_folds_over_itself() {
         // A read position that goes out and comes back shows the same backdrop
-        // twice - that is the mirror the rim had. Outward sampling is monotone
-        // by construction: the shift only falls as the depth grows.
+        // twice - that is the mirror the rim had. Both reads are monotone by
+        // construction: the read only ever moves one way with depth.
         for (w, h) in [(760usize, 60usize), (760, 520)] {
             let map = super::bezel_bytes(w, h);
             let band = super::bezel_band(w.min(h) as f32);
@@ -4279,9 +4309,14 @@ mod tests {
                 let red = map[(y * w + x) * 4 + 2] as f32;
                 x as f32 + (red - 128.0) / 127.0 * range
             };
-            // The edge wraps the desktop outside the pane around the curve.
+            // Where the outer edge reads from: outside the pane for the outward
+            // model, from inside it for the inward one.
             let first = read(0);
-            assert!(first < 0.0, "the edge must read outside the pane, got {first}");
+            if super::SAMPLE_OUTWARD {
+                assert!(first < 0.0, "the edge must read outside the pane, got {first}");
+            } else {
+                assert!(first > 0.0 && first < band, "the edge must read inside the band, got {first}");
+            }
             // The shift must also change smoothly: a cap that clamps leaves a
             // flat 1:1 strip at the border and then jumps the stretch to ~6x,
             // which reads as a hard line parallel to the edge.
@@ -4307,7 +4342,7 @@ mod tests {
             }
             // Precision in use: the edge cell carries most of the range.
             let edge = map[(y * w) * 4 + 2];
-            assert!(edge < 24, "edge cell only reaches {edge} of the range");
+            assert!((edge as i32 - 128).abs() > 50, "edge cell only reaches {edge} of the range");
         }
     }
 
@@ -4480,6 +4515,29 @@ mod tests {
     }
 
     #[test]
+    fn the_inward_pull_never_folds_the_band() {
+        if super::SAMPLE_OUTWARD {
+            return;
+        }
+        // Where each depth of the band reads from. It has to only ever move
+        // further in: a depth that reads shallower than the one before it is a
+        // fold, and a fold shows the pane's middle twice - the mirror.
+        for band in [21.0_f32, 42.0, super::BEZEL_MARGIN] {
+            let mut previous = -1.0_f32;
+            for step in 0..=(band as i32) {
+                let t = step as f32 / band;
+                let read = step as f32 + super::RIM_PULL * band * (1.0 - t) * (1.0 - t);
+                assert!(read >= previous, "pull folds in the {band} px band at {step}: {read} < {previous}");
+                // Never reads past the band, so it stays under the pane and
+                // meets the 1:1 middle exactly at the band's end.
+                assert!(read <= band + 1e-3, "pull reads {read} px into a {band} px band");
+                previous = read;
+            }
+            assert_eq!(previous, band);
+        }
+    }
+
+    #[test]
     fn the_rim_carries_its_read_around_the_border() {
         // A radial pull on its own lays the backdrop down as a column
         // stretched outward; the slide along the edge is what makes the band
@@ -4499,9 +4557,9 @@ mod tests {
         // Mirrored point on the same edge slides down by the same amount.
         let (_, down) = at(1, h - 1 - h / 4);
         assert!((128 - up) == (down - 128), "left edge is not symmetric: {up} {down}");
-        // Mid-edge: no slide, and the radial read still goes outward.
+        // Mid-edge: no slide, and the radial read is still strong.
         let (left, mid) = at(1, h / 2);
-        assert!(left < 96, "left edge no longer reads outward: {left}");
+        assert!((left - 128).abs() > 32, "left edge lost its radial read: {left}");
         assert_eq!(mid, 128, "mid-edge still slides along the border: {mid}");
         // Top edge mirrors the same behaviour on the other axis.
         let (up_left, _) = at(w / 4, 1);

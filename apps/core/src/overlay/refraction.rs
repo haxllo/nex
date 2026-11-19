@@ -203,11 +203,13 @@ fn bezel_band(short_side: f32) -> f32 {
     BEZEL_MARGIN.min(short_side.max(0.0) * 0.35)
 }
 
-/// Narrowing of the rim band where the outline turns a corner. The silhouette
-/// keeps its 8 px radius; the band must not be forced around it. A band far
-/// wider than the corner can only turn all at the 45 degree diagonal, which
-/// reads as a diamond instead of a circular reflection, so the band gives way
-/// there. `1` along a straight side, `0.55` on the diagonal.
+/// How much of the rim's reach survives where the outline turns a corner:
+/// `1` along a straight side, `0.55` on the diagonal. A band far wider than an
+/// 8 px corner cannot turn around it without bunching on the 45 degree
+/// diagonal, which reads as a diamond instead of a circular reflection, so the
+/// corner reaches less far. This scales the SHIFT, not the band: applied to the
+/// band it finished the bend in 31 px in the corners against 56 px on the
+/// sides, which read as a rim that changes depth.
 fn corner_taper(nx: f32, ny: f32) -> f32 {
     let diagonal = (4.0 * (nx * ny).abs()).clamp(0.0, 1.0);
     // Eased at both ends, so the band's width has no kink where the taper
@@ -220,6 +222,15 @@ fn corner_taper(nx: f32, ny: f32) -> f32 {
 /// Thickness of the rim relative to its width (`T = B * RIM_THICKNESS`). What
 /// sets how far the rim reads the backdrop: Snell over this thickness.
 const RIM_THICKNESS: f32 = 1.6;
+/// Fan of the read along the rim at the border, as a share of the band. The
+/// radial bend pulls the backdrop straight out of the pane, which is a column
+/// stretched outward; a bubble instead carries what it gathers around the edge,
+/// so the sampled point slides along the border as it comes in. It slides AWAY
+/// from the edge's midpoint, so both halves of an edge pull toward their own
+/// corner and the corner gathers the two. A single tangent direction made the
+/// top edge travel one way and the bottom the other, which read as a spin.
+/// Strongest at the border, gone by the band's end. 0 is the plain radial bend.
+const RIM_SWIRL: f32 = 0.35;
 /// Refractive index of the pane. Constant, as in the reference optics.
 const IOR: f32 = 1.5;
 /// Device-pixel growth for the main window's native region. The page's
@@ -2024,18 +2035,13 @@ fn lens_profile(x: f32, y: f32, w: f32, h: f32, radius: f32) -> (f32, f32, f32) 
 
 fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
     let band = bezel_band(w.min(h) as f32 / scale);
-    // Same direction box the displacement map uses, so the specular hairline
-    // and the bend taper together at the corners.
-    let r_dir = (band * scale).max(CORNER_RADIUS * scale);
     let mut layers = vec![Vec::with_capacity(w * h * 4); 5];
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
             let (depth, nx, ny) = lens_profile(px, py, w as f32, h as f32, CORNER_RADIUS * scale);
-            let (_, dx, dy) = lens_profile(px, py, w as f32, h as f32, r_dir);
             let depth = depth / scale;
-            let band_here = band * corner_taper(dx, dy);
-            let ridge = rim_light(depth, band_here);
+            let ridge = rim_light(depth, band);
             // Uniform along each edge: directional variation is applied once
             // per frame from the pointer light, so all four corners read the
             // same brightness instead of two lit diagonals.
@@ -2051,7 +2057,7 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
             hash = hash.wrapping_mul(0x7feb352d);
             hash ^= hash >> 15;
             let white = hash & 1 != 0;
-            let shade = if depth < band_here {
+            let shade = if depth < band {
                 ((nx + ny).max(0.0) * (-depth.max(0.0) / 6.0).exp() * 0.09 * 255.0) as u8
             } else { 0 };
             let alpha = shade.saturating_add(1);
@@ -2068,7 +2074,15 @@ fn rim_light(depth: f32, band: f32) -> f32 {
     // makes the pane read as thick glass under a moving light.
     let depth = depth.max(0.0);
     if depth >= band { return 0.0; }
-    0.34 * (-(depth / 0.9).powi(2)).exp() + 0.055 * (-depth / 14.0).exp()
+    // The hairline is a highlight lying on the edge: its width comes from the
+    // light, so it stays in px. The glow is the pane's thickness seen edge-on,
+    // so it scales with the band - at 56 px this is the 14 px it always was,
+    // and on the 21 px dock it no longer floods two thirds of the band.
+    let hairline = 0.34 * (-(depth / 0.9).powi(2)).exp();
+    let glow = 0.055 * (-depth / (0.25 * band.max(1.0))).exp();
+    // Fade the outer 15% instead of cutting at the band: the cut left a
+    // 3/255 step in the middle row of the dock, a faint second line.
+    (hairline + glow) * ((1.0 - depth / band) / 0.15).min(1.0)
 }
 
 fn backdrop_grid(pixels: &[u8], w: usize, h: usize, wash: (f32, f32, f32, f32)) -> Vec<[f32; 4]> {
@@ -2134,24 +2148,43 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
             let (depth, _, _) = lens_profile(px, py, width, height, r_true);
             let (_, nx, ny) = lens_profile(px, py, width, height, r_dir);
             let depth = depth / scale;
-            // The band gives way where the outline turns a corner, so the
-            // reflection curves around it instead of bunching on the diagonal.
-            let band_here = band_logical * corner_taper(nx, ny);
-            let t = (depth / band_here).clamp(0.0, 1.0);
+            let t = (depth / band_logical).clamp(0.0, 1.0);
             // Rim bend, in logical px, then encoded over the map's range. The
             // interior is not displaced at all: the reference look has no zoom
             // and no slab, so the pane's middle stays a window.
             //
-            // The read goes OUTWARD (`+nx`): the rim shows the desktop wrapped
-            // around the curve, which is what makes it read as convex glass
-            // rather than a magnified copy of the pane. Sampling inward showed
-            // backdrop the pane's own middle also shows - the same picture
-            // twice, which is the mirror. Outward is monotone too: the shift
-            // only falls with depth, so the read only moves further out. One
-            // band is the furthest it may read, which is what the pad carries.
-            let shift = soft_cap(rim_shift(t, band_here, thickness), band_here);
-            let dx = nx * shift / range;
-            let dy = ny * shift / range;
+            // The read goes OUTWARD (`+n * shift`): the rim shows the desktop
+            // wrapped around the curve, which is what makes it read as convex
+            // glass rather than a magnified copy of the pane. Outward is also
+            // monotone - the shift only falls with depth, so the sampled point
+            // only ever moves further out - and one band is the furthest it
+            // reads, which is what the pad carries.
+            //
+            // A corner reaches less far, not more shallowly: the taper scales
+            // the shift, so the bend keeps the sides' shape and depth there.
+            let shift = soft_cap(rim_shift(t, band_logical, thickness), band_logical)
+                * corner_taper(nx, ny);
+            // Circumferential slide: what the radial pull gathers is carried
+            // along the border rather than only straight out of it, so the band
+            // reads as a sweep around the curve. The slide points away from the
+            // edge's midpoint (`ux`/`uy` are the signed position along that
+            // edge), so the two halves of an edge fan toward their own corner
+            // and the corner resolves both into one outward read.
+            let fan = RIM_SWIRL * band_logical * (1.0 - t) * (1.0 - t);
+            let ux = (px - half_w) / half_w;
+            let uy = (py - half_h) / half_h;
+            let mut vx = nx * shift + fan * ux * ny.abs();
+            let mut vy = ny * shift + fan * uy * nx.abs();
+            // The two components can line up at a corner; keep the sampled
+            // point inside one band, which is what `range` encodes.
+            let len = (vx * vx + vy * vy).sqrt();
+            if len > band_logical {
+                let k = band_logical / len;
+                vx *= k;
+                vy *= k;
+            }
+            let dx = vx / range;
+            let dy = vy / range;
             let r = (128.0 + dx * 127.0).round().clamp(0.0, 255.0) as u8;
             let g = (128.0 + dy * 127.0).round().clamp(0.0, 255.0) as u8;
             let scatter = (FROST * 255.0).round() as u8;
@@ -4221,9 +4254,10 @@ mod tests {
         }
         // A tall pane keeps the full band.
         assert_eq!(super::bezel_band(417.0), super::BEZEL_MARGIN);
-        // The band gives way on the diagonal so it can turn a corner narrower
-        // than itself; that is what stops the reflection bunching into a
-        // diamond. Along a straight side it is untouched.
+        // The corner reaches less far so the band can turn an 8 px radius
+        // without bunching on the diagonal; along a straight side it is
+        // untouched. It scales the shift, so the corner's bend still ends at
+        // the band's end rather than in half the distance.
         assert_eq!(super::corner_taper(1.0, 0.0), 1.0);
         let s = std::f32::consts::FRAC_1_SQRT_2;
         let diagonal = super::corner_taper(s, s);
@@ -4419,6 +4453,16 @@ mod tests {
             previous = current;
         }
         assert!(super::rim_light(2.0, band) < 0.055);
+        // The glow is the pane's edge seen on, so it scales with the band: at
+        // 10 px in, the dock's 21 px band has almost nothing left while the
+        // 56 px panel still glows.
+        assert!(
+            super::rim_light(10.0, 21.0) < super::rim_light(10.0, band) * 0.5,
+            "the glow does not follow the band"
+        );
+        // No step where the band ends: a hard cut left 3/255 on the dock.
+        assert!(super::rim_light(20.9, 21.0) < 0.002, "step at the dock's band edge");
+        assert_eq!(super::rim_light(21.0, 21.0), 0.0);
         // Diagonal of a circular corner removes 0.293R, not the
         // 0.159R a sqrt-cos profile did (which read as square).
         let mid = super::corner_offsets();
@@ -4433,6 +4477,40 @@ mod tests {
             alpha(16),
             alpha(140)
         );
+    }
+
+    #[test]
+    fn the_rim_carries_its_read_around_the_border() {
+        // A radial pull on its own lays the backdrop down as a column
+        // stretched outward; the slide along the edge is what makes the band
+        // read as a sweep of the surroundings, like a bubble wrapping what is
+        // beside it. It fans away from each edge's midpoint, so the top edge's
+        // left half and right half travel opposite ways and their corners
+        // gather both. A single tangent direction spun instead.
+        let (w, h) = (480usize, 320);
+        let map = super::bezel_bytes(w, h);
+        let at = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            (map[i + 2] as i32, map[i + 1] as i32) // (red, green) = (x, y) shift
+        };
+        // Left edge, quarter way down: slides up toward the top-left corner.
+        let (_, up) = at(1, h / 4);
+        assert!(up < 116, "left edge does not fan toward its corner: {up}");
+        // Mirrored point on the same edge slides down by the same amount.
+        let (_, down) = at(1, h - 1 - h / 4);
+        assert!((128 - up) == (down - 128), "left edge is not symmetric: {up} {down}");
+        // Mid-edge: no slide, and the radial read still goes outward.
+        let (left, mid) = at(1, h / 2);
+        assert!(left < 96, "left edge no longer reads outward: {left}");
+        assert_eq!(mid, 128, "mid-edge still slides along the border: {mid}");
+        // Top edge mirrors the same behaviour on the other axis.
+        let (up_left, _) = at(w / 4, 1);
+        let (up_right, _) = at(w - 1 - w / 4, 1);
+        assert!((128 - up_left) == (up_right - 128), "top edge is not symmetric: {up_left} {up_right}");
+        assert!(up_left < 128 && up_right > 128, "top edge does not fan: {up_left} {up_right}");
+        // It is gone by the band's end, where the pane is a plain window.
+        let band = super::bezel_band(w.min(h) as f32) as usize;
+        assert_eq!(at(band + 4, h / 2), (128, 128), "slide leaks past the band");
     }
 
     /// Luminance of the glass: the wash composited over the backdrop.

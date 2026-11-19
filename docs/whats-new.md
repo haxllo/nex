@@ -1,4 +1,4 @@
-<!-- release: 3.1.0 -->
+<!-- release: 3.1.1 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -87,21 +87,21 @@
 -->
 
 
-## The first key answers at once
 
-Typing a letter as soon as the panel opens used to leave the list sitting there for a moment. The search index is now prepared while the panel is still hidden, so the work happens before you press a key.
+## The rim shows only the pane
 
-The glass edge changed as well. It bends the desktop behind the panel the way a lens edge does, and the line across the border is gone.
+The glass edge changed again. The rim now reads what sits under the panel instead of what sits beside it, so a small window no longer repeats the desktop next to it inside its own border.
 
-### Typing
-
-- **The index is ready before you type.** Opening the panel starts a background pass that reads what one letter will search, and it repeats after new files are added.
-- **Icons are sent once.** App icons were pushed to the panel with every keystroke, which is why a letter matching installed apps felt heavier than one that did not. Each icon now goes once and stays.
-- **Search answers while the index is being written.** A keystroke reads the previous snapshot, and the next one already includes the change.
+The light along the edge follows the band's width too, which makes the dock and a tall panel read as the same piece of glass.
 
 ### The glass edge
 
-- **The rim bends the desktop.** The border reads the desktop outside the window and curves it, so the panel looks like thick glass with the desktop running through its edge.
-- **The seam is gone.** The bend used to end in a hard line with a flat, unbent strip beyond it. The stretch now eases out as it reaches the end of the band.
-- **Corners turn properly.** The bend narrows through the rounded corner, so the glass wraps it with no fanned patch.
-- **A clearer middle.** The frost across the pane is even and light, so what you see through the glass is the desktop rather than a blurred band.
+- **The rim reads from inside.** The border samples the backdrop under the pane and pulls it out toward the edge, so nothing from outside the window can appear in it.
+- **Corners keep the depth of the sides.** The bend shortens through a corner instead of stopping halfway, so the turn matches the straight runs.
+- **The glow follows the band.** It used to be the same 14 pixels whatever the band was, covering a quarter of a tall panel's band and two thirds of the dock's. It now grows with the band and fades out at the end instead of stopping on a step.
+- **The fan.** Both halves of each edge pull toward their own corner, so the rim gathers at the corners instead of travelling one way around the border.
+- **Less blur behind it.** The desktop passes through unblurred, leaving the frost and the thin rim line to do the work.
+
+### Under the hood
+
+- When Windows moves its change journal while Nex is reading it, the indexer retries instead of rescanning the whole drive.

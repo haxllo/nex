@@ -88,19 +88,20 @@
 
 
 
-## The rim shows only the pane
 
-The glass edge changed again. The rim now reads what sits under the panel instead of what sits beside it, so a small window no longer repeats the desktop next to it inside its own border.
+## Glass that reads from behind it
 
-The light along the edge follows the band's width too, which makes the dock and a tall panel read as the same piece of glass.
+The rim of the glass theme takes its colour from the backdrop inside the panel, the way a thick window does. What sits beside the window stays out of its border.
+
+The light along the edge follows the panel's size, so the dock and a tall panel carry the same thickness of glass, and the corners bend by as much as the sides do.
 
 ### The glass edge
 
-- **The rim reads from inside.** The border samples the backdrop under the pane and pulls it out toward the edge, so nothing from outside the window can appear in it.
-- **Corners keep the depth of the sides.** The bend shortens through a corner instead of stopping halfway, so the turn matches the straight runs.
-- **The glow follows the band.** It used to be the same 14 pixels whatever the band was, covering a quarter of a tall panel's band and two thirds of the dock's. It now grows with the band and fades out at the end instead of stopping on a step.
-- **The fan.** Both halves of each edge pull toward their own corner, so the rim gathers at the corners instead of travelling one way around the border.
-- **Less blur behind it.** The desktop passes through unblurred, leaving the frost and the thin rim line to do the work.
+- **The rim samples the panel's own backdrop.** Colour comes from just inside the edge and stretches outward, so the border shows what is behind the glass.
+- **The light scales with the band.** It used to be the same 14 pixels on every panel, enough to fill two thirds of the dock's band. It now grows with the band and fades out at the end.
+- **Corners bend as far as the sides.** The bend shortens through a corner instead of ending halfway along it.
+- **Each half of an edge pulls toward its own corner,** so the rim gathers where the corners meet instead of running one way around the border.
+- **No blur between the desktop and the glass.** The frost and a thin rim line carry the effect.
 
 ### Under the hood
 

@@ -319,9 +319,14 @@ fn dispatch(
             let service = Arc::clone(service);
             std::thread::spawn(move || {
                 if let Ok(guard) = service.try_read() {
-                    guard.warm_search_cache_forced();
-                    let warmed = guard.warm_seed_queries_throttled();
-                    if warmed > 0 {
+                    // One timed query decides whether the pages survived the
+                    // idle period; re-reading the index when they did is pure
+                    // I/O next to a first paint. See
+                    // `CoreService::warm_index_after_show`.
+                    let (warm, warmed) = guard.warm_index_after_show();
+                    if warm {
+                        crate::logging::info("[nex] warm_index: index pages already resident");
+                    } else if warmed > 0 {
                         crate::logging::info(&format!(
                             "[nex] seed warm: {warmed} prefix queries"
                         ));

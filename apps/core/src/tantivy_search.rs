@@ -678,6 +678,11 @@ impl TantivyIndex {
 #[derive(Default)]
 pub(crate) struct IndexWarmer {
     in_flight: std::sync::atomic::AtomicBool,
+    /// A forced pass was asked for while another was running. Dropping it is
+    /// how the first keystroke after an idle period goes cold: the show asks
+    /// for the forced pass, a background pass happens to be in flight, and the
+    /// request vanishes.
+    force_pending: std::sync::atomic::AtomicBool,
     files_read: std::sync::atomic::AtomicU64,
     /// Bytes a forced pass may read; 0 means [`FORCED_PASS_MAX_BYTES`]. Only
     /// tests set it, so a test does not have to write 24 MB to prove the slice
@@ -730,6 +735,12 @@ impl IndexWarmer {
         self.files_read.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// True when no warm pass is running.
+    #[cfg(test)]
+    pub(crate) fn is_idle_for_test(&self) -> bool {
+        !self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Cap the bytes a forced pass reads, so a test can exercise the slice.
     #[cfg(test)]
     pub(crate) fn set_pass_budget_for_test(&self, bytes: u64) {
@@ -747,13 +758,25 @@ impl IndexWarmer {
     fn spawn_warm(self: &std::sync::Arc<Self>, index_dir: PathBuf, force: bool) {
         use std::sync::atomic::Ordering;
         if self.in_flight.swap(true, Ordering::AcqRel) {
+            // Keep the request instead of dropping it: a pass is already
+            // running, so it will pick this up on the way out.
+            if force {
+                self.force_pending.store(true, Ordering::Release);
+            }
             return;
         }
         let this = std::sync::Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("nex-index-warm".into())
             .spawn(move || {
-                this.warm(&index_dir, force);
+                let mut force = force;
+                loop {
+                    this.warm(&index_dir, force);
+                    if !this.force_pending.swap(false, Ordering::AcqRel) {
+                        break;
+                    }
+                    force = true;
+                }
                 this.in_flight.store(false, Ordering::Release);
             });
         if spawned.is_err() {
@@ -1411,10 +1434,18 @@ mod tests {
             "the first pass must read the segment files"
         );
 
+        assert!(
+            settles(|| warmer.is_idle_for_test()),
+            "the first pass must finish before the next one starts"
+        );
+
         // Nothing changed, no force: a second pass has nothing to do.
         let after_first = warmer.files_read();
         warmer.warm_in_background(dir.path().to_path_buf());
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            settles(|| warmer.is_idle_for_test()),
+            "the second pass must finish"
+        );
         assert_eq!(
             warmer.files_read(),
             after_first,
@@ -1456,6 +1487,10 @@ mod tests {
         // shows warm all four files even though no pass reads more than one.
         for expected in 2..=4 {
             warmer.rewind_throttle_for_test();
+            assert!(
+                settles(|| warmer.is_idle_for_test()),
+                "the previous pass must finish before the next one"
+            );
             warmer.warm_in_background_forced(dir.path().to_path_buf());
             assert!(
                 settles(|| warmer.files_read() == expected),

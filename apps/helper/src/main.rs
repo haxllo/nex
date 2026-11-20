@@ -461,6 +461,18 @@ static PENDING_INJECT: AtomicU8 = AtomicU8::new(0);
 
 /// Ask the loop thread to inject `action`. Never blocks, never calls SendInput.
 fn defer_inject(action: u8) {
+    // Hand the batch straight to the injector thread. It used to be parked in
+    // PENDING_INJECT for the pump loop to collect, and the pump loop is what
+    // blocks: the hook callback itself, then `set_overlay_foreground` with its
+    // 40 ms retry sleeps. On the first press after an idle period that delay
+    // measured long enough for the shell to open Start before the mask went
+    // down (CIQ-222), so nothing may sit behind the loop any more.
+    if let Some(tx) = INJECT_TX.get() {
+        if tx.try_send(action).is_ok() {
+            return;
+        }
+    }
+    // No injector, or its queue is full: leave it for the loop, which retries.
     PENDING_INJECT.fetch_or(action, Ordering::SeqCst);
     if let Some(tid) = HELPER_THREAD_ID.get() {
         unsafe { PostThreadMessageW(*tid, WM_NEX_WAKE, 0, 0) };
@@ -481,22 +493,10 @@ static KEYUP_QUEUED_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 static HELPER_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
 
-/// When the last physical (non-injected) key-down was seen, on the helper clock.
-static LAST_PHYSICAL_KEY_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Whether the menu mask is currently held only because the machine is idle.
-///
-/// Suppressing Start needs the mask down *before* the shell handles the Win
-/// key-up, and the mask is injected from the injector thread after the hook
-/// returns. On a cold helper that gap measured 184 ms inside one hook callback
-/// (CIQ-222), enough for a normal Win tap to open Start. Holding the mask while
-/// no keys are being pressed removes the race entirely: by the time the Win
-/// key-down arrives the mask is already down. It is released on the first real
-/// key press, so typing, chords and games see nothing unusual.
-static IDLE_MASK_HELD: AtomicBool = AtomicBool::new(false);
-
-/// How long after the last physical key the mask is held again.
-const IDLE_MASK_QUIET_MS: u64 = 900;
+/// Start is cancelled by a key event *inside* the Win press, so the mask and the
+/// guard have to be sent while that press is live. Early in the press is better
+/// than late: this stamp measures how long the first injection took to reach
+/// the shell, which is the whole suppression window on a cold callback.
 
 fn helper_now_ms() -> u64 {
     HELPER_EPOCH
@@ -519,8 +519,8 @@ fn inject_writer_loop(rx: std::sync::mpsc::Receiver<u8>) {
             let waited = helper_now_ms().saturating_sub(queued_at);
             invalidate_start_gesture();
             // 50 ms is far beyond the cheap path (well under a millisecond) and
-            // close to the point where the shell has already decided the tap was
-            // a bare Win press.
+            // close to where the shell has already decided the tap was a bare
+            // Win press.
             if queued_at != 0 && waited > 50 {
                 debug_log(&format!(
                     "[stall] start guard injected {waited} ms after the Win key-up"
@@ -532,6 +532,13 @@ fn inject_writer_loop(rx: std::sync::mpsc::Receiver<u8>) {
             send_mask_up();
         }
         if pending & INJECT_MASK_DOWN != 0 {
+            // The mask only cancels Start while the shell sees it *inside* the
+            // Win press. This callback runs before the shell is given the Win
+            // key-down, so injecting immediately can put the mask down first -
+            // and a mask that was already down when Win went down cancels
+            // nothing (that is what made a pre-held mask let Start open on every
+            // press). Two milliseconds is past that dispatch and inside any tap.
+            std::thread::sleep(std::time::Duration::from_millis(2));
             send_mask_down();
         }
     }
@@ -622,35 +629,21 @@ fn hold_mask() -> bool {
 }
 
 /// Release the mask if held. Returns true on transition.
-/// Hold the menu mask while the user is not typing, so a Win tap cannot reach
-/// the shell as a bare Win press even when this process is paging in after an
-/// idle period.
+/// Re-touch the state the hook callback reads.
 ///
-/// Called from the pump loop, which wakes on its own bounded wait, so this also
-/// keeps the hook callback's code and statics resident.
-fn ensure_idle_mask() {
-    let target_is_win = CFG
+/// Called from the pump loop, which already wakes every 250 ms: the callback is
+/// a handful of atomics, but after an idle period its code and statics can be
+/// paged out, and a callback that takes 184 ms (measured) loses the Start
+/// gesture before it can cancel it. Touching them keeps them resident.
+fn touch_hot_path() {
+    let _ = CFG
         .read()
         .ok()
-        .and_then(|cfg| cfg.as_ref().map(|cfg| cfg.target_is_win))
-        .unwrap_or(false);
-    if !target_is_win || !HK_ENABLED.load(Ordering::SeqCst) {
-        return;
-    }
-    // A press in progress owns the mask; the deferred release owns it next.
-    if CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0 || DEFER_MASK_RELEASE.load(Ordering::SeqCst) {
-        return;
-    }
-    if IDLE_MASK_HELD.load(Ordering::SeqCst) {
-        return;
-    }
-    let quiet = helper_now_ms().saturating_sub(LAST_PHYSICAL_KEY_MS.load(Ordering::SeqCst));
-    if quiet < IDLE_MASK_QUIET_MS || MASK_HELD.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    IDLE_MASK_HELD.store(true, Ordering::SeqCst);
-    defer_inject(INJECT_MASK_DOWN);
-    debug_log("idle mask held");
+        .and_then(|cfg| cfg.as_ref().map(|cfg| (cfg.target_is_win, cfg.target_vk)));
+    let _ = HK_IS_WIN.load(Ordering::SeqCst);
+    let _ = HK_ENABLED.load(Ordering::SeqCst);
+    let _ = MASK_HELD.load(Ordering::SeqCst);
+    let _ = CONSUMED_WIN_VK.load(Ordering::SeqCst);
 }
 
 /// Keep the input path hot and first in line.
@@ -960,33 +953,14 @@ unsafe fn keyboard_hook_proc_inner(
             || vk == VK_LMENU || vk == VK_RMENU
             || vk == VK_LSHIFT || vk == VK_RSHIFT;
 
-        // A real key press ends the idle hold: from here the shell must see the
-        // user's own input, not our mask. Skipped during a Win press, where the
-        // mask is doing its job.
-        if is_keydown
-            && !is_win_vk
-            && !is_mod
-            && CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0
-        {
-            LAST_PHYSICAL_KEY_MS.store(helper_now_ms(), Ordering::SeqCst);
-            if IDLE_MASK_HELD.swap(false, Ordering::SeqCst) {
-                MASK_HELD.store(false, Ordering::SeqCst);
-                defer_inject(INJECT_MASK_UP);
-                debug_log("idle mask released on key press");
-            }
-        }
-
         if is_win_vk {
             if is_keydown {
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    // Never SendInput from the hook; ask the loop instead. The
-                    // idle hold may already have the mask down, and a second
-                    // key-down would repeat it.
-                    if !MASK_HELD.swap(true, Ordering::SeqCst) {
-                        defer_inject(INJECT_MASK_DOWN);
-                    }
+                    // Never SendInput from the hook; ask the loop instead.
+                    MASK_HELD.store(true, Ordering::SeqCst);
+                    defer_inject(INJECT_MASK_DOWN);
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
             }
@@ -2489,7 +2463,7 @@ fn main() {
         // thread: SendInput from inside a low-level hook re-enters the input
         // pipeline and blocks, which froze every key and the mouse for secs.
         run_pending_injections();
-        ensure_idle_mask();
+        touch_hot_path();
 
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {

@@ -1,4 +1,4 @@
-<!-- release: 3.1.1 -->
+<!-- release: 3.2.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -102,6 +102,19 @@
      must not hide the one item people will notice: that item gets a drawer of
      its own and the rest follow underneath.
 
+  A fix is written as a fix. One line, the symptom it removes, in the reader's
+  words: "Fixed: Start opened with the panel on the first press after an idle
+  period." Do not dress it up as new behaviour, do not explain the cause, and do
+  not turn it into a paragraph - three short lines beat one that justifies
+  itself.
+
+  Do not overstate, and do not use a word the reader has no reason to know.
+  Screen-space numbers ("3 %", "blur 8 to 10"), and mechanism nouns ("band",
+  "slice", "warm", "index", "backdrop", "mask") only make sense to whoever
+  wrote the change; if a sentence needs one of them to be true, it is a
+  mechanism line and belongs in the release page. Say what a person sees, in the
+  words they would use to describe it.
+
   A cosmetic adjustment never earns a heading. More blur, a slightly deeper
   corner, a warmer edge light are bullets inside the surface's drawer. If a
   reader would not spot the difference, the line belongs in the release page
@@ -144,16 +157,20 @@
 
 
 
-## The glass edge
 
-The rim reads the backdrop inside the panel and stretches it toward the border, so the glass shows what is behind the panel rather than what sits beside the window.
 
-- **Reading from the pane itself.** Colour comes from just inside the edge, across the whole band.
-- **Edge light sized to the band.** The glow grows with the panel and fades out at the end, so the dock and a tall panel read the same.
-- **Corners with the sides' depth.** The bend shortens through a corner, which keeps the turn as deep as the straight runs.
-- **Each half of an edge pulls toward its own corner,** so the rim gathers where corners meet.
-- **No blur between the desktop and the glass.** The frost and a thin rim line carry the effect.
+## The glass and the hotkey
 
-### Under the hood
+The panel's glass now shows what is behind it slightly enlarged, like looking through thick glass. The hotkey had a slow first press after the machine had been idle, and that is fixed.
 
-- When Windows moves its change journal while Nex is reading it, the indexer retries instead of rescanning the whole drive.
+### The glass
+
+- **The middle looks through, not past.** What is behind the panel appears a little bigger, so the pane reads as glass rather than a hole cut in the desktop.
+- **The bright edge fades into the middle** instead of stopping in a line.
+- **It only uses what is behind the panel.** A window moving around behind it can't smear the edge.
+
+### The hotkey
+
+- **Fixed:** the first press after the machine had been idle took half a second to open the panel.
+- **Fixed:** Start opened with the panel on that press.
+- **Fixed:** the first character typed before the panel settled waited for its results.

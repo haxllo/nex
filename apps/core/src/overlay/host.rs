@@ -182,7 +182,7 @@ use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::http::{header::CONTENT_TYPE, Request, Response};
-use wry::WebViewExtWindows;
+use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 use wry::{WebView, WebViewBuilder};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -2366,6 +2366,22 @@ fn build_webview(
     let glass_css = acrylic_available && opaque_bg.is_none();
     let builder = WebViewBuilder::new()
         .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
+        // The overlay spends most of its life hidden, and WebView2 answers a
+        // hidden window by throttling and eventually suspending the renderer.
+        // That throttling is paid back on the next show: the page took 693 ms
+        // to post its first paint after an idle period, with nothing running on
+        // our side. Keeping the renderer scheduled costs an idle process some
+        // CPU but makes the show path the only thing left to measure.
+        .with_additional_browser_args(
+            // wry replaces its own defaults when this is set, so they are
+            // repeated here: the mini-menu and SmartScreen switches it adds
+            // for every webview, and autoplay, which wry sets by default.
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion \
+             --autoplay-policy=no-user-gesture-required \
+             --disable-renderer-backgrounding \
+             --disable-background-timer-throttling \
+             --disable-backgrounding-occluded-windows",
+        )
         .with_transparent(opaque_bg.is_none());
     let builder = match opaque_bg {
         Some(bg) => builder.with_background_color(bg),

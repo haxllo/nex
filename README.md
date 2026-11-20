@@ -220,11 +220,11 @@ cargo test -p nex --lib chat             # one module
 cargo test -p nex-indexer --test process_isolation_test   # IPC end to end
 ```
 
-If your machine is short on RAM or disk, point Cargo elsewhere and build a
-single job at a time:
+Build output goes to `target/`. If that disk is tight, or a single-job build
+suits your machine better, point Cargo somewhere else:
 
 ```bash
-export CARGO_TARGET_DIR=/g/nex-target CARGO_BUILD_JOBS=1
+export CARGO_TARGET_DIR=~/nex-target CARGO_BUILD_JOBS=1
 ```
 
 Web assets (`index.html`, `style.css`, `app.js`) are embedded at compile time.

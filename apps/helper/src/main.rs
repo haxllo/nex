@@ -481,6 +481,23 @@ static KEYUP_QUEUED_AT_MS: AtomicU64 = AtomicU64::new(0);
 
 static HELPER_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
 
+/// When the last physical (non-injected) key-down was seen, on the helper clock.
+static LAST_PHYSICAL_KEY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the menu mask is currently held only because the machine is idle.
+///
+/// Suppressing Start needs the mask down *before* the shell handles the Win
+/// key-up, and the mask is injected from the injector thread after the hook
+/// returns. On a cold helper that gap measured 184 ms inside one hook callback
+/// (CIQ-222), enough for a normal Win tap to open Start. Holding the mask while
+/// no keys are being pressed removes the race entirely: by the time the Win
+/// key-down arrives the mask is already down. It is released on the first real
+/// key press, so typing, chords and games see nothing unusual.
+static IDLE_MASK_HELD: AtomicBool = AtomicBool::new(false);
+
+/// How long after the last physical key the mask is held again.
+const IDLE_MASK_QUIET_MS: u64 = 900;
+
 fn helper_now_ms() -> u64 {
     HELPER_EPOCH
         .get_or_init(std::time::Instant::now)
@@ -605,6 +622,73 @@ fn hold_mask() -> bool {
 }
 
 /// Release the mask if held. Returns true on transition.
+/// Hold the menu mask while the user is not typing, so a Win tap cannot reach
+/// the shell as a bare Win press even when this process is paging in after an
+/// idle period.
+///
+/// Called from the pump loop, which wakes on its own bounded wait, so this also
+/// keeps the hook callback's code and statics resident.
+fn ensure_idle_mask() {
+    let target_is_win = CFG
+        .read()
+        .ok()
+        .and_then(|cfg| cfg.as_ref().map(|cfg| cfg.target_is_win))
+        .unwrap_or(false);
+    if !target_is_win || !HK_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+    // A press in progress owns the mask; the deferred release owns it next.
+    if CONSUMED_WIN_VK.load(Ordering::SeqCst) != 0 || DEFER_MASK_RELEASE.load(Ordering::SeqCst) {
+        return;
+    }
+    if IDLE_MASK_HELD.load(Ordering::SeqCst) {
+        return;
+    }
+    let quiet = helper_now_ms().saturating_sub(LAST_PHYSICAL_KEY_MS.load(Ordering::SeqCst));
+    if quiet < IDLE_MASK_QUIET_MS || MASK_HELD.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    IDLE_MASK_HELD.store(true, Ordering::SeqCst);
+    defer_inject(INJECT_MASK_DOWN);
+    debug_log("idle mask held");
+}
+
+/// Keep the input path hot and first in line.
+///
+/// The callback that suppresses Start is a few atomics and a PostThreadMessageW,
+/// yet it measured 184 ms after an idle period: the work is not the cost, being
+/// paged out and descheduled behind a busy UI is. High priority plus no EcoQoS
+/// throttling shortens that window; `ensure_idle_mask` keeps the pages touched.
+fn raise_input_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetProcessInformation,
+        SetThreadPriority, HIGH_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_STATE,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        ProcessPowerThrottling, THREAD_PRIORITY_TIME_CRITICAL,
+    };
+    unsafe {
+        let process = GetCurrentProcess();
+        let ret = SetPriorityClass(process, HIGH_PRIORITY_CLASS);
+        debug_log(&format!("SetPriorityClass(HIGH): ret={ret}"));
+        // Opt out of EcoQoS. Without this an idle process can be throttled to
+        // an efficiency core, which is exactly when the hotkey press arrives.
+        let throttle = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let ret = SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            &throttle as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+        debug_log(&format!("SetProcessInformation(EcoQoS off): ret={ret}"));
+        let ret = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        debug_log(&format!("SetThreadPriority(TIME_CRITICAL): ret={ret}"));
+    }
+}
+
 fn release_mask() -> bool {
     if MASK_HELD.swap(false, Ordering::SeqCst) {
         send_mask_up();
@@ -876,14 +960,33 @@ unsafe fn keyboard_hook_proc_inner(
             || vk == VK_LMENU || vk == VK_RMENU
             || vk == VK_LSHIFT || vk == VK_RSHIFT;
 
+        // A real key press ends the idle hold: from here the shell must see the
+        // user's own input, not our mask. Skipped during a Win press, where the
+        // mask is doing its job.
+        if is_keydown
+            && !is_win_vk
+            && !is_mod
+            && CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0
+        {
+            LAST_PHYSICAL_KEY_MS.store(helper_now_ms(), Ordering::SeqCst);
+            if IDLE_MASK_HELD.swap(false, Ordering::SeqCst) {
+                MASK_HELD.store(false, Ordering::SeqCst);
+                defer_inject(INJECT_MASK_UP);
+                debug_log("idle mask released on key press");
+            }
+        }
+
         if is_win_vk {
             if is_keydown {
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
-                    // Never SendInput from the hook; ask the loop instead.
-                    MASK_HELD.store(true, Ordering::SeqCst);
-                    defer_inject(INJECT_MASK_DOWN);
+                    // Never SendInput from the hook; ask the loop instead. The
+                    // idle hold may already have the mask down, and a second
+                    // key-down would repeat it.
+                    if !MASK_HELD.swap(true, Ordering::SeqCst) {
+                        defer_inject(INJECT_MASK_DOWN);
+                    }
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
             }
@@ -2195,6 +2298,7 @@ fn main() {
     // Cache this thread's ID so the hook proc can wake GetMessageW.
     let _ = HELPER_THREAD_ID.set(unsafe { GetCurrentThreadId() });
 
+    raise_input_priority();
     debug_log("helper entering message loop");
 
     // Message loop — use MsgWaitForMultipleObjects to wait on messages,
@@ -2385,6 +2489,7 @@ fn main() {
         // thread: SendInput from inside a low-level hook re-enters the input
         // pipeline and blocks, which froze every key and the mouse for secs.
         run_pending_injections();
+        ensure_idle_mask();
 
         // Check if hook proc fired
         if HOTKEY_FIRED.swap(false, Ordering::SeqCst) {

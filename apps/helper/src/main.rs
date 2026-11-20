@@ -470,6 +470,24 @@ fn defer_inject(action: u8) {
 /// Queue for deferred injection batches.
 static INJECT_TX: OnceLock<std::sync::mpsc::SyncSender<u8>> = OnceLock::new();
 
+/// When the Win key-up was queued for masking, in milliseconds since the
+/// helper started.
+///
+/// The mask and the 0xFF start guard have to reach the shell *before* it
+/// handles that key-up, and a press that lands while the helper is paging in
+/// after an idle period can miss that window. Without a timestamp a miss looks
+/// like the Start menu opening for no reason; with one it is a `[stall]` line.
+static KEYUP_QUEUED_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+static HELPER_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+
+fn helper_now_ms() -> u64 {
+    HELPER_EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 /// Perform deferred injections on the injector thread.
 ///
 /// `SendInput` waits for the event it queued to be delivered, and our own
@@ -480,7 +498,17 @@ static INJECT_TX: OnceLock<std::sync::mpsc::SyncSender<u8>> = OnceLock::new();
 fn inject_writer_loop(rx: std::sync::mpsc::Receiver<u8>) {
     while let Ok(pending) = rx.recv() {
         if pending & INJECT_START_GUARD != 0 {
+            let queued_at = KEYUP_QUEUED_AT_MS.swap(0, Ordering::SeqCst);
+            let waited = helper_now_ms().saturating_sub(queued_at);
             invalidate_start_gesture();
+            // 50 ms is far beyond the cheap path (well under a millisecond) and
+            // close to the point where the shell has already decided the tap was
+            // a bare Win press.
+            if queued_at != 0 && waited > 50 {
+                debug_log(&format!(
+                    "[stall] start guard injected {waited} ms after the Win key-up"
+                ));
+            }
         }
         // Release before hold so a net hold in the same batch ends held.
         if pending & INJECT_MASK_UP != 0 {
@@ -896,6 +924,10 @@ unsafe fn keyboard_hook_proc_inner(
                         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
                     }
                     debug_log(&format!("bare Win press vk={consumed_vk} -> reporting HOTKEY"));
+                    // Stamped here, read by the injector thread: the gap between
+                    // this key-up and the guard reaching the shell is what a
+                    // suppression miss actually is.
+                    KEYUP_QUEUED_AT_MS.store(helper_now_ms(), Ordering::SeqCst);
                     // ORDER MATTERS. Kill the Start gesture *before* the mask
                     // goes away, and keep the mask held until nex has shown
                     // the overlay and taken foreground. Releasing first let

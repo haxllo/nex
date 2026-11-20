@@ -679,6 +679,10 @@ impl TantivyIndex {
 pub(crate) struct IndexWarmer {
     in_flight: std::sync::atomic::AtomicBool,
     files_read: std::sync::atomic::AtomicU64,
+    /// Bytes a forced pass may read; 0 means [`FORCED_PASS_MAX_BYTES`]. Only
+    /// tests set it, so a test does not have to write 24 MB to prove the slice
+    /// ends.
+    pass_budget: std::sync::atomic::AtomicU64,
     state: Mutex<WarmState>,
 }
 
@@ -686,6 +690,10 @@ pub(crate) struct IndexWarmer {
 struct WarmState {
     files: std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
     last_full: Option<std::time::Instant>,
+    /// Where the next forced pass resumes in the sorted file list. A forced
+    /// pass has to ignore stamps, so without a cursor it would re-read the
+    /// whole index on every show.
+    forced_cursor: usize,
 }
 
 const FULL_REWARM_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -694,6 +702,14 @@ const FULL_REWARM_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// trimmed page cache leaves lengths and mtimes identical. Throttled so a user
 /// hammering the hotkey does not re-read the index per show.
 const FORCED_REWARM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How much a single forced pass may read.
+///
+/// The pass runs while the panel is being shown, on the same machine and the
+/// same cold page cache as the reveal. Reading a 4.6 GB index in one go there
+/// was 120 MB of I/O against a first paint; a slice keeps the warm cheap and
+/// the cursor covers the rest over the next few shows.
+const FORCED_PASS_MAX_BYTES: u64 = 24 * 1024 * 1024;
 
 impl IndexWarmer {
     pub(crate) fn warm_in_background(self: &std::sync::Arc<Self>, index_dir: PathBuf) {
@@ -712,6 +728,13 @@ impl IndexWarmer {
     /// real work, since a pass that skips everything is otherwise invisible.
     pub(crate) fn files_read(&self) -> u64 {
         self.files_read.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Cap the bytes a forced pass reads, so a test can exercise the slice.
+    #[cfg(test)]
+    pub(crate) fn set_pass_budget_for_test(&self, bytes: u64) {
+        self.pass_budget
+            .store(bytes, std::sync::atomic::Ordering::Release);
     }
 
     /// Pretend the last full pass is old, so a forced pass is not throttled.
@@ -742,6 +765,19 @@ impl IndexWarmer {
         let Ok(entries) = std::fs::read_dir(index_dir) else {
             return;
         };
+        // Sorted so the forced pass resumes at the same place twice: the
+        // directory order is not stable enough to carry a cursor across passes.
+        let mut candidates: Vec<(PathBuf, u64, Option<std::time::SystemTime>)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() || path.extension().is_some_and(|e| e == "tmp" || e == "lock") {
+                continue;
+            }
+            candidates.push((path, meta.len(), meta.modified().ok()));
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let due = state
             .last_full
@@ -751,27 +787,49 @@ impl IndexWarmer {
                 .last_full
                 .is_none_or(|at| at.elapsed() >= FORCED_REWARM_MIN_INTERVAL);
         if due || forced_due {
-            state.files.clear();
             state.last_full = Some(std::time::Instant::now());
         }
+        let count = candidates.len();
+        // The stamp-driven pass only touches what changed, so it has no budget
+        // and no order. The forced pass ignores stamps and starts where the
+        // previous one stopped.
+        let start = if forced_due && count > 0 {
+            state.forced_cursor % count
+        } else {
+            0
+        };
+        let cap = match self.pass_budget.load(std::sync::atomic::Ordering::Acquire) {
+            0 => FORCED_PASS_MAX_BYTES,
+            bytes => bytes,
+        };
+        let mut budget = if forced_due { cap } else { u64::MAX };
         let mut seen = HashSet::new();
         let mut read = 0_u64;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_file() || path.extension().is_some_and(|e| e == "tmp" || e == "lock") {
+        let mut bytes = 0_u64;
+        for step in 0..count {
+            let index = (start + step) % count;
+            let (path, len, mtime) = &candidates[index];
+            let stamp = (*len, *mtime);
+            seen.insert(path.clone());
+            if !forced_due && state.files.get(path) == Some(&stamp) {
                 continue;
             }
-            let stamp = (meta.len(), meta.modified().ok());
-            seen.insert(path.clone());
-            if state.files.get(&path) == Some(&stamp) {
+            // One file may exceed the slice on its own (a postings file can be
+            // tens of megabytes); reading it is the only way the pass makes
+            // progress, so the first file is always allowed.
+            if forced_due && read > 0 && *len > budget {
                 continue;
             }
             // The data is dropped at once; the OS page cache keeps the pages
             // that tantivy's mmap reads later.
-            if std::fs::read(&path).is_ok() {
-                state.files.insert(path, stamp);
+            if std::fs::read(path).is_ok() {
+                state.files.insert(path.clone(), stamp);
                 read += 1;
+                bytes += *len;
+                budget = budget.saturating_sub(*len);
+                if forced_due {
+                    state.forced_cursor = (index + 1) % count;
+                }
             }
         }
         state.files.retain(|path, _| seen.contains(path));
@@ -779,8 +837,9 @@ impl IndexWarmer {
             self.files_read
                 .fetch_add(read, std::sync::atomic::Ordering::AcqRel);
             crate::logging::info(&format!(
-                "[nex] index warm: read {read} file(s){} into the page cache",
-                if forced_due || due { " (full pass)" } else { "" }
+                "[nex] index warm: read {read} file(s) ({:.1} MB){} into the page cache",
+                bytes as f64 / (1024.0 * 1024.0),
+                if forced_due { " (forced slice)" } else { "" }
             ));
         }
     }
@@ -1369,5 +1428,40 @@ mod tests {
             settles(|| warmer.files_read() > after_first),
             "a forced pass must re-read files whose length and mtime are unchanged"
         );
+    }
+
+    /// A forced pass ignores file stamps, so without a limit it re-reads the
+    /// whole index on every show - 23 files and ~120 MB on the live index,
+    /// while the panel is painting. It reads a slice instead and resumes where
+    /// it stopped, so repeated shows still cover everything.
+    #[test]
+    fn forced_pass_reads_a_slice_and_resumes_where_it_stopped() {
+        let _serial = tantivy_guard();
+        let dir = tempfile::tempdir().unwrap();
+        // Four files of 1 KiB, one budget of 1 KiB: one file per pass.
+        for name in ["a.idx", "b.idx", "c.idx", "d.idx"] {
+            std::fs::write(dir.path().join(name), vec![7_u8; 1024]).unwrap();
+        }
+        let warmer = std::sync::Arc::new(IndexWarmer::default());
+        warmer.set_pass_budget_for_test(1024);
+
+        warmer.warm_in_background_forced(dir.path().to_path_buf());
+        assert!(
+            settles(|| warmer.files_read() == 1),
+            "a forced pass must stop at the slice, not read every file: got {}",
+            warmer.files_read()
+        );
+
+        // Every later pass picks up where the previous one stopped, so four
+        // shows warm all four files even though no pass reads more than one.
+        for expected in 2..=4 {
+            warmer.rewind_throttle_for_test();
+            warmer.warm_in_background_forced(dir.path().to_path_buf());
+            assert!(
+                settles(|| warmer.files_read() == expected),
+                "pass {expected} must read the next file: got {}",
+                warmer.files_read()
+            );
+        }
     }
 }

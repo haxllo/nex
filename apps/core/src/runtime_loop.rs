@@ -904,10 +904,36 @@ impl RuntimeWorker {
             .unwrap_or_default()
     }
 
+    /// Idle content the reveal can show at once: this session's rows, or the
+    /// snapshot the last successful load wrote. Nothing here touches the
+    /// database or decodes an icon, because after a long idle both of those
+    /// page in from disk (337 ms measured) and the reveal must not wait.
+    fn prime_idle_content(&mut self) {
+        if !self.quick_launch_loaded {
+            let snap = Self::load_ql_snapshot_from(&Self::ql_snapshot_path());
+            if !snap.is_empty() {
+                self.quick_launch_items = snap.clone();
+                self.overlay.set_quick_launch_items(snap);
+            }
+        } else {
+            self.overlay
+                .set_quick_launch_items(self.quick_launch_items.clone());
+        }
+        // No waiting for rows: the page holds its instant idle reveal on
+        // `content_pending`, and holding it is what turned a 337 ms load into a
+        // blank panel. Rows land a moment later and replace this state.
+        self.overlay.set_content_pending(false);
+        self.show_idle_or_quick_launch();
+    }
+
     /// Idle content for a show: fresh load, else last snapshot (instant,
     /// refreshed silently when the lock frees), else hold the reveal.
     /// Stale-while-revalidate: the snapshot keys match fresh rows, so the
     /// page skips re-animation and nothing visibly pops.
+    ///
+    /// Runs after the window is armed, which is why the panel no longer waits
+    /// on it: `prime_idle_content` has already given the page something to
+    /// reveal.
     fn prepare_idle_content(&mut self) {
         self.load_quick_launch_items();
         if !self.quick_launch_loaded {
@@ -1832,32 +1858,38 @@ impl RuntimeWorker {
                 ));
                 match action {
                     HotkeyAction::ShowAndFocus => {
-                        // Kick off index warming on a background thread; never
-                        // block the show on it. try_read(): if a writer holds
-                        // the service, skip and show immediately.
-                        match self.service.try_read() {
-                            Ok(guard) => guard.warm_search_cache(),
-                            Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
-                        }
-                        // This process owns no Tantivy reader; the pages the
-                        // next keystroke needs are mapped in the indexer. Ask
-                        // it for a pass so the first character after a restart
-                        // or an idle period is not the slow one.
-                        std::thread::spawn(|| {
-                            crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
-                        });
                         spawn_recent_documents_refresh(&self.service);
                         reconcile_suppressed_uninstall_titles(
                             &mut self.suppressed_uninstall_titles,
                         );
-                        if self.overlay.query_text().trim().is_empty() {
-                            self.prepare_idle_content();
+                        // Reveal first. Everything below this line can page in
+                        // after a long idle (a SQLite read, an icon lookup, a
+                        // warm pass over the index), and doing any of it before
+                        // the window is armed is what made the first hotkey
+                        // press after an idle period take half a second.
+                        let idle_show = self.overlay.query_text().trim().is_empty();
+                        if idle_show {
+                            self.prime_idle_content();
                         }
                         self.overlay.show_and_focus();
                         log_info(&format!(
                             "[nex] show_latency worker_ms={}",
                             hotkey_at.elapsed().as_millis()
                         ));
+                        if idle_show {
+                            self.prepare_idle_content();
+                        }
+                        // Warm after the reveal: the pass protects the first
+                        // keystroke, not the show, so it must not compete with
+                        // the panel's own first paint. try_read(): if a writer
+                        // holds the service, skip rather than queue behind it.
+                        match self.service.try_read() {
+                            Ok(guard) => guard.warm_search_cache(),
+                            Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
+                        }
+                        std::thread::spawn(|| {
+                            crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                        });
                         // Fresh media state on every show: the overlay may
                         // reopen into a surviving media view, and Spotify may
                         // have quit while hidden. The push auto-closes the
@@ -1908,24 +1940,27 @@ impl RuntimeWorker {
                 crate::overlay::hotkey::finish_bare_win_press();
             }
             OverlayEvent::ExternalShow => {
-                // Same background warmup as ShowAndFocus; try_read so a
-                // writer never delays the show.
-                if let Ok(guard) = self.service.try_read() {
-                    guard.warm_search_cache();
-                }
-                std::thread::spawn(|| {
-                    crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
-                });
                 spawn_recent_documents_refresh(&self.service);
                 reconcile_suppressed_uninstall_titles(&mut self.suppressed_uninstall_titles);
-                if self.overlay.query_text().trim().is_empty() {
-                    self.prepare_idle_content();
+                // Same order as the hotkey show: reveal from memory, then load.
+                let idle_show = self.overlay.query_text().trim().is_empty();
+                if idle_show {
+                    self.prime_idle_content();
                 }
                 // Drop any stale status (e.g. "Settings applied") left by a
                 // config reload so it can't linger into the next show.
                 self.overlay.set_status_text("");
                 self.overlay.show_and_focus();
                 self.overlay_state.set_visible(true);
+                if idle_show {
+                    self.prepare_idle_content();
+                }
+                if let Ok(guard) = self.service.try_read() {
+                    guard.warm_search_cache();
+                }
+                std::thread::spawn(|| {
+                    crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                });
                 // Same as ShowAndFocus: revalidate media on show so a
                 // surviving media view closes promptly if playback ended
                 // while hidden.

@@ -2325,6 +2325,43 @@ impl CoreService {
         self.warm_seed_queries()
     }
 
+    /// Whether one seed query runs fast enough to say the mapped index pages
+    /// are resident.
+    ///
+    /// File stamps cannot answer this: a trimmed page cache leaves length and
+    /// mtime identical, which is why the show path had to force a full re-read
+    /// after every idle period. One timed query can: the same prefix that costs
+    /// 4-20 ms warm costs hundreds of milliseconds when its postings have to
+    /// come off disk.
+    pub fn seed_cache_is_warm(&self) -> bool {
+        /// A prefix a keystroke also uses, so the pages it touches are the ones
+        /// the next character needs.
+        const PROBE: &str = "a";
+        const PROBE_LIMIT: usize = 240;
+        /// Well above the warm 4-20 ms and well below the cold 200 ms+.
+        const WARM_PROBE_MAX_MS: u128 = 40;
+        let started = std::time::Instant::now();
+        if self.search_tantivy_seed(PROBE, PROBE_LIMIT).is_err() {
+            return false;
+        }
+        started.elapsed().as_millis() <= WARM_PROBE_MAX_MS
+    }
+
+    /// The warm the show path asks the indexer for.
+    ///
+    /// Returns `(already_warm, prefixes_warmed)`. One timed query decides
+    /// whether the cached pages survived the idle period; when they did, the
+    /// pass does nothing at all instead of re-reading the index, and when they
+    /// did not, the reader is warmed and the seed prefixes are run so the first
+    /// typed character costs what the second one does.
+    pub fn warm_index_after_show(&self) -> (bool, usize) {
+        if self.seed_cache_is_warm() {
+            return (true, 0);
+        }
+        self.warm_search_cache_forced();
+        (false, self.warm_seed_queries())
+    }
+
     /// Same, but re-reads index files even when their length and mtime are
     /// unchanged. A trimmed page cache leaves both identical, so the plain
     /// pass skips exactly the files that went cold; this one is for the show

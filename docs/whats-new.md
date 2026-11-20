@@ -55,9 +55,9 @@
 
   ## Format
 
-  - The FIRST "## " line is the heading. Four words or so, naming what the
-    release does for the reader. A second "## " becomes another drawer, so one
-    heading only.
+  - The FIRST "## " line is the heading. Four words or so. Which words is the
+    ladder under "Choosing the heading"; a second "## " becomes another
+    drawer, so there is one heading only.
   - The intro is two or three short paragraphs, always visible. Bullets are
     allowed there only when the list really is the whole story.
   - "### " is a drawer: a section title and its bullets. Order them by what
@@ -84,23 +84,74 @@
   doing the work of a sentence, and the same "used to X, now Y" shape in every
   bullet. Read the result out loud. If a line sounds written to fill a section,
   cut the section instead.
+
+  ## Choosing the heading
+
+  Three shapes, in order. The first one that is true names the release.
+
+  1. It adds a capability: something the reader could not do before (attach a
+     PDF, ask about an image). Name the capability the way they would describe
+     using it, not as a spec line or a changelog entry: "Pictures and PDFs in
+     the conversation", not "Attachment Support Added".
+  2. Nothing new to do, and the work sits on one surface (the media panel, the
+     glass edge). Name the surface: "The media panel", "The glass edge". This
+     is the normal shape when a release is fixes and adjustments, and it is
+     honest: it tells the reader where to look.
+  3. Neither: no new capability and no single surface. Then "Fixes and
+     adjustments" is the heading. It is the last resort, never a habit, and it
+     must not hide the one item people will notice: that item gets a drawer of
+     its own and the rest follow underneath.
+
+  A cosmetic adjustment never earns a heading. More blur, a slightly deeper
+  corner, a warmer edge light are bullets inside the surface's drawer. If a
+  reader would not spot the difference, the line belongs in the release page
+  and not here at all.
+
+  Never a heading that names the defect it replaced or claims a win ("The rim
+  shows only the pane", "Search is fixed"), a version-diff opener ("The glass
+  edge changed again"), a category used as decoration ("Polish", "Improvements",
+  "Stability") where a surface would do, a superlative, "finally", "only", an
+  exclamation mark, or a comparison with a build the reader never saw.
+
+  ## What earns a line
+
+  The page answers one question: after updating, what will I see that is
+  different? Sort each change into one of these before wording it.
+
+  - A feature lets the reader do something they could not do. It earns the
+    heading plus a drawer.
+  - An adjustment changes the result of a task they already had: blur amount,
+    corner depth, edge light, row order. It is a bullet, never a heading.
+  - Noise is a change you can only describe with a number that exists on
+    screen ("blur 8 to 10"). It stays in the release page's commit log.
+
+  Performance and robustness count only when the reader would notice them:
+  typing, opening, or a crash that stopped happening. "Under the hood" is
+  optional, at most three lines, and only for a change that is invisible but
+  noticeable (fewer rescans, less memory, faster startup). Mechanism stays in
+  the release page.
+
+  A bullet names the thing, then says what the reader sees. Two lines at most,
+  four to six in a drawer. Numbers only when they describe something visible.
+  A "used to" clause is allowed once per drawer, where the sentence is
+  otherwise meaningless; the same past-against-present shape on every bullet
+  means a defect story is being told instead of a behaviour.
+
 -->
 
 
 
 
-## Glass that reads from behind it
 
-The rim of the glass theme takes its colour from the backdrop inside the panel, the way a thick window does. What sits beside the window stays out of its border.
 
-The light along the edge follows the panel's size, so the dock and a tall panel carry the same thickness of glass, and the corners bend by as much as the sides do.
+## The glass edge
 
-### The glass edge
+The rim reads the backdrop inside the panel and stretches it toward the border, so the glass shows what is behind the panel rather than what sits beside the window.
 
-- **The rim samples the panel's own backdrop.** Colour comes from just inside the edge and stretches outward, so the border shows what is behind the glass.
-- **The light scales with the band.** It used to be the same 14 pixels on every panel, enough to fill two thirds of the dock's band. It now grows with the band and fades out at the end.
-- **Corners bend as far as the sides.** The bend shortens through a corner instead of ending halfway along it.
-- **Each half of an edge pulls toward its own corner,** so the rim gathers where the corners meet instead of running one way around the border.
+- **Reading from the pane itself.** Colour comes from just inside the edge, across the whole band.
+- **Edge light sized to the band.** The glow grows with the panel and fades out at the end, so the dock and a tall panel read the same.
+- **Corners with the sides' depth.** The bend shortens through a corner, which keeps the turn as deep as the straight runs.
+- **Each half of an edge pulls toward its own corner,** so the rim gathers where corners meet.
 - **No blur between the desktop and the glass.** The frost and a thin rim line carry the effect.
 
 ### Under the hood

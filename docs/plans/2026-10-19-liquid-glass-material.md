@@ -60,10 +60,12 @@
 
 ## Checks and commands
 
-Use the build settings in `AGENTS.md`:
+PowerShell:
 ```powershell
+$env:CARGO_TARGET_DIR='G:\nex-target'
+$env:CARGO_TERM_COLOR='never'
 cargo test -p nex --lib overlay::refraction::tests -- --test-threads=1
-cargo build --release --bin NexUIProcess --bin NexHelper
+cargo build --release --bin Nex --bin NexHelper
 ```
 
 Stop Nex/NexHelper before linking when the target executable is running. Existing installed executable at session start: `%LOCALAPPDATA%\Programs\Nex\bin\Nex.exe`.

@@ -318,6 +318,16 @@ fn dispatch(
         "warm_index" => {
             let service = Arc::clone(service);
             std::thread::spawn(move || {
+                // The panel is still arming when this arrives. A forced pass
+                // reads ~20 MB and runs 36 seed queries, which on a small
+                // machine delays that arm past the glass deadline and costs the
+                // show its glass - far more than the pass saves. Let the panel
+                // land first, and keep this thread below normal priority so the
+                // arm and first paint always win the CPU.
+                std::thread::sleep(std::time::Duration::from_millis(
+                    WARM_AFTER_REVEAL_DELAY_MS,
+                ));
+                lower_current_thread_priority();
                 if let Ok(guard) = service.try_read() {
                     // One timed query decides whether the pages survived the
                     // idle period; re-reading the index when they did is pure
@@ -606,6 +616,25 @@ pub fn search_seed(
 ///
 /// Failures are silent by design - no indexer means the keystroke falls back to
 /// the local cache, which is a latency question, not an error one.
+/// How long the indexer waits after the show request before warming, so the
+/// read cannot land on the panel's own arm and first paint.
+const WARM_AFTER_REVEAL_DELAY_MS: u64 = 400;
+
+/// Drop this thread to below normal priority. Background warm work must never
+/// take CPU from the thread that is painting the panel.
+#[cfg(target_os = "windows")]
+fn lower_current_thread_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn lower_current_thread_priority() {}
+
 pub fn warm_index(addr: &str) {
     let _ = ipc_call_with_timeout(
         addr,

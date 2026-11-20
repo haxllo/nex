@@ -241,9 +241,31 @@ const RIM_SWIRL: f32 = 0.35;
 const SAMPLE_OUTWARD: bool = false;
 /// Reach of that inward pull at the border, as a share of the band. The mapping
 /// has to stay monotone or the band becomes a mirror of the middle; with the
-/// `(1 - t)^2` profile the sampled depth is `d + pull * (1 - t)^2`, whose slope
-/// is `1 - 2 * pull / band`, so anything above half the band folds.
-const RIM_PULL: f32 = 0.5;
+/// `(1 - t)^3` profile below the sampled depth is `d + pull * (1 - t)^3`, whose
+/// slope is `1 - 3 * pull / band`, so anything above a third of the band folds.
+/// A third of the band is more than the profile can carry: at exactly a third
+/// the outermost pixels stop advancing altogether, so the rest is left as
+/// headroom and the edge keeps a slight compression instead of a flat row.
+const RIM_PULL: f32 = 0.3;
+/// Exponent of the pull's falloff. It is what decides the join with the flat
+/// middle: the local stretch is `1 - n * pull / band * (1 - t)^(n - 1)`, so at
+/// the band's end the stretch reaches 1 with a slope of 0 only for `n >= 3`.
+/// At `n = 2` the magnification is still changing at that boundary, which is
+/// the straight ramp the eye picks up.
+const RIM_FALLOFF: i32 = 3;
+/// Magnification of the pane's middle. The interior used to be a 1:1 window -
+/// a hole in the glass. A few percent makes the pane a lens over its own
+/// backdrop. It is applied as a source-space scale (`zoom_source`), not in the
+/// displacement map: the map is what the show swell animates, and the zoom
+/// must hold still while the rim settles.
+const MIDDLE_ZOOM: f32 = 1.03;
+
+/// Share of the crop trimmed from each side to make `MIDDLE_ZOOM`: the read is
+/// inset so the remaining span is `1 / MIDDLE_ZOOM` of the crop, and everything
+/// it reads is still inside the pane.
+fn zoom_inset() -> f32 {
+    0.5 * (1.0 - 1.0 / MIDDLE_ZOOM)
+}
 /// Refractive index of the pane. Constant, as in the reference optics.
 const IOR: f32 = 1.5;
 /// Device-pixel growth for the main window's native region. The page's
@@ -982,6 +1004,10 @@ struct Engine {
     /// GPU-resident backdrop crop the source bitmap wraps; captured
     /// frames are copied straight into it (no CPU round trip).
     source_tex: Option<ID3D11Texture2D>,
+    /// The middle zoom, applied once per frame as a source-space scale. It
+    /// lives here rather than in the displacement map so the show swell -
+    /// which scales the map - cannot animate it.
+    zoom: Option<ID2D1Bitmap1>,
     /// 16x16 GPU downsample of the source, read back for material/tint
     /// statistics. One kilobyte per frame instead of the full panel.
     sample_tex: ID3D11Texture2D,
@@ -1278,6 +1304,7 @@ impl Engine {
             d2d,
             source: None,
             source_tex: None,
+            zoom: None,
             sample_tex,
             sample_staging,
             sample_next: std::cell::Cell::new(0),
@@ -1365,11 +1392,27 @@ impl Engine {
             }
         };
         let map = geometry.map.clone();
+        // The graph samples the zoomed copy, not the crop itself: the zoom is
+        // a constant of the glass, so it is drawn per frame and never scaled
+        // by the show swell the way the displacement map is.
+        let zoom: ID2D1Bitmap1 = unsafe {
+            self.d2d
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: w as u32,
+                        height: h as u32,
+                    },
+                    None,
+                    0,
+                    &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET) as *const _,
+                )
+                .map_err(|e| format!("zoom bitmap failed: {e:?}"))?
+        };
         // Re-point the shared effect graph at the new bitmaps. Effects
         // are size-agnostic; only the bitmaps track the panel.
         unsafe {
-            self.blur.SetInput(0, &source, true);
-            self.tight_blur.SetInput(0, &source, true);
+            self.blur.SetInput(0, &zoom, true);
+            self.tight_blur.SetInput(0, &zoom, true);
             self.scatter_mask.SetInput(0, &map, true);
             self.masked_blur.SetInput(0, &effect_output(&self.blur)?, true);
             self.masked_blur.SetInput(1, &effect_output(&self.scatter_mask)?, true);
@@ -1386,6 +1429,7 @@ impl Engine {
         }
         self.source = Some(source);
         self.source_tex = Some(source_tex);
+        self.zoom = Some(zoom);
         self.map = Some(map);
         self.lights = geometry.lights;
         self.depth_grain = Some(geometry.depth_grain);
@@ -1616,9 +1660,51 @@ impl Engine {
     /// Present the held source with the current material. Callers update
     /// the source (via `copy_crop`) and its statistics first.
     fn present(&self, material: &Material, bend: f32) -> Result<(), String> {
+        self.zoom_source()?;
         self.set_tint(material.wash());
         self.set_bend(bend);
         self.render_frame()
+    }
+
+    /// Magnify the crop by `MIDDLE_ZOOM` about the pane's centre, in one
+    /// source-space draw. The map is left out of it on purpose: the show swell
+    /// scales the map, and the zoom must not move with it.
+    fn zoom_source(&self) -> Result<(), String> {
+        let (Some(source), Some(zoom)) = (&self.source, &self.zoom) else {
+            return Ok(());
+        };
+        let (w, h) = (
+            (self.panel_w + BLUR_PAD * 2) as f32,
+            (self.panel_h + BLUR_PAD * 2) as f32,
+        );
+        let inset = zoom_inset();
+        let src = D2D_RECT_F {
+            left: w * inset,
+            top: h * inset,
+            right: w * (1.0 - inset),
+            bottom: h * (1.0 - inset),
+        };
+        let dst = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: w,
+            bottom: h,
+        };
+        unsafe {
+            self.d2d.SetTarget(zoom);
+            self.d2d.BeginDraw();
+            self.d2d.DrawBitmap(
+                source,
+                Some(&dst as *const _),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                Some(&src as *const _),
+                None,
+            );
+        }
+        unsafe { self.d2d.EndDraw(None, None) }
+            .map_err(|e| format!("zoom draw failed: {e:?}"))?;
+        Ok(())
     }
 
     fn update_local_tint(&self, pixels: &[u8], w: u32, h: u32, material: &Material) -> Result<(), String> {
@@ -2161,9 +2247,8 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
             let (_, nx, ny) = lens_profile(px, py, width, height, r_dir);
             let depth = depth / scale;
             let t = (depth / band_logical).clamp(0.0, 1.0);
-            // Rim read, in logical px, then encoded over the map's range. The
-            // interior is not displaced at all: by the band's end the read is
-            // 1:1 and the pane's middle stays a plain window.
+            // Rim read, in logical px, then encoded over the map's range. By
+            // the band's end the read is 1:1 with the middle.
             //
             // A corner reaches less far, not more shallowly: the taper scales
             // the read, so the band keeps the sides' shape and depth there.
@@ -2182,9 +2267,12 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
                 // has to vanish at the band's end and stay monotone, or the
                 // band folds into a mirror of the middle; `RIM_PULL` is capped
                 // for exactly that.
-                let pull = RIM_PULL * band_logical * (1.0 - t) * (1.0 - t) * taper;
+                let falloff = (1.0 - t).powi(RIM_FALLOFF);
+                let pull = RIM_PULL * band_logical * falloff * taper;
                 (-nx * pull, -ny * pull)
             };
+            // Middle zoom is not here: it is a source-space scale drawn per
+            // frame, so no lens animation can move it.
             // Fan: what the radial read gathers is also carried along the
             // border rather than only straight across it. The slide points away
             // from the edge's midpoint, so the two halves of an edge travel
@@ -4253,7 +4341,7 @@ mod tests {
         if super::SAMPLE_OUTWARD {
             assert!(rim < 40, "rim {rim} must bend hard");
         } else {
-            assert!(rim > 170, "rim {rim} must pull hard");
+            assert!(rim > 150, "rim {rim} must pull hard");
         }
         assert_eq!(
             band_end, 128,
@@ -4340,9 +4428,10 @@ mod tests {
                 }
                 previous = s;
             }
-            // Precision in use: the edge cell carries most of the range.
+            // Precision in use: the edge cell carries `RIM_PULL` of the range,
+            // which is the pull's own share and no longer half of it.
             let edge = map[(y * w) * 4 + 2];
-            assert!((edge as i32 - 128).abs() > 50, "edge cell only reaches {edge} of the range");
+            assert!((edge as i32 - 128).abs() > 30, "edge cell only reaches {edge} of the range");
         }
     }
 
@@ -4526,7 +4615,8 @@ mod tests {
             let mut previous = -1.0_f32;
             for step in 0..=(band as i32) {
                 let t = step as f32 / band;
-                let read = step as f32 + super::RIM_PULL * band * (1.0 - t) * (1.0 - t);
+                let read =
+                    step as f32 + super::RIM_PULL * band * (1.0 - t).powi(super::RIM_FALLOFF);
                 assert!(read >= previous, "pull folds in the {band} px band at {step}: {read} < {previous}");
                 // Never reads past the band, so it stays under the pane and
                 // meets the 1:1 middle exactly at the band's end.
@@ -4534,6 +4624,26 @@ mod tests {
                 previous = read;
             }
             assert_eq!(previous, band);
+        }
+    }
+
+    #[test]
+    fn the_middle_zoom_is_a_constant_and_not_in_the_map() {
+        // The zoom is a source-space scale, so every frame carries the same
+        // one. The map must not carry it: the show swell scales the map, and a
+        // zoom inside it would animate on every open.
+        let span = 1.0 - 2.0 * super::zoom_inset();
+        assert!(
+            (span - 1.0 / super::MIDDLE_ZOOM).abs() < 1e-6,
+            "the zoom reads {span} of the crop"
+        );
+        assert!(span < 1.0, "the zoom must magnify, not shrink");
+        let (w, h) = (480usize, 320);
+        let map = super::bezel_bytes(w, h);
+        let red = |x: usize, y: usize| map[(y * w + x) * 4 + 2] as i32;
+        let band = super::BEZEL_MARGIN as usize;
+        for x in (band + 4)..=(w - band - 4) {
+            assert_eq!(red(x, h / 2), 128, "the map carries a zoom at {x}");
         }
     }
 

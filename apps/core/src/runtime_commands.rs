@@ -77,7 +77,11 @@ pub(crate) fn command_status() -> Result<(), RuntimeError> {
                 "stopped"
             }
         ));
-        if !state.other_runtime_pids.is_empty() {
+        // Only when the window is missing: the pid list includes the instance
+        // that owns the window, so warning on "any pid at all" fired on every
+        // healthy run and told the user to restart a runtime that was fine
+        // (seen 2026-11-22 02:06, "running" and "pids_without_window" together).
+        if !state.has_overlay_window && !state.other_runtime_pids.is_empty() {
             log_warn(&format!(
                 "[nex] status detected runtime_pids_without_window={:?} recommendation=run --restart",
                 state.other_runtime_pids

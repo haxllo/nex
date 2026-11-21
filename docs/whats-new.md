@@ -1,4 +1,4 @@
-<!-- release: 3.2.0 -->
+<!-- release: 3.3.0 -->
 <!--
   WHAT THIS FILE IS
   The page people see inside Nex, in the What's New view, after they update.
@@ -152,25 +152,28 @@
 
 -->
 
+## Fixes and adjustments
 
+The panel looks different. What is behind it now shows through, slightly enlarged, with a bright edge that fades into the middle, and corners that are round without a straight piece left over.
 
-
-
-
-
-
-## The glass and the hotkey
-
-The panel's glass now shows what is behind it slightly enlarged, like looking through thick glass. The hotkey had a slow first press after the machine had been idle, and that is fixed.
+The rest of the release is about the moments around the panel: opening it, quitting, and settings.
 
 ### The glass
 
-- **The middle looks through, not past.** What is behind the panel appears a little bigger, so the pane reads as glass rather than a hole cut in the desktop.
-- **The bright edge fades into the middle** instead of stopping in a line.
-- **It only uses what is behind the panel.** A window moving around behind it can't smear the edge.
+- **You can see through it.** What is behind the panel appears a little larger, so it reads as a thick pane of glass rather than a hole cut in the desktop.
+- **The edge is bright and soft.** It fades into the middle instead of ending in a line.
+- **The corners are fully round.** No short straight side where the curve meets the edge.
+- **Text near the edge has no colour fringe.**
+- **The tint follows what is behind it.** A dark window underneath makes the panel read deeper.
 
 ### The hotkey
 
-- **Fixed:** the first press after the machine had been idle took half a second to open the panel.
-- **Fixed:** Start opened with the panel on that press.
-- **Fixed:** the first character typed before the panel settled waited for its results.
+- **Fixed:** the first press after the machine had been idle opened the panel slowly.
+- **Fixed:** Start could open on the same press as the panel.
+- **Fixed:** the hotkey could stop working for a while when a program running as administrator had been in front.
+
+### Quitting and settings
+
+- **Fixed:** opening settings closed Nex.
+- **Fixed:** quitting took several seconds, then said Nex was not running.
+- **Fixed:** the mouse froze for a moment as Nex closed.

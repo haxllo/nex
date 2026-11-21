@@ -1491,10 +1491,15 @@ impl Drop for HotkeyListener {
 /// hooks. A helper that is *terminated* while `WH_KEYBOARD_LL` / `WH_MOUSE_LL`
 /// are still installed leaves Windows waiting for a hook callback that will
 /// never return, and the user feels that as the mouse freezing for a moment
-/// right after the tray icon disappears. Three hundred milliseconds is many
-/// times the observed exit (a few ms) and short enough to stay invisible on the
-/// quit path.
-const HELPER_GRACEFUL_EXIT_MS: u64 = 300;
+/// right after the tray icon disappears.
+///
+/// A normal exit is a few milliseconds, and 300 ms covered it until a panic
+/// teardown took the helper's pipe and its loop down at the same moment:
+/// 2026-11-22 02:56:13 the helper logged the request at .115 and the UI gave
+/// up at .419, so it was force-killed with its hooks installed - the exact
+/// thing this wait exists to avoid. The user has already asked Nex to quit
+/// by then, so a longer wait costs nothing visible.
+const HELPER_GRACEFUL_EXIT_MS: u64 = 800;
 
 /// Ask the helper to leave, then terminate it only if it did not.
 fn kill_helper_process(handle: isize) {

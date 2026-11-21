@@ -294,12 +294,12 @@
         </div>
 
         <!-- Jump-to-newest, parked until CIQ-203.
-             Under native glass a backdrop-filter samples the DWM layer behind
-             the WebView, not the page content in front of it, so the transcript
-             showed through the translucent fill unblurred - sharp text behind a
-             glass chip. Filing. The fill and blur are settled; only the
-             placement is unresolved, because any position over the transcript
-             puts text behind it.
+             The chip is translucent, so whatever is painted behind it - the
+             transcript - reads through at any fill short of solid, and the
+             blur that was meant to hide it never could: under native glass a
+             backdrop-filter samples the DWM layer behind the WebView, not the
+             page content in front of it. Placement is unresolved because any
+             position over the transcript puts text behind it.
         <button type="button" id="chat-jump-bottom" class="chat-jump-bottom" hidden aria-label="Jump to the newest message">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
         </button>

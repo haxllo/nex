@@ -52,6 +52,16 @@
   --panel-sheen: rgba(255, 255, 255, 0.08);
   --panel-reflection: rgba(255, 255, 255, 0.03);
   --panel-bottom-edge: rgba(0, 0, 0, 0.24);
+  /* Glass tiers for the chrome the page draws above the native refractive
+     layer. The lens below is the material; these surfaces sit on it, so they
+     take a tint, a rim and a sheen - never a backdrop filter of their own,
+     because the page is transparent there and a filter would sample the
+     desktop instead of the pane. Fill rises with the amount of text the
+     surface has to carry: icon-only controls, then the composer, then menus.
+     These are the dials: raise them for legibility, lower them for material. */
+  --glass-thin: color-mix(in srgb, var(--bg-opaque) 44%, transparent);
+  --glass-regular: color-mix(in srgb, var(--bg-opaque) 52%, transparent);
+  --glass-thick: color-mix(in srgb, var(--bg-opaque) 64%, transparent);
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.13);
   --text: #c8c8c8;
@@ -639,13 +649,9 @@ html.bare #footer {
   background: var(--pressed);
   opacity: 1;
 }
-/* Blur-behind is glass-only: over opaque panels it only tints flat
-   fill, while the filter layer grayscales hovered/selected text. */
-html[data-native-material="acrylic"] .row:hover::before,
-html[data-native-material="acrylic"] .row.selected::before {
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-}
+/* No filter on the state layer: a row is a layer inside the pane, not another
+   material. A backdrop filter here had nothing of ours to sample - it blurred
+   the desktop and pushed the row's text onto a composited layer. */
 .keyboard-nav .row:hover:not(.selected)::before {
   opacity: 0;
 }
@@ -1146,19 +1152,27 @@ html.glass-native .footer-mark {
   outline: none;
   box-shadow: var(--ring);
 }
-/* Frosted materials: the chip follows the panel instead of painting an
-   opaque block on top of it. */
-html[data-native-material="acrylic"] .footer-icon-btn:hover,
-html[data-native-material="acrylic"] .footer-icon-btn:focus-visible,
+/* Thin tier: a control is the lightest surface above the material - enough
+   fill to separate it from the pane, the shared rim, and one sheen from the
+   top. The border is transparent in the rest state so colouring it on hover
+   cannot nudge the glyph. */
+html.glass-native .footer-icon-btn {
+  border: 1px solid transparent;
+}
 html.glass-native .footer-icon-btn:hover,
 html.glass-native .footer-icon-btn:focus-visible {
-  background: color-mix(in srgb, var(--bg-opaque) 52%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  backdrop-filter: blur(20px) saturate(1.3);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 70%),
+    var(--glass-thin);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
-html[data-native-material="acrylic"] .footer-icon-btn:active,
 html.glass-native .footer-icon-btn:active {
-  background: color-mix(in srgb, var(--bg-opaque) 74%, transparent);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 70%),
+    var(--glass-regular);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 /* Solid panel modes keep the hover chip opaque. */
 html.bg-black .footer-icon-btn:hover,
@@ -1166,8 +1180,6 @@ html.bg-white .footer-icon-btn:hover,
 html.bg-black .footer-icon-btn:focus-visible,
 html.bg-white .footer-icon-btn:focus-visible {
   background: color-mix(in srgb, var(--bg-opaque) 80%, var(--text) 20%);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
 }
 html.bg-black .footer-icon-btn:active,
 html.bg-white .footer-icon-btn:active {
@@ -2304,11 +2316,14 @@ html[data-theme="light"] .wn-hero {
     transform: scale(0.97);
   }
 }
-/* Glass keeps the frosted material; opaque modes stay flat for crisp text. */
-html[data-native-material="acrylic"] #context-menu {
-  background: color-mix(in srgb, var(--bg-opaque) 42%, transparent);
-  -webkit-backdrop-filter: blur(30px) saturate(1.35);
-  backdrop-filter: blur(30px) saturate(1.35);
+/* Thick tier: a menu carries a list of labels, so it takes the heaviest fill
+   and still shows the material at its edge. Opaque modes stay flat. */
+html.glass-native #context-menu {
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 40%),
+    var(--glass-thick);
+  border: 1px solid var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 #context-menu button {
   display: block;
@@ -2518,7 +2533,9 @@ html.glass-native.glass-dark {
   --bg-opaque: #121212;
   --bg-raised: #1b1b1b;
   --scrollbar-thumb: rgba(255, 255, 255, 0.26);
-  --panel-highlight: rgba(255, 255, 255, 0.12);
+  /* The rim's lit edge, kept above --panel-edge so a dark surface still reads
+     as lit from the top instead of carrying an even hairline. */
+  --panel-highlight: rgba(255, 255, 255, 0.22);
   --panel-edge: rgba(255, 255, 255, 0.12);
   --panel-glint: rgba(255, 255, 255, 0.12);
   --panel-sheen: rgba(255, 255, 255, 0.1);
@@ -2872,9 +2889,9 @@ html.glass-native .row .icon.placeholder {
   display: block;
   margin: 0 14px;
   padding: 9px 10px 7px;
-  /* No border, and no inset hairline either: a 1px inner line reads as a
-     border at any zoom. The lift comes from the fill being a clear step above
-     the surface behind it, plus a short shadow to seat it on the page. */
+  /* No border in the opaque case: here the lift comes from the fill being a
+     clear step above the surface behind it. The glass rule below adds the
+     rim, which is a light edge rather than an outline. */
   border: 0;
   border-radius: 14px;
   background: var(--composer-surface);
@@ -2893,16 +2910,15 @@ html.glass-native .row .icon.placeholder {
    glass took over, which is why the input box appeared to change appearance
    mid-session: `glassNative` is gated on the refraction layer having produced a
    frame, so the page toggles the mode after first paint. */
-html[data-native-material="acrylic"] .chat-composer-shell,
+/* Regular tier: the composer holds the text being typed, so it takes a heavier
+   fill than a control and the shared rim. The blur is gone - the pane is
+   transparent, so a filter here sampled the desktop, never the glass. */
 html.glass-native .chat-composer-shell {
-  /* The composer stacks above the transcript, so it needs no masking fill.
-     25% is the lightest end of the overlay's glass language - the box reads
-     as a hint of surface, not a slab. Input text stays readable over a
-     normal desktop; over a bright wallpaper the fill thins out, so the blur
-     carries the readability. */
-  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(1.1);
-  backdrop-filter: blur(18px) saturate(1.1);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 62%),
+    var(--glass-regular);
+  border: 1px solid var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 /* The composer input takes focus the moment the chat view opens, so anything
    drawn here is permanent, not a focus state. A ring would therefore read as
@@ -2913,6 +2929,13 @@ html.glass-native .chat-composer-shell {
     0 1px 2px rgba(0, 0, 0, .12),
     0 2px 8px rgba(0, 0, 0, .16),
     0 0 16px rgba(0, 0, 0, .12);
+}
+/* In glass the composer is already a surface, so focus deepens the tier
+   instead of swapping in an opaque fill. */
+html.glass-native .chat-composer-shell:focus-within {
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 62%),
+    var(--glass-thick);
 }
 
 #chat-input {
@@ -3337,14 +3360,14 @@ html.glass-native .chat-composer-shell {
   transform: translateX(-50%);
   transition: opacity 120ms ease, transform 120ms ease, background-color var(--dur-fast) var(--ease);
 }
-/* Kept identical to .chat-composer-shell's glass rule. If that fill changes,
-   this has to change with it; the two are the same surface at different
-   sizes and a mismatch is visible in the gap between them. */
-html[data-native-material="acrylic"] .chat-jump-bottom,
+/* Same tier and rim as the composer: the control reads as part of it rather
+   than as another floating layer. */
 html.glass-native .chat-jump-bottom {
-  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(1.1);
-  backdrop-filter: blur(18px) saturate(1.1);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 62%),
+    var(--glass-regular);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 .chat-jump-bottom[hidden] { display: none; }
 .chat-jump-bottom:hover { transform: translateX(-50%) translateY(-1px); }
@@ -4110,17 +4133,15 @@ html.glass-native .chat-jump-bottom {
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .45);
   animation: chatMenuIn 160ms var(--ease-out);
 }
-/* A sheet floating over the transcript is frosted, not sheet-of-paper.
-   It was forced opaque under acrylic, which made it the one chat surface that
-   ignored the material; and because it had no glass rule at all, native glass
-   left it opaque too. The fill is kept light (20%): the transcript is
-   unpainted while this sheet is open, so there is nothing behind it that
-   needs masking - the sheet reads as glass, and the blur does the rest. */
-html[data-native-material="acrylic"] .chat-settings,
+/* Thick tier: a sheet floats over the transcript with settings text in it, so
+   it takes the heaviest fill. The transcript is not painted while it is open,
+   which is what lets the pane's own glass show through the fill. */
 html.glass-native .chat-settings {
-  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  backdrop-filter: blur(20px) saturate(1.3);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 34%),
+    var(--glass-thick);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 .chat-settings[hidden],
 .chat-settings [hidden],
@@ -4317,10 +4338,14 @@ html.glass-native .chat-settings {
   box-shadow: 0 16px 34px -10px rgba(0, 0, 0, .5);
   animation: chatMenuIn 140ms var(--ease-out);
 }
-html[data-native-material="acrylic"] .chat-provider-options,
-html[data-native-material="acrylic"] .chat-model-options {
-  -webkit-backdrop-filter: blur(18px) saturate(1.1);
-  backdrop-filter: blur(18px) saturate(1.1);
+/* Thick tier, same as the sheet they open from. */
+html.glass-native .chat-provider-options,
+html.glass-native .chat-model-options {
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 45%),
+    var(--glass-thick);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 .chat-provider-options[hidden],
 .chat-model-options[hidden] { display: none; }
@@ -4392,15 +4417,13 @@ html[data-native-material="acrylic"] .chat-model-options {
 .chat-menu-scrim[hidden] { display: none !important; }
 
 /* A chat popup must sit on the glass, not on the transcript. The page's own
-   DWM glass lives behind the transparent WebView (`html.glass-native #panel`
-   paints nothing), while the transcript is page content painted on top of it.
-   A popup's backdrop-filter can only sample what is painted in the page behind
-   it - the transcript - never the glass behind the window, so any painted
-   transcript reads through the blur at every fill short of fully opaque, and
-   fully opaque is the flat sheet this feature replaced. The only way to show
-   the background glass through the popup is to stop painting the transcript
-   while a popup is open. `visibility`, not `display`: the scroll element keeps
-   its layout and scroll position so closing the sheet restores the view. */
+   refracted layer lives behind the transparent WebView (`html.glass-native
+   #panel` paints nothing), while the transcript is page content painted on top
+   of it. A translucent popup shows whatever is painted behind it, so a painted
+   transcript reads through the fill and flattens it into a grey sheet. Hiding
+   the transcript while a popup is open lets the pane's own glass show through.
+   `visibility`, not `display`: the scroll element keeps its layout and scroll
+   position so closing the sheet restores the view. */
 #panel.chat-settings-open #chat-scroll,
 #panel.chat-history-open #chat-scroll {
   visibility: hidden;
@@ -4425,11 +4448,12 @@ html[data-native-material="acrylic"] .chat-model-options {
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, .45);
   animation: chatMenuIn 150ms var(--ease-out);
 }
-html[data-native-material="acrylic"] .chat-history,
 html.glass-native .chat-history {
-  background: color-mix(in srgb, var(--bg-opaque) 20%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  backdrop-filter: blur(20px) saturate(1.3);
+  background:
+    linear-gradient(180deg, var(--panel-glint), transparent 34%),
+    var(--glass-thick);
+  border-color: var(--panel-edge);
+  border-top-color: var(--panel-highlight);
 }
 .chat-history-head {
   flex: 0 0 auto;
@@ -4742,4 +4766,47 @@ html.glass-native .chat-history {
   .chat-file-picker-content { padding-inline: 10px; }
   .chat-file-picker-footer { padding-inline: 10px; }
   .chat-file-picker-action { padding-inline: 10px; }
+}
+
+/* Fallbacks for the material above. Reduced transparency and forced colours
+   drop the tint and the sheen and go solid; the rim stays, because it is the
+   only edge signal left once the fill stops carrying the backdrop. Neither can
+   park the native lens itself - that is the D2D layer's job, and the opaque
+   panel modes already do it. Print has no case here: the overlay is never
+   printed. */
+@media (prefers-reduced-transparency: reduce) {
+  html.glass-native #context-menu,
+  html.glass-native .chat-settings,
+  html.glass-native .chat-history,
+  html.glass-native .chat-provider-options,
+  html.glass-native .chat-model-options {
+    background: var(--bg-raised);
+  }
+  html.glass-native .chat-composer-shell,
+  html.glass-native .chat-composer-shell:focus-within,
+  html.glass-native .chat-jump-bottom {
+    background: var(--composer-surface);
+  }
+  html.glass-native .footer-icon-btn:hover,
+  html.glass-native .footer-icon-btn:focus-visible {
+    background: color-mix(in srgb, var(--bg-opaque) 78%, var(--text) 22%);
+  }
+  html.glass-native .footer-icon-btn:active {
+    background: color-mix(in srgb, var(--bg-opaque) 70%, var(--text) 30%);
+  }
+}
+
+@media (forced-colors: active) {
+  html.glass-native #context-menu,
+  html.glass-native .chat-settings,
+  html.glass-native .chat-history,
+  html.glass-native .chat-provider-options,
+  html.glass-native .chat-model-options,
+  html.glass-native .chat-composer-shell,
+  html.glass-native .chat-composer-shell:focus-within,
+  html.glass-native .chat-jump-bottom,
+  html.glass-native .footer-icon-btn {
+    background: Canvas;
+    border-color: CanvasText;
+  }
 }

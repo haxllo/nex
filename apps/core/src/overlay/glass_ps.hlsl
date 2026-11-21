@@ -356,7 +356,15 @@ float4 PSGlass(float4 pos : SV_Position) : SV_Target
         // three channels read three different pixels and the bend breaks into
         // red/green/blue bands instead of a colour fringe. Keep the separation
         // under a device pixel: the colour hint survives, the banding cannot.
-        float sep_px = min(uB.x * abs(rim) * s, 0.6);
+        // ...and faded out at the rim itself, for two reasons that compound
+        // there. The bend is longest at t = 0, so that is where any split is
+        // widest; and the backdrop is usually ClearType text, whose three
+        // channels carry different subpixel coverage - magnified and shifted,
+        // those phases stop cancelling and the text itself turns to colour
+        // bands. Sub-pixel separation then reads as colour rather than as a
+        // fringe, so the rim keeps none of it and the body keeps a trace.
+        float dispfade = smoothstep(0.0, 0.45, t);
+        float sep_px = min(uB.x * abs(rim) * s * dispfade, 0.35);
         float disp = (abs(rim) > 1e-4) ? sep_px / (abs(rim) * s) : 0.0;
         float3 k = float3(1.0 + disp, 1.0, 1.0 - disp);
         float3 c;

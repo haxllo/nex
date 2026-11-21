@@ -4937,6 +4937,12 @@
       }
       if (typeof state.glassClip === "string") {
         document.documentElement.style.setProperty("--glass-clip", state.glassClip);
+        // One radius for the whole shell: the clip polygon above is generated
+        // from this same number, so a change to it can never leave the page
+        // clipping on the old curve while everything else uses the new one.
+        if (state.glassRadius !== undefined) {
+          document.documentElement.style.setProperty("--radius", state.glassRadius + "px");
+        }
       }
 
       // Vibrancy: the material picks the palette, not the system theme,

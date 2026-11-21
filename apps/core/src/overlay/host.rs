@@ -3395,6 +3395,7 @@ fn snapshot_state_with_transparency(s: &ShimState, show_pending: bool, transpare
         "glassLight": transparent && s.glass_native && s.glass_light,
         "glassInk": if transparent && s.glass_native { s.glass_ink } else { 0 },
         "glassClip": &*LENS_CLIP,
+        "glassRadius": crate::overlay::refraction::CORNER_RADIUS,
         "compactView": s.compact_view,
     })
     .to_string()
@@ -3706,7 +3707,14 @@ fn sync_opaque_window_region(window: &Window, use_region: bool) -> bool {
         return false;
     }
     let scale = window.scale_factor() as f32;
-    let radius = (8.0 * scale).round() as i32;
+    // The corner radius is the one the refracted silhouette is built from, not
+    // a second constant, so an opaque panel and a glass panel have the same
+    // corner. A region is hard edged - it has no anti-aliasing at all - so it
+    // is kept OUTSIDE the panel's own antialiased clip (see `region slack`
+    // below) instead of cutting into it.
+    let radius = (crate::overlay::refraction::CORNER_RADIUS * scale)
+        .round()
+        .max(1.0) as i32;
     let width = client_rect.right - client_rect.left;
     let height = client_rect.bottom - client_rect.top;
     if width <= 0 || height <= 0 {
@@ -3723,9 +3731,23 @@ fn sync_opaque_window_region(window: &Window, use_region: bool) -> bool {
     // antialiased stroke pixel on those two edges.
     let right = left + width + 1;
     let bottom = top + height + 1;
+    // The region is also grown by a pixel on all four sides. The page's own
+    // clip is a polygon with a one-pixel antialiased ramp; a region boundary
+    // that sits on the contour cuts that ramp in half and leaves a hard,
+    // stair-stepped edge exactly where the corner is meant to look smooth.
+    // Outside the region the window is simply not painted, so keeping the
+    // region outside the silhouette costs nothing.
+    const REGION_SLACK: i32 = 1;
     let mut regions_applied = true;
     unsafe {
-        let region = CreateRoundRectRgn(left, top, right, bottom, radius * 2, radius * 2);
+        let region = CreateRoundRectRgn(
+            left - REGION_SLACK,
+            top - REGION_SLACK,
+            right + REGION_SLACK,
+            bottom + REGION_SLACK,
+            radius * 2,
+            radius * 2,
+        );
         if !region.is_null() {
             // SetWindowRgn transfers ownership only on success.
             if SetWindowRgn(hwnd, region, 1) == 0 {
@@ -3743,10 +3765,10 @@ fn sync_opaque_window_region(window: &Window, use_region: bool) -> bool {
         // current client bounds, using the same physical-pixel radius.
         if !webview_hwnd.is_null() {
             let child_region = CreateRoundRectRgn(
-                0,
-                0,
-                width + 1,
-                height + 1,
+                -REGION_SLACK,
+                -REGION_SLACK,
+                width + 1 + REGION_SLACK,
+                height + 1 + REGION_SLACK,
                 radius * 2,
                 radius * 2,
             );

@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    compile_glass_shaders();
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     // apps/core -> repository root.
@@ -103,4 +104,139 @@ fn base64(bytes: &[u8]) -> String {
         out.push(if chunk.len() > 2 { ALPHABET[triple as usize & 63] as char } else { '=' });
     }
     out
+}
+/// Compile the glass pixel shader at build time, so the app does not pay for
+/// it at every start (about 150 ms of CPU on the engine thread, and again
+/// whenever the engine restarts).
+///
+/// The source is the reference implementation's own `PSGlass`: one pass that
+/// bends, frosts, tints and lights the backdrop per pixel, and cuts the
+/// silhouette with a one-pixel coverage ramp (`saturate(D * scale + 0.5)`)
+/// instead of a bitmap mask or a window region. Those two are what made a
+/// rounded corner quantise; a shader ramp cannot, at any radius or scale.
+///
+/// `D3DCompile` is called through a raw declaration because the alternative
+/// (a build-dependency on the `windows` crate) would build that crate twice
+/// for the host just to reach one function. Nothing is vendored: if the
+/// compiler cannot be loaded the file is written empty and the app reports it
+/// at start instead of failing the build.
+fn compile_glass_shaders() {
+    println!("cargo:rerun-if-changed=src/overlay/glass_ps.hlsl");
+    let Ok(out) = std::env::var("OUT_DIR") else { return };
+    let out = PathBuf::from(out);
+    let src = std::fs::read("src/overlay/glass_ps.hlsl").unwrap_or_default();
+    // Keep in step with the passes in `overlay::glass_ps`.
+    let shaders = [
+        ("ps_glass.dxbc", "PSGlass", "ps_5_0"),
+        ("ps_crop.dxbc", "PSCrop", "ps_5_0"),
+        ("ps_down.dxbc", "PSDown", "ps_5_0"),
+        ("vs_main.dxbc", "VSMain", "vs_5_0"),
+    ];
+    for (file, entry, target) in shaders {
+        let bytes = match compile(&src, entry, target, 1 << 15) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                for line in format!("glass shader {entry} was not compiled at build time: {why}").lines() {
+                    println!("cargo:warning={line}");
+                }
+                Vec::new()
+            }
+        };
+        let path = out.join(file);
+        if std::fs::read(&path).ok().as_deref() != Some(&bytes[..]) {
+            let _ = std::fs::write(&path, &bytes);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn compile(_: &[u8], _: &str, _: &str, _: u32) -> Result<Vec<u8>, String> {
+    Err("not a Windows host".into())
+}
+
+#[cfg(windows)]
+fn compile(src: &[u8], entry: &str, target: &str, flags: u32) -> Result<Vec<u8>, String> {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Blob {
+        vtbl: *const BlobVtbl,
+    }
+    #[repr(C)]
+    struct BlobVtbl {
+        query_interface: usize,
+        add_ref: usize,
+        release: unsafe extern "system" fn(*mut Blob) -> u32,
+        buffer_pointer: unsafe extern "system" fn(*mut Blob) -> *mut c_void,
+        buffer_size: unsafe extern "system" fn(*mut Blob) -> usize,
+    }
+    type D3DCompile = unsafe extern "system" fn(
+        *const c_void,
+        usize,
+        *const u8,
+        *const c_void,
+        *const c_void,
+        *const u8,
+        *const u8,
+        u32,
+        u32,
+        *mut *mut Blob,
+        *mut *mut Blob,
+    ) -> i32;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    }
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+
+    unsafe fn text(b: *mut Blob) -> Vec<u8> {
+        if b.is_null() {
+            return Vec::new();
+        }
+        unsafe {
+            let v = &*(*b).vtbl;
+            let bytes = std::slice::from_raw_parts((v.buffer_pointer)(b) as *const u8, (v.buffer_size)(b)).to_vec();
+            (v.release)(b);
+            bytes
+        }
+    }
+
+    unsafe {
+        let dll: Vec<u16> = "d3dcompiler_47.dll".encode_utf16().chain([0]).collect();
+        let module = LoadLibraryExW(dll.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if module.is_null() {
+            return Err("d3dcompiler_47.dll cannot be loaded".into());
+        }
+        let f = GetProcAddress(module, c"D3DCompile".as_ptr() as *const u8);
+        if f.is_null() {
+            return Err("D3DCompile is not in d3dcompiler_47.dll".into());
+        }
+        let d3d_compile: D3DCompile = std::mem::transmute(f);
+        let (name, entry_z, target_z) = (b"glass_ps.hlsl ".as_slice(), format!("{entry} "), format!("{target} "));
+        let (mut code, mut errors): (*mut Blob, *mut Blob) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let hr = d3d_compile(
+            src.as_ptr() as *const c_void,
+            src.len(),
+            name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            entry_z.as_ptr(),
+            target_z.as_ptr(),
+            flags,
+            0,
+            &mut code,
+            &mut errors,
+        );
+        let message = String::from_utf8_lossy(&text(errors)).into_owned();
+        if hr < 0 {
+            return Err(format!("D3DCompile failed ({hr:#x}): {message}"));
+        }
+        let bytes = text(code);
+        if bytes.is_empty() {
+            return Err("D3DCompile returned no bytecode".into());
+        }
+        Ok(bytes)
+    }
 }

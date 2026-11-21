@@ -442,8 +442,12 @@ pub(crate) fn run_windows_runtime(
     // shim. The runtime worker thread (above) drains `event_rx` and
     // calls `on_event` for each `OverlayEvent`; the host flips
     // `is_running` to `false` when its event loop exits.
-    log_info("[nex] shutdown: host event loop returned");
+    log_info("[nex] host event loop starting");
     let host_result = crate::overlay::host::run(host);
+    // Logged after the loop returns, not before it starts: this line used to be
+    // written just ahead of the call, so every session opened with a "shutdown"
+    // line and a start read like an exit in the log.
+    log_info("[nex] shutdown: host event loop returned");
 
     // Clear the console handler's sender so a late Ctrl+C does not
     // deliver ExternalQuit into a channel nobody reads anymore.

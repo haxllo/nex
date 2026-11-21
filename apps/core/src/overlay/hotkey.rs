@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "windows")]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1933,6 +1933,39 @@ fn create_pipe_retrying_busy(
     ))
 }
 
+/// Cancel a blocking `ConnectNamedPipe` on the accept thread.
+///
+/// The detection pipe is single-instance, so whoever holds it owns the name.
+/// When the supervisor gave up on a slow accept it returned while the accept
+/// thread stayed blocked in `ConnectNamedPipe`, holding the instance open; every
+/// later attempt then failed with `ERROR_PIPE_BUSY` (231) for its whole retry
+/// budget, so no helper could ever attach again, and the log reported "pipe
+/// stayed busy" instead of "no helper" (CIQ-226). Closing the handle from
+/// another thread while the call is blocked is not safe; `CancelSynchronousIo`
+/// is the supported way to break it, after which the accept thread closes its
+/// own handle and the name is free.
+fn abort_blocked_accept(thread_id: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::IO::CancelSynchronousIo;
+    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_TERMINATE};
+
+    if thread_id == 0 {
+        return Err("accept thread did not publish its id".into());
+    }
+    let handle = unsafe { OpenThread(THREAD_TERMINATE, 0, thread_id) };
+    if handle.is_null() {
+        let error = unsafe { GetLastError() };
+        return Err(format!("OpenThread({thread_id}) failed err={error}"));
+    }
+    let cancelled = unsafe { CancelSynchronousIo(handle) };
+    let error = unsafe { GetLastError() };
+    unsafe { CloseHandle(handle) };
+    if cancelled == 0 {
+        return Err(format!("CancelSynchronousIo failed err={error}"));
+    }
+    Ok(())
+}
+
 /// Create the helper's detection pipe and hand back the read end.
 ///
 /// The pipe object MUST be created by this Medium-IL process. It used to be
@@ -1944,7 +1977,10 @@ fn create_pipe_retrying_busy(
 /// Ownership follows the same rule as `NexHelperCmd`, only mirrored: here the
 /// UI owns the pipe and reads, and the elevated helper connects as the client
 /// that writes. Writing *down* into a Medium-IL pipe is permitted.
-fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String> {
+fn create_helper_detection_pipe(
+    pipe_name: &str,
+    abort_tid: &AtomicU32,
+) -> Result<std::fs::File, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
 
     const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
@@ -1992,6 +2028,14 @@ fn create_helper_detection_pipe(pipe_name: &str) -> Result<std::fs::File, String
 
     let wide = to_wide(pipe_name);
     let handle = create_pipe_retrying_busy(&wide, pipe_name, CreateNamedPipeW)?;
+
+    // Publish this thread before blocking, so the supervisor can cancel the
+    // connect if no helper arrives. Nothing is published earlier on purpose:
+    // until the instance exists there is no connect to cancel.
+    abort_tid.store(
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+        Ordering::SeqCst,
+    );
 
     let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
     if connected == 0 {
@@ -2456,10 +2500,15 @@ fn spawn_and_connect_helper(
     //    client that writes. See `create_helper_detection_pipe`.
     let accept_name = pipe_name.clone();
     let (pipe_tx, pipe_rx) = std::sync::mpsc::channel();
+    // The accept thread publishes its id just before blocking, so a connect
+    // that outlives this wait can be cancelled instead of abandoned.
+    let accept_tid = Arc::new(AtomicU32::new(0));
+    let accept_tid_thread = accept_tid.clone();
     thread::Builder::new()
         .name("nex-helper-pipe-accept".into())
         .spawn(move || {
-            let _ = pipe_tx.send(create_helper_detection_pipe(&accept_name));
+            let result = create_helper_detection_pipe(&accept_name, &accept_tid_thread);
+            let _ = pipe_tx.send(result);
         })
         .map_err(|e| format!("failed to spawn pipe accept thread: {e}"))?;
 
@@ -2469,10 +2518,34 @@ fn spawn_and_connect_helper(
 
     // 6. Take the accepted connection. Bounded so a helper that never starts
     //    cannot wedge the supervisor; the caller retries with backoff.
-    let pipe_file = match pipe_rx.recv_timeout(std::time::Duration::from_secs(15)) {
+    const ACCEPT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+    let pipe_file = match pipe_rx.recv_timeout(ACCEPT_WAIT) {
         Ok(Ok(file)) => file,
         Ok(Err(error)) => return Err(error),
-        Err(_) => return Err("helper did not connect to the detection pipe in time".into()),
+        Err(_) => {
+            // Returning here without touching the accept thread is what left
+            // the name busy for the rest of the process lifetime, so every later
+            // attempt failed with err=231 and the helper never got a chance.
+            let cancelled = abort_blocked_accept(accept_tid.load(Ordering::SeqCst));
+            // Wait for the thread to unwind, so the instance is closed before
+            // the next attempt creates one.
+            let _ = pipe_rx.recv_timeout(std::time::Duration::from_millis(500));
+            if let Err(error) = &cancelled {
+                logging::warn(&format!(
+                    "[nex] could not cancel the abandoned detection-pipe accept ({error}); the                      pipe name may stay busy until this attempt's helper exits"
+                ));
+            }
+            // A helper starting late can still latch onto the instance just
+            // cancelled; superseding it stops that helper being taken for the
+            // next attempt's.
+            bump_helper_generation();
+            return Err(match cancelled {
+                Ok(()) => "helper did not connect to the detection pipe in time".into(),
+                Err(error) => {
+                    format!("helper did not connect to the detection pipe in time ({error})")
+                }
+            });
+        }
     };
 
     // Process handle = 0 (scheduled task, not directly manageable)
@@ -3303,6 +3376,71 @@ mod tests {
         assert!(started.elapsed() <= HELPER_REPLACE_GRACE + Duration::from_millis(500));
         HELPER_ACTIVE.store(false, Ordering::SeqCst);
     }
+    /// A supervisor that gives up on a slow accept must free the pipe name.
+    ///
+    /// The accept thread blocks in `ConnectNamedPipe` holding the single
+    /// instance. Leaving it there kept the name busy for the rest of the
+    /// process lifetime, so every later attempt failed with err=231 and no
+    /// helper could attach (CIQ-226). This drives the real pipe and the real
+    /// cancel, then proves the name is free.
+    #[test]
+    fn an_abandoned_accept_is_cancelled_and_frees_the_pipe_name() {
+        // Built from the real prefix so the test needs no escape
+        // sequences of its own; the suffix keeps it clear of the live
+        // detection pipe.
+        let name = format!(
+            "{}-test-accept-abort-{}",
+            HELPER_PIPE_NAME,
+            std::process::id()
+        );
+        let tid = Arc::new(AtomicU32::new(0));
+        let tid_in_thread = tid.clone();
+        let name_in_thread = name.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let accept = thread::spawn(move || {
+            let result = create_helper_detection_pipe(&name_in_thread, &tid_in_thread);
+            let _ = done_tx.send(match result {
+                Ok(_) => "connected".to_string(),
+                Err(error) => error,
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tid.load(Ordering::SeqCst) == 0 {
+            if let Ok(error) = done_rx.try_recv() {
+                panic!("the accept thread gave up before blocking: {error}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the accept thread must publish its id before blocking"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Let it actually reach the blocking connect: cancelling a thread that
+        // has not entered the call yet cancels nothing.
+        thread::sleep(Duration::from_millis(150));
+
+        abort_blocked_accept(tid.load(Ordering::SeqCst)).expect("the cancel must be accepted");
+        let outcome = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a cancelled connect must return");
+        assert!(
+            outcome.contains("995") || outcome.contains("failed"),
+            "a cancelled connect must be reported as a failure, not handed to the reader: {outcome}"
+        );
+        accept.join().ok();
+
+        // The instance must be gone, or the next attempt would get err=231.
+        match std::fs::File::open(&name) {
+            Ok(_) => panic!("the cancelled instance still holds the pipe name"),
+            Err(error) => assert_eq!(
+                error.raw_os_error(),
+                Some(2),
+                "expected ERROR_FILE_NOT_FOUND once the instance is closed"
+            ),
+        }
+    }
+
     /// The injected mask key is one OS-level resource. If nex and the helper
     /// both send it for the same press, one side's release orphans the other's
     /// flag and the next Win tap leaks the Start menu. Exactly one side must

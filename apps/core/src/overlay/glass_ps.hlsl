@@ -350,7 +350,15 @@ float4 PSGlass(float4 pos : SV_Position) : SV_Target
         // STEP 4: frost, the blur is in the region pyramid, taken before the displacement.
         // Deviation from the sheet: the outermost ring samples a sharper mip (factor uOpt.y at the edge, 1 where the band ends) so the rim bending stays visible.
         float lod = SigmaToLod(uB.y * s) * lerp(uOpt.y, 1.0, smoothstep(0.0, 1.0, t));
-        float3 k = float3(1.0 + uB.x, 1.0, 1.0 - uB.x);
+        // DISPERSION, bounded in device pixels. Scaling the whole shift per
+        // channel splits it by `uB.x * rim`, and the shift is largest exactly at
+        // the rim - a few percent of a 40 px bend is more than a pixel, so the
+        // three channels read three different pixels and the bend breaks into
+        // red/green/blue bands instead of a colour fringe. Keep the separation
+        // under a device pixel: the colour hint survives, the banding cannot.
+        float sep_px = min(uB.x * abs(rim) * s, 0.6);
+        float disp = (abs(rim) > 1e-4) ? sep_px / (abs(rim) * s) : 0.0;
+        float3 k = float3(1.0 + disp, 1.0, 1.0 - disp);
         float3 c;
         if (uExt.w > 0.5 && lod < 0.001)
         {
@@ -359,7 +367,7 @@ float4 PSGlass(float4 pos : SV_Position) : SV_Target
             // ((39,255,255) next to (60,60,255)), which bilinear taps cannot give. With a blurred backdrop (lod > 0) bilinear is used.
             int2 hi = int2(uWin.zw) - 1;
             // the browser's 8-bit map cannot show a red/blue gap under about half a pixel (0.25 px per side) is dropped (identical taps)
-            float2 dd = v * (uB.x * s);
+            float2 dd = v * (disp * s);
             dd = float2(abs(dd.x) < 0.25 ? 0.0 : dd.x, abs(dd.y) < 0.25 ? 0.0 : dd.y);
             float2 vs = v * s;
             c.r = tA.Load(int3(clamp(int2(floor(rp + vs + dd)), int2(0, 0), hi), 0)).r;

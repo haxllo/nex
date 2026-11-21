@@ -145,7 +145,7 @@ pub(crate) fn stop_runtime_instance(
     if !state.has_overlay_window && state.other_runtime_pids.is_empty() {
         // No UI left, but a stray indexer may still hold the index files
         // open (e.g. quit raced the orphan watchdog). Stop it directly.
-        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+        if indexer_process_running() && crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
             return Ok(stop_indexer_process());
         }
         return Ok(StopRuntimeOutcome::AlreadyStopped);
@@ -186,6 +186,24 @@ pub(crate) fn stop_runtime_instance(
 /// to force-terminating the process so `quit` never leaves it running.
 #[cfg(target_os = "windows")]
 fn stop_indexer_process() -> StopRuntimeOutcome {
+    // Ask the process list before the socket. A refused loopback connect takes
+    // 2.1 s on this machine (measured 2026-11-22 02:12, "actively refused" after
+    // 2105 ms), and that was the whole remaining cost of `--quit` with nothing
+    // running: the ping was "learning" that a process which does not exist is
+    // not listening.
+    if !indexer_process_running() {
+        return StopRuntimeOutcome::AlreadyStopped;
+    }
+    // An indexer that is already leaving (its parent-PID watchdog fired when the
+    // UI went) closes its listener first and only then exits. Pinging in that
+    // window is the refused connect above, and waiting it out is cheaper than
+    // paying for it: twenty polls, and the process list is the only thing read.
+    for _ in 0..20 {
+        if !indexer_process_running() {
+            return StopRuntimeOutcome::AlreadyStopped;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
     if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
         return StopRuntimeOutcome::AlreadyStopped;
     }
@@ -211,6 +229,12 @@ fn stop_indexer_process() -> StopRuntimeOutcome {
     } else {
         StopRuntimeOutcome::Forced
     }
+}
+
+/// True while an indexer process exists, cheapest liveness question available.
+#[cfg(target_os = "windows")]
+fn indexer_process_running() -> bool {
+    process_alive_by_name("NexIndexerProcess.exe")
 }
 
 #[cfg(target_os = "windows")]

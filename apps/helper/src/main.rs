@@ -444,6 +444,40 @@ fn send_mask_down() {
 /// cannot type anything, but it cancels Start-menu-on-Win-key-up.
 const VK_START_GUARD: u16 = 0xFF;
 
+/// A press that reached the hook later than this is history, not input.
+///
+/// Windows delivers low-level hook events from a queue, so a stall of the hook
+/// thread (or of the machine) hands the callback a backlog at once. By then the
+/// shell has already run the Win gesture for each of those presses: a mask or a
+/// guard injected now lands after the gesture resolved, and reporting the press
+/// to nex makes one physical press toggle the panel several times. Measured on
+/// 2026-11-21 18:19: callbacks returned after 4.8-5.4 s and replayed six
+/// presses, one of which opened Start. Four hundred milliseconds is far past
+/// any suppression window and far short of a stall.
+const STALE_PRESS_MS: u32 = 400;
+
+/// How late this event is, in ms, measured from its own timestamp.
+///
+/// `KBDLLHOOKSTRUCT.time` is the tick count when the event happened, so this is
+/// the queue delay, not the time our own proc spent: an event that waited 5 s
+/// behind a stall reports 5000 here while the callback that sees it is fast.
+fn event_lateness_ms(event_time: u32) -> u32 {
+    let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
+    lateness_between(now, event_time)
+}
+
+/// `event_lateness_ms` without the clock, so the boundary is testable.
+///
+/// The subtraction wraps on purpose: the tick count is 32-bit and wraps every
+/// 49 days, and an event from just before a wrap must read as fresh, not as 49
+/// days late.
+fn lateness_between(now_ms: u32, event_time: u32) -> u32 {
+    if event_time == 0 {
+        return 0;
+    }
+    now_ms.wrapping_sub(event_time)
+}
+
 /// Injection work the hook proc must not do itself.
 ///
 /// A low-level hook runs inside the OS input pipeline. `SendInput` from there
@@ -843,6 +877,27 @@ fn spawn_cmd_pipe_client(cmd_path: String) {
                     Ok(_) => {}
                 }
                 let cmd = buf.trim().to_string();
+                // nex is shutting down (or replacing this helper). Exit the
+                // way a normal end of session does, through the message loop,
+                // so both low-level hooks are unhooked before the process goes.
+                // Being terminated with `WH_KEYBOARD_LL`/`WH_MOUSE_LL` still
+                // installed leaves Windows waiting on a hook callback that will
+                // never return, which the user feels as the mouse freezing for
+                // a moment right after the tray icon disappears.
+                if cmd == "QUIT" {
+                    debug_log("shutdown requested by nex; exiting through the loop");
+                    if let Some(tid) = HELPER_THREAD_ID.get() {
+                        unsafe {
+                            windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                                *tid,
+                                windows_sys::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                                0,
+                                0,
+                            );
+                        }
+                    }
+                    return;
+                }
                 // Game-mode suppression is a verdict nex has already
                 // computed; it is not an action to execute.
                 if cmd == "GAME_ON" || cmd == "GAME_OFF" {
@@ -954,6 +1009,26 @@ unsafe fn keyboard_hook_proc_inner(
             || vk == VK_LSHIFT || vk == VK_RSHIFT;
 
         if is_win_vk {
+            // A press replayed out of a stall cannot be masked inside its own
+            // gesture and must not be reported: it would toggle the panel
+            // seconds after the key was pressed, and the shell has already
+            // resolved Start for it. Drop it, cancel whatever Start the shell
+            // may have begun, and leave the mask released so the next real
+            // press behaves normally. Scoped to the Win key itself: a late
+            // chord key (Win+E) must still reach the shell and must not
+            // disturb the press that is already tracked.
+            let late_by = event_lateness_ms(kb.time);
+            if late_by >= STALE_PRESS_MS {
+                let consumed_vk = CONSUMED_WIN_VK.swap(0, Ordering::SeqCst);
+                CHORD_DETECTED.store(false, Ordering::SeqCst);
+                let was_held = MASK_HELD.swap(false, Ordering::SeqCst);
+                defer_inject(INJECT_START_GUARD | if was_held { INJECT_MASK_UP } else { 0 });
+                debug_log(&format!(
+                    "dropped a Win {} that arrived {late_by} ms late (vk={consumed_vk} mask_held={was_held})",
+                    if is_keydown { "key-down" } else { "key-up" },
+                ));
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
+            }
             if is_keydown {
                 if CONSUMED_WIN_VK.load(Ordering::SeqCst) == 0 {
                     CONSUMED_WIN_VK.store(vk, Ordering::SeqCst);
@@ -2536,6 +2611,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A replayed press is told apart from a fresh one by its own timestamp,
+    // which is what a stalled hook queue destroys.
+    #[test]
+    fn a_press_is_late_only_when_its_timestamp_says_so() {
+        assert_eq!(lateness_between(10_000, 10_000), 0);
+        assert_eq!(lateness_between(10_005, 10_000), 5);
+        assert_eq!(lateness_between(15_000, 10_000), 5_000);
+        assert_eq!(lateness_between(10_000, 0), 0); // no timestamp: trust it
+        // Wrapping tick count: an event just before a wrap is fresh.
+        assert_eq!(lateness_between(3, u32::MAX - 1), 5);
+    }
 
     // A held Win key fires after its auto-repeat only when no chord key ever
     // went down: the chord flag lives for the whole press.

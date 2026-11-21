@@ -1485,9 +1485,48 @@ impl Drop for HotkeyListener {
     }
 }
 
-/// Terminate the helper: TerminateProcess when we own a direct handle,
-/// taskkill by name for scheduled-task mode (handle == 0).
+/// How long a helper gets to unhook and exit by itself before it is terminated.
+///
+/// Its exit runs through its own message loop, which unhooks both low-level
+/// hooks. A helper that is *terminated* while `WH_KEYBOARD_LL` / `WH_MOUSE_LL`
+/// are still installed leaves Windows waiting for a hook callback that will
+/// never return, and the user feels that as the mouse freezing for a moment
+/// right after the tray icon disappears. Three hundred milliseconds is many
+/// times the observed exit (a few ms) and short enough to stay invisible on the
+/// quit path.
+const HELPER_GRACEFUL_EXIT_MS: u64 = 300;
+
+/// Ask the helper to leave, then terminate it only if it did not.
 fn kill_helper_process(handle: isize) {
+    if send_helper_key("QUIT") {
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < HELPER_GRACEFUL_EXIT_MS as u128 {
+            let gone = if handle != 0 {
+                unsafe {
+                    windows_sys::Win32::System::Threading::WaitForSingleObject(
+                        handle as *mut core::ffi::c_void,
+                        0,
+                    ) == 0
+                }
+            } else {
+                !crate::runtime_process::process_alive_by_name("NexHelper.exe")
+            };
+            if gone {
+                logging::info("[nex] shutdown: helper exited on request (hooks unhooked)");
+                if handle != 0 {
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(
+                            handle as *mut core::ffi::c_void,
+                        );
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        logging::warn("[nex] shutdown: helper ignored the quit request; terminating it");
+    }
+
     if handle != 0 {
         logging::info("[nex] shutdown: terminating helper process");
         unsafe {

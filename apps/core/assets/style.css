@@ -2596,19 +2596,18 @@ html.glass-native.glass-light img.icon.glyph {
 }
 
 /* The material flip above is a step change in the palette; ease the
-   properties that consume it so a flip reads as a fade rather than a
-   flash. Scoped to the swap window (html.glass-fading is armed by the
-   page for ~300ms) so it never overrides the hover and selection
-   transitions of the base rules. */
+   surfaces that consume it so a flip reads as a fade rather than a flash.
+   Text is deliberately not in this list: a 260ms colour ease walks the
+   text through mid-grey, which is the one value it cannot be read at, and
+   the palette only flips once the backdrop has held past the threshold
+   for 300ms - there is nothing left to soften. Scoped to the swap window
+   (html.glass-fading is armed by the page for ~300ms) so it never
+   overrides the hover and selection transitions of the base rules. */
 html.glass-fading #panel,
 html.glass-fading #panel * {
   transition:
-    color 260ms ease,
     background-color 260ms ease,
-    border-color 260ms ease,
-    fill 260ms ease,
-    stroke 260ms ease,
-    text-shadow 260ms ease;
+    border-color 260ms ease;
 }
 
 /* The glint colours are declared on the root, so they transition there:

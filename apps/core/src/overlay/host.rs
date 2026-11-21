@@ -185,6 +185,22 @@ use wry::http::{header::CONTENT_TYPE, Request, Response};
 use wry::{WebViewBuilderExtWindows, WebViewExtWindows};
 use wry::{WebView, WebViewBuilder};
 
+/// Browser switches every Nex webview must share.
+///
+/// WebView2 keys the browser process on the user data folder *and* the options
+/// used to create the environment. A second environment over the same folder
+/// with different `AdditionalBrowserArguments` fails to create its controller
+/// with `ERROR_INVALID_STATE` (0x8007139F), which is what took the whole app
+/// down when the settings window was opened: the overlay's switches were added
+/// on 2026-11-21 (`0df63a2f`) and settings stopped opening the same day
+/// (2026-11-21 18:22, then 2026-11-22 02:55 and 02:56 - two opens, two panics).
+/// Both webviews are built from this string so there is only ever one
+/// environment.
+/// wry replaces its own defaults when this is set, so they are repeated here:
+/// the mini-menu and SmartScreen switches it adds for every webview, and
+/// autoplay, which wry sets by default.
+const WEBVIEW_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --autoplay-policy=no-user-gesture-required --disable-renderer-backgrounding --disable-background-timer-throttling --disable-backgrounding-occluded-windows";
+
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
@@ -1955,6 +1971,13 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let proxy_for_ipc = proxy.clone();
                         let webview = wry::WebViewBuilder::new()
                             .with_initialization_script(DISABLE_NATIVE_CONTEXT_MENU)
+                            // Same environment switches as the overlay. A
+                            // second environment over the same user data
+                            // folder with different switches fails its
+                            // controller creation with ERROR_INVALID_STATE and
+                            // used to panic the app shut; see
+                            // `WEBVIEW_BROWSER_ARGS`.
+                            .with_additional_browser_args(WEBVIEW_BROWSER_ARGS)
                             .with_background_color((0, 0, 0, 0))
                             .with_url("nexasset://localhost/settings.html")
                             .with_custom_protocol("nexasset".into(),move |_id, request| {
@@ -2040,12 +2063,28 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     }
                                 }
                             })
-                            .build(&sw)
-                            .expect("settings webview");
+                            .build(&sw);
 
-                        let _ = sw.set_visible(true);
-                        animate_window_open(sw.hwnd() as HWND);
-                        settings_ui = Some((sw, webview));
+                        // A settings window that cannot be created must never
+                        // take the app with it: the panic here unwound out of
+                        // the overlay event loop and shut Nex down, which is how
+                        // "open settings" became "the app quit" (2026-11-22
+                        // 02:55 and 02:56). The panel stays usable and the
+                        // failure is in the log.
+                        match webview {
+                            Ok(webview) => {
+                                let _ = sw.set_visible(true);
+                                animate_window_open(sw.hwnd() as HWND);
+                                settings_ui = Some((sw, webview));
+                            }
+                            Err(error) => {
+                                crate::runtime::log_warn(&format!(
+                                    "[nex] settings window could not be created: {error}"
+                                ));
+                                let _ = sw.set_visible(false);
+                                settings_window_id = None;
+                            }
+                        }
                     }
                     // push config into the page (works for both fresh and warm opens)
                     if let Some((_, wv)) = &settings_ui {
@@ -2372,16 +2411,7 @@ fn build_webview(
         // to post its first paint after an idle period, with nothing running on
         // our side. Keeping the renderer scheduled costs an idle process some
         // CPU but makes the show path the only thing left to measure.
-        .with_additional_browser_args(
-            // wry replaces its own defaults when this is set, so they are
-            // repeated here: the mini-menu and SmartScreen switches it adds
-            // for every webview, and autoplay, which wry sets by default.
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion \
-             --autoplay-policy=no-user-gesture-required \
-             --disable-renderer-backgrounding \
-             --disable-background-timer-throttling \
-             --disable-backgrounding-occluded-windows",
-        )
+        .with_additional_browser_args(WEBVIEW_BROWSER_ARGS)
         .with_transparent(opaque_bg.is_none());
     let builder = match opaque_bg {
         Some(bg) => builder.with_background_color(bg),

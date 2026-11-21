@@ -2319,11 +2319,11 @@ html[data-theme="light"] .wn-hero {
 /* Thick tier: a menu carries a list of labels, so it takes the heaviest fill
    and still shows the material at its edge. Opaque modes stay flat. */
 html.glass-native #context-menu {
-  background:
-    linear-gradient(180deg, var(--panel-glint), transparent 40%),
-    var(--glass-thick);
-  border: 1px solid var(--panel-edge);
-  border-top-color: var(--panel-highlight);
+  /* A tier of the same material, not a second material: the fill only. The
+     sheen and the border were CSS pretending to be the rim, and a nested
+     surface cannot bend the desktop - it can only tint what the panel already
+     did. */
+  background: var(--glass-thick);
 }
 #context-menu button {
   display: block;
@@ -2618,22 +2618,21 @@ html.glass-fading {
     --panel-reflection 260ms ease;
 }
 
-/* Curved lighting, inner shade and fine dither now live in D2D beneath
-   the page. No second, stationary specular layer over the text. */
-html.glass-native #panel::before {
-  content: none;
-}
+/* Curved lighting, inner shade and fine dither live in D2D beneath the
+   page. What D2D cannot do is sit *above* the text, so the top-edge light
+   lives here: a real material is lit from above, and a pane whose only edge
+   treatment is an even hairline reads as a sticker rather than a thick body.
 
-/* 1px border matching opaque themes. The border follows the clip-path
-   since it's drawn on the same element. */
-html.glass-native #panel::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border: 1px solid var(--panel-edge);
-  border-radius: var(--radius);
-  pointer-events: none;
-}
+   Two parts, both drawn over the content the way a specular is: a short
+   gradient band at the top edge, and an inset hairline that brightens only the
+   top border. It is deliberately the weakest of the surface layers - the
+   gradient starts at --panel-sheen (10%) and is gone by 12% of the height, so
+   it lifts a row of text without washing it out. */
+/* The material has no CSS face at all: no inset highlight, no border. Both used
+   to stand in for a rim, and both were light painted over an image - the exact
+   thing the effect graph now does properly, by bending and reflecting the
+   desktop. CSS cannot sample what is behind the window, so anything it draws
+   here is decoration laid on top of the real material. */
 
 @media (prefers-reduced-motion: reduce) {
   html.glass-fading, html.glass-fading * { transition: none !important; }
@@ -2932,9 +2931,7 @@ html.glass-native .chat-composer-shell {
 /* In glass the composer is already a surface, so focus deepens the tier
    instead of swapping in an opaque fill. */
 html.glass-native .chat-composer-shell:focus-within {
-  background:
-    linear-gradient(180deg, var(--panel-glint), transparent 62%),
-    var(--glass-thick);
+  background: var(--glass-thick);
 }
 
 #chat-input {

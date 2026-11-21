@@ -48,6 +48,7 @@ pub(crate) mod shim;
 pub(crate) mod tray;
 #[cfg(target_os = "windows")]
 pub(crate) mod refraction;
+pub(crate) mod glass_ps;
 
 #[cfg(target_os = "windows")]
 pub use model::{OverlayEvent, OverlayRow, OverlayRowRole};

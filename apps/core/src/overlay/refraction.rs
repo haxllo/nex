@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::overlay::glass_ps;
 use crate::overlay::host::UiCommand;
 use tao::event_loop::EventLoopProxy;
 use windows::core::Interface;
@@ -57,7 +58,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT,
     D3D11_MAP_READ,
-    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
+    ID3D11RenderTargetView, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
 };
 use windows_numerics::Vector2;
@@ -152,22 +153,58 @@ fn mark_glass_ok() -> bool {
     GLASS_FAILED.swap(false, std::sync::atomic::Ordering::AcqRel)
 }
 
-/// Wide diffusion branch: the frost of the pane's interior. At zero the
-/// backdrop shows through the tight rim blur alone, which is the look to judge
-/// the bend by.
-const BLUR_STDDEV: f32 = 0.0;
+/// Wide diffusion branch: the frost of the pane's interior, logical px.
+///
+/// It shipped at zero, so the pane's middle was the desktop itself, zoomed 3%:
+/// a hole in the glass with a bent edge around it. Real glass frosts what is
+/// behind it, and that frost is doing most of the legibility work - it removes
+/// the high-frequency detail that text has to compete with - so a material with
+/// no frost reads as a tinted sheet however good its rim is. It is deliberately
+/// small: Apple's material is clear glass whose edge optics carry the look, and
+/// a heavy frost is the cheap web recipe that turns glass into milk. 1.5 px is
+/// just enough to keep the pane from looking like a cut-out hole; anything
+/// above that starts erasing the desktop the glass is supposed to bend.
+const BLUR_STDDEV: f32 = 1.2;
 /// The rim's own blur. A bending edge is not razor sharp either: the whole
 /// pane is seen through the same glass, so the rim gets a soft version of the
 /// tight blur (true Gaussian passes, `OPTIMIZATION_QUALITY`) plus its share of
 /// the wide frost.
-const RIM_BLUR_STDDEV: f32 = 2.2;
-/// Colour fringe per channel as a share of the shift. The shipped look has
-/// none: with a shift this strong (tens of px at the rim) a fringe reads as a
-/// rainbow flare in the corners, not as dispersion in a lens.
-const ABERRATION: f32 = 0.0;
-/// Backdrop vibrancy: the refracted image is lifted slightly so it does
-/// not read as greyed out behind the tint.
-const SATURATION: f32 = 1.2;
+const RIM_BLUR_STDDEV: f32 = 1.0;
+
+/// How far outside the pane the reflected view samples, in logical px. The
+/// capture carries `BLUR_PAD` of desktop on every side of the panel, so the rim
+/// has real surroundings to reflect instead of a colour invented for it.
+const REFLECT_SHIFT: f32 = 44.0;
+/// Share of the band the reflected view reaches at the border. Grazing
+/// incidence reflects most of the light a surface receives, but this pane also
+/// has to be read through, so the reflection wraps the surroundings into the
+/// rim without turning it into a mirror.
+const REFLECT_MAX: f32 = 0.95;
+/// How far the reflected vectors slide toward the corners. A body's reflection
+/// travels around it, so the environment arrives from the sides at the ends of
+/// an edge rather than only straight across it.
+const REFLECT_WRAP: f32 = 0.35;
+/// Share of the band the reflection lives in. The band is 33-56 px; a reference
+/// pane's bright edge is a few px wide, so the read has to give up most of that
+/// width. At 0.45 the reflection is gone by 15 px and the rest of the band is
+/// pure transmission - a crisp rim instead of a haze of duplicated desktop.
+const REFLECT_NARROW: f32 = 0.6;
+/// Colour fringe per channel as a share of the shift.
+///
+/// Real glass does not bend every wavelength by the same amount, and the graph
+/// already carries three displacement passes so the channels can sample three
+/// slightly different positions. It was off while the shift was the only thing
+/// being judged; at 2% it is a fringe you find on the rim rather than a rainbow
+/// flare, and it is the difference between a warped screenshot and something
+/// behind glass.
+const ABERRATION: f32 = 0.05;
+/// Backdrop vibrancy: the refracted image is lifted so it does not read as
+/// greyed out behind the tint. Blurring pulls colours toward grey - that is what
+/// averaging does - so the lift has to be applied *after* the blur, and it has
+/// to be larger than it looks: 1.2 read as washed out once the frost was real,
+/// because the frost itself removes the saturation the old value was picked
+/// against. Clamped output keeps the lift from clipping channel tops.
+const SATURATION: f32 = 1.32;
 /// The shift the map can carry for a panel, logical px: the widest band that
 /// panel can have. A cell holds `shift / range`, so a range fixed at 112 px
 /// left most of the 255 levels unused and put 0.88 px between them - the slow
@@ -223,7 +260,7 @@ fn corner_taper(nx: f32, ny: f32) -> f32 {
 
 /// Thickness of the rim relative to its width (`T = B * RIM_THICKNESS`). What
 /// sets how far the rim reads the backdrop: Snell over this thickness.
-const RIM_THICKNESS: f32 = 1.6;
+const RIM_THICKNESS: f32 = 2.4;
 /// Fan of the read along the rim at the border, as a share of the band. The
 /// radial read pulls the backdrop out of (or in from) the pane, which on its own
 /// is a column stretched along that one direction; the fan slides the sampled
@@ -233,7 +270,7 @@ const RIM_THICKNESS: f32 = 1.6;
 /// direction made the top edge travel one way and the bottom the other, which
 /// read as a spin. Strongest at the border, gone by the band's end. 0 is the
 /// plain radial read.
-const RIM_SWIRL: f32 = 0.35;
+const RIM_SWIRL: f32 = 0.60;
 /// Which side of the edge the band reads. `true` reads the desktop BEYOND the
 /// pane, so the rim shows the surroundings wrapped around the curve. `false`
 /// reads the pane's own backdrop, pulled from just inside and stretched toward
@@ -246,13 +283,42 @@ const SAMPLE_OUTWARD: bool = false;
 /// A third of the band is more than the profile can carry: at exactly a third
 /// the outermost pixels stop advancing altogether, so the rest is left as
 /// headroom and the edge keeps a slight compression instead of a flat row.
-const RIM_PULL: f32 = 0.3;
+const RIM_PULL: f32 = 0.33;
 /// Exponent of the pull's falloff. It is what decides the join with the flat
 /// middle: the local stretch is `1 - n * pull / band * (1 - t)^(n - 1)`, so at
 /// the band's end the stretch reaches 1 with a slope of 0 only for `n >= 3`.
 /// At `n = 2` the magnification is still changing at that boundary, which is
 /// the straight ramp the eye picks up.
 const RIM_FALLOFF: i32 = 3;
+
+/// Wobble of the pulled read, as a share of the pull. Glass poured onto a
+/// surface is never geometrically perfect, and a perfectly uniform bend reads as
+/// a filter rather than an object: this ripples it slowly along the rim so the
+/// band is a liquid edge instead of a machined one. Slow on purpose - the
+/// wavelengths are 300-1000 px, several times the band, so the ripple curves the
+/// read instead of chopping it, and the read stays monotone across the band.
+const RIM_TURBULENCE: f32 = 0.22;
+/// How much of that wobble travels ALONG the border rather than across it, as a
+/// share of the band. This is the part that makes straight lines behind the rim
+/// curl as they pass it.
+const RIM_TURBULENCE_TANGENT: f32 = 0.14;
+
+/// A slow, smooth wobble, evaluated as a pure function of position so a resize
+/// rebuilds the identical map. Three sines at incommensurate wavelengths, summed
+/// in the usual 0.55/0.3/0.15 weights: no visible period, no table to allocate.
+///
+/// Evaluated on absolute distances from the pane's centre, so the field is
+/// symmetric across its two mid-axes. The bend has always been mirror-symmetric
+/// around the shape, and an asymmetric ripple would slide one half of an edge up
+/// while its mirror slid the other way - a spin, which is exactly what the fan
+/// exists to avoid. Symmetric noise reads as an irregular surface, not a twist.
+fn rim_turbulence(dx: f32, dy: f32) -> f32 {
+    let (dx, dy) = (dx.abs(), dy.abs());
+    let a = (dx * 0.0125 + dy * 0.0091).sin();
+    let b = (dx * 0.0063 - dy * 0.0147 + 1.7).sin();
+    let c = (dx * 0.0211 + dy * 0.0043 + 4.1).sin();
+    (a * 0.55 + b * 0.30 + c * 0.15).clamp(-1.0, 1.0)
+}
 /// Magnification of the pane's middle. The interior used to be a 1:1 window -
 /// a hole in the glass. A few percent makes the pane a lens over its own
 /// backdrop. It is applied as a source-space scale (`zoom_source`), not in the
@@ -267,7 +333,7 @@ fn zoom_inset() -> f32 {
     0.5 * (1.0 - 1.0 / MIDDLE_ZOOM)
 }
 /// Refractive index of the pane. Constant, as in the reference optics.
-const IOR: f32 = 1.5;
+const IOR: f32 = 2.4;
 /// Device-pixel growth for the main window's native region. The page's
 /// own clip-path is antialiased; letting the region sit a pixel outside
 /// it keeps GDI's hard polygon edge from shaving that antialiasing off.
@@ -277,8 +343,25 @@ const IOR: f32 = 1.5;
 /// page's semi-transparent AA ramp -> pixels poking out at the corners.
 /// 2 px leaves the region clear of the ~1 px AA band even after worst-case
 /// integer rounding while avoiding the black line artifact that 3 px causes.
-const SILHOUETTE_GROW_PX: f64 = 2.0;
-pub(crate) const CORNER_RADIUS: f32 = 8.0;
+pub(crate) const CORNER_RADIUS: f32 = 16.0;
+
+/// The corner is a CIRCULAR arc of the radius, not a superellipse.
+///
+/// A squircle is the nicer shape on a tall pane, and this one used to be a
+/// superellipse stretched by 1.843x so its diagonal bite matched a circle's.
+/// The stretch is what broke the short panel: the corner then reaches 29.5 px
+/// along each side, and a collapsed 60 px bar has only 30 px to give, so the
+/// shape had 0.5 px of straight side left. Both short sides were one long
+/// shallow curve, every edge pixel sat inside an anti-aliasing ramp, and the bar
+/// read as bulged by a pixel with stepped edges - the symptoms of "the corner
+/// radius is too big", when the corner was in fact twice the size asked for.
+///
+/// A circle of the radius asked for leaves 14 px of straight side on that bar
+/// and lines up with the glass this follows: its shape distance is a circle of
+/// the radius, `l - r`, with no stretch.
+fn corner_extent(radius: f32) -> f32 {
+    radius
+}
 /// Statistics downsample size: enough for the 4x4 tint grid and a stable
 /// luminance average, small enough that the readback is noise.
 const SAMPLE_W: u32 = 16;
@@ -288,8 +371,8 @@ const SAMPLE_H: u32 = 16;
 /// the text colour never fights what is behind the glass. Alpha is the
 /// wash at the material's own extreme; hysteresis (plus the dwell below)
 /// stops flapping when the backdrop sits near the switch.
-const TINT_MIN_ALPHA: f32 = 0.10;
-const TINT_MAX_ALPHA: f32 = 0.28;
+const TINT_MIN_ALPHA: f32 = 0.03;
+const TINT_MAX_ALPHA: f32 = 0.12;
 const MATERIAL_SWITCH: f32 = 0.55;
 const MATERIAL_HYSTERESIS: f32 = 0.18;
 /// The palette goes light - dark text - only where the *darkest tenth* of
@@ -636,7 +719,7 @@ impl GlassLayer {
         if self.window.region.get() == Some(key) {
             return;
         }
-        apply_lens_region(self.main_sys, w, h, scale, SILHOUETTE_GROW_PX);
+        apply_panel_region(self.main_sys, w, h);
         apply_glass_region(self.window.hwnd.0 as isize, w, h);
         self.window.region.set(Some(key));
     }
@@ -922,7 +1005,15 @@ impl GlassWindow {
 #[derive(Clone)]
 struct SizedGeometry {
     map: ID2D1Bitmap1,
-    lights: Vec<ID2D1Bitmap1>,
+    /// Where the reflected view samples: outward on the border, identity in the
+    /// middle, so the rim shows the world around the pane instead of the world
+    /// behind it.
+    reflection_map: ID2D1Bitmap1,
+    /// Fresnel weight of that view per pixel: how much of each pixel is
+    /// reflection rather than transmission.
+    reflection_mask: ID2D1Bitmap1,
+    /// Specular highlight per edge: the spot of light the pointer moves.
+    speculars: Vec<ID2D1Bitmap1>,
     depth_grain: ID2D1Bitmap1,
     mask: ID2D1Bitmap1,
     shadow: ID2D1Bitmap1,
@@ -994,8 +1085,13 @@ struct Engine {
     blue_displace: ID2D1Effect,
     channels: [ID2D1Effect; 3],
     optical_output: ID2D1Effect,
-    /// Static geometry layers; pointer changes only their opacity.
-    lights: Vec<ID2D1Bitmap1>,
+    /// Reflected view of the surroundings, blended over the transmitted one by
+    /// Fresnel weight. This is the rim: an image, not a highlight.
+    reflect_displace: ID2D1Effect,
+    reflect_alpha: ID2D1Effect,
+    reflect_blend: ID2D1Effect,
+    /// Specular highlight bitmaps, one per edge.
+    speculars: Vec<ID2D1Bitmap1>,
     depth_grain: Option<ID2D1Bitmap1>,
     local_tint: Option<ID2D1Bitmap1>,
     /// Panel-sized premultiplied alpha mask: 1 inside the rounded shape,
@@ -1043,6 +1139,12 @@ struct Engine {
     /// glass region clips the rest).
     panel_w: u32,
     panel_h: u32,
+    /// The material as one pixel shader. `None` when its bytecode is missing,
+    /// in which case the effect graph below still draws a material.
+    glass_ps: Option<glass_ps::GlassPs>,
+    /// The wash last handed to the shader path, kept so a steady frame keeps
+    /// its tint without rebuilding it.
+    wash: std::cell::Cell<(f32, f32, f32, f32)>,
 }
 
 /// Pick the DXGI adapter that owns the monitor the panel lives on. On
@@ -1187,7 +1289,7 @@ impl Engine {
         let d2d = d2d_setup(&device)?;
         let range = lens_range(panel_w, panel_h, 1.0);
         crate::logging::info(&format!(
-            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} sat={SATURATION} bend={} range={range}px margin={BEZEL_MARGIN}px pad={BLUR_PAD}",
+            "[nex][refract] d2d effect ready blur={BLUR_STDDEV} frost={FROST} sat={SATURATION} bend={} range={range}px reflect={REFLECT_SHIFT}px max={REFLECT_MAX} margin={BEZEL_MARGIN}px pad={BLUR_PAD}",
             bend_scale(range)
         ));
         let tint_brush: ID2D1SolidColorBrush = unsafe {
@@ -1257,6 +1359,12 @@ impl Engine {
             matrix[15] = 1.0;
             set_color_matrix(effect, &matrix)?;
         }
+        // The reflected view: the same captured image, sampled where the
+        // surroundings are, with its alpha replaced by the Fresnel weight so
+        // the blend between the two views is the physics rather than a paint.
+        let reflect_displace = displacement_effect(&d2d)?;
+        let reflect_alpha = create_effect(&d2d, &CLSID_D2D1AlphaMask)?;
+        let reflect_blend = create_effect(&d2d, &CLSID_D2D1Composite)?;
         let optical_output = create_effect(&d2d, &CLSID_D2D1Composite)?;
         unsafe {
             optical_output.SetInputCount(3).map_err(|e| format!("RGB inputs: {e:?}"))?;
@@ -1304,8 +1412,22 @@ impl Engine {
             )
             .map_err(|e| format!("sample target failed: {e:?}"))?
         };
+        let glass_ps = match glass_ps::GlassPs::new(&device, &context) {
+            Ok(ps) => {
+                crate::logging::info(
+                    "[nex][glass] shader material ready (one analytic pass: bend, frost, rim, tint)",
+                );
+                Some(ps)
+            }
+            Err(why) => {
+                crate::logging::warn(&format!("{why}; the effect graph draws instead"));
+                None
+            }
+        };
         let mut engine = Engine {
             scale: 1.0,
+            glass_ps,
+            wash: std::cell::Cell::new((0.0, 0.0, 0.0, 0.0)),
             device,
             context,
             swapchain,
@@ -1339,7 +1461,10 @@ impl Engine {
             blue_displace,
             channels,
             optical_output,
-            lights: Vec::new(),
+            reflect_displace,
+            reflect_alpha,
+            reflect_blend,
+            speculars: Vec::new(),
             depth_grain: None,
             local_tint: None,
             mask: None,
@@ -1437,12 +1562,26 @@ impl Engine {
                 self.channels[index].SetInput(0, &effect_output(lens)?, true);
                 self.optical_output.SetInput(index as u32, &effect_output(&self.channels[index])?, true);
             }
+            // Transmission first, then the reflected view over it at Fresnel
+            // weight. The reflected sample is displaced outward past the panel
+            // edge, which is what squeezes the surroundings into the band.
+            self.reflect_displace.SetInput(0, &effect_output(&self.blur)?, true);
+            self.reflect_displace.SetInput(1, &geometry.reflection_map, true);
+            let _ = set_float(
+                &self.reflect_displace,
+                D2D1_DISPLACEMENTMAP_PROP_SCALE.0,
+                REFLECT_SHIFT * self.scale as f32,
+            );
+            self.reflect_alpha.SetInput(0, &effect_output(&self.reflect_displace)?, true);
+            self.reflect_alpha.SetInput(1, &geometry.reflection_mask, true);
+            self.reflect_blend.SetInput(0, &effect_output(&self.reflect_alpha)?, true);
+            self.reflect_blend.SetInput(1, &effect_output(&self.optical_output)?, true);
         }
         self.source = Some(source);
         self.source_tex = Some(source_tex);
         self.zoom = Some(zoom);
         self.map = Some(map);
-        self.lights = geometry.lights;
+        self.speculars = geometry.speculars;
         self.depth_grain = Some(geometry.depth_grain);
         self.mask = Some(geometry.mask);
         self.shadow = Some(geometry.shadow);
@@ -1486,11 +1625,43 @@ impl Engine {
                 .map_err(|e| format!("map CreateBitmap failed: {e:?}"))?
         };
         let layers = surface_layers(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
-        let mut lights = Vec::with_capacity(4);
+        let mut speculars = Vec::with_capacity(4);
         for bytes in &layers[..4] {
-            lights.push(self.bitmap(self.panel_w, self.panel_h, bytes)?);
+            speculars.push(self.bitmap(self.panel_w, self.panel_h, bytes)?);
         }
         let depth_grain = self.bitmap(self.panel_w, self.panel_h, &layers[4])?;
+        // The reflected view samples outside the pane, so its map covers the
+        // whole capture with identity (128 = no shift) around the panel box.
+        let mut reflect_map_bytes = vec![128u8; w * h * 4];
+        for alpha in reflect_map_bytes.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        let panel_reflect =
+            reflect_bytes(self.panel_w as usize, self.panel_h as usize, self.scale as f32);
+        for row in 0..self.panel_h as usize {
+            let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
+            let src = row * self.panel_w as usize * 4;
+            reflect_map_bytes[dst..dst + self.panel_w as usize * 4]
+                .copy_from_slice(&panel_reflect[src..src + self.panel_w as usize * 4]);
+        }
+        let reflection_map = self.bitmap(w as u32, h as u32, &reflect_map_bytes)?;
+        // The mask goes into the graph as an effect input, and effect inputs
+        // align at the origin - so it is capture-sized with the panel's own
+        // weight copied into the middle, not a panel-sized bitmap that would
+        // land 58 px away from the pixels it masks.
+        let mut reflection_mask_bytes = vec![0u8; w * h * 4];
+        let panel_mask = reflection_mask_bytes_for(
+            self.panel_w as usize,
+            self.panel_h as usize,
+            self.scale as f32,
+        );
+        for row in 0..self.panel_h as usize {
+            let dst = ((row + BLUR_PAD as usize) * w + BLUR_PAD as usize) * 4;
+            let src = row * self.panel_w as usize * 4;
+            reflection_mask_bytes[dst..dst + self.panel_w as usize * 4]
+                .copy_from_slice(&panel_mask[src..src + self.panel_w as usize * 4]);
+        }
+        let reflection_mask = self.bitmap(w as u32, h as u32, &reflection_mask_bytes)?;
         let mask = self.bitmap(
             self.panel_w,
             self.panel_h,
@@ -1514,7 +1685,9 @@ impl Engine {
         )?;
         Ok(SizedGeometry {
             map,
-            lights,
+            reflection_map,
+            reflection_mask,
+            speculars,
             depth_grain,
             mask,
             shadow,
@@ -1765,6 +1938,7 @@ impl Engine {
 
     /// Wash colour + alpha over the refracted backdrop.
     fn set_tint(&self, wash: (f32, f32, f32, f32)) {
+        self.wash.set(wash);
         let (r, g, b, a) = wash;
         unsafe {
             self.tint_brush.SetColor(&D2D1_COLOR_F {
@@ -1779,6 +1953,10 @@ impl Engine {
     /// Draw the effect into the current backbuffer and present it. The
     /// target rebinds every frame: bitblt-model buffers rotate.
     fn render_frame(&self) -> Result<(), String> {
+        if let Some(ps) = &self.glass_ps {
+            self.present_shader(ps)?;
+            return Ok(());
+        }
         let texture: ID3D11Texture2D = unsafe {
             self.swapchain
                 .GetBuffer(0)
@@ -1821,11 +1999,60 @@ impl Engine {
         Ok(())
     }
 
+    /// Draw the panel with the shader material and present it.
+    ///
+    /// Unlike the effect graph this makes no bitmaps and composites nothing: it
+    /// copies the crop into the frost pyramid and runs one pass over the whole
+    /// buffer, so the silhouette is per-pixel and the corner cannot step.
+    fn present_shader(&self, ps: &glass_ps::GlassPs) -> Result<(), String> {
+        let source = self
+            .source_tex
+            .as_ref()
+            .ok_or("no source texture for the shader path")?;
+        let texture: ID3D11Texture2D = unsafe {
+            self.swapchain
+                .GetBuffer(0)
+                .map_err(|e| format!("swapchain GetBuffer failed: {e:?}"))?
+        };
+        let mut rtv: Option<ID3D11RenderTargetView> = None;
+        unsafe {
+            self.device.CreateRenderTargetView(&texture, None, Some(&mut rtv as *mut _))
+        }
+        .map_err(|e| format!("shader target failed: {e:?}"))?;
+        let rtv = rtv.ok_or("shader target came back empty")?;
+        let (r, g, b, a) = self.wash.get();
+        let look = glass_ps::Look::clear([r, g, b, a]);
+        ps.draw(
+            source,
+            (
+                self.panel_w + BLUR_PAD * 2,
+                self.panel_h + BLUR_PAD * 2,
+            ),
+            (self.width, self.height),
+            (self.panel_w, self.panel_h),
+            SHADOW_MARGIN,
+            BLUR_PAD,
+            CORNER_RADIUS as f32,
+            self.scale as f32,
+            &look,
+            &rtv,
+        )?;
+        ps.unbind();
+        unsafe {
+            self.swapchain
+                .Present(0, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0))
+        }
+        .ok()
+        .map_err(|e| format!("Present failed: {e:?}"))?;
+        Ok(())
+    }
+
     /// Draw the whole material into `target`. `render_frame` passes the
     /// swapchain buffer; a probe passes a CPU-readable bitmap, which is the
     /// only way to see the glass: the live window is excluded from capture.
     fn draw_frame(&self, target: &ID2D1Bitmap1) -> Result<(), String> {
-        let displace = &self.optical_output;
+        // Transmission and reflection, already blended by Fresnel weight.
+        let displace = &self.reflect_blend;
         unsafe {
             self.d2d.SetTarget(target);
             self.d2d.BeginDraw();
@@ -1872,9 +2099,19 @@ impl Engine {
                 (-ly).clamp(0.0, 1.0),
                 ly.clamp(0.0, 1.0),
             ];
-            for (light, bias) in self.lights.iter().zip(bias) {
-                let opacity = (0.75 + 0.45 * bias) * if focused { 1.0 } else { 0.6 };
-                self.d2d.DrawBitmap(light, Some(&panel), opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            // One thin highlight, on the side the light is on: a real surface
+            // has exactly one sharp reflection of the source. The rim itself is
+            // no longer painted - it is the reflected view inside the effect
+            // graph, which is a picture of the surroundings rather than light.
+            if !self.speculars.is_empty() {
+                for (spec, bias) in self.speculars.iter().zip(bias) {
+                    let weight = bias * bias;
+                    let opacity = weight * if focused { 0.85 } else { 0.3 };
+                    if opacity <= 0.02 {
+                        continue;
+                    }
+                    self.d2d.DrawBitmap(spec, Some(&panel), opacity, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+                }
             }
             if let Some(mask) = &self.mask {
                 let image: ID2D1Image = mask
@@ -2099,10 +2336,17 @@ fn dispersion_scales(bend: f32, range: f32) -> [f32; 3] {
 }
 
 /// Share of the wide frost over the pane. One value everywhere: a ramp made a
-/// short pane's middle blurrier than its ends, which read as a strip across
-/// it. Ten percent of the 8 px blur softens the backdrop without stealing the
-/// rim's bend, which the narrow `RIM_BLUR_STDDEV` already handles.
-const FROST: f32 = 0.10;
+/// short pane's middle blurrier than its ends, which read as a strip across it.
+///
+/// At 0.10 it softened a blur that was itself zero, so the pane showed the raw
+/// desktop. A frosted pane needs most of the wide blur, and the rim keeps its
+/// own sharper pass (`RIM_BLUR_STDDEV`) on top, which is why this stops short of
+/// 1.0: at full frost the bent edge lost the detail the bend is visible in.
+///
+/// 0.2, not 0.5: the frost is a small share of a small blur now. Glass bends
+/// the image, it does not sand it down - the material reads as glass because
+/// the desktop is still recognisable behind it.
+const FROST: f32 = 0.15;
 
 /// Height profile of the rim: a squircle. Vertical at the edge (t = 0), flat on
 /// top (t = 1). `1 - (1-t)^4` written without the cancellation.
@@ -2147,34 +2391,62 @@ fn lens_profile(x: f32, y: f32, w: f32, h: f32, radius: f32) -> (f32, f32, f32) 
     let px = x - w * 0.5;
     let py = y - h * 0.5;
     let radius = radius.min(w * 0.5).min(h * 0.5);
-    let qx = px.abs() - (w * 0.5 - radius);
-    let qy = py.abs() - (h * 0.5 - radius);
+    // Never more than half the pane, so the two corners cannot cross even when
+    // the radius asked for is larger than a short side can carry.
+    let extent = corner_extent(radius).min(w * 0.5).min(h * 0.5);
+    let qx = px.abs() - (w * 0.5 - extent);
+    let qy = py.abs() - (h * 0.5 - extent);
     if qx > 0.0 && qy > 0.0 {
+        // Circular corner: the distance to its centre is the distance to the
+        // boundary, and the normal is the radius direction. Shape and bevel
+        // direction come out of one function here, the way the reference
+        // implementation drives both from one distance field.
         let length = qx.hypot(qy).max(0.00001);
-        (radius - length, qx / length * px.signum(), qy / length * py.signum())
+        (
+            extent - length,
+            qx / length * px.signum(),
+            qy / length * py.signum(),
+        )
     } else if qx > qy {
-        (radius - qx, px.signum(), 0.0)
+        (extent - qx, px.signum(), 0.0)
     } else {
-        (radius - qy, 0.0, py.signum())
+        (extent - qy, 0.0, py.signum())
     }
 }
 
 fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
     let band = bezel_band(w.min(h) as f32 / scale);
+    // Depth from the true outline, direction from a box rounder than it: the
+    // outline's own normal jumps to the nearest edge a few px inside a corner,
+    // and a highlight laid on that normal shows a 45 degree seam in the corners
+    // the light does not face. Same split the displacement maps use.
+    let r_true = CORNER_RADIUS * scale;
+    let r_dir = (band * scale).max(r_true);
+    // Layers 0..4 are the specular highlights, one per edge; 4 is grain and
+    // inner shade. There is no rim light here any more: the rim is the
+    // reflected view the effect graph blends in, so nothing white is painted
+    // over the image to stand in for it.
     let mut layers = vec![Vec::with_capacity(w * h * 4); 5];
     for y in 0..h {
         for x in 0..w {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let (depth, nx, ny) = lens_profile(px, py, w as f32, h as f32, CORNER_RADIUS * scale);
+            let (depth, _, _) = lens_profile(px, py, w as f32, h as f32, r_true);
+            let (_, nx, ny) = lens_profile(px, py, w as f32, h as f32, r_dir);
             let depth = depth / scale;
-            let ridge = rim_light(depth, band);
             // Uniform along each edge: directional variation is applied once
             // per frame from the pointer light, so all four corners read the
             // same brightness instead of two lit diagonals.
             let weights = [(-nx).max(0.0), nx.max(0.0), (-ny).max(0.0), ny.max(0.0)];
-            for (layer, facing) in layers[..4].iter_mut().zip(weights) {
-                let alpha = (ridge * facing * 255.0).clamp(0.0, 255.0) as u8;
-                layer.extend_from_slice(&[alpha, alpha, alpha, alpha]);
+            let along = [
+                x as f32 / w.max(1) as f32,
+                1.0 - x as f32 / w.max(1) as f32,
+                y as f32 / h.max(1) as f32,
+                1.0 - y as f32 / h.max(1) as f32,
+            ];
+            for (index, facing) in weights.into_iter().enumerate() {
+                let streak = specular_streak(depth, along[index], band) * facing;
+                let spec = (streak * 255.0).clamp(0.0, 255.0) as u8;
+                layers[index].extend_from_slice(&[spec, spec, spec, spec]);
             }
             // Fixed zero-mean grain: no shimmer, less than one 8-bit level
             // of average modulation. Inner bottom/right shade adds depth.
@@ -2186,7 +2458,10 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
             let shade = if depth < band {
                 ((nx + ny).max(0.0) * (-depth.max(0.0) / 6.0).exp() * 0.09 * 255.0) as u8
             } else { 0 };
-            let alpha = shade.saturating_add(1);
+            // ~1.6% of a level: the dither band is 2-3% on the material it
+            // imitates, and one level out of 255 was below what a monitor can
+            // show, so it only ever broke up banding by accident.
+            let alpha = shade.saturating_add(4);
             let color = if white { 1 } else { 0 };
             layers[4].extend_from_slice(&[color, color, color, alpha]);
         }
@@ -2194,21 +2469,135 @@ fn surface_layers(w: usize, h: usize, scale: f32) -> Vec<Vec<u8>> {
     layers
 }
 
-fn rim_light(depth: f32, band: f32) -> f32 {
-    // Peak at the boundary, never an offset ridge/double outline. A
-    // narrow specular hairline sits on a wider glow; the glow is what
-    // makes the pane read as thick glass under a moving light.
-    let depth = depth.max(0.0);
-    if depth >= band { return 0.0; }
-    // The hairline is a highlight lying on the edge: its width comes from the
-    // light, so it stays in px. The glow is the pane's thickness seen edge-on,
-    // so it scales with the band - at 56 px this is the 14 px it always was,
-    // and on the 21 px dock it no longer floods two thirds of the band.
-    let hairline = 0.34 * (-(depth / 0.9).powi(2)).exp();
-    let glow = 0.055 * (-depth / (0.25 * band.max(1.0))).exp();
-    // Fade the outer 15% instead of cutting at the band: the cut left a
-    // 3/255 step in the middle row of the dock, a faint second line.
-    (hairline + glow) * ((1.0 - depth / band) / 0.15).min(1.0)
+/// Sampling map for the reflected view: what the band shows instead of the
+/// desktop straight behind it.
+///
+/// A pane's edge is a mirror at grazing incidence, so the rim does not show a
+/// brighter version of the middle - it shows the world *around* the pane,
+/// folded over the curve. Vectors here point outward, at full strength on the
+/// border and to nothing at the band's end: that is what squeezes the
+/// surroundings into the band instead of continuing the backdrop across it, and
+/// it is the reason a real pane looks like an object floating over the desktop
+/// rather than a tinted rectangle lying on it.
+///
+/// The wrap term slides the vectors toward the corners, so the environment
+/// arrives around the body instead of only straight across each edge.
+///
+/// Encoded like the lens map: B unused, G is the Y offset, R the X offset, 128
+/// is no shift, 255 is opaque.
+fn reflect_bytes(w: usize, h: usize, scale: f32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * 4);
+    let (pw, ph) = (w as f32, h as f32);
+    let (half_w, half_h) = (pw * 0.5, ph * 0.5);
+    let band = bezel_band(pw.min(ph) / scale) * scale;
+    let r_true = (CORNER_RADIUS * scale).min(half_w).min(half_h);
+    // Direction comes from a box rounder than the outline: the outline's own
+    // normal jumps to the nearest edge a few px inside a corner, which fans the
+    // band apart there.
+    let r_dir = band.max(r_true).min(half_w).min(half_h);
+    for y in 0..h {
+        let py = y as f32 + 0.5;
+        for x in 0..w {
+            let px = x as f32 + 0.5;
+            let (depth, _, _) = lens_profile(px, py, pw, ph, r_true);
+            let t = (depth / band).clamp(0.0, 1.0);
+            if t >= 1.0 {
+                out.extend_from_slice(&[0, 128, 128, 255]);
+                continue;
+            }
+            let (_, nx, ny) = lens_profile(px, py, pw, ph, r_dir);
+            let taper = corner_taper(nx, ny);
+            // Convicted to the outer share of the band, and falling as a fourth
+            // power: the squeeze has to be near the border to read as an edge,
+            // and a linear ramp spread it over the whole 33-56 px band, which
+            // looks like fog rather than glass.
+            let t = (t / REFLECT_NARROW).clamp(0.0, 1.0);
+            let fell = 1.0 - t;
+            let strength = fell * fell * fell * fell * taper;
+            let ux = (px - half_w) / half_w;
+            let uy = (py - half_h) / half_h;
+            let mut vx = nx + REFLECT_WRAP * ux * ny.abs();
+            let mut vy = ny + REFLECT_WRAP * uy * nx.abs();
+            // One band is the furthest any read reaches, so the corners cannot
+            // gather past the pane's own surroundings.
+            let len = (vx * vx + vy * vy).sqrt();
+            if len > 1.0 {
+                vx /= len;
+                vy /= len;
+            }
+            let (vx, vy) = (vx * strength, vy * strength);
+            out.extend_from_slice(&[
+                0,
+                (128.0 + vy * 127.0).round().clamp(0.0, 255.0) as u8,
+                (128.0 + vx * 127.0).round().clamp(0.0, 255.0) as u8,
+                255,
+            ]);
+        }
+    }
+    out
+}
+
+/// Weight of the reflected view: the Fresnel term, as an alpha mask for the
+/// blend. Strong on the border, gone before the band's inner end, so the
+/// reflection wraps the rim and never lands on the text.
+fn reflection_mask_bytes_for(w: usize, h: usize, scale: f32) -> Vec<u8> {
+    let band = bezel_band(w.min(h) as f32 / scale);
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let (depth, _, _) = lens_profile(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                w as f32,
+                h as f32,
+                CORNER_RADIUS * scale,
+            );
+            let weight = fresnel_band(depth / scale, band) * REFLECT_MAX;
+            let value = (weight * 255.0).round().clamp(0.0, 255.0) as u8;
+            out.extend_from_slice(&[value, value, value, value]);
+        }
+    }
+    out
+}
+
+/// Fresnel share of the pane: how much of the surrounding world its edge
+/// reflects instead of transmitting.
+///
+/// Light hitting a surface at a grazing angle reflects almost entirely; light
+/// coming straight through passes. A pane's outer band is exactly where the
+/// surface turns away from the eye, so the rim is a mirror and the middle is a
+/// window - which is the whole reason glass reads as a body with thickness.
+/// `(1 - cos)^3` is the shape the reference material evaluates per pixel; here
+/// `cos` is replaced by the normalised depth into the band, so the mirror takes
+/// over only in the last stretch of the rim and never tinting the interior.
+fn fresnel_band(depth: f32, band: f32) -> f32 {
+    let band = band.max(1e-3);
+    if depth >= band {
+        return 0.0;
+    }
+    let t = (depth / band).clamp(0.0, 1.0);
+    (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+/// The specular highlight: light reflected off the curved edge, sitting on the
+/// border itself rather than spread across the band.
+///
+/// `depth` is distance from that edge in px, `along` is the position across the
+/// edge (0..1), `band` sizes the highlight. It is a narrow line whose brightness
+/// fades toward both corners, so a lit edge reads as a spot of light travelling
+/// around the body as the pointer moves, not as an outlined rectangle.
+fn specular_streak(depth: f32, along: f32, band: f32) -> f32 {
+    if depth < 0.0 {
+        return 0.0;
+    }
+    // Width in px, like the hairline it is: scaling it with the band turned a
+    // short pane's highlight into a second glow.
+    // About 1.2 px of sigma. The reference pane's rim is a few device px at any
+    // size, and at 2 px sigma this read as a soft spot smeared around the body.
+    let width = (band * 0.02).clamp(0.8, 1.5);
+    let line = (-(depth / width).powi(2)).exp();
+    let centre = 1.0 - (2.0 * along.clamp(0.0, 1.0) - 1.0).abs();
+    line * centre.powf(0.55)
 }
 
 fn backdrop_grid(pixels: &[u8], w: usize, h: usize, wash: (f32, f32, f32, f32)) -> Vec<[f32; 4]> {
@@ -2299,6 +2688,20 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
                 let pull = RIM_PULL * band_logical * falloff * taper;
                 (-nx * pull, -ny * pull)
             };
+            // Turbulence: the bend is wobbled across the band and swung along
+            // the border, so the rim reads as poured glass rather than a
+            // generated gradient. It fades with the pull, so the band's end and
+            // the flat middle are untouched.
+            let turb = rim_turbulence(px - half_w, py - half_h) * (1.0 - t);
+            let (mut radial_x, mut radial_y) = (radial_x, radial_y);
+            radial_x *= 1.0 + RIM_TURBULENCE * turb;
+            radial_y *= 1.0 + RIM_TURBULENCE * turb;
+            // The swing reuses the fan's own directions, so the wobble travels
+            // along the border the same way the fan does and stays mirror-
+            // symmetric with it.
+            let swing = RIM_TURBULENCE_TANGENT * band_logical * turb;
+            radial_x += swing * (px - half_w) / half_w * ny.abs();
+            radial_y += swing * (py - half_h) / half_h * nx.abs();
             // Middle zoom is not here: it is a source-space scale drawn per
             // frame, so no lens animation can move it.
             // Fan: what the radial read gathers is also carried along the
@@ -2329,17 +2732,24 @@ fn bezel_bytes_scaled(w: usize, h: usize, scale: f32) -> Vec<u8> {
     out
 }
 
-/// Same sampled continuous corner feeds GDI regions and the CSS polygon.
+/// Same sampled continuous corner feeds the window region and the CSS polygon.
 /// Offsets are logical pixels from each corner; no independent CSS radius.
-/// Circular arc: a quarter circle of radius R removes 0.293R at the
-/// diagonal. The earlier sqrt-cos profile removed only 0.159R there,
-/// which read as a nearly square corner despite the radius.
+///
+/// The curve is the circular arc `lens_profile` describes: at angle `a` the
+/// boundary point is `(r - r cos a, r - r sin a)`, i.e. each sample is `r`
+/// along the corner's own bisector. The polygon sags below the true arc by
+/// `r (1 - cos(45/24 deg))`, which at 48 samples is 0.006 px on an 8 px corner
+/// and 0.011 px on the 16 px one - measured, not assumed, because a polygon is
+/// the obvious suspect for a stepped corner and here it is not the culprit.
 fn corner_offsets() -> Vec<(f32, f32)> {
     const SAMPLES: u32 = 48;
+    let extent = corner_extent(CORNER_RADIUS as f32);
     (0..=SAMPLES).map(|i| {
         let angle = i as f32 / SAMPLES as f32 * std::f32::consts::FRAC_PI_2;
         let (sin, cos) = angle.sin_cos();
-        (CORNER_RADIUS * (1.0 - cos), CORNER_RADIUS * (1.0 - sin))
+        // The same circular arc `lens_profile` describes, so the page's clip and
+        // the material's silhouette are one curve.
+        (extent - extent * cos, extent - extent * sin)
     }).collect()
 }
 
@@ -2360,23 +2770,21 @@ pub(crate) fn lens_clip_css() -> String {
 }
 
 /// Panel-sized premultiplied alpha mask for the rounded silhouette.
-/// Analytic signed distance to a rounded rectangle, 1 px coverage ramp,
-/// so the compositor blends a smooth arc instead of a binary GDI region.
+///
+/// The coverage is `saturate(depth + 0.5)`: a ramp exactly one device pixel
+/// wide, centred on the contour, from the SAME `lens_profile` the bevel, the
+/// rim and the reflection are placed with. Nothing here is sampled, polygonised
+/// or snapped to a whole pixel, so the corner stays a curve at any radius - the
+/// alternative (a window region, or the system's own rounding) is a hard,
+/// one-bit edge and is what made a larger corner look stepped.
 fn rounded_mask(w: u32, h: u32, scale: f32, radius_logical: f32) -> Vec<u8> {
-    let rw = w as f32;
-    let rh = h as f32;
-    let half_w = rw * 0.5;
-    let half_h = rh * 0.5;
-    let r = (radius_logical * scale).min(half_w).min(half_h).max(0.0);
-    let inset_x = (half_w - r).max(0.0);
-    let inset_y = (half_h - r).max(0.0);
+    let (fw, fh) = (w as f32, h as f32);
+    let radius = radius_logical * scale;
     let mut out = vec![0u8; w as usize * h as usize * 4];
     for y in 0..h {
-        let qy = (y as f32 + 0.5 - half_h).abs() - inset_y;
         for x in 0..w {
-            let qx = (x as f32 + 0.5 - half_w).abs() - inset_x;
-            let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
-            let coverage = (0.5 - outside).clamp(0.0, 1.0);
+            let (depth, _, _) = lens_profile(x as f32 + 0.5, y as f32 + 0.5, fw, fh, radius);
+            let coverage = (depth + 0.5).clamp(0.0, 1.0);
             let a = (coverage * 255.0).round() as u8;
             let i = (y as usize * w as usize + x as usize) * 4;
             out[i..i + 4].copy_from_slice(&[a, a, a, a]);
@@ -2406,19 +2814,21 @@ fn shadow_bytes(
         .min(panel_w as f32 * 0.5)
         .min(panel_h as f32 * 0.5)
         .max(0.0);
-    let cx = margin as f32 + panel_w as f32 * 0.5;
-    let cy = margin as f32 + panel_h as f32 * 0.5;
-    let half_w = panel_w as f32 * 0.5;
-    let half_h = panel_h as f32 * 0.5;
-    // Signed distance to the rounded panel rect.
+    // Signed distance to the panel's own silhouette, positive outside, from
+    // the same function the mask and the bevel use. The shadow used to test a
+    // plain circular corner while the pane cut a squircle one: the two curves
+    // cross inside the corner, and where the shadow's own curve fell outside
+    // the pane's the halo painted over the glass - a dark wedge in each corner
+    // that a small radius hid and a large one does not.
     let sdf = |x: f32, y: f32| {
-        let qx = (x - cx).abs() - (half_w - radius);
-        let qy = (y - cy).abs() - (half_h - radius);
-        if qx > 0.0 && qy > 0.0 {
-            qx.hypot(qy) - radius
-        } else {
-            qx.max(qy) - radius
-        }
+        let (depth, _, _) = lens_profile(
+            x - margin as f32,
+            y - margin as f32,
+            panel_w as f32,
+            panel_h as f32,
+            radius,
+        );
+        -depth
     };
     for y in 0..h {
         for x in 0..w {
@@ -2446,30 +2856,45 @@ fn shadow_bytes(
     out
 }
 
-/// Polygon points for the lens silhouette in device pixels.
-/// `grow_px` expands the circular corner radially from its centre, so the
-/// cut stays a true circle. Growing x/y independently distorted the arc
-/// (1.41 px at the diagonal, 1 px at the tangents); points may sit just
-/// outside the window rect, where Windows clips them.
-fn lens_region_points(w: u32, h: u32, scale: f64, grow_px: f64) -> Vec<(f64, f64)> {
-    let radius = (CORNER_RADIUS as f64 * scale).max(1.0);
-    let factor = (radius + grow_px) / radius;
-    let mut points = Vec::new();
-    for corner in 0..4 {
-        for (x, y) in corner_offsets() {
-            let ox = x as f64 * scale;
-            let oy = y as f64 * scale;
-            let x = radius + (ox - radius) * factor;
-            let y = radius + (oy - radius) * factor;
-            points.push(match corner {
-                0 => (x, y),
-                1 => (w as f64 - y, x),
-                2 => (w as f64 - x, h as f64 - y),
-                _ => (y, h as f64 - x),
-            });
+/// Clip the page's window to the panel box, generous by a couple of pixels.
+///
+/// The silhouette is NOT drawn here. It used to be: this window carried a GDI
+/// polygon region of the panel's outline, ~1.5 px outside it, and a region has
+/// no anti-aliasing at all - GDI fills its boundary in whole pixels. So on
+/// every straight side the panel's edge was that polygon's, a pixel outside the
+/// material, and each corner was a staircase of 48 chords. That is why a larger
+/// radius looked worse and why the same panel looked right the moment the
+/// system rounded the window instead.
+///
+/// The shape belongs to the material: the swapchain's mask carries a one
+/// pixel-wide analytic ramp, and the page clips itself with the matching
+/// polygon. All this window needs is to stop compositing the parts of its
+/// permanently max-panel-sized surface that hold nothing, and a rectangle just
+/// outside the panel does that without touching either edge.
+const PANEL_REGION_SLACK: i32 = 2;
+
+fn apply_panel_region(hwnd: isize, w: u32, h: u32) -> bool {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+    let (ox, oy) = client_origin_in_window(hwnd);
+    let region = unsafe {
+        CreateRectRgn(
+            ox - PANEL_REGION_SLACK,
+            oy - PANEL_REGION_SLACK,
+            ox + w as i32 + PANEL_REGION_SLACK,
+            oy + h as i32 + PANEL_REGION_SLACK,
+        )
+    };
+    if region.is_null() {
+        return false;
+    }
+    unsafe {
+        if SetWindowRgn(hwnd as _, region, 1) == 0 {
+            // The system only owns the region on success.
+            DeleteObject(region);
+            return false;
         }
     }
-    points
+    true
 }
 
 /// Offset of the client area's origin inside the window's own coordinates.
@@ -2518,24 +2943,6 @@ fn apply_glass_region(hwnd: isize, w: u32, h: u32) -> bool {
 /// margin its shadow falls into on every side.
 fn glass_region_size(w: u32, h: u32) -> (u32, u32) {
     (w + SHADOW_MARGIN * 2, h + SHADOW_MARGIN * 2)
-}
-
-fn apply_lens_region(hwnd: isize, w: u32, h: u32, scale: f64, grow_px: f64) -> bool {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::Graphics::Gdi::{CreatePolygonRgn, SetWindowRgn, DeleteObject, WINDING};
-    let (ox, oy) = client_origin_in_window(hwnd);
-    let points: Vec<POINT> = lens_region_points(w, h, scale, grow_px)
-        .into_iter()
-        .map(|(x, y)| POINT {
-            x: ox + x.round() as i32,
-            y: oy + y.round() as i32,
-        })
-        .collect();
-    unsafe {
-        let region = CreatePolygonRgn(points.as_ptr(), points.len() as i32, WINDING);
-        if region.is_null() { return false; }
-        if SetWindowRgn(hwnd as _, region, 1) == 0 { DeleteObject(region); false } else { true }
-    }
 }
 
 /// Worker-owned capture: duplication session + full-frame GPU mirror.
@@ -3885,14 +4292,61 @@ mod tests {
         // as a blurrier strip than its neighbour.
         assert_eq!(left[0], centre[0], "frost must be even at the rim");
         let range = super::lens_range(w as u32, h as u32, 1.0);
-        assert_eq!(super::dispersion_scales(1.0, range), [super::bend_scale(range); 3]);
+        // Three channels, three slightly different shifts: real dispersion is
+        // a few percent, ordered red over green over blue.
+        let scales = super::dispersion_scales(1.0, range);
+        let bend = super::bend_scale(range);
+        assert!(scales[0] > scales[1] && scales[1] > scales[2]);
+        // 5% per channel is the tuned fringe: enough to see a rim split into
+        // colour, far below the shift itself so the bend does not rainbow apart.
+        for scale in scales {
+            assert!((scale - bend).abs() < bend * 0.08, "dispersion must stay a fringe");
+        }
         assert_eq!(super::dispersion_scales(0.0, range), [0.0; 3]);
         let matrix = super::saturation_matrix(super::SATURATION);
         for output in 0..3 {
             let neutral: f32 = (0..3).map(|input| matrix[input * 4 + output] * 0.5).sum();
             assert!((neutral - 0.5).abs() < 0.0001, "vibrancy must preserve gray");
         }
-        assert!((super::FROST - 0.10).abs() < 1e-6, "frost is ten percent");
+        // The pane must be frosted, and not so hard that the rim's own pass is
+        // pointless: the frost is what carries text legibility, the rim blur is
+        // what keeps the bend readable.
+        // Clear glass: the desktop has to stay recognisable through it, so the
+        // frost is a small share of a small blur. The edge optics carry the
+        // material, the frost only stops the pane looking like a cut-out hole.
+        assert!(
+            super::FROST >= 0.1 && super::FROST <= 0.35,
+            "the frost must not fog the pane: {}",
+            super::FROST
+        );
+        assert!(
+            super::BLUR_STDDEV <= 2.5,
+            "glass bends the image, it does not sand it down: {}",
+            super::BLUR_STDDEV
+        );
+        // The two layers that make the edge read as a body rather than a tinted
+        // sheet, checked as shapes so a retune cannot silently remove them.
+        let band = 56.0;
+        assert_eq!(super::fresnel_band(0.0, band), 1.0, "the border is a mirror");
+        assert_eq!(super::fresnel_band(band, band), 0.0, "the middle transmits");
+        assert!(super::fresnel_band(band * 0.5, band) < 0.2, "fresnel stays in the rim");
+        let mut previous = super::fresnel_band(0.0, band);
+        for step in 1..=10 {
+            let current = super::fresnel_band(step as f32 / 10.0 * band, band);
+            assert!(current <= previous, "fresnel must fall away from the edge");
+            previous = current;
+        }
+        // A highlight sits on the border, is a few px wide, and fades toward the
+        // corners so a lit edge reads as a spot, not an outlined rectangle.
+        assert!(super::specular_streak(0.0, 0.5, band) > 0.9, "peak on the border");
+        assert!(
+            super::specular_streak(6.0, 0.5, band) < 0.05,
+            "the highlight must not smear across the band"
+        );
+        assert!(
+            super::specular_streak(0.0, 0.0, band) < 0.05,
+            "it must fade out at the corner"
+        );
     }
 
     /// Real effect-graph readback. Explicit opt-in: needs a Windows GPU and
@@ -4452,7 +4906,10 @@ mod tests {
         }
         let (d1, _, _) = super::lens_profile(8.0, 0.0, 160.0, 96.0, 8.0);
         let (d2, _, _) = super::lens_profile(16.0, 0.0, 320.0, 192.0, 16.0);
-        assert_eq!(d1, d2);
+        // At twice the size the depth is twice as large, not the same number.
+        // (Exact equality held while the corner was a circular arc by luck of
+        // where the subtraction cancelled; it is a coincidence, not a rule.)
+        assert!((d1 * 2.0 - d2).abs() < 1e-4, "{d1} vs {d2}");
         assert!(super::lens_clip_css().starts_with("polygon("));
     }
 
@@ -4582,10 +5039,19 @@ mod tests {
     /// folds a band this wide into a fan.
     #[test]
     fn the_rim_direction_comes_from_a_rounder_box_than_its_depth() {
-        let (w, h) = (160.0, 96.0);
-        let r = super::CORNER_RADIUS;
+        // A box large enough that neither corner is clamped by the panel's own
+        // half size, and a point just inside the true corner but well within
+        // the rounder box's: the true outline's normal has already snapped to
+        // an axis there, while the rounder box is still turning.
+        // A small outline radius on a large box, so the point can be clear of
+        // the true corner (axis-aligned normal) while still deep inside the
+        // rounder box's corner (a turning one). The radius is stated here
+        // rather than taken from the panel's, because what is under test is the
+        // split between depth and direction, not the shipped corner size.
+        let (w, h) = (400.0, 400.0);
+        let r = 8.0;
         let r_dir = super::BEZEL_MARGIN.max(r);
-        let (x, y) = (20.0, 20.0);
+        let (x, y) = (40.0, 40.0);
         let (depth, tx, ty) = super::lens_profile(x, y, w, h, r);
         assert!(depth > 10.0, "the point must be inside the pane, got {depth}");
         assert!(tx == 0.0 || ty == 0.0, "the outline's own normal is axis aligned: {tx},{ty}");
@@ -4609,37 +5075,6 @@ mod tests {
             previous = current;
         }
         assert_eq!(super::rim_shift(1.0, band, thickness), 0.0);
-    }
-
-    #[test]
-    fn silhouette_growth_only_expands_the_cut() {
-        let base = super::lens_region_points(700, 441, 1.0, 0.0);
-        let grown = super::lens_region_points(700, 441, 1.0, super::SILHOUETTE_GROW_PX);
-        assert_eq!(base.len(), grown.len());
-        let radius = super::CORNER_RADIUS as f64;
-        let per_corner = super::corner_offsets().len();
-        for (i, ((bx, by), (gx, gy))) in base.iter().zip(&grown).enumerate() {
-            let (cx, cy) = match i / per_corner {
-                0 => (radius, radius),
-                1 => (700.0 - radius, radius),
-                2 => (700.0 - radius, 441.0 - radius),
-                _ => (radius, 441.0 - radius),
-            };
-            let before = (bx - cx).hypot(by - cy);
-            let after = (gx - cx).hypot(gy - cy);
-            assert!(
-                (after - before - super::SILHOUETTE_GROW_PX).abs() < 0.001,
-                "corner {i} grew {before} -> {after}"
-            );
-            // The grown region may poke slightly past the panel box (grow is
-            // a device-pixel margin), so allow SILHOUETTE_GROW_PX + a pixel of
-            // rounding on every side.
-            let m = super::SILHOUETTE_GROW_PX + 1.0;
-            assert!(
-                *gx >= -m && *gy >= -m && *gx <= 700.0 + m && *gy <= 441.0 + m,
-                "grown point {gx},{gy} escaped the panel box by more than {m}"
-            );
-        }
     }
 
     /// Contact shadow stays clear under the panel and fades outward, so it
@@ -4674,26 +5109,6 @@ mod tests {
         assert!(profile[4] < profile[0], "no falloff inside the contact band");
     }
 
-    /// The region polygon spans the whole panel box, so translating it onto
-    /// the client origin (`client_origin_in_window`) lands its straight
-    /// edges on the client's far edges. Anchored at the window origin
-    /// instead, the region shaved the invisible frame width off the page's
-    /// right and bottom.
-    #[test]
-    fn region_polygon_spans_the_full_panel_box() {
-        let (w, h) = (700u32, 441u32);
-        let points = super::lens_region_points(w, h, 1.0, 0.0);
-        let (min_x, max_x) = points
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.0), hi.max(p.0)));
-        let (min_y, max_y) = points
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
-        assert!(min_x <= 0.0 && min_y <= 0.0, "box origin not covered");
-        assert!(max_x >= f64::from(w), "right edge short: {max_x}");
-        assert!(max_y >= f64::from(h), "bottom edge short: {max_y}");
-    }
-
     #[test]
     fn local_tint_is_bounded_and_preserves_backdrop_hue() {
         let grid = super::backdrop_grid(&bgra(30, 60, 180, 64 * 64), 64, 64, (0.4, 0.4, 0.4, 0.2));
@@ -4709,38 +5124,57 @@ mod tests {
     }
 
     #[test]
-    fn rim_is_a_fading_glint_not_an_inset_outline() {
-        let band = super::BEZEL_MARGIN;
-        let mut previous = super::rim_light(0.0, band);
-        for step in 1..=320 {
-            let current = super::rim_light(step as f32 / 10.0, band);
-            assert!(current <= previous, "secondary ridge at depth {}", step as f32 / 10.0);
+    fn the_rim_shows_the_world_outside_the_pane() {
+        // The rim is an image of the surroundings, not a highlight: the band
+        // has to sample the desktop *around* the panel while its middle passes
+        // the backdrop straight through.
+        let (w, h) = (160usize, 96usize);
+        let map = super::reflect_bytes(w, h, 1.0);
+        let at = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            (map[i + 2] as i32 - 128, map[i + 1] as i32 - 128)
+        };
+        let (tx, ty) = at(w / 2, 0);
+        assert!(ty < -100, "the top rim must read above the pane: {ty}");
+        assert!(tx.abs() < 20, "and straight out, not sideways: {tx}");
+        let (bx, by) = at(w / 2, h - 1);
+        assert!(by > 100, "the bottom rim must read below the pane: {by}");
+        let (lx, _) = at(0, h / 2);
+        assert!(lx < -100, "the left rim must read beside the pane: {lx}");
+        assert_eq!(at(w / 2, h / 2), (0, 0), "the middle must transmit unchanged");
+        // The read lives in the outer share of the band and falls as a fourth
+        // power, so the rim is a few px of bent desktop rather than a haze
+        // spread over 33-56 px. At 12 px in it must already be gone.
+        let (_, near_edge) = at(w / 2, 0);
+        let (_, deeper) = at(w / 2, 12);
+        assert!(deeper > near_edge, "the read must relax with depth");
+        assert!(
+            deeper.abs() * 10 < near_edge.abs(),
+            "the reflected read must fade out within the rim: {deeper} at 12 px"
+        );
+
+        // Its weight is the Fresnel term: strongest on the border, gone before
+        // the band's inner end, so nothing of it lands on the text.
+        let mask = super::reflection_mask_bytes_for(w, h, 1.0);
+        let alpha = |x: usize, y: usize| mask[(y * w + x) * 4 + 3];
+        assert!(alpha(w / 2, 0) > 180, "the border is the strongest reflection");
+        let mut previous = alpha(w / 2, 0);
+        for y in 1..20 {
+            let current = alpha(w / 2, y);
+            assert!(current <= previous, "the reflection must fade inward");
             previous = current;
         }
-        assert!(super::rim_light(2.0, band) < 0.055);
-        // The glow is the pane's edge seen on, so it scales with the band: at
-        // 10 px in, the dock's 21 px band has almost nothing left while the
-        // 56 px panel still glows.
-        assert!(
-            super::rim_light(10.0, 21.0) < super::rim_light(10.0, band) * 0.5,
-            "the glow does not follow the band"
-        );
-        // No step where the band ends: a hard cut left 3/255 on the dock.
-        assert!(super::rim_light(20.9, 21.0) < 0.002, "step at the dock's band edge");
-        assert_eq!(super::rim_light(21.0, 21.0), 0.0);
-        // Diagonal of a circular corner removes 0.293R, not the
-        // 0.159R a sqrt-cos profile did (which read as square).
+        assert_eq!(alpha(w / 2, h / 2), 0, "no reflection over the text");
+
+        // Diagonal of a circular corner removes 0.293R, not the 0.159R a
+        // sqrt-cos profile did (which read as square); the squircle keeps that
+        // bite with continuous curvature.
         let mid = super::corner_offsets();
         let (dx, dy) = mid[mid.len() / 2];
         let expected = super::CORNER_RADIUS * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
-        assert!((dx - expected).abs() < 0.01 && (dy - expected).abs() < 0.01, "corner is not circular: {dx},{dy}");
-        let layers = super::surface_layers(160, 96, 1.0);
-        let alpha = |x: usize| layers[2][(160 + x) * 4 + 3];
         assert!(
-            alpha(16) == alpha(140),
-            "top highlight must be uniform along the edge: {} vs {}",
-            alpha(16),
-            alpha(140)
+            (dx - expected).abs() < 0.01 && (dy - expected).abs() < 0.01,
+            "corner is not the continuous curve it claims: {dx},{dy}"
         );
     }
 

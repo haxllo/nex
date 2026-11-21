@@ -1872,7 +1872,19 @@ impl RuntimeWorker {
                         // the window is armed is what made the first hotkey
                         // press after an idle period take half a second.
                         let idle_show = self.overlay.query_text().trim().is_empty();
-                        if idle_show {
+                        // The prime pushes state, and the host handles a state
+                        // push as its own command - so priming first put that
+                        // command in front of UiCommand::Show. Measured on the
+                        // first show after an idle period: 135-220 ms between
+                        // this point and the host receiving Show, against 1-4 ms
+                        // when the prime had nothing to do (2026-11-21 20:12,
+                        // 23:40, 2026-11-22 01:03). Reveal first, then build the
+                        // idle content behind it; the page already holds the
+                        // rows from the previous session.
+                        let idle_content_resident = !self.quick_launch_items.is_empty();
+                        if idle_show && !idle_content_resident {
+                            // First show of the session: there is nothing to
+                            // reveal yet, so the prime has to come first.
                             self.prime_idle_content();
                         }
                         self.overlay.show_and_focus();
@@ -1881,6 +1893,9 @@ impl RuntimeWorker {
                             hotkey_at.elapsed().as_millis()
                         ));
                         if idle_show {
+                            if idle_content_resident {
+                                self.prime_idle_content();
+                            }
                             self.prepare_idle_content();
                         }
                         // Warm after the reveal: the pass protects the first

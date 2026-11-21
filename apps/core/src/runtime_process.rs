@@ -141,7 +141,7 @@ pub(crate) fn inspect_runtime_process_state() -> RuntimeProcessState {
 pub(crate) fn stop_runtime_instance(
     timeout: std::time::Duration,
 ) -> Result<StopRuntimeOutcome, RuntimeError> {
-    let mut state = inspect_runtime_process_state();
+    let state = inspect_runtime_process_state();
     if !state.has_overlay_window && state.other_runtime_pids.is_empty() {
         // No UI left, but a stray indexer may still hold the index files
         // open (e.g. quit raced the orphan watchdog). Stop it directly.
@@ -151,14 +151,19 @@ pub(crate) fn stop_runtime_instance(
         return Ok(StopRuntimeOutcome::AlreadyStopped);
     }
 
-    if state.has_overlay_window {
-        let _ = signal_existing_instance_quit(&state.other_runtime_pids).map_err(RuntimeError::Overlay)?;
-        if wait_until_overlay_window_closed(timeout) {
-            state = inspect_runtime_process_state();
-            if state.other_runtime_pids.is_empty() {
-                return Ok(stop_indexer_process());
-            }
-        }
+    // The signal needs a window to land on; a hidden instance still owns one,
+    // so ask as long as anything is alive at all.
+    let _ = signal_existing_instance_quit(&state.other_runtime_pids).map_err(RuntimeError::Overlay)?;
+    if wait_until_runtime_stopped(timeout) {
+        // It left on its own. The indexer usually goes with it, but
+        // `stop_indexer_process` then reports `AlreadyStopped`, and returning
+        // that made `--quit` announce "quit skipped (not running)" *after a
+        // successful quit* - measured twice, 2026-11-20 20:54 and 2026-11-22
+        // 01:35, both following a clean shutdown in the log.
+        return Ok(match stop_indexer_process() {
+            StopRuntimeOutcome::Failed => StopRuntimeOutcome::Failed,
+            _ => StopRuntimeOutcome::Graceful,
+        });
     }
 
     let forced = force_terminate_other_runtime_processes()?;
@@ -219,59 +224,112 @@ fn hidden_command(program: &str) -> std::process::Command {
     command
 }
 
+/// Wait until neither a Nex window nor a Nex runtime process is left.
+///
+/// Waiting for the window alone declared quit finished while the process was
+/// still winding down, and the caller then force-terminated a shutdown that
+/// only needed a moment longer.
 #[cfg(target_os = "windows")]
-fn wait_until_overlay_window_closed(timeout: std::time::Duration) -> bool {
+fn wait_until_runtime_stopped(timeout: std::time::Duration) -> bool {
     let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if !is_instance_window_present() {
+    loop {
+        let processes_gone = runtime_process_pids_excluding_current()
+            .map(|pids| pids.is_empty())
+            .unwrap_or(false);
+        let window_gone = !is_instance_window_present();
+        if window_gone && processes_gone {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        if start.elapsed() >= timeout {
+            return window_gone && processes_gone;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
     }
-    !is_instance_window_present()
 }
 
 #[cfg(target_os = "windows")]
 fn force_terminate_other_runtime_processes() -> Result<bool, RuntimeError> {
-    let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
     let mut terminated_any = false;
-    for exe_name in runtime_executable_names() {
-        let command = format!(
-            "taskkill /F /T /FI \"IMAGENAME eq {exe_name}\" /FI \"PID ne {}\" >NUL 2>&1",
-            current_pid
-        );
-        let status = hidden_command("cmd")
-            .arg("/C")
-            .arg(command)
-            .status()
-            .map_err(RuntimeError::Io)?;
-        terminated_any |= status.success();
+    for pid in runtime_process_pids_excluding_current()? {
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+        if handle.is_null() {
+            continue;
+        }
+        terminated_any |= unsafe { TerminateProcess(handle, 1) } != 0;
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
     }
     Ok(terminated_any)
 }
 
+/// Pids of every Nex runtime process except this one, matched by executable
+/// name from a single process snapshot.
+///
+/// This used to shell out to `tasklist` once per executable name: four
+/// `cmd /C` spawns, which took 3.6 s on a loaded machine (measured against a
+/// running game, 2026-11-22) and printed nothing until they returned, so
+/// `--quit` looked hung before it worked. A Toolhelp snapshot is one call, no
+/// console window, and it cannot be starved by a cold page cache.
 #[cfg(target_os = "windows")]
 fn runtime_process_pids_excluding_current() -> Result<Vec<u32>, RuntimeError> {
+    let wanted: Vec<String> = runtime_executable_names()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    process_pids_named(&wanted)
+}
+
+/// True while a process with this executable name is running (excluding us).
+///
+/// Used by the helper shutdown to tell "it left through its message loop" from
+/// "it is wedged and has to be terminated", which is the difference between
+/// cleanly unhooked input hooks and a stalled input queue.
+#[cfg(target_os = "windows")]
+pub(crate) fn process_alive_by_name(exe_name: &str) -> bool {
+    process_pids_named(&[exe_name.to_ascii_lowercase()])
+        .map(|pids| !pids.is_empty())
+        .unwrap_or(true)
+}
+
+#[cfg(target_os = "windows")]
+fn process_pids_named(wanted: &[String]) -> Result<Vec<u32>, RuntimeError> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
     let current_pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
-    let mut pids = Vec::new();
-    for exe_name in runtime_executable_names() {
-        let output = hidden_command("cmd")
-            .arg("/C")
-            .arg(format!(
-                "tasklist /FI \"IMAGENAME eq {exe_name}\" /FO LIST /NH"
-            ))
-            .output()
-            .map_err(RuntimeError::Io)?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        pids.extend(parse_tasklist_pid_lines(&stdout));
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err(RuntimeError::Io(std::io::Error::last_os_error()));
     }
-    pids.retain(|pid| *pid != current_pid);
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut pids = Vec::new();
+    let mut found = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while found {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = OsString::from_wide(&entry.szExeFile[..len])
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        if entry.th32ProcessID != current_pid && wanted.iter().any(|w| *w == name) {
+            pids.push(entry.th32ProcessID);
+        }
+        found = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
     pids.sort_unstable();
     pids.dedup();
     Ok(pids)
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn parse_tasklist_pid_lines(content: &str) -> Vec<u32> {
     content
         .lines()

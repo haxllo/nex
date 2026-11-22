@@ -46,6 +46,48 @@ Two rows deserve emphasis because they are easy to miss:
   `Superseded by ADR-XXXX`. Do not edit an accepted ADR. Its text is the only
   record of why the previous shape was chosen.
 
+## The rule has a gate behind it
+
+`scripts/check-docs-currency.sh` fails when a source file that cannot change
+without making a document wrong has changed without that document changing too.
+CI runs it on every pull request, before the build, so it fails in seconds rather
+than after an hour.
+
+The gate only covers the pairs where the link is certain. Everything in the
+trigger table above is still your job; the script is a floor, not the standard.
+
+Current coverage:
+
+```bash
+scripts/check-docs-currency.sh --list
+```
+
+### When the change genuinely does not affect the document
+
+A refactor that moves a function without changing its behaviour, a comment, a
+private helper: the file changed, the document did not need to. Say so, and skip
+the gate:
+
+```bash
+NEX_ALLOW_STALE_DOCS=1 scripts/check-docs-currency.sh <changed files>
+```
+
+In CI the same switch is read from the pull request body. Put this line in it:
+
+```
+NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>
+```
+
+That is the whole escape hatch, and it is deliberately awkward in one respect: it
+leaves a written reason next to the pull request. A bypass with no stated reason
+is indistinguishable from an oversight, and the next reader cannot tell which one
+they are looking at.
+
+Do not reach for it because updating a document is tedious. The gate covers
+fourteen files; if one of them is genuinely encouraging a false positive on every
+touch, remove that row from `RULES` in the script and say why, rather than
+teaching people to bypass the whole gate.
+
 ## Three documents are build inputs
 
 These are not ordinary documentation and must not be reorganised on a whim.

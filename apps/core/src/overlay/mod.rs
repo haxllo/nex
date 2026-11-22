@@ -42,6 +42,8 @@ pub(crate) mod icon_disk_cache;
 pub(crate) mod model;
 #[cfg(target_os = "windows")]
 pub(crate) mod platform;
+
+pub(crate) mod probe;
 #[cfg(target_os = "windows")]
 pub(crate) mod shim;
 #[cfg(target_os = "windows")]

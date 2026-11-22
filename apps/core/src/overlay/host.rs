@@ -262,11 +262,44 @@ document.addEventListener('contextmenu', function (event) {
 "#;
 /// Commands the shim posts to the UI thread via the event-loop proxy.
 #[derive(Debug, Clone)]
+/// Times one UI command and logs it if it held the thread (CIQ-236).
+///
+/// A slow command here is what stalls the *global* low-level hook chain:
+/// Windows calls this thread's hook proc on this thread's pump, and the
+/// helper's proc waits behind it, so a blocked loop delays the Win key by
+/// seconds rather than by the cost of the command.
+struct SlowCmd {
+    label: &'static str,
+    at: Instant,
+}
+
+impl SlowCmd {
+    fn new(label: &'static str) -> Self {
+        Self { label, at: Instant::now() }
+    }
+}
+
+impl Drop for SlowCmd {
+    fn drop(&mut self) {
+        let ms = self.at.elapsed().as_millis();
+        if ms >= 60 {
+            crate::runtime::log_info(&format!(
+                "[nex][probe] ui_cmd_slow cmd={} ms={ms}",
+                self.label
+            ));
+        }
+    }
+}
+
 pub(crate) enum UiCommand {
     /// The web page finished loading and registered `window.nex`.
     WebviewReady,
     /// Re-push the current [`ShimState`] snapshot to the page.
     Apply,
+    /// Watchdog tick carrying the microsecond stamp of when it was sent
+    /// (CIQ-236). The delay between send and handling is the UI thread being
+    /// unavailable, which is what a slow show actually looks like.
+    ProbeTick(u64),
     /// Icons decoded in the background are now cached — re-send the
     /// icon data JSON so the page can patch placeholder <img> elements.
     /// The payload contains only newly decoded icon paths, avoiding a
@@ -541,6 +574,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Show-path latency telemetry: stamped on UiCommand::Show receipt,
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
+    // CIQ-236: per-step cost of the reveal tail, which runs on the UI thread.
+    let mut reveal_push_us = 0_u64;
+    let mut reveal_focus_us = 0_u64;
+    let mut reveal_input_us = 0_u64;
     let mut show_arm_at: Option<Instant> = None;
     // Previously-foregrounded windows, newest last (capped). Pushed on
     // Show and on every genuine focus loss; drained (dead pruned) on
@@ -631,6 +668,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .ok();
     let warm_release_arm = warm_release_tx.clone();
 
+    // UI-thread watchdog (CIQ-236). 50 ms is well inside the frame budget, so
+    // a tick that arrives late means the loop was not running at all.
+    let watchdog_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-ui-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if !LOOP_ALIVE.load(Ordering::SeqCst) {
+                break;
+            }
+            let sent_us = super::probe::tick_sent();
+            if watchdog_proxy
+                .send_event(UiCommand::ProbeTick(sent_us))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .ok();
+
     LOOP_ALIVE.store(true, Ordering::SeqCst);
     let mut chat_picker_generation = 0_u64;
     let mut chat_picker_listing: Option<super::file_picker::ChatPickerDirectory> = None;
@@ -641,6 +698,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             match event {
                 Event::UserEvent(cmd) => match cmd {
                     UiCommand::WebviewReady => {
+                        let _slow = SlowCmd::new("WebviewReady");
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
@@ -780,6 +838,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             push_glass_ink(&webview, ink);
                         }
                     }
+                UiCommand::ProbeTick(sent_us) => {
+                    super::probe::tick_handled(sent_us);
+                }
                 UiCommand::Apply => {
                     // Push while visible — or while a show is pending: stale
                     // in-flight results (or a slow quick-launch load) are the
@@ -1213,6 +1274,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Show => {
+                    let _slow = SlowCmd::new("Show");
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     show_cmd_at = Some(Instant::now());
                     SHOW_EPOCH_MS.store(
@@ -1365,6 +1427,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
                     show_arm_at = Some(Instant::now());
+                    // CIQ-236: one line per show with everything the idle
+                    // freeze could be blamed on, so the next guess is testable.
+                    crate::overlay::probe::log("show", hwnd as *mut core::ffi::c_void, "");
                     if let Some(t0) = show_cmd_at {
                         crate::runtime::log_info(&format!(
                             "[nex] show_latency show_arm_ms={}",
@@ -1394,6 +1459,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Hide => {
+                    let _slow = SlowCmd::new("Hide");
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
                     // RIT to register it, so that when the window is hidden the
                     // newly-foreground window never sees a bare Win key — it
@@ -1414,6 +1480,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = window.set_visible(false);
                     }
                     crate::overlay::hotkey::release_mask_after_hide();
+                    // CIQ-236: this hide starts the idle period the next show
+                    // is measured against, and resets the heartbeat gap.
+                    crate::overlay::probe::note_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     // OS visibility distinguishes cloak (still "visible")
                     // from fallback real-hide; logical flag is always false
@@ -1517,6 +1586,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
 
                 UiCommand::Resize { h, immediate, src } => {
+                    let _slow = SlowCmd::new("Resize");
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
                     // A view-to-view Tab press can produce more than one of
                     // these per keypress, and a second one that lands after
@@ -1614,6 +1684,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     ));
                 }
                 UiCommand::Painted(painted) => {
+                    let _slow = SlowCmd::new("Painted");
                     let snapshot = match state.lock() {
                         Ok(s) => s.clone(),
                         Err(_) => return,
@@ -1663,6 +1734,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 t0.elapsed().as_millis()
                             ));
                         }
+                        // CIQ-236: the page says how long it took from
+                        // receiving the show state to painting it, which
+                        // separates "the page never woke" from "the page ran
+                        // and the compositor was late".
+                        let page_side = format!(
+                            " since_recv_ms={} painted_gap_ms={}",
+                            painted.since_recv_ms, painted.painted_gap_ms
+                        );
+                        crate::overlay::probe::log("painted", hwnd as *mut core::ffi::c_void, &page_side);
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.
@@ -1755,7 +1835,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     if let Ok(mut s) = state.lock() {
                                         s.glass_frame_ready = true;
                                     }
+                                    let t = std::time::Instant::now();
                                     push_state(&webview, &state, &icon_cache, false);
+                                    reveal_push_us = t.elapsed().as_micros() as u64;
                                 }
                             }
                         }
@@ -1763,7 +1845,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // restore DOM focus to the WebView's search control.
                         // Foreground activation alone can leave focus on the
                         // previous window or the host HWND during first show.
+                        let t_focus = std::time::Instant::now();
                         let _ = window.set_focus();
+                        reveal_focus_us = t_focus.elapsed().as_micros() as u64;
                         // Re-assert topmost Z-position. When the overlay
                         // Explorer from exposing the taskbar. Depending on
                         // WebView2/tao focus notifications, the next show can
@@ -1793,7 +1877,25 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
                             );
                         }
+                        let t_input = std::time::Instant::now();
                         focus_input(&webview);
+                        reveal_input_us = t_input.elapsed().as_micros() as u64;
+                        // CIQ-236: the reveal tail runs on the UI thread, and a
+                        // WebView2 call that waits on the renderer blocks the
+                        // whole loop - including the low-level hook, which
+                        // Windows calls on this thread's pump. That is how a
+                        // 470 ms block here becomes a seconds-late Win press.
+                        let tail_ms = reveal_push_us / 1_000
+                            + reveal_focus_us / 1_000
+                            + reveal_input_us / 1_000;
+                        if tail_ms >= 25 {
+                            crate::runtime::log_info(&format!(
+                                "[nex][probe] reveal_tail push_state_ms={} set_focus_ms={} focus_input_ms={}",
+                                reveal_push_us / 1_000,
+                                reveal_focus_us / 1_000,
+                                reveal_input_us / 1_000
+                            ));
+                        }
                         if let Some(t0) = show_cmd_at.take() {
                             let fg_owned = unsafe { GetForegroundWindow() == hwnd };
                             crate::runtime::log_info(&format!(
@@ -2559,6 +2661,10 @@ fn handle_ipc(
             let (h, immediate) = p.v.height_and_immediate();
             let src = p.v.src();
             try_send_ui(proxy, UiCommand::Resize { h, immediate, src });
+        }
+        OverlayMessage::Heartbeat(payload) => {
+            // CIQ-236: a gap here means the page stopped running while hidden.
+            crate::overlay::probe::note_heartbeat(payload.v);
         }
         OverlayMessage::Painted(payload) => {
             // First paint after push_state — safe to show the window.

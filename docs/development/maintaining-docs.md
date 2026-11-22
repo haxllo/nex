@@ -78,9 +78,9 @@ In CI the same switch is read from the pull request body. Put this line in it:
 NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>
 ```
 
-That is the whole escape hatch, and it is deliberately awkward in one respect: it
-leaves a written reason next to the pull request. A bypass with no stated reason
-is indistinguishable from an oversight, and the next reader cannot tell which one
+The reason is not optional. A bare `NEX_ALLOW_STALE_DOCS=1` with nothing after
+the colon fails the gate, because a bypass with no stated judgment is
+indistinguishable from an oversight, and the next reader cannot tell which one
 they are looking at.
 
 Do not reach for it because updating a document is tedious. The gate covers
@@ -102,6 +102,11 @@ If you move any of the three, update the consumer in the same commit. The builds
 do not read this table.
 
 ## Finding out you are wrong
+
+The gate cannot help here. It compares changed files against changed documents, so
+it catches a document that the current change has just made wrong. It cannot catch
+a claim that was already wrong, because nothing in the change points at it. Those
+are found by reading a document against the code, and that is a human act.
 
 Not every stale claim is found by the person who made it stale. If you read a
 document that contradicts the code and you were not asked to fix it, you have three

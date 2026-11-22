@@ -76,9 +76,14 @@ jobs:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
           WINGETCREATE_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
-          $args = @('-Version', $env:VERSION)
-          if ('${{ inputs.dry_run }}' -eq 'true') { $args += '-DryRun' }
-          ./scripts/windows/publish-winget.ps1 @args
+          # Not splatted through $args: that name is a PowerShell automatic
+          # variable, and assigning to it corrupts the splat into positional
+          # arguments.
+          if ('${{ inputs.dry_run }}' -eq 'true') {
+            ./scripts/windows/publish-winget.ps1 -Version $env:VERSION -DryRun
+          } else {
+            ./scripts/windows/publish-winget.ps1 -Version $env:VERSION
+          }
 
       - name: Report
         run: |

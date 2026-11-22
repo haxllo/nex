@@ -33,6 +33,12 @@ static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
 static CONSUMED_WIN_VK: AtomicU32 = AtomicU32::new(0);
+
+/// The Win key-down's own timestamp, and the tick count when the callback saw
+/// it. Their difference is how late the mask was asked for, which is the only
+/// window in which a mask can still cancel the Start gesture.
+static WIN_DOWN_EVENT_TICK: AtomicU32 = AtomicU32::new(0);
+static WIN_DOWN_SEEN_TICK: AtomicU32 = AtomicU32::new(0);
 static CHORD_DETECTED: AtomicBool = AtomicBool::new(false);
 static WIN_KEY_RELEASED: AtomicBool = AtomicBool::new(false);
 
@@ -456,14 +462,18 @@ const VK_START_GUARD: u16 = 0xFF;
 /// any suppression window and far short of a stall.
 const STALE_PRESS_MS: u32 = 400;
 
+/// Tick count from the same clock as `KBDLLHOOKSTRUCT.time`.
+fn now_tick() -> u32 {
+    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() }
+}
+
 /// How late this event is, in ms, measured from its own timestamp.
 ///
 /// `KBDLLHOOKSTRUCT.time` is the tick count when the event happened, so this is
 /// the queue delay, not the time our own proc spent: an event that waited 5 s
 /// behind a stall reports 5000 here while the callback that sees it is fast.
 fn event_lateness_ms(event_time: u32) -> u32 {
-    let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount() };
-    lateness_between(now, event_time)
+    lateness_between(now_tick(), event_time)
 }
 
 /// `event_lateness_ms` without the clock, so the boundary is testable.
@@ -1121,6 +1131,15 @@ unsafe fn keyboard_hook_proc_inner(
                     CHORD_DETECTED.store(false, Ordering::SeqCst);
                     // Never SendInput from the hook; ask the loop instead.
                     MASK_HELD.store(true, Ordering::SeqCst);
+                    // How late the key-down itself was when we asked for the
+                    // mask. `SendInput` cannot run inside the hook proc, so the
+                    // mask reaches the shell from the injector thread, and its
+                    // only job is to kill Start *during* the press. Past this
+                    // delay the gesture is already running and the mask cannot
+                    // stop it, which makes the press one the shell has seen
+                    // unprotected. Recorded here and read at the key-up.
+                    WIN_DOWN_EVENT_TICK.store(kb.time, Ordering::SeqCst);
+                    WIN_DOWN_SEEN_TICK.store(now_tick(), Ordering::SeqCst);
                     defer_inject(INJECT_MASK_DOWN);
                 }
                 return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
@@ -1161,7 +1180,14 @@ unsafe fn keyboard_hook_proc_inner(
                         ));
                         return unsafe { CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param) };
                     }
-                    debug_log(&format!("bare Win press vk={consumed_vk} -> reporting HOTKEY"));
+                    let mask_late_ms = lateness_between(
+                        WIN_DOWN_SEEN_TICK.load(Ordering::SeqCst),
+                        WIN_DOWN_EVENT_TICK.load(Ordering::SeqCst),
+                    );
+                    debug_log(&format!(
+                        "bare Win press vk={consumed_vk} -> reporting HOTKEY (report_late={}ms mask_late={mask_late_ms}ms)",
+                        event_lateness_ms(kb.time),
+                    ));
                     // Stamped here, read by the injector thread: the gap between
                     // this key-up and the guard reaching the shell is what a
                     // suppression miss actually is.

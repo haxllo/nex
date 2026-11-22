@@ -52,8 +52,10 @@ before they do anything useful. Nex is built around three things:
 - **It searches the real disk.** A native MFT scan reads the NTFS master file
   table directly instead of walking directories, so a full-drive index is
   practical rather than a background job that never finishes.
-- **It looks like part of Windows.** Acrylic backdrop, rounded corners and a
-  contact shadow, with a CSS fallback on older builds.
+- **It looks like part of Windows.** The panel is drawn as a pane of glass: the
+  desktop behind it refracts into the edges and the rim catches light. Solid
+  black and white backgrounds are available, and anything unsupported falls back
+  to an opaque surface rather than a blank panel.
 
 ## Features
 
@@ -90,7 +92,12 @@ Press **Win**, type, press **Enter**.
 | `@apps` | Applications only |
 | `@files` | Files only |
 | `@folders` | Folders only |
-| `kind:file`, `ext:md` | Key/value filters |
+| `@actions` | Actions only |
+| `@clipboard` | Clipboard history only |
+| `ext:md`, `modified:week`, `created:month` | Field filters |
+| `OR`, `-term` | Alternative terms, excluded terms |
+
+Full syntax: [docs/user/search-syntax.md](docs/user/search-syntax.md).
 
 </details>
 
@@ -107,7 +114,7 @@ Not needed for daily use, but available:
 | `NexUIProcess.exe --status` | Check whether Nex is running |
 | `NexUIProcess.exe --quit` | Stop the running instance |
 | `NexUIProcess.exe --restart` | Restart the instance |
-| `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics zip |
+| `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics folder |
 
 </details>
 
@@ -121,13 +128,15 @@ it in `%APPDATA%\Nex\index.sqlite3`.
 
 | Setting | Default | Description |
 |---|---|---|
-| `hotkey` | `Win` (left) | Global summon shortcut |
+| `hotkey` | `Win` | Global summon shortcut |
 | `max_results` | `20` | Results shown per query |
-| `show_files` | `false` | Include files in results |
-| `show_folders` | `false` | Include folders in results |
+| `show_files` | `true` | Include files in results |
+| `show_folders` | `true` | Include folders in results |
 | `launch_at_startup` | `true` | Start with Windows |
 
-Most settings are also editable from the settings view in the panel.
+Every key, with its type and accepted range, is in
+[docs/user/settings.md](docs/user/settings.md). Most are also editable from the
+settings view in the panel.
 
 </details>
 
@@ -196,9 +205,11 @@ Settings has to live in the helper and be forwarded back over a pipe.
 apps/
 ├── core/       nex_core — the engine shared by every binary
 │   └── src/
-│       ├── overlay/    WebView2 host, hotkeys, tray, icons (tao + wry)
-│       ├── chat/       assistant, tool calling, confirmation cards
-│       ├── discovery   MFT and walkdir file discovery
+│       ├── overlay/    WebView2 host, glass, hotkeys, tray, icons (tao + wry)
+│       ├── chat.rs     assistant, tool calling, confirmation cards
+│       ├── chat_tools.rs  the tools and their confirmation classes
+│       ├── discovery.rs   discovery roots and the walkdir path
+│       ├── mft_discovery.rs  the NTFS master file table path
 │       └── ...         search, config, calculator, clipboard, updater
 ├── ui/         NexUIProcess — overlay, tray, search UI
 ├── indexer/    NexIndexerProcess — discovery and indexing
@@ -217,7 +228,7 @@ would give all three processes the same Task Manager name.
 cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess
 cargo test -p nex                        # unit tests
 cargo test -p nex --lib chat             # one module
-cargo test -p nex-indexer --test process_isolation_test   # IPC end to end
+NEX_RUN_PROCESS_ISOLATION_TEST=1 cargo test -p nex-indexer --test process_isolation_test
 ```
 
 Build output goes to `target/`. If that disk is tight, or a single-job build
@@ -242,9 +253,12 @@ Editing them without rebuilding changes nothing at runtime.
 
 ## Documentation
 
-- [Architecture notes](docs/README.md)
+- [Documentation index](docs/README.md)
+- [User guide](docs/user/install.md)
+- [Architecture decisions](docs/adr/README.md)
 - [Changelog](CHANGELOG.md)
 - [What's New](docs/whats-new.md)
+- [Contribution and agent rules](AGENTS.md)
 
 ## License
 

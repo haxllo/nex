@@ -19,5 +19,5 @@ if (-not $SkipSmoke) {
 }
 
 Write-Host '[3/3] Checklist location:' -ForegroundColor Yellow
-Write-Host 'docs/engineering/windows-runtime-validation-checklist.md' -ForegroundColor Green
+Write-Host 'docs/development/validation-checklist.md' -ForegroundColor Green
 Write-Host 'Run scripts/windows/record-manual-e2e.ps1 to capture manual pass/fail evidence.' -ForegroundColor Green

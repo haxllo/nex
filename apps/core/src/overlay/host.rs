@@ -262,6 +262,35 @@ document.addEventListener('contextmenu', function (event) {
 "#;
 /// Commands the shim posts to the UI thread via the event-loop proxy.
 #[derive(Debug, Clone)]
+/// Times one UI command and logs it if it held the thread (CIQ-236).
+///
+/// A slow command here is what stalls the *global* low-level hook chain:
+/// Windows calls this thread's hook proc on this thread's pump, and the
+/// helper's proc waits behind it, so a blocked loop delays the Win key by
+/// seconds rather than by the cost of the command.
+struct SlowCmd {
+    label: &'static str,
+    at: Instant,
+}
+
+impl SlowCmd {
+    fn new(label: &'static str) -> Self {
+        Self { label, at: Instant::now() }
+    }
+}
+
+impl Drop for SlowCmd {
+    fn drop(&mut self) {
+        let ms = self.at.elapsed().as_millis();
+        if ms >= 60 {
+            crate::runtime::log_info(&format!(
+                "[nex][probe] ui_cmd_slow cmd={} ms={ms}",
+                self.label
+            ));
+        }
+    }
+}
+
 pub(crate) enum UiCommand {
     /// The web page finished loading and registered `window.nex`.
     WebviewReady,
@@ -545,6 +574,10 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
     // Show-path latency telemetry: stamped on UiCommand::Show receipt,
     // reported when Painted reveals the window.
     let mut show_cmd_at: Option<Instant> = None;
+    // CIQ-236: per-step cost of the reveal tail, which runs on the UI thread.
+    let mut reveal_push_us = 0_u64;
+    let mut reveal_focus_us = 0_u64;
+    let mut reveal_input_us = 0_u64;
     let mut show_arm_at: Option<Instant> = None;
     // Previously-foregrounded windows, newest last (capped). Pushed on
     // Show and on every genuine focus loss; drained (dead pruned) on
@@ -665,6 +698,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
             match event {
                 Event::UserEvent(cmd) => match cmd {
                     UiCommand::WebviewReady => {
+                        let _slow = SlowCmd::new("WebviewReady");
                         crate::runtime::log_info(&format!("[nex] host UiCommand::WebviewReady received"));
                         ready = true;
                         if state.lock().map(|s| s.visible).unwrap_or(false) {
@@ -1240,6 +1274,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Show => {
+                    let _slow = SlowCmd::new("Show");
                     crate::runtime::log_info(&format!("[nex] host UiCommand::Show received webview_exists={} ready={} show_pending={}", webview.is_some(), ready, show_pending));
                     show_cmd_at = Some(Instant::now());
                     SHOW_EPOCH_MS.store(
@@ -1424,6 +1459,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     }
                 }
                 UiCommand::Hide => {
+                    let _slow = SlowCmd::new("Hide");
                     // Re-inject the menu-mask key (0xE8) and spin-wait for the
                     // RIT to register it, so that when the window is hidden the
                     // newly-foreground window never sees a bare Win key — it
@@ -1550,6 +1586,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                 }
 
                 UiCommand::Resize { h, immediate, src } => {
+                    let _slow = SlowCmd::new("Resize");
                     let h = h.clamp(INITIAL_HEIGHT, MAX_HEIGHT);
                     // A view-to-view Tab press can produce more than one of
                     // these per keypress, and a second one that lands after
@@ -1647,6 +1684,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     ));
                 }
                 UiCommand::Painted(painted) => {
+                    let _slow = SlowCmd::new("Painted");
                     let snapshot = match state.lock() {
                         Ok(s) => s.clone(),
                         Err(_) => return,
@@ -1797,7 +1835,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                     if let Ok(mut s) = state.lock() {
                                         s.glass_frame_ready = true;
                                     }
+                                    let t = std::time::Instant::now();
                                     push_state(&webview, &state, &icon_cache, false);
+                                    reveal_push_us = t.elapsed().as_micros() as u64;
                                 }
                             }
                         }
@@ -1805,7 +1845,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         // restore DOM focus to the WebView's search control.
                         // Foreground activation alone can leave focus on the
                         // previous window or the host HWND during first show.
+                        let t_focus = std::time::Instant::now();
                         let _ = window.set_focus();
+                        reveal_focus_us = t_focus.elapsed().as_micros() as u64;
                         // Re-assert topmost Z-position. When the overlay
                         // Explorer from exposing the taskbar. Depending on
                         // WebView2/tao focus notifications, the next show can
@@ -1835,7 +1877,25 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
                             );
                         }
+                        let t_input = std::time::Instant::now();
                         focus_input(&webview);
+                        reveal_input_us = t_input.elapsed().as_micros() as u64;
+                        // CIQ-236: the reveal tail runs on the UI thread, and a
+                        // WebView2 call that waits on the renderer blocks the
+                        // whole loop - including the low-level hook, which
+                        // Windows calls on this thread's pump. That is how a
+                        // 470 ms block here becomes a seconds-late Win press.
+                        let tail_ms = reveal_push_us / 1_000
+                            + reveal_focus_us / 1_000
+                            + reveal_input_us / 1_000;
+                        if tail_ms >= 25 {
+                            crate::runtime::log_info(&format!(
+                                "[nex][probe] reveal_tail push_state_ms={} set_focus_ms={} focus_input_ms={}",
+                                reveal_push_us / 1_000,
+                                reveal_focus_us / 1_000,
+                                reveal_input_us / 1_000
+                            ));
+                        }
                         if let Some(t0) = show_cmd_at.take() {
                             let fg_owned = unsafe { GetForegroundWindow() == hwnd };
                             crate::runtime::log_info(&format!(

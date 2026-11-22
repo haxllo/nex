@@ -19,7 +19,7 @@ const LEGACY_APP_DIR_NAME_UNIX: &str = "swiftfind";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LEGACY_CONFIG_FILE_NAME: &str = "config.json";
 
-pub const CURRENT_CONFIG_VERSION: u32 = 27;
+pub const CURRENT_CONFIG_VERSION: u32 = 28;
 const LEGACY_IDLE_CACHE_TRIM_MS_V1: u32 = 1200;
 const LEGACY_ACTIVE_MEMORY_TARGET_MB_V1: u16 = 80;
 const LEGACY_INDEX_MAX_ITEMS_TOTAL_V1: u32 = 120_000;
@@ -415,9 +415,9 @@ impl PanelBackground {
 #[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     /// 60px search bar when idle; the results view appears once you type.
+    #[default]
     Compact,
     /// Idle shows the Quick Launch / recent-apps feed with tabs and preview.
-    #[default]
     Expanded,
 }
 
@@ -448,11 +448,11 @@ mod view_mode_tests {
     use super::*;
 
     #[test]
-    fn parses_and_defaults_to_expanded() {
+    fn parses_and_defaults_to_compact() {
         assert_eq!(ViewMode::parse("Compact"), Some(ViewMode::Compact));
         assert_eq!(ViewMode::parse(" expanded "), Some(ViewMode::Expanded));
         assert_eq!(ViewMode::parse("neon"), None);
-        assert_eq!(ViewMode::default(), ViewMode::Expanded);
+        assert_eq!(ViewMode::default(), ViewMode::Compact);
         // Only the expanded view fills the idle panel with apps.
         assert!(!ViewMode::Compact.shows_idle_feed());
         assert!(ViewMode::Expanded.shows_idle_feed());
@@ -647,9 +647,9 @@ impl Default for Config {
             plugin_paths: vec![app_dir.join("plugins")],
             plugins_safe_mode: true,
             game_mode_enabled: false,
-            grid_view: true,
+            grid_view: false,
             panel_background: PanelBackground::Glass,
-            view_mode: ViewMode::Expanded,
+            view_mode: ViewMode::Compact,
             idle_cache_trim_ms: 900,
             active_memory_target_mb: 72,
             ui_warm_release_ms: 5_000,
@@ -1657,6 +1657,16 @@ fn apply_migrations(cfg: &mut Config, raw: &str) -> bool {
             cfg.index_max_items_per_root = Config::default().index_max_items_per_root;
             changed = true;
         }
+    }
+
+    if source_version < 28 {
+        // The panel now opens as a bare search bar over a vertical list.
+        // `expanded` and `true` were the old defaults, so a config holding
+        // them is indistinguishable from one that never chose; both move once
+        // here, and any later choice sticks.
+        cfg.view_mode = ViewMode::Compact;
+        cfg.grid_view = false;
+        changed = true;
     }
 
     if TEMPLATE_REQUIRED_KEYS

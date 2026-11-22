@@ -1365,6 +1365,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                     // post("painted") to trigger the deferred show.
                     push_state(&webview, &state, &icon_cache, true);
                     show_arm_at = Some(Instant::now());
+                    // CIQ-236: one line per show with everything the idle
+                    // freeze could be blamed on, so the next guess is testable.
+                    crate::overlay::probe::log("show", hwnd as *mut core::ffi::c_void, "");
                     if let Some(t0) = show_cmd_at {
                         crate::runtime::log_info(&format!(
                             "[nex] show_latency show_arm_ms={}",
@@ -1414,6 +1417,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                         let _ = window.set_visible(false);
                     }
                     crate::overlay::hotkey::release_mask_after_hide();
+                    // CIQ-236: this hide starts the idle period the next show
+                    // is measured against, and resets the heartbeat gap.
+                    crate::overlay::probe::note_hide();
                     let fg_after = unsafe { GetForegroundWindow() };
                     // OS visibility distinguishes cloak (still "visible")
                     // from fallback real-hide; logical flag is always false
@@ -1663,6 +1669,15 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                 t0.elapsed().as_millis()
                             ));
                         }
+                        // CIQ-236: the page says how long it took from
+                        // receiving the show state to painting it, which
+                        // separates "the page never woke" from "the page ran
+                        // and the compositor was late".
+                        let page_side = format!(
+                            " since_recv_ms={} painted_gap_ms={}",
+                            painted.since_recv_ms, painted.painted_gap_ms
+                        );
+                        crate::overlay::probe::log("painted", hwnd as *mut core::ffi::c_void, &page_side);
                         // Gate on live state: an outside-click Escape during
                         // the show window (between Show and first paint)
                         // already hid the overlay — do NOT resurrect it.
@@ -2559,6 +2574,10 @@ fn handle_ipc(
             let (h, immediate) = p.v.height_and_immediate();
             let src = p.v.src();
             try_send_ui(proxy, UiCommand::Resize { h, immediate, src });
+        }
+        OverlayMessage::Heartbeat(payload) => {
+            // CIQ-236: a gap here means the page stopped running while hidden.
+            crate::overlay::probe::note_heartbeat(payload.v);
         }
         OverlayMessage::Painted(payload) => {
             // First paint after push_state — safe to show the window.

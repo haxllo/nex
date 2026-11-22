@@ -332,6 +332,12 @@
       try { nex.apply(e.data); } catch (_) {}
     });
   }
+  // CIQ-236: the host cannot see whether this page is still running while the
+  // panel is hidden. Two seconds apart is fast enough to notice a renderer that
+  // stopped, and slow enough to cost nothing.
+  setInterval(() => {
+    try { post("heartbeat", Math.round(performance.now())); } catch (_) {}
+  }, 2000);
 
   // ── toast notification ────────────────────────────────────
   // ── pin/unpin icons ────────────────────────────────────────
@@ -1184,11 +1190,16 @@
   let activeShowId = 0;
   let glassWaitingForShow = false;
   let showContentPainted = false;
+  let showRecvAt = 0;
+  let paintedRafAt = 0;
   function sendPaintedAck() {
     if (!showContentPainted || glassWaitingForShow || activeShowId === 0) return;
+    const now = performance.now();
     post("painted", {
       showId: activeShowId,
       glassNative: document.documentElement.classList.contains("glass-native"),
+      sinceRecvMs: showRecvAt > 0 ? Math.round(now - showRecvAt) : 0,
+      paintedGapMs: paintedRafAt > 0 ? Math.round(now - paintedRafAt) : 0,
     });
   }
   function noteContentPainted() {
@@ -1198,6 +1209,7 @@
   function schedulePaintedAck() {
     const showId = activeShowId;
     requestAnimationFrame(() => requestAnimationFrame(() => {
+      paintedRafAt = performance.now();
       if (showId === activeShowId) sendPaintedAck();
     }));
   }
@@ -4774,6 +4786,9 @@
       if (Number.isSafeInteger(state.showId) && state.showId >= 0 && state.showId !== activeShowId) {
         activeShowId = state.showId;
         showContentPainted = false;
+        // CIQ-236: the host needs to know whether a slow first paint was the
+        // page waking up or the compositor arriving late.
+        showRecvAt = performance.now();
       }
 
       // Close the power panel / confirm whenever Rust pushes a fresh state

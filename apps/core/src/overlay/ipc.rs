@@ -141,9 +141,27 @@ pub(crate) struct PaintedPayload {
 pub(crate) struct PaintedState {
     pub show_id: u64,
     pub glass_native: bool,
+    /// Milliseconds the page itself took from receiving the show state to
+    /// acking the paint (CIQ-236). Optional so an older page still parses.
+    #[serde(default)]
+    pub since_recv_ms: u32,
+    /// Milliseconds this ack spent between its first animation frame and the
+    /// frame that ran the ack, i.e. the compositor's contribution.
+    #[serde(default)]
+    pub painted_gap_ms: u32,
 }
 
 /// Seek target in whole milliseconds.
+/// Page heartbeat (CIQ-236): the page's own clock, sent every two seconds.
+///
+/// A gap in these is the only direct evidence that the renderer stopped
+/// running while the panel was hidden, as opposed to the host being slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HeartbeatPayload {
+    pub v: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SeekPayload {
@@ -356,6 +374,8 @@ pub(crate) enum OverlayMessage {
     Resize(ResizePayload),
     #[serde(rename = "painted")]
     Painted(PaintedPayload),
+    #[serde(rename = "heartbeat")]
+    Heartbeat(HeartbeatPayload),
     #[serde(rename = "pin")]
     Pin(TextPayload),
     #[serde(rename = "unpin")]
@@ -482,6 +502,7 @@ pub(crate) fn parse_overlay(body: &str) -> Result<OverlayMessage, IpcReject> {
         "escape",
         "resize",
         "painted",
+        "heartbeat",
         "pin",
         "unpin",
         "bookmark",

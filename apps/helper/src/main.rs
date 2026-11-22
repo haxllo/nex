@@ -942,9 +942,95 @@ static SUPPRESS_FOR_GAME: AtomicBool = AtomicBool::new(false);
 /// whole input queue, and unhooks a proc that keeps exceeding it. Samples
 /// above a generous budget are logged so a regression is visible in the log.
 fn note_hook_duration(kind: &str, elapsed: std::time::Duration) {
-    if elapsed >= std::time::Duration::from_millis(30) {
-        debug_log(&format!("[stall] {kind} hook proc took {}ms", elapsed.as_millis()));
+    if elapsed < std::time::Duration::from_millis(30) {
+        return;
     }
+    // The proc itself does almost nothing - one atomic store and a
+    // PostThreadMessage - so a stall of hundreds of milliseconds is the thread
+    // not being scheduled, not our code being slow (CIQ-236). Print what the
+    // process looks like at that moment: throttling state, page faults, and how
+    // much CPU the thread had actually used.
+    let (control, state) = process_power_throttling();
+    let (faults, cpu_ms) = hook_thread_counters();
+    debug_log(&format!(
+        "[stall] {kind} hook proc took {}ms pow={control}/{state} pf={faults} thread_cpu_ms={cpu_ms}",
+        elapsed.as_millis()
+    ));
+}
+
+/// `ProcessPowerThrottling` for this process: control mask and state mask.
+/// Bit 0 of the state mask means Windows has this process on reduced speed.
+fn process_power_throttling() -> (u32, u32) {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetProcessInformation, ProcessPowerThrottling,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    let mut throttling = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: 0,
+        StateMask: 0,
+    };
+    let ok = unsafe {
+        GetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &mut throttling as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    if ok == 0 {
+        return (u32::MAX, u32::MAX);
+    }
+    (throttling.ControlMask, throttling.StateMask)
+}
+
+/// A `FILETIME` for a `GetProcessTimes` out parameter.
+fn filetime(high: u32) -> windows_sys::Win32::Foundation::FILETIME {
+    windows_sys::Win32::Foundation::FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: high,
+    }
+}
+
+/// `FILETIME` is 100 ns units; return whole milliseconds.
+fn filetime_ms(value: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    let ticks = ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64;
+    ticks / 10_000
+}
+
+/// Page faults and thread CPU time for this process, in milliseconds.
+fn hook_thread_counters() -> (u32, u64) {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut faults = 0u32;
+    if unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    } != 0
+    {
+        faults = counters.PageFaultCount;
+    }
+    let mut creation = filetime(0);
+    let mut exit = filetime(0);
+    let mut kernel = filetime(0);
+    let mut user = filetime(0);
+    let mut cpu_ms = 0u64;
+    if unsafe {
+        GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user)
+    } != 0
+    {
+        cpu_ms = filetime_ms(kernel) + filetime_ms(user);
+    }
+    (faults, cpu_ms)
 }
 
 unsafe extern "system" fn keyboard_hook_proc(

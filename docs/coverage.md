@@ -38,6 +38,7 @@ as facts.
 | [development/testing.md](development/testing.md) | CI workflow steps, test file inventory, opt-in environment variables | Test counts change constantly and are deliberately not quoted |
 | [development/releasing.md](development/releasing.md) | `.github/workflows/release.yml`, `build.rs`, version fields in three crates | The packaging scripts were read, not run |
 | [development/validation-checklist.md](development/validation-checklist.md) | Release workflow, existing checklist structure | The manual scenarios are a maintained list; nobody re-ran all of them this pass |
+| [development/maintaining-docs.md](development/maintaining-docs.md) | The build-input dependencies in `build.rs`, the release workflow, and the packaging scripts | The rule itself, not a description of code |
 | [adr/*.md](adr/) | Code for the decision's current state; release notes and commit history for the date and the alternatives | Alternatives are recorded as they were argued at the time, which is a reconstruction from commit messages and release notes |
 | [history/timeline.md](history/timeline.md) | Tag dates, release-note headlines, commit messages for abandoned work | Deliberately a summary; the per-version detail is in `releases/` |
 | [reference/](reference/) | Copied verbatim, not verified | External material; nothing here is a statement about Nex |
@@ -64,6 +65,10 @@ nobody spends an afternoon trying.
 Re-check a document when you change the code it describes, and update its row here
 if the gap changed. A document whose row still claims a date from 2026-11-22 while
 the code has moved is not covered by this page any more; it is covered by nothing.
+
+The trigger table in [development/maintaining-docs.md](development/maintaining-docs.md)
+says which document a given change makes wrong. This page records the result of that
+obligation being met, not a substitute for it.
 
 ## Corrections made in this pass
 

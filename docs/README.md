@@ -25,6 +25,7 @@ is a bug.
 | Work on IPC, pipes, or the helper | [development/ipc-and-privileges.md](development/ipc-and-privileges.md) |
 | Change a config key or add a migration | [development/configuration.md](development/configuration.md) |
 | Run or add a test | [development/testing.md](development/testing.md) |
+| Find out which doc your change makes wrong | [development/maintaining-docs.md](development/maintaining-docs.md) |
 | Validate a release by hand | [development/validation-checklist.md](development/validation-checklist.md) |
 | Cut a release | [development/releasing.md](development/releasing.md) |
 | Learn why the code looks this way | [adr/README.md](adr/README.md) |
@@ -58,6 +59,7 @@ Some facts live in exactly one place. Do not copy them, link to them.
 | Every config key and its default | `apps/core/src/config.rs`, in `Config::default` and `write_user_template_toml` |
 | Build, test, and release gates | [development/onboarding.md](development/onboarding.md), [development/testing.md](development/testing.md), [development/releasing.md](development/releasing.md) |
 | Contribution and agent rules | `AGENTS.md` at the repository root |
+| Which doc a code change makes wrong | [development/maintaining-docs.md](development/maintaining-docs.md) |
 
 `AGENTS.md` is the working agreement for coding agents and is deliberately not
 duplicated here. It is the authority on process; this tree is the authority on
@@ -85,3 +87,10 @@ release run and is not committed back to the tree.
 
 Neither is required reading to work on Nex; they exist so that a decision does not
 have to be re-litigated from memory.
+
+## Changing a document
+
+Read [development/maintaining-docs.md](development/maintaining-docs.md) first. It maps
+a code change to the document it makes wrong, and it lists the three documents that
+are build inputs rather than ordinary prose. Documentation changes in the same commit
+as the code that made it stale, not in a later cleanup.

@@ -16,5 +16,6 @@ CIQ-
 
 ## Checklist
 
+- [ ] Docs impact: did this change make any document wrong? If so, that document was updated in this PR ([docs/development/maintaining-docs.md](docs/development/maintaining-docs.md) maps each type of change to its document)
 - [ ] Process roles preserved (UI never indexes, indexer never renders, helper is a broker)
 - [ ] Commits use the repo-owner identity and contain no AI/bot names or trailers

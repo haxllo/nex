@@ -51,6 +51,32 @@ jobs:
           echo "::error::This PR changes apps/, scripts/, or manifests/ but names no Linear issue (CIQ-<n>) in its title or body."
           exit 1
 
+      - name: Require docs update for behaviour changes
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
+            --jq '.[].filename' > "$RUNNER_TEMP/changed.txt"
+          # Escape hatch, so an agent that has genuinely decided a document is
+          # unaffected can still land the change. The marker has to be in the PR
+          # body, and it has to carry a reason: a bypass with no stated judgment
+          # is indistinguishable from an oversight.
+          if printf '%s' "$PR_BODY" | grep -q 'NEX_ALLOW_STALE_DOCS'; then
+            if printf '%s' "$PR_BODY" | grep -Eq 'NEX_ALLOW_STALE_DOCS=1:[[:space:]]*[^[:space:]]'; then
+              echo "PR body carries NEX_ALLOW_STALE_DOCS with a reason; running the gate in bypass mode."
+              NEX_ALLOW_STALE_DOCS=1 scripts/check-docs-currency.sh < "$RUNNER_TEMP/changed.txt"
+              exit 0
+            fi
+            echo "::error::The PR body mentions NEX_ALLOW_STALE_DOCS but gives no reason. Write 'NEX_ALLOW_STALE_DOCS=1: <why the document is unaffected>'."
+            exit 1
+          fi
+          scripts/check-docs-currency.sh < "$RUNNER_TEMP/changed.txt"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:

@@ -2,6 +2,100 @@
 
 All notable changes to Nex are documented in this file.
 
+**Format note.** Entries up to 2.7.0 below were written at the time with full
+detail. From 2.8.0 onward the long form lives in `docs/releases/v<ver>-notes.md`,
+one page per version, which is what the GitHub release page shows. This file keeps
+a one-line summary per version so that a reader can find the release that changed
+something without opening sixty files.
+
+## Versions after 2.7.0
+
+| Version | Date | Summary |
+|---|---|---|
+| 3.3.0 | 2026-11-22 | One WebView2 environment for both windows, an honest indexer probe, and a helper that unhooks before it is terminated |
+| 3.2.0 | 2026-11-20 | Win-menu mask held from the hook and while idle, panel revealed before post-idle paging, glass rim eased into the middle |
+| 3.1.1 | 2026-11-19 | Rim light read from the pane's own backdrop; a moving USN journal is retried instead of forcing a full rescan |
+| 3.1.0 | 2026-11-19 | First-keystroke latency cut, rim bend smoothed into the band so the edge has no seam |
+| 3.0.2 | 2026-11-18 | App rows the startup load asks for are indexed; the search worker wakes when the store load lands |
+| 3.0.1 | 2026-11-18 | Release page drafted from the previous release, with the notes users had not seen |
+| 3.0.0 | 2026-11-18 | 27 new capabilities and 70 fixes since 2.40.0 |
+| 2.40.0 | 2026-11-07 | Indexing moved fully out of the UI process; search rebuilt for scale with USN deltas and a disk icon cache |
+| 2.39.0 | 2026-11-05 | NTFS MFT discovery replaces the directory walk on NTFS volumes |
+| 2.38.1 | 2026-11-05 | The indexer no longer starts with a visible console window |
+| 2.38.0 | 2026-11-05 | Indexing runs in its own process |
+| 2.37.0 | 2026-11-03 | Files and folders under discovery roots are reliably searchable again |
+| 2.36.3 | 2026-11-03 | Expanded-view action flyout stops ghosting open |
+| 2.36.2 | 2026-11-03 | Compact bar stops clipping pins when both bars are visible |
+| 2.36.1 | 2026-11-03 | Pinned row stops jumping to a wrong position |
+| 2.36.0 | 2026-11-03 | Smarter compact bar, cleaner test gate |
+| 2.35.0 | 2026-11-03 | Pin limits removed; compact view shows pins as launch icons beside search |
+| 2.34.2 | 2026-11-03 | What's New shows the full release notes in their own scroll area |
+| 2.34.1 | 2026-11-02 | Liquid glass stops flashing a dark panel on open |
+| 2.34.0 | 2026-11-02 | Rounded edges for every panel, not only the glass one |
+| 2.33.1 | 2026-11-01 | Switching between glass and solid backgrounds no longer leaves a stale surface |
+| 2.33.0 | 2026-10-27 | Glass rendering fixed on laptops; cleaner first show |
+| 2.32.1 | 2026-10-27 | The update notice clears itself |
+| 2.32.0 | 2026-10-27 | Results use the full width; pins persist |
+| 2.31.0 | 2026-10-23 | The idle panel becomes a usable surface rather than a short app list |
+| 2.30.0 | 2026-10-21 | Faster, steadier glass panel |
+| 2.29.1 | 2026-10-21 | New application icon |
+| 2.29.0 | 2026-10-20 | The Win key behaves like a system key at every display scale |
+| 2.28.0 | 2026-10-20 | The panel is drawn natively as glass by default |
+| 2.27.1 | 2026-10-18 | Glass is live from the first frame; lighter surface, quieter grain |
+| 2.27.0 | 2026-10-18 | Liquid Glass becomes an option in the display settings |
+| 2.26.3 | 2026-10-15 | Post-update entry stays and names the detected release |
+| 2.26.2 | 2026-10-15 | Update entry names the detected version and opens its notes |
+| 2.26.1 | 2026-10-15 | Chat UI pass: composer, dropdowns, hints, and message chrome harmonised |
+| 2.26.0 | 2026-10-14 | Text rendering fixed; the helper grows up |
+| 2.25.3 | 2026-10-12 | Opaque modes start opaque, glass parks when it should, resizes stop flashing |
+| 2.25.2 | 2026-10-12 | Update pill stops narrating its own progress |
+| 2.25.1 | 2026-10-12 | Update pill clears itself after an up-to-date check |
+| 2.25.0 | 2026-10-12 | Panel background becomes a setting; chat keeps up |
+| 2.24.2 | 2026-10-10 | Updater could deadlock holding the install folder; fixed |
+| 2.24.1 | 2026-10-10 | Follow-up chat turns work again; failed updates name the culprit |
+| 2.24.0 | 2026-10-10 | File picker in chat, honest PC specs, tidier footer |
+| 2.23.3 | 2026-10-08 | No flash-close or half-painted opens |
+| 2.23.2 | 2026-10-08 | Chat reliability fixes |
+| 2.23.1 | 2026-10-07 | What's New polish and a cleaner footer |
+| 2.23.0 | 2026-10-07 | In-overlay chat arrives, no CLI install needed |
+| 2.22.12 | 2026-10-06 | Liquid glass enabled by default with an automatic fallback |
+| 2.22.11 | 2026-10-06 | Keyboard focus handed to the search field as the overlay opens |
+| 2.22.10 | 2026-10-05 | Media view rebuilt; the window became glass |
+| 2.22.9 | 2026-10-02 | The update button returns for per-user installs |
+| 2.22.8 | 2026-10-02 | What's New view tells you what just changed |
+| 2.22.7 | 2026-10-01 | Update failed with a wrong "installed for all users" error |
+| 2.22.6 | 2026-10-01 | Orphan cleanup that actually fires on hybrid installs |
+| 2.22.5 | 2026-10-01 | Updates that cannot brick the install; every step logged |
+| 2.22.4 | 2026-10-01 | Faster downloads; stale machine-wide registration cleaned up |
+| 2.22.3 | 2026-10-01 | Correct elevated orphan cleanup without flipping the install into admin mode |
+| 2.22.2 | 2026-10-01 | Per-user updates elevate once to remove a legacy copy |
+| 2.22.1 | 2026-10-01 | Orphaned-install detection and cleanup |
+| 2.22.0 | 2026-10-01 | Now-playing media view with album art and transport controls |
+| 2.21.4 | 2026-09-28 | Automatic silent updates |
+| 2.21.3 | 2026-09-28 | Search, icon, and watcher reliability |
+| 2.21.2 | 2026-09-26 | Update notifications and safer updating |
+| 2.21.1 | 2026-09-26 | Icon cache invalidation fixed so 2.21.0's icons appear |
+| 2.21.0 | 2026-09-25 | Faster search, robust indexing, better diagnostics |
+| 2.20.0 | 2026-09-19 | Web bookmarks with favicons, and a Quick Launch overhaul |
+| 2.19.0 | 2026-09-15 | Windows lifecycle, search, persistence, accessibility, and overlay interaction fixes |
+| 2.18.0 | 2026-09-08 | Discoverable search modes, visual clipboard history, safer settings |
+| 2.17.1 | 2026-09-03 | Hotkey flash fixed; visible keyboard selection; caption drag cleaned up |
+| 2.17.0 | 2026-08-29 | Settings window redesigned with native hotkey capture; MIT licence in the installer |
+| 2.16.0 | 2026-08-22 | Inline power menu replaces the popup; "Show all apps" expansion |
+| 2.15.1 | 2026-08-18 | Hotkey opens immediately while indexing; two first-run WebView2 crashes fixed |
+| 2.15.0 | 2026-08-18 | Startup made instant, icons for settings pages, short queries stop hiding files |
+| 2.14.2 | 2026-08-15 | Automatic accent colour decoded correctly; accent fills brightened |
+| 2.14.1 | 2026-08-15 | Folders return to results; typing stops causing visible re-renders |
+| 2.14.0 | 2026-08-10 | Selection mapped through the row index; sparse glyph icons fixed |
+| 2.13.0 | 2026-08-05 | Create a folder or file from an unmatched query |
+| 2.12.0 | 2026-08-04 | New icon extraction pipeline; sharper icons in grid view |
+| 2.11.0 | 2026-08-02 | Power menu and idle power popup in the overlay footer |
+| 2.10.0 | 2026-07-31 | Hotkey can be changed while running; Win-key chord detection fixed |
+| 2.9.1 | 2026-07-29 | Release metadata only |
+| 2.9.0 | 2026-07-29 | Release metadata only |
+| 2.8.1 | 2026-07-24 | Release metadata only |
+| 2.8.0 | 2026-07-24 | Overlay flash fixes, retained GPU layers, themed icons, web-search row on no results |
+
 ## [2.7.0] - 2026-07-23
 
 ### Architecture

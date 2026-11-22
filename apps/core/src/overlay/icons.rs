@@ -468,7 +468,7 @@ fn source_fingerprint(path: &str) -> Option<Fingerprint> {
 /// embedding in JSON. Used because WebView2 custom protocols don't
 /// support sub-resource loading for `<img>` tags - the browser
 /// silently ignores `nexasset://localhost/icon/...` URLs. See
-/// `docs/plans/robustness-audit.md` "Investigation Log" for details.
+/// `docs/development/overlay-and-glass.md`.
 pub(crate) fn data_uri(bytes: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(22 + bytes.len() * 4 / 3 + 4);

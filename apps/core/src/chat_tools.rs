@@ -7,7 +7,7 @@
 //!
 //! This exists because the model's output is untrusted input: it may have just
 //! read a file containing instructions aimed at it. See
-//! `docs/design/ciq-137-chat-actions.md`.
+//! `docs/adr/0008-assistant-tool-approval.md`.
 
 use serde::{Deserialize, Serialize};
 

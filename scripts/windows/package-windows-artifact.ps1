@@ -140,7 +140,7 @@ if (Test-Path "apps/assets/fonts/Inter") {
   New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "assets/fonts") | Out-Null
   Copy-Item "apps/assets/fonts/Inter" (Join-Path $stageDir "assets/fonts/Inter") -Recurse -Force
 }
-Copy-Item "docs/engineering/windows-runtime-validation-checklist.md" (Join-Path $stageDir "docs/windows-runtime-validation-checklist.md") -Force
+Copy-Item "docs/development/validation-checklist.md" (Join-Path $stageDir "docs/validation-checklist.md") -Force
 Copy-Item "docs/releases/windows-milestone-release-notes-template.md" (Join-Path $stageDir "docs/release-notes-template.md") -Force
 Copy-Item "scripts/windows/install-nex.ps1" (Join-Path $stageDir "scripts/install-nex.ps1") -Force
 Copy-Item "scripts/windows/uninstall-nex.ps1" (Join-Path $stageDir "scripts/uninstall-nex.ps1") -Force

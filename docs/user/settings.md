@@ -31,8 +31,8 @@ These are the keys people change first.
 | `show_files` | `true` | Include files in results |
 | `show_folders` | `true` | Include folders in results |
 | `panel_background` | `"glass"` | `glass`, `black`, or `white` |
-| `view_mode` | `"expanded"` | `expanded` shows the idle app list; `compact` is a bare search field until you type |
-| `grid_view` | `true` | Tiles for applications. Files, folders, and actions always stay as rows. |
+| `view_mode` | `"compact"` | `compact` is a bare search field until you type; `expanded` shows the idle app list |
+| `grid_view` | `false` | Tiles for applications when on. Files, folders, and actions always stay as rows. |
 | `game_mode_enabled` | `false` | Suppress the hotkey while a fullscreen game has focus |
 
 ## What is indexed

@@ -183,7 +183,10 @@ if ($verdict -match 'Manifest Warning:') {
 
 if ($DryRun) {
     Write-Step "Dry run: manifests are in $target and validated. Nothing submitted."
-    return
+    # exit, not return: the process exit code is still whatever the last native
+    # command left behind, and winget validate exits non-zero for warnings. A
+    # plain return would fail the calling CI step despite the clean run.
+    exit 0
 }
 
 # --- 5. Supersede an open pull request, or submit a new one.
@@ -243,7 +246,7 @@ if ($openPrs) {
     }
 
     Write-Host "Superseded: https://github.com/$WingetRepo/pull/$($pr.number)" -ForegroundColor Green
-    return
+    exit 0
 }
 
 Write-Step "Submitting to $WingetRepo"
@@ -253,3 +256,4 @@ wingetcreate submit --prtitle "New version: $PackageId version $Version" --no-op
 if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed." }
 
 Write-Step "Submitted. Check https://github.com/$WingetRepo/pulls?q=is%3Apr+$PackageId"
+exit 0

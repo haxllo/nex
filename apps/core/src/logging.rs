@@ -64,6 +64,10 @@ pub fn error(message: &str) {
 }
 
 pub fn open_logs_folder() -> Result<(), String> {
+    // A test must never put a File Explorer window on the desktop.
+    if crate::action_executor::shell_launches_suppressed() {
+        return Ok(());
+    }
     let dir = logs_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create logs dir: {e}"))?;
 

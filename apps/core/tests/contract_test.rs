@@ -3,6 +3,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nex_core::contract::{CoreRequest, CoreResponse, LaunchRequest, SearchRequest};
 use nex_core::core_service::CoreService;
 
+/// A config that owns its index instead of reading the developer's.
+///
+/// `Config::default()` resolves `index_db_path` to the live
+/// `%APPDATA%/Nex/index.sqlite3`, and `CoreService` opens the Tantivy index
+/// beside it, so a default config searches the real index: this test asked
+/// for "code" and got five hits from the machine instead of the one item it
+/// inserted. The database handed to `with_connection` is in memory, but the
+/// search index is not, so it has to be redirected here.
+fn isolated_config(unique: u128) -> nex_core::config::Config {
+    let temp = std::env::temp_dir();
+    let mut config = nex_core::config::Config::default();
+    config.config_path = temp.join(format!("nex-contract-cfg-{unique}.toml"));
+    config.index_db_path = temp.join(format!("nex-contract-index-{unique}.sqlite3"));
+    config.clipboard_enabled = false;
+    config.plugins_enabled = false;
+    config
+}
+
 #[test]
 fn serializes_and_deserializes_search_request() {
     let request = CoreRequest::Search(SearchRequest {
@@ -25,7 +43,7 @@ fn handles_search_command_and_serializes_response() {
     let item_path = std::env::temp_dir().join(format!("nex-contract-search-{unique}.tmp"));
     std::fs::write(&item_path, b"ok").unwrap();
 
-    let config = nex_core::config::Config::default();
+    let config = isolated_config(unique);
     let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
@@ -62,6 +80,8 @@ fn handles_search_command_and_serializes_response() {
 
 #[test]
 fn handles_launch_command_by_path() {
+    // Nothing may open on the machine running the tests.
+    nex_core::action_executor::set_shell_launches_suppressed(true);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -69,7 +89,7 @@ fn handles_launch_command_by_path() {
     let launch_path = std::env::temp_dir().join(format!("nex-contract-launch-{unique}.txt"));
     std::fs::write(&launch_path, b"ok").unwrap();
 
-    let config = nex_core::config::Config::default();
+    let config = isolated_config(unique);
     let db = nex_core::index_store::open_memory().unwrap();
     let service = CoreService::with_connection(config, db).unwrap();
 
@@ -80,14 +100,6 @@ fn handles_launch_command_by_path() {
         }))
         .unwrap();
 
-    // ShellExecuteW on .txt opens Notepad asynchronously; kill it so remove_file succeeds
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let _ = Command::new("taskkill")
-            .args(["/f", "/im", "notepad.exe"])
-            .output();
-    }
     std::fs::remove_file(&launch_path).unwrap();
 
     assert_eq!(

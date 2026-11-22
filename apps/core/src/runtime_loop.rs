@@ -530,6 +530,10 @@ fn open_url_in_browser(url: &str) {
     if !lower.starts_with("http://") && !lower.starts_with("https://") {
         return;
     }
+    // A test must never open a browser tab.
+    if crate::action_executor::shell_launches_suppressed() {
+        return;
+    }
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
     unsafe {

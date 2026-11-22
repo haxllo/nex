@@ -63,9 +63,38 @@ fn record_test_launch(target: &str) -> bool {
     true
 }
 
-#[cfg(not(test))]
-fn record_test_launch(_target: &str) -> bool {
-    false
+/// Set by tests so nothing is opened on the machine running them.
+///
+/// Unit tests set it by construction; integration tests link the normal
+/// library, so they call [`set_shell_launches_suppressed`] instead. Without
+/// this, a test that launches a file runs the shell for real: a temp file with
+/// no association opens the "Pick an app" dialog and the call blocks until
+/// someone dismisses it.
+static SHELL_LAUNCHES_SUPPRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// Suppress real launches. Tests only; nothing in the app calls this.
+#[doc(hidden)]
+pub fn set_shell_launches_suppressed(suppressed: bool) {
+    SHELL_LAUNCHES_SUPPRESSED
+        .store(suppressed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True when launches must be recorded rather than performed.
+pub(crate) fn shell_launches_suppressed() -> bool {
+    SHELL_LAUNCHES_SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Returns true when the caller must return success without launching.
+fn suppress_launch(target: &str) -> bool {
+    if !shell_launches_suppressed() {
+        return false;
+    }
+    #[cfg(test)]
+    record_test_launch(target);
+    #[cfg(not(test))]
+    let _ = target;
+    true
 }
 
 /// Take the launches recorded during this test, clearing the list.
@@ -121,7 +150,7 @@ fn launch_existing_path(candidate: &Path) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_open(target: &str) -> Result<(), LaunchError> {
-    if record_test_launch(target) {
+    if suppress_launch(target) {
         return Ok(());
     }
     if target.trim().to_ascii_lowercase().starts_with("shell:") {
@@ -182,7 +211,7 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_runas(target: &str) -> Result<(), LaunchError> {
-    if record_test_launch(target) {
+    if suppress_launch(target) {
         return Ok(());
     }
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -413,6 +442,9 @@ pub fn resolve_shell_appsfolder_path(_value: &str) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn launch_shell_target(target: &str) -> Result<(), LaunchError> {
+    if suppress_launch(target) {
+        return Ok(());
+    }
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY;
     unsafe {

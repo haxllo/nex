@@ -859,6 +859,10 @@ fn is_uninstall_command_usable(command: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn launch_uninstall_command(display_name: &str, command: &str) -> Result<(), String> {
+    // A test must never run an uninstaller.
+    if cfg!(test) || crate::action_executor::shell_launches_suppressed() {
+        return Ok(());
+    }
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 

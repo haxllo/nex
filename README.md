@@ -230,6 +230,16 @@ export CARGO_TARGET_DIR=~/nex-target CARGO_BUILD_JOBS=1
 Web assets (`index.html`, `style.css`, `app.js`) are embedded at compile time.
 Editing them without rebuilding changes nothing at runtime.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=haxllo%2Fnex&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=haxllo/nex&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=haxllo/nex&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=haxllo/nex&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## Documentation
 
 - [Architecture notes](docs/README.md)

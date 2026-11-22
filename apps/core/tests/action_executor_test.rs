@@ -12,14 +12,14 @@ fn unique_temp_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("nex-{label}-{}-{unique}.txt", std::process::id()))
 }
 
-fn kill_notepad() {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let _ = Command::new("taskkill")
-            .args(["/f", "/im", "notepad.exe"])
-            .output();
-    }
+/// These tests exercise the launch path, not the shell.
+///
+/// Without this they opened Notepad, a browser tab and Calculator on the
+/// machine running the tests - and where the temp file's extension has no
+/// association, the shell opened its "Pick an app" dialog and the call blocked
+/// until someone dismissed it, which read as a 20-minute hang.
+fn suppress_shell_launches() {
+    nex_core::action_executor::set_shell_launches_suppressed(true);
 }
 
 #[test]
@@ -39,12 +39,12 @@ fn rejects_missing_launch_path() {
 
 #[test]
 fn accepts_existing_launch_path() {
+    suppress_shell_launches();
     let file_path = unique_temp_path("existing-path");
     let file_path_str = file_path.to_string_lossy().to_string();
 
     fs::write(&file_path, b"ok").expect("should create temp file");
     let result = launch_path(&file_path_str);
-    kill_notepad();
     fs::remove_file(&file_path).expect("should clean temp file");
 
     assert!(result.is_ok());
@@ -58,18 +58,14 @@ fn rejects_empty_open_target() {
 
 #[test]
 fn accepts_web_open_target() {
-    if std::env::var("CI").is_ok() {
-        return;
-    }
+    suppress_shell_launches();
     let result = launch_open_target("https://duckduckgo.com/?q=swiftfind");
     assert!(result.is_ok());
 }
 
 #[test]
 fn accepts_shell_open_target_via_launch_path() {
-    if std::env::var("CI").is_ok() {
-        return;
-    }
+    suppress_shell_launches();
     let result = launch_path("shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
     assert!(result.is_ok());
 }

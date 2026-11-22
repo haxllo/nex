@@ -36,9 +36,16 @@ static LAST_HIDE: Mutex<Option<Instant>> = Mutex::new(None);
 static LAST_HEARTBEAT: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
 /// Largest heartbeat gap seen since the last show, in milliseconds.
 static WORST_GAP_MS: Mutex<u32> = Mutex::new(0);
+/// When the UI-thread watchdog last sent a tick, on its own clock.
+static TICK_SENT_US: Mutex<u64> = Mutex::new(0);
+/// Worst watchdog latency seen since the last hide, in microseconds.
+static WORST_TICK_US: Mutex<u64> = Mutex::new(0);
 
 /// Record a hide, which is the start of the idle period a later show measures.
 pub(crate) fn note_hide() {
+    if let Ok(mut worst) = WORST_TICK_US.lock() {
+        *worst = 0;
+    }
     if let Ok(mut slot) = LAST_HIDE.lock() {
         *slot = Some(Instant::now());
     }
@@ -305,10 +312,59 @@ pub(crate) fn log(tag: &str, hwnd: *mut core::ffi::c_void, extra: &str) {
         .map(|age| age.to_string())
         .unwrap_or_else(|| "none".to_string());
     let fields = format!(
-        "idle_s={} pow={control}/{state} ws_mb={ws_mb} pf={page_faults} cloaked={} vis={visible}          wv_procs={procs} wv_ws_mb={procs_ws_mb} wv_cpu_ms={procs_cpu_ms} hb_age_ms={heartbeat}          gap_ms={} avail_mb={avail_mb} commit_mb={commit_mb}/{commit_limit_mb}{extra}",
+        "idle_s={} pow={control}/{state} ws_mb={ws_mb} pf={page_faults} cloaked={} vis={visible}          wv_procs={procs} wv_ws_mb={procs_ws_mb} wv_cpu_ms={procs_cpu_ms} hb_age_ms={heartbeat}          gap_ms={} ui_block_ms={} avail_mb={avail_mb} commit_mb={commit_mb}/{commit_limit_mb}{extra}",
         idle_seconds(),
         cloaked(hwnd),
         worst_gap_ms(),
+        worst_tick_ms(),
     );
     crate::runtime::log_info(&format!("[nex][probe] {tag} {fields}"));
+}
+
+/// A watchdog tick sent to the UI thread every 50 ms (CIQ-236).
+///
+/// Every plausible cause of a slow show is a story about the UI thread being
+/// unavailable: a synchronous file read, an icon decode, a GPU present, a
+/// database query on the wrong thread. None of them show up as a duration in
+/// the log, because the thread that would have logged it is the blocked one -
+/// the messages just arrive late, in a clump. This dates the block: the
+/// watchdog stamps the moment it *sends*, and the UI thread stamps the moment
+/// it *handles*, so the difference is real unavailability, not slowness.
+pub(crate) fn tick_sent() -> u64 {
+    let now = monotonic_us();
+    if let Ok(mut slot) = TICK_SENT_US.lock() {
+        *slot = now;
+    }
+    now
+}
+
+/// Called on the UI thread when a watchdog tick arrives.
+pub(crate) fn tick_handled(sent_us: u64) {
+    let latency_us = monotonic_us().saturating_sub(sent_us);
+    if let Ok(mut worst) = WORST_TICK_US.lock() {
+        *worst = (*worst).max(latency_us);
+    }
+    // 150 ms is well past anything a healthy loop does: a resize, a snapshot
+    // encode and a glass present together stay under 50 ms in the log.
+    if latency_us >= 150_000 {
+        crate::runtime::log_info(&format!(
+            "[nex][probe] ui_blocked_ms={} idle_s={}",
+            latency_us / 1_000,
+            idle_seconds()
+        ));
+    }
+}
+
+/// Worst watchdog latency since the last hide, in milliseconds.
+pub(crate) fn worst_tick_ms() -> u64 {
+    WORST_TICK_US
+        .lock()
+        .map(|worst| *worst / 1_000)
+        .unwrap_or(0)
+}
+
+fn monotonic_us() -> u64 {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    base.elapsed().as_micros() as u64
 }

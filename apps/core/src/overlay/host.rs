@@ -267,6 +267,10 @@ pub(crate) enum UiCommand {
     WebviewReady,
     /// Re-push the current [`ShimState`] snapshot to the page.
     Apply,
+    /// Watchdog tick carrying the microsecond stamp of when it was sent
+    /// (CIQ-236). The delay between send and handling is the UI thread being
+    /// unavailable, which is what a slow show actually looks like.
+    ProbeTick(u64),
     /// Icons decoded in the background are now cached — re-send the
     /// icon data JSON so the page can patch placeholder <img> elements.
     /// The payload contains only newly decoded icon paths, avoiding a
@@ -631,6 +635,26 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
         .ok();
     let warm_release_arm = warm_release_tx.clone();
 
+    // UI-thread watchdog (CIQ-236). 50 ms is well inside the frame budget, so
+    // a tick that arrives late means the loop was not running at all.
+    let watchdog_proxy = proxy.clone();
+    std::thread::Builder::new()
+        .name("nex-ui-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if !LOOP_ALIVE.load(Ordering::SeqCst) {
+                break;
+            }
+            let sent_us = super::probe::tick_sent();
+            if watchdog_proxy
+                .send_event(UiCommand::ProbeTick(sent_us))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .ok();
+
     LOOP_ALIVE.store(true, Ordering::SeqCst);
     let mut chat_picker_generation = 0_u64;
     let mut chat_picker_listing: Option<super::file_picker::ChatPickerDirectory> = None;
@@ -780,6 +804,9 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                             push_glass_ink(&webview, ink);
                         }
                     }
+                UiCommand::ProbeTick(sent_us) => {
+                    super::probe::tick_handled(sent_us);
+                }
                 UiCommand::Apply => {
                     // Push while visible — or while a show is pending: stale
                     // in-flight results (or a slow quick-launch load) are the

@@ -468,8 +468,17 @@ mod tests {
             .iter()
             .position(|item| item.id == "item-1")
             .expect("the inserted item should be in the results");
+        let _ = crate::action_executor::take_test_launches();
         launch_overlay_selection(&service, &cfg, &plugins, &results, index, "launch target", &overlay)
             .expect("launch should succeed");
+        // Under test the launcher records instead of calling the shell, so the
+        // test can assert the item it selected is the one that was launched
+        // without opening anything on the developer's desktop.
+        assert_eq!(
+            crate::action_executor::take_test_launches(),
+            vec![launch_path.to_string_lossy().to_string()],
+            "the selected item should be the path handed to the launcher"
+        );
 
         std::fs::remove_file(&launch_path).expect("temp launch file should be removed");
         let _ = std::fs::remove_file(isolated_config_path);

@@ -43,6 +43,40 @@ impl Display for LaunchError {
 
 impl std::error::Error for LaunchError {}
 
+/// Every path a test run asked the shell to open.
+///
+/// Tests must not reach `ShellExecuteW`: launching a file with an
+/// unassociated extension (a temp `.tmp`, as the launch-flow test used) opens
+/// the shell's "Pick an app" dialog, and the call does not return until
+/// someone dismisses it. That made a unit test wait for a human and report as
+/// a 20-minute hang. Recording the request instead keeps the test hermetic and
+/// lets it assert what was launched.
+#[cfg(test)]
+static TEST_LAUNCHES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Records a launch instead of performing one, under test.
+#[cfg(test)]
+fn record_test_launch(target: &str) -> bool {
+    if let Ok(mut launches) = TEST_LAUNCHES.lock() {
+        launches.push(target.to_string());
+    }
+    true
+}
+
+#[cfg(not(test))]
+fn record_test_launch(_target: &str) -> bool {
+    false
+}
+
+/// Take the launches recorded during this test, clearing the list.
+#[cfg(test)]
+pub(crate) fn take_test_launches() -> Vec<String> {
+    TEST_LAUNCHES
+        .lock()
+        .map(|mut launches| std::mem::take(&mut *launches))
+        .unwrap_or_default()
+}
+
 pub fn launch_path(path: &str) -> Result<(), LaunchError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -87,6 +121,9 @@ fn launch_existing_path(candidate: &Path) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_open(target: &str) -> Result<(), LaunchError> {
+    if record_test_launch(target) {
+        return Ok(());
+    }
     if target.trim().to_ascii_lowercase().starts_with("shell:") {
         return launch_shell_target(target);
     }
@@ -145,6 +182,9 @@ fn launch_open(target: &str) -> Result<(), LaunchError> {
 
 #[cfg(target_os = "windows")]
 fn launch_runas(target: &str) -> Result<(), LaunchError> {
+    if record_test_launch(target) {
+        return Ok(());
+    }
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, SW_SHOWNORMAL};
 

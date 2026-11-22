@@ -1,0 +1,86 @@
+# Publishes a Nex release to winget on demand.
+#
+# This is deliberately not part of release.yml. Submitting needs a token that can
+# open pull requests on microsoft/winget-pkgs, and an expired token or a
+# winget-pkgs outage must not turn a successful release red. It is also not worth
+# running for every release: a version superseded while still queued for review
+# wastes moderator time.
+#
+# Required repository secret:
+#   WINGET_TOKEN  a fine-grained or classic PAT with `public_repo` scope, used to
+#                 fork microsoft/winget-pkgs and open or update a pull request.
+#                 The default GITHUB_TOKEN cannot open pull requests in another
+#                 repository, and wingetcreate needs to authenticate as a user.
+#
+# Run it from Actions -> "Publish to winget" -> Run workflow, or:
+#   gh workflow run winget.yml -f version=3.4.0
+
+name: Publish to winget
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without a leading v (for example 3.4.0). Defaults to the latest release.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Generate and validate the manifests, then stop before touching GitHub'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: winget
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the version
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:INPUT_VERSION
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = (gh release view --repo $env:GITHUB_REPOSITORY --json tagName --jq '.tagName').TrimStart('v')
+            Write-Host "No version given; using the latest release, $version."
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version '$version' is not a plain x.y.z version."
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install wingetcreate
+        run: |
+          winget install --id Microsoft.WingetCreate --exact `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:LOCALAPPDATA\Microsoft\WinGet\Links"
+
+      - name: Generate manifests and submit
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGETCREATE_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $args = @('-Version', $env:VERSION)
+          if ('${{ inputs.dry_run }}' -eq 'true') { $args += '-DryRun' }
+          ./scripts/windows/publish-winget.ps1 @args
+
+      - name: Report
+        run: |
+          Write-Host "Version $env:VERSION published to winget."
+          Write-Host "Pull request: https://github.com/microsoft/winget-pkgs/pulls?q=is%3Apr+Haxllo.Nex"

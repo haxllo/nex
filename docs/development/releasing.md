@@ -102,6 +102,44 @@ Pushing the tag publishes. The GitHub release page shows
 `docs/releases/v<ver>-notes.md`; the app shows `docs/whats-new.md` once per
 version, behind the pill that appears after an update.
 
+## Publishing to winget (optional, manual)
+
+winget does not follow releases. A version appears there only when someone submits
+it, so the published version silently falls behind unless you act. That is how the
+first manifests sat at 1.0.1 for six months while the project reached 3.3.0.
+
+It is deliberately separate from `release.yml`. Submission needs a token that can
+open pull requests on `microsoft/winget-pkgs`, and an expired token or an outage
+there must not turn a successful release red. Running it per release is also
+unnecessary: a version superseded while still queued for review wastes moderator
+time.
+
+```bash
+# through Actions
+github.com/haxllo/nex/actions/workflows/winget.yml -> Run workflow
+
+# or from a shell
+gh workflow run winget.yml -f version=3.4.0
+
+# locally, to inspect what would be submitted
+./scripts/windows/publish-winget.ps1 -Version 3.4.0 -DryRun
+```
+
+The script regenerates the manifests from the published release asset, not from
+whatever is in `manifests/`. It hashes the downloaded installer and cross-checks it
+against the hash recorded in that release's `manifest.json`, so a mismatch stops
+before anything reaches GitHub. It needs `WINGET_TOKEN` in repository secrets, a
+PAT with `public_repo` scope; the default `GITHUB_TOKEN` cannot open pull requests
+in another repository.
+
+If a pull request for this package is already open, the new version replaces the
+old one on that same branch rather than opening a second one. winget validation
+allows exactly one package version per pull request.
+
+Expect a first submission to take a week or more: `New-Package` cannot auto-merge
+and needs a moderator. Later versions go through automated validation and merge
+within hours.
+
 ## Next
 
 - [testing.md](testing.md) for the gates that run on every pull request

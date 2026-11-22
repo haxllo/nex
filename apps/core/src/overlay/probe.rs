@@ -255,6 +255,31 @@ fn webview_tree() -> (usize, u64, u64) {
     (descendants.len(), ws_bytes / (1024 * 1024), cpu_ms)
 }
 
+/// Machine-wide memory pressure: available physical, commit total and commit
+/// limit, in MB.
+///
+/// The owner's own read on the idle slowdown is memory pressure from other
+/// programs, which is worth measuring rather than agreeing with: if a show is
+/// slow only when the commit charge sits near its limit, the answer is "do not
+/// allocate on the show path"; if it is slow regardless, the answer is
+/// elsewhere.
+fn system_memory() -> (u64, u64, u64) {
+    use windows_sys::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
+
+    let mut info: PERFORMANCE_INFORMATION = unsafe { std::mem::zeroed() };
+    info.cb = std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32;
+    if unsafe { GetPerformanceInfo(&mut info, info.cb) } == 0 {
+        return (0, 0, 0);
+    }
+    let page = info.PageSize.max(1) as u64;
+    let to_mb = |pages: usize| (pages as u64 * page) / (1024 * 1024);
+    (
+        to_mb(info.PhysicalAvailable),
+        to_mb(info.CommitTotal),
+        to_mb(info.CommitLimit),
+    )
+}
+
 /// A `FILETIME` built from its two halves, for the `GetProcessTimes` out params.
 fn filetime(high: u32) -> windows_sys::Win32::Foundation::FILETIME {
     windows_sys::Win32::Foundation::FILETIME {
@@ -274,16 +299,16 @@ pub(crate) fn log(tag: &str, hwnd: *mut core::ffi::c_void, extra: &str) {
     let (control, state) = power_throttling();
     let (ws_mb, page_faults) = memory().unwrap_or((0, 0));
     let (procs, procs_ws_mb, procs_cpu_ms) = webview_tree();
+    let (avail_mb, commit_mb, commit_limit_mb) = system_memory();
     let visible = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd) };
     let heartbeat = heartbeat_age_ms()
         .map(|age| age.to_string())
         .unwrap_or_else(|| "none".to_string());
-    crate::runtime::log_info(&format!(
-        "[nex][probe] {tag} idle_s={} pow={control}/{state} ws_mb={ws_mb} pf={page_faults} \
-         cloaked={} vis={visible} wv_procs={procs} wv_ws_mb={procs_ws_mb} \
-         wv_cpu_ms={procs_cpu_ms} hb_age_ms={heartbeat} gap_ms={}{extra}",
+    let fields = format!(
+        "idle_s={} pow={control}/{state} ws_mb={ws_mb} pf={page_faults} cloaked={} vis={visible}          wv_procs={procs} wv_ws_mb={procs_ws_mb} wv_cpu_ms={procs_cpu_ms} hb_age_ms={heartbeat}          gap_ms={} avail_mb={avail_mb} commit_mb={commit_mb}/{commit_limit_mb}{extra}",
         idle_seconds(),
         cloaked(hwnd),
         worst_gap_ms(),
-    ));
+    );
+    crate::runtime::log_info(&format!("[nex][probe] {tag} {fields}"));
 }

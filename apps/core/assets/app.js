@@ -4789,6 +4789,7 @@
         // CIQ-236: the host needs to know whether a slow first paint was the
         // page waking up or the compositor arriving late.
         showRecvAt = performance.now();
+        paintedRafAt = 0;
       }
 
       // Close the power panel / confirm whenever Rust pushes a fresh state

@@ -161,8 +161,25 @@ foreach ($file in Get-ChildItem -Path $template.FullName -File) {
 
 Write-Step "Validating"
 
-winget validate --manifest $target
-if ($LASTEXITCODE -ne 0) { throw "winget validate rejected the generated manifests." }
+$validateOutput = winget validate --manifest $target 2>&1
+$validateExit = $LASTEXITCODE
+
+# Block on errors, not on warnings. Newer winget builds exit non-zero when they
+# emit warnings while still reporting "validation succeeded with warnings", so
+# the exit code alone cannot decide. Read the verdict out of the output, and fall
+# back to the exit code only when there is no verdict to read.
+$verdict = ($validateOutput | Out-String)
+Write-Host $verdict.Trim()
+
+if ($verdict -match 'Manifest validation failed' -or $verdict -match 'Manifest Error:') {
+    throw "winget validate rejected the generated manifests."
+}
+if ($validateExit -ne 0 -and $verdict -notmatch 'validation succeeded') {
+    throw "winget validate exited $validateExit without a verdict."
+}
+if ($verdict -match 'Manifest Warning:') {
+    Write-Warning "winget validate reported warnings; they do not block submission."
+}
 
 if ($DryRun) {
     Write-Step "Dry run: manifests are in $target and validated. Nothing submitted."

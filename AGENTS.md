@@ -117,7 +117,30 @@ which hid it. The causes were real and are fixed:
 `cargo test -p nex-helper` still cannot run: the helper embeds a `requireAdministrator`
 manifest, so the harness exits with "The requested operation requires elevation" (os error 740).
 
-**CI order**: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess` → `cargo test -p nex` → perf gate → smoke gate.
+**CI order**: two policy gates run first, before anything is compiled, and
+they are the ones an agent skips when it follows the build-and-test part of
+this file only. Neither is reachable from the `commit-msg` hook, which checks
+only the Linear id and the branch, so a green hook says nothing about them.
+
+1. `Require Linear issue for code changes` — a `CIQ-<n>` in the PR title or
+   body.
+2. `Require docs update for behaviour changes` — `scripts/check-docs-currency.sh`
+   maps a source file to the document it invalidates (`config.rs` →
+   `docs/user/settings.md` and so on; `scripts/check-docs-currency.sh --list`
+   prints the table). If the source changed, the document changes in the same
+   push. When the change genuinely cannot affect the document — a test module,
+   a private helper — set `NEX_ALLOW_STALE_DOCS=1` and state the reason in the
+   PR body, where the bypass is allowed only with one.
+
+Run both locally before opening the PR; the docs gate takes a second and reads
+the same changed-file list CI does:
+
+```bash
+git diff --name-only origin/master... | scripts/check-docs-currency.sh
+git diff --name-only origin/master... | NEX_ALLOW_STALE_DOCS=1 scripts/check-docs-currency.sh
+```
+
+Then the build gates: `vitest --run` → `cargo build --release --bin NexUIProcess --bin NexHelper --bin NexIndexerProcess` → `cargo test -p nex` → perf gate → smoke gate.
 
 **Helper binary**: `NexHelper.exe` is a separate workspace member (`apps/helper`) built via `--bin NexHelper`. It runs elevated (High IL) via a scheduled task to handle hotkey detection when elevated windows (Task Manager, Settings) are foreground. The scheduled task is created automatically on first run (one-time UAC prompt). The helper lives beside `NexUIProcess.exe` and is found automatically.
 

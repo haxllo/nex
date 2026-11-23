@@ -64,6 +64,71 @@ pub(crate) fn search_overlay_results(
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// How each keystroke's index seed was actually answered.
+///
+/// The indexer reports its own side in `status`, but only the UI knows which
+/// path a keystroke took: a seed that answered, a seed that came back empty, a
+/// seed that failed or timed out, or a prefix-cache hit that never asked the
+/// indexer at all. The three fallbacks are not the same problem — an empty seed
+/// for a query with no matches is normal, a timeout is a busy index — so they
+/// are counted apart instead of collapsing into one number.
+mod seed_path_stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(super) static ASKED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static ANSWERED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static EMPTY: AtomicU64 = AtomicU64::new(0);
+    pub(super) static FAILED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static PREFIX_CACHE: AtomicU64 = AtomicU64::new(0);
+    pub(super) static NOT_UI_CLIENT: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// These counters live in the UI process, so a `--status-json` run in
+    /// another process can never see them. Writing them to the log is what makes
+    /// them readable, and `--status` shows the last such line.
+    static LAST_LOG_EPOCH: AtomicU64 = AtomicU64::new(0);
+    const LOG_INTERVAL_SECS: u64 = 30;
+
+    pub(super) fn log_if_due() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let last = LAST_LOG_EPOCH.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < LOG_INTERVAL_SECS {
+            return;
+        }
+        if LAST_LOG_EPOCH
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let report = super::search_seed_path_report();
+        crate::logging::info(&format!(
+            "[nex] search_seed_path asked={} answered={} empty={} failed={} prefix_cache={} not_ui_client={}",
+            report["asked"], report["answered"], report["empty"], report["failed"],
+            report["prefix_cache"], report["not_ui_client"]
+        ));
+    }
+}
+
+/// The UI half of the seed report, published in `--status-json`.
+pub fn search_seed_path_report() -> serde_json::Value {
+    use seed_path_stats as stats;
+    serde_json::json!({
+        "asked": stats::ASKED.load(std::sync::atomic::Ordering::Relaxed),
+        "answered": stats::ANSWERED.load(std::sync::atomic::Ordering::Relaxed),
+        "empty": stats::EMPTY.load(std::sync::atomic::Ordering::Relaxed),
+        "failed": stats::FAILED.load(std::sync::atomic::Ordering::Relaxed),
+        "prefix_cache": stats::PREFIX_CACHE.load(std::sync::atomic::Ordering::Relaxed),
+        "not_ui_client": stats::NOT_UI_CLIENT.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
 pub(crate) fn search_overlay_results_with_session(
     service: &CoreService,
     cfg: &Config,
@@ -131,6 +196,7 @@ pub(crate) fn search_overlay_results_with_session(
             )
         }) {
         indexed_cache_hit = true;
+        seed_path_stats::bump(&seed_path_stats::PREFIX_CACHE);
         search_with_filter(
             &cache.seed_items,
             text_query,
@@ -143,9 +209,18 @@ pub(crate) fn search_overlay_results_with_session(
         } else {
             Err("not a UI client".to_string())
         };
+        if service.is_ui_client() {
+            seed_path_stats::bump(&seed_path_stats::ASKED);
+        } else {
+            seed_path_stats::bump(&seed_path_stats::NOT_UI_CLIENT);
+        }
         match remote {
-            Ok(items) if !items.is_empty() => items,
-            _ => {
+            Ok(items) if !items.is_empty() => {
+                seed_path_stats::bump(&seed_path_stats::ANSWERED);
+                items
+            }
+            Ok(_) => {
+                seed_path_stats::bump(&seed_path_stats::EMPTY);
                 // The UI cache holds only the hot set; caching this seed would
                 // keep later keystrokes off the indexer once it answers again.
                 seed_is_partial = service.is_ui_client();
@@ -153,8 +228,16 @@ pub(crate) fn search_overlay_results_with_session(
                     .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
                     .map_err(|error| format!("indexed search failed: {error}"))?
             }
+            Err(_) => {
+                seed_path_stats::bump(&seed_path_stats::FAILED);
+                seed_is_partial = service.is_ui_client();
+                service
+                    .search_with_filter_uncapped(text_query, indexed_seed_limit, &indexed_filter)
+                    .map_err(|error| format!("indexed search failed: {error}"))?
+            }
         }
     };
+    seed_path_stats::log_if_due();
     let indexed_ms = indexed_started.elapsed().as_millis();
     if !indexed_cache_hit {
         record_indexed_latency_sample(session, indexed_ms);

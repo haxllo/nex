@@ -47,7 +47,7 @@ is rejected rather than guessed at.
 |---|---|
 | `ping` | Liveness and version |
 | `shutdown` | Stop the indexer, used by a graceful quit |
-| `status` | Index health |
+| `status` | Index health, including the `search_seed` counters |
 | `snapshot` | The published item snapshot with its generation |
 | `sync` | Incremental changes since a generation |
 | `search` | A query against the index |
@@ -57,6 +57,10 @@ is rejected rather than guessed at.
 | `record_launch`, `record_selection` | Usage counters written by the UI |
 | `delete_item` | Remove one item from the index |
 | `warm_index` | Ask the indexer to warm its caches |
+
+`status` also carries `search_seed` (`requests`, `answered`, `empty`, `failed`,
+`over_budget`, `avg_ms`, `max_ms`, `budget_ms`), so a keystroke served by the UI's
+cache instead of the index is a number rather than an assumption.
 
 The UI does not query this on every keystroke. It keeps a snapshot and applies
 deltas. See [index-and-search.md](index-and-search.md).

@@ -87,6 +87,28 @@ from the in-memory snapshot without touching either store.
 The stores are rebuilt if either is missing or unreadable. Deleting
 `index.sqlite3` while Nex is closed costs a rescan and nothing else.
 
+## Seeding a keystroke
+
+Each keystroke asks the indexer for candidates (`search_seed`) under a 500 ms
+budget. If the budget expires, the answer is empty, or the call fails, the UI
+ranks its own hot cache instead, which is a much smaller set. That fallback used
+to be invisible.
+
+Both sides now count it. The indexer reports `requests`, `answered`, `empty`,
+`failed`, `over_budget`, `avg_ms`, `max_ms` and `budget_ms` in its `status`
+payload; `over_budget` counts seeds whose own work reached the budget, which is
+the honest "too slow" signal and only the indexer can measure it. The UI counts
+which path each keystroke took (`asked`, `answered`, `empty`, `failed`,
+`prefix_cache`, `not_ui_client`) and writes that line to the log at most every
+30 s, because those counters live in the UI process where a separate `--status`
+run cannot read them.
+
+Measured on a development machine: 120 seeds against an idle index and 1,500
+across a full filesystem pass, all answered, `avg_ms=2`, `max_ms=6`,
+`over_budget=0`. Those queries were single words against an already-built
+index — a prefix query during a Tantivy rebuild is the heavier case, and the
+counters are what will show it.
+
 ## Ranking
 
 Results are ordered by how the query matched, then by how you have used the item.

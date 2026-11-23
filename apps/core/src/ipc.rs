@@ -12,7 +12,7 @@
 //! fixed port, which let any process on the machine read the index and control
 //! the indexer (CIQ-242).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -221,6 +221,7 @@ fn dispatch(
                 "generation": service.search_generation(),
                 "cached_items": service.cached_items_len(),
                 "indexing": indexing.load(Ordering::Acquire),
+                "search_seed": seed_stats_json(),
             }))
         }
         "snapshot" => {
@@ -364,9 +365,25 @@ fn dispatch(
                 .and_then(Value::as_u64)
                 .unwrap_or(500) as usize;
             let service = service.read().unwrap_or_else(|e| e.into_inner());
-            match service.search_tantivy_seed(query, limit) {
-                Ok(items) => IpcResponse::ok(json!({ "items": items_to_values(&items) })),
-                Err(error) => IpcResponse::error(error.to_string()),
+            let started = Instant::now();
+            let outcome = service.search_tantivy_seed(query, limit);
+            let elapsed = started.elapsed();
+            match outcome {
+                Ok(items) => {
+                    SEED_COUNTERS.record(
+                        elapsed,
+                        if items.is_empty() {
+                            SeedOutcome::Empty
+                        } else {
+                            SeedOutcome::Answered
+                        },
+                    );
+                    IpcResponse::ok(json!({ "items": items_to_values(&items) }))
+                }
+                Err(error) => {
+                    SEED_COUNTERS.record(elapsed, SeedOutcome::Failed);
+                    IpcResponse::error(error.to_string())
+                }
             }
         }
         other => IpcResponse::error(format!("unknown method: {other}")),
@@ -563,6 +580,107 @@ pub fn ipc_call_with_timeout(
     let encoded = serde_json::to_string(request).map_err(|e| e.to_string())?;
     let line = crate::ipc_transport::call(endpoint, &encoded, read_timeout)?;
     serde_json::from_str(line.trim()).map_err(|e| e.to_string())
+}
+
+/// Counters for the `search_seed` fast path.
+///
+/// [`SEARCH_SEED_TIMEOUT`] is a promise to the typist, not to the index: when it
+/// is exceeded the UI ranks its hot cache instead, and that keystroke is served
+/// by a much smaller set of candidates. Nothing counted how often that happened,
+/// so whether a busy indexer changed what people saw was a guess.
+///
+/// `over_budget` is the honest signal, and it is measured here rather than in
+/// the UI: a seed whose own work exceeded the budget is one the UI may already
+/// have abandoned, and the indexer is the only side that can see it finish.
+struct SeedCounters {
+    requests: AtomicU64,
+    answered: AtomicU64,
+    empty: AtomicU64,
+    failed: AtomicU64,
+    over_budget: AtomicU64,
+    total_micros: AtomicU64,
+    slowest_micros: AtomicU64,
+}
+
+impl SeedCounters {
+    const fn new() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            answered: AtomicU64::new(0),
+            empty: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            over_budget: AtomicU64::new(0),
+            total_micros: AtomicU64::new(0),
+            slowest_micros: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, elapsed: Duration, outcome: SeedOutcome) {
+        let micros = elapsed.as_micros() as u64;
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.total_micros.fetch_add(micros, Ordering::Relaxed);
+        self.slowest_micros.fetch_max(micros, Ordering::Relaxed);
+        match outcome {
+            SeedOutcome::Answered => {
+                self.answered.fetch_add(1, Ordering::Relaxed);
+            }
+            SeedOutcome::Empty => {
+                self.empty.fetch_add(1, Ordering::Relaxed);
+            }
+            SeedOutcome::Failed => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if elapsed >= SEARCH_SEED_TIMEOUT {
+            self.over_budget.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn report(&self) -> Value {
+        let requests = self.requests.load(Ordering::Relaxed);
+        let total = self.total_micros.load(Ordering::Relaxed);
+        json!({
+            "requests": requests,
+            "answered": self.answered.load(Ordering::Relaxed),
+            "empty": self.empty.load(Ordering::Relaxed),
+            "failed": self.failed.load(Ordering::Relaxed),
+            "over_budget": self.over_budget.load(Ordering::Relaxed),
+            "avg_ms": if requests == 0 { 0 } else { total / requests / 1000 },
+            "max_ms": self.slowest_micros.load(Ordering::Relaxed) / 1000,
+            "budget_ms": SEARCH_SEED_TIMEOUT.as_millis() as u64,
+        })
+    }
+}
+
+enum SeedOutcome {
+    Answered,
+    Empty,
+    Failed,
+}
+
+static SEED_COUNTERS: SeedCounters = SeedCounters::new();
+
+/// `search_seed` counters as reported by `status`.
+pub fn seed_stats_json() -> Value {
+    SEED_COUNTERS.report()
+}
+
+/// Read the indexer's seed counters over IPC, for the UI's own status output.
+///
+/// Returns `None` when the indexer is not answering, which is itself a datum:
+/// the UI-side counters then show the fallback rate it caused.
+pub fn indexer_seed_stats(endpoint: &str) -> Option<Value> {
+    let response = ipc_call_with_timeout(
+        endpoint,
+        &IpcRequest::new("status", json!({})),
+        Duration::from_millis(300),
+    )
+    .ok()?;
+    response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("search_seed"))
+        .cloned()
 }
 
 /// Keystroke budget for the indexer seed query. A busy indexer (rebuild at
@@ -810,6 +928,30 @@ mod tests {
     /// An indexer that never answers must not turn a quit into an error. The
     /// endpoint is bound and left silent, which is exactly the busy-indexer
     /// case.
+    /// The seed counters exist so the 500 ms typing budget can be judged from
+    /// data instead of assumed. The boundary matters: a seed that finishes at
+    /// the budget has already been abandoned by the caller.
+    #[test]
+    fn seed_counters_split_outcomes_and_flag_over_budget() {
+        let counters = SeedCounters::new();
+        counters.record(Duration::from_millis(10), SeedOutcome::Answered);
+        counters.record(SEARCH_SEED_TIMEOUT, SeedOutcome::Empty);
+        counters.record(Duration::from_millis(5), SeedOutcome::Failed);
+
+        let report = counters.report();
+        assert_eq!(report["requests"], 3);
+        assert_eq!(report["answered"], 1);
+        assert_eq!(report["empty"], 1);
+        assert_eq!(report["failed"], 1);
+        assert_eq!(
+            report["over_budget"], 1,
+            "a seed that spends the whole budget has exceeded it"
+        );
+        assert_eq!(report["max_ms"], 500);
+        assert_eq!(report["budget_ms"], 500);
+        assert_eq!(report["avg_ms"], 171);
+    }
+
     #[test]
     fn shutdown_of_a_silent_indexer_returns_within_the_budget() {
         let endpoint = format!("nex-test-silent-{}", std::process::id());

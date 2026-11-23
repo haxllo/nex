@@ -22,7 +22,7 @@ pub enum UpdateCheck {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct ReleaseTag {
+pub(crate) struct ReleaseTag {
     #[serde(default)]
     tag_name: String,
     #[serde(default)]
@@ -154,6 +154,58 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
 
 /// Check if an update is available by running the updater in capture mode
 /// and parsing the output. Returns (available, detected version).
+/// Everything an update would do, decided and written out but not performed.
+///
+/// This exists because "which install would be modified, and with elevation or
+/// not?" has been the wrong answer before — a stale HKLM registration beside a
+/// per-user one, or an orphan copy shadowing the real install. The plan is read
+/// from the same functions a native apply path will use, so the diagnostic
+/// cannot describe behaviour that differs from what the updater does.
+pub fn update_plan_json(channel: UpdateChannel) -> String {
+    let facts = crate::update_install::collect_install_facts();
+    let target = crate::update_install::resolve_install_target(&facts);
+    let installed = crate::update_install::installed_version(&target.root);
+    let runtime = crate::update_install::runtime_executable(&target.root);
+
+    let (status, latest, reason) = match fetch_releases() {
+        Ok(releases) => {
+            match select_release(
+                &releases,
+                channel,
+                installed.as_deref().unwrap_or("0.0.0"),
+            ) {
+                UpdateCheck::Available { version } => ("update-available", Some(version), None),
+                UpdateCheck::UpToDate { latest } => ("up-to-date", Some(latest), None),
+                UpdateCheck::Failed { reason } => ("check-failed", None, Some(reason)),
+            }
+        }
+        Err(reason) => ("check-failed", None, Some(reason)),
+    };
+
+    let assets = latest
+        .as_deref()
+        .map(crate::update_install::release_asset_names);
+
+    serde_json::json!({
+        "channel": channel.as_arg(),
+        "status": status,
+        "reason": reason,
+        "installed_version": installed,
+        "installed_root": target
+            .root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_string(),
+        "install_source": target.source.as_str(),
+        "needs_elevation": target.needs_elevation,
+        "runtime_executable": runtime.to_string_lossy(),
+        "latest_version": latest,
+        "setup_asset": assets.as_ref().map(|(setup, _)| setup.clone()),
+        "manifest_asset": assets.as_ref().map(|(_, manifest)| manifest.clone()),
+    })
+    .to_string()
+}
+
 /// Ask GitHub whether a newer release exists, in process.
 ///
 /// This used to start PowerShell and scrape `NEX_UPDATE_RESULT:` out of the
@@ -173,7 +225,7 @@ fn running_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-fn fetch_releases() -> Result<Vec<ReleaseTag>, String> {
+pub(crate) fn fetch_releases() -> Result<Vec<ReleaseTag>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(8))
         .timeout_read(std::time::Duration::from_secs(8))
@@ -199,7 +251,11 @@ fn fetch_releases() -> Result<Vec<ReleaseTag>, String> {
 
 /// The selection rules, ported from `scripts/windows/update-nex.ps1` so the
 /// in-process check cannot disagree with the updater that applies the update.
-fn select_release(releases: &[ReleaseTag], channel: UpdateChannel, running: &str) -> UpdateCheck {
+pub(crate) fn select_release(
+    releases: &[ReleaseTag],
+    channel: UpdateChannel,
+    running: &str,
+) -> UpdateCheck {
     let wants_beta = channel == UpdateChannel::Beta;
     let newest = releases
         .iter()
@@ -242,7 +298,7 @@ fn is_beta_release(release: &ReleaseTag) -> bool {
 }
 
 /// Strip a leading `v`, and give a two-part version the patch it omits.
-fn normalize_version(tag_or_version: &str) -> String {
+pub(crate) fn normalize_version(tag_or_version: &str) -> String {
     let trimmed = tag_or_version.trim();
     let without_prefix = trimmed.strip_prefix('v').unwrap_or(trimmed);
     let (core, suffix) = match without_prefix.find(['-', '+']) {

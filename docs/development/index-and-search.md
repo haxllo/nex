@@ -46,6 +46,13 @@ An application pass is skipped while its stamp is younger than the reconcile
 interval, so a change here does not show up until the stamp is cleared or the
 interval elapses.
 
+Executable publishers come from each file's own version resource
+(`\StringFileInfo\<lang><codepage>\CompanyName`), read in process. That reader
+lives in `win_version_resource.rs` rather than in `discovery.rs`, because the
+updater reads the same resource tree for a different field: the installed
+build's `FileVersion`. Both used to be PowerShell `FileVersionInfo` lookups,
+which is the argument shape a user's antivirus flagged (CIQ-201).
+
 ### Watchers and the reconcile window
 
 Each root has its own directory watcher and consumer. A watcher that cannot open

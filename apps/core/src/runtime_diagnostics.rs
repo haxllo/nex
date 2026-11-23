@@ -831,6 +831,16 @@ fn copy_recent_logs_to_bundle(
     Ok(())
 }
 
+/// `--update-plan`: say which installation an update would modify and what it
+/// would install, without stopping, moving or downloading anything.
+pub(crate) fn command_update_plan() -> Result<(), RuntimeError> {
+    println!(
+        "{}",
+        crate::updater::update_plan_json(crate::updater::UpdateChannel::Stable)
+    );
+    Ok(())
+}
+
 pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
     use crate::tantivy_search::TantivyIndex;
     use std::path::Path;

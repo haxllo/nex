@@ -10,16 +10,31 @@ point.
 
 | Path | Transport | Why |
 |---|---|---|
-| UI to indexer | TCP on `127.0.0.1:45821` | Both are Medium integrity, so no privilege boundary is crossed, and a socket carries request and response cleanly |
+| UI to indexer | Named pipe, name scoped to user and session | The two processes are at the same integrity level, so the boundary that matters is *the user*, not the privilege level. A pipe name is the only one of the two that can carry an owner |
 | UI to helper, and indexer to helper | Named pipes | Integrity levels differ, so the pipe's creator decides who may use it |
 
-A second indexer that finds `127.0.0.1:45821` already bound exits on startup rather
-than fighting for the port. That is how single-indexer ownership is enforced.
+A second indexer that finds its endpoint already owned exits on startup rather than
+fighting for it. Ownership is an explicit claim, not a side effect: `ipc_transport`
+creates a `Local\<endpoint>-v1-<scope>` mutex and treats `ERROR_ALREADY_EXISTS` as
+"another indexer owns this link".
+
+The scope is the session id plus a hash of the user's SID, and the pipe's DACL is
+generated from that SID. Two consequences follow, and both are the point of the
+design:
+
+- An unrelated process running as the same user is still refused by the DACL, and
+  a process running as another user cannot open the pipe at all.
+- Two sessions are two separate links. The earlier transport used a fixed loopback
+  port, which is per machine while the runtime singleton is per session, so a
+  second session's indexer could not bind and its UI silently read the first
+  session's index (CIQ-242).
 
 ## The UI to indexer protocol
 
-The indexer listens on loopback and answers JSON requests. Each request carries a
-protocol version, and a mismatch is rejected rather than guessed at.
+The indexer answers newline-delimited JSON: one request line in, one response line
+out, per connection, framed in byte mode and bounded by explicit caps (1 MiB
+request, 256 MiB response). Each request carries a protocol version, and a mismatch
+is rejected rather than guessed at.
 
 | Method | Purpose |
 |---|---|

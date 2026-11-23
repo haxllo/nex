@@ -510,9 +510,9 @@ pub(crate) fn run_windows_runtime(
     // parent-PID watchdog is only a backstop for crashes.
     #[cfg(target_os = "windows")]
     if std::env::var("NEX_UI_PROCESS").ok().as_deref() == Some("1") {
-        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+        if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ENDPOINT) {
             log_info("[nex] shutdown: stopping NexIndexerProcess");
-            crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR);
+            crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ENDPOINT);
             mark("indexer asked to stop", &mut step_at);
         }
     }
@@ -1911,7 +1911,7 @@ impl RuntimeWorker {
                             Err(_) => log_info("[nex] warm_search_cache deferred (index busy)"),
                         }
                         std::thread::spawn(|| {
-                            crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                            crate::ipc::warm_index(crate::ipc::INDEXER_ENDPOINT)
                         });
                         // Fresh media state on every show: the overlay may
                         // reopen into a surviving media view, and Spotify may
@@ -1982,7 +1982,7 @@ impl RuntimeWorker {
                     guard.warm_search_cache();
                 }
                 std::thread::spawn(|| {
-                    crate::ipc::warm_index(crate::ipc::INDEXER_ADDR)
+                    crate::ipc::warm_index(crate::ipc::INDEXER_ENDPOINT)
                 });
                 // Same as ShowAndFocus: revalidate media on show so a
                 // surviving media view closes promptly if playback ended

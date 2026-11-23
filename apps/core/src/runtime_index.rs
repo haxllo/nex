@@ -104,7 +104,7 @@ fn start_ui_snapshot_sync(
             {
                 SnapshotSync::Unchanged => None,
                 SnapshotSync::Unreachable => {
-                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ADDR);
+                    crate::ipc::ensure_indexer_running(crate::ipc::INDEXER_ENDPOINT);
                     None
                 }
                 SnapshotSync::Full(generation, instance, items) => {
@@ -256,11 +256,11 @@ fn sync_indexer_snapshot(
     known_instance: u64,
     wait: Duration,
 ) -> SnapshotSync {
-    use crate::ipc::{ipc_call_with_timeout, items_from_values, IpcRequest, INDEXER_ADDR};
+    use crate::ipc::{ipc_call_with_timeout, items_from_values, IpcRequest, INDEXER_ENDPOINT};
     use serde_json::{json, Value};
 
     let response = match ipc_call_with_timeout(
-        INDEXER_ADDR,
+        INDEXER_ENDPOINT,
         &IpcRequest::new(
             "sync",
             json!({

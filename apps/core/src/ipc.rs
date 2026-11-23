@@ -828,9 +828,13 @@ mod tests {
         let elapsed = started.elapsed();
         let _ = result;
         // The wait must be the budget, not a scheduler accident: the old 60 s
-        // call would sit here for a minute.
+        // call would sit here for a minute. The tolerance is a few tens of
+        // milliseconds because the budget starts inside the call, after this
+        // measurement and after the link is opened, so a fast transport returns
+        // marginally under it (measured 498.4 ms of 500 ms on CI). A call that
+        // returned early would be orders of magnitude away, not 1.6 ms.
         assert!(
-            elapsed >= SHUTDOWN_INDEXER_TIMEOUT,
+            elapsed >= SHUTDOWN_INDEXER_TIMEOUT - Duration::from_millis(50),
             "expected to wait out the budget, returned in {elapsed:?}"
         );
         assert!(

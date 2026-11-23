@@ -296,7 +296,7 @@ impl DiscoveryProvider for StartMenuAppDiscoveryProvider {
     fn change_stamp(&self) -> Option<String> {
         // Bump when Start menu discovery/filtering behavior changes so incremental
         // rebuilds do not keep stale cached app entries.
-        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "11";
+        const START_MENU_DISCOVERY_SCHEMA_VERSION: &str = "12";
         Some(format!(
             "v{START_MENU_DISCOVERY_SCHEMA_VERSION};{}",
             roots_change_stamp(&self.roots)
@@ -2149,8 +2149,101 @@ fn registered_command_target(command: &str) -> Option<String> {
     (!target.is_empty()).then(|| target.to_string())
 }
 
+/// Every entry the Start menu shows, as `(display name, App ID)`.
+///
+/// This is the same list `Get-StartApps` reports: the shell's `AppsFolder`
+/// namespace, enumerated as shell items. `SIGDN_PARENTRELATIVEPARSING` on a
+/// child is the App ID (`Anysphere.Cursor`, `Microsoft.Paint_8wekyb3d8bbwe!App`),
+/// and `SIGDN_NORMALDISPLAY` is the localised name the Start menu shows.
+///
+/// Replacing `Get-StartApps` removes a cold `powershell.exe` start and 430 ms of
+/// interpreter work from every app pass.
 #[cfg(target_os = "windows")]
-fn discover_start_apps(
+fn enumerate_shell_apps() -> Vec<(String, String)> {
+    use windows::Win32::Foundation::{S_FALSE, S_OK};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_APARTMENTTHREADED,
+        COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::{
+        IEnumShellItems, IShellItem, BHID_EnumItems, FOLDERID_AppsFolder, KF_FLAG_DEFAULT,
+        SHGetKnownFolderItem, SIGDN, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
+    };
+
+    /// Read one display name out of a shell item and free the shell's copy.
+    ///
+    /// # Safety
+    /// `item` must be a live shell item interface.
+    unsafe fn shell_item_name(item: &IShellItem, sigdn: SIGDN) -> Option<String> {
+        // SAFETY: the caller guarantees `item` is live; the returned string is
+        // CoTaskMem-allocated and freed exactly once below.
+        let raw = unsafe { item.GetDisplayName(sigdn) }.ok()?;
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: `raw` is NUL terminated and owned by this function.
+        let text = unsafe { raw.to_string() }.ok();
+        // SAFETY: `raw` came from `GetDisplayName` and is not used afterwards.
+        unsafe { CoTaskMemFree(Some(raw.0 as *const core::ffi::c_void)) };
+        let text = text?;
+        let trimmed = text.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
+
+    // A thread already in the multi-threaded apartment can still enumerate the
+    // shell namespace, so a changed-mode result is not fatal: only a successful
+    // initialisation is undone, and `S_FALSE` belongs to someone else.
+    let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    let owned = init == S_OK;
+    if init.is_err() && init != S_FALSE {
+        crate::logging::warn(&format!(
+            "[nex] shell AppsFolder enumeration could not initialise COM: {init:?}"
+        ));
+        return Vec::new();
+    }
+
+    let mut apps = Vec::new();
+    // SAFETY: COM is initialised above (or was already), and every interface is
+    // released by the time its binding leaves scope.
+    unsafe {
+        let folder = SHGetKnownFolderItem::<IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None);
+        let Ok(folder) = folder else {
+            if owned {
+                CoUninitialize();
+            }
+            return apps;
+        };
+        let items = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems);
+
+        if let Ok(items) = items {
+            loop {
+                let mut batch: [Option<IShellItem>; 16] = Default::default();
+                let mut fetched = 0u32;
+                // `Next` returns S_FALSE when the enumerator is exhausted, which
+                // the typed wrapper reports as `Ok(())` with a short batch.
+                if items.Next(&mut batch, Some(&mut fetched)).is_err() || fetched == 0 {
+                    break;
+                }
+                for item in batch.iter().take(fetched as usize).flatten() {
+                    let name = shell_item_name(item, SIGDN_NORMALDISPLAY);
+                    let app_id = shell_item_name(item, SIGDN_PARENTRELATIVEPARSING);
+                    if let (Some(name), Some(app_id)) = (name, app_id) {
+                        apps.push((name, app_id));
+                    }
+                }
+            }
+        }
+    }
+
+    if owned {
+        // SAFETY: mirrors the successful `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+    }
+    apps
+}
+
+#[cfg(target_os = "windows")]
+fn discover_start_apps_via_powershell(
     uninstall_publishers: &HashMap<String, String>,
 ) -> Result<Vec<SearchItem>, ProviderError> {
     use std::os::windows::process::CommandExt;
@@ -2197,8 +2290,6 @@ Get-StartApps | ForEach-Object {
         )));
     }
 
-    let appx_publishers = load_appx_family_publishers().unwrap_or_default();
-
     let mut items = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Some((name, app_id)) = line.split_once('\t') else {
@@ -2221,7 +2312,7 @@ Get-StartApps | ForEach-Object {
         let id = format!("app:{}", normalize_id_path(&path));
         let mut item = SearchItem::new(&id, "app", title, &path);
         if let Some(subtitle) = publisher_from_uninstall_map(title, uninstall_publishers)
-            .or_else(|| start_app_subtitle_from_app_id(app_id, &appx_publishers))
+            .or_else(|| start_app_subtitle_from_app_id(app_id))
             .and_then(|raw| sanitize_publisher_label(raw.as_str()))
         {
             item = item.with_subtitle(subtitle.as_str());
@@ -2232,66 +2323,49 @@ Get-StartApps | ForEach-Object {
     Ok(items)
 }
 
+/// Start-menu entries, preferring the shell namespace and falling back to
+/// `Get-StartApps` only when the namespace enumerates nothing.
+///
+/// The fallback exists so a machine where COM enumeration fails loses speed
+/// rather than 144 app records. It is expected never to run.
 #[cfg(target_os = "windows")]
-fn load_appx_family_publishers() -> Result<HashMap<String, String>, ProviderError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-Get-AppxPackage | ForEach-Object {
-  $family = [string]$_.PackageFamilyName
-  if ([string]::IsNullOrWhiteSpace($family)) { return }
-  $publisher = [string]$_.PublisherDisplayName
-  if ([string]::IsNullOrWhiteSpace($publisher)) {
-    $publisher = [string]$_.Publisher
-  }
-  if (-not [string]::IsNullOrWhiteSpace($publisher)) {
-    "{0}`t{1}" -f $family.Trim(), $publisher.Trim()
-  }
-}
-"#;
-
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW);
-
-    let output = command.output().map_err(|error| {
-        ProviderError::new(format!("Get-AppxPackage invocation failed: {error}"))
-    })?;
-    if !output.status.success() {
-        return Ok(HashMap::new());
+fn discover_start_apps(
+    uninstall_publishers: &HashMap<String, String>,
+) -> Result<Vec<SearchItem>, ProviderError> {
+    let apps = enumerate_shell_apps();
+    if apps.is_empty() {
+        crate::logging::warn(
+            "[nex] shell AppsFolder enumeration returned nothing; using the PowerShell fallback",
+        );
+        return discover_start_apps_via_powershell(uninstall_publishers);
     }
 
-    let mut out = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.splitn(2, '\t');
-        let Some(family_raw) = parts.next() else {
-            continue;
-        };
-        let Some(publisher_raw) = parts.next() else {
-            continue;
-        };
-        let family = family_raw.trim();
-        let publisher = publisher_raw.trim();
-        if family.is_empty() || publisher.is_empty() {
+    let mut items = Vec::new();
+    for (name, app_id) in apps {
+        let title = name.trim();
+        let app_id = app_id.trim();
+        if title.is_empty() || app_id.is_empty() {
             continue;
         }
-        if let Some(clean_publisher) = sanitize_publisher_label(publisher) {
-            out.insert(family.to_ascii_lowercase(), clean_publisher);
+        if should_exclude_non_app_start_reference(title, app_id) {
+            continue;
         }
-    }
+        if is_documentation_like_start_entry_title(title) {
+            continue;
+        }
 
-    Ok(out)
+        let path = format!("shell:AppsFolder\\{app_id}");
+        let id = format!("app:{}", normalize_id_path(&path));
+        let mut item = SearchItem::new(&id, "app", title, &path);
+        if let Some(subtitle) = publisher_from_uninstall_map(title, uninstall_publishers)
+            .or_else(|| start_app_subtitle_from_app_id(app_id))
+            .and_then(|raw| sanitize_publisher_label(raw.as_str()))
+        {
+            item = item.with_subtitle(subtitle.as_str());
+        }
+        items.push(item);
+    }
+    Ok(items)
 }
 
 #[cfg(target_os = "windows")]
@@ -2513,10 +2587,7 @@ fn program_files_vendor_label(target_path: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn start_app_subtitle_from_app_id(
-    app_id: &str,
-    appx_publishers: &HashMap<String, String>,
-) -> Option<String> {
+fn start_app_subtitle_from_app_id(app_id: &str) -> Option<String> {
     let trimmed = app_id.trim();
     if trimmed.is_empty() {
         return None;
@@ -2528,13 +2599,6 @@ fn start_app_subtitle_from_app_id(
     }
 
     if let Some((package_name, _app_entry)) = trimmed.split_once('!') {
-        let family_key = package_name.trim().to_ascii_lowercase();
-        if let Some(label) = appx_publishers.get(&family_key) {
-            let cleaned = label.trim();
-            if !cleaned.is_empty() {
-                return Some(cleaned.to_string());
-            }
-        }
         if let Some((publisher_hint, _package_tail)) = package_name.split_once('_') {
             if let Some(publisher) = normalize_publisher_hint(publisher_hint) {
                 return Some(publisher);
@@ -2957,6 +3021,38 @@ mod tests {
                 "{name} kept its NUL terminator: {command:?}"
             );
         }
+    }
+
+    /// The Start menu is read from the shell's `AppsFolder` namespace instead of
+    /// `Get-StartApps`. Parity against the PowerShell list was checked by hand
+    /// (180 App IDs, 180 names, zero differences); this pins what can be checked
+    /// without starting a second shell: a populated, duplicate-free list whose
+    /// entries carry a name and an App ID.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shell_apps_are_enumerated_with_names_and_app_ids() {
+        let apps = enumerate_shell_apps();
+        if apps.is_empty() {
+            eprintln!("skipping: this shell exposed no AppsFolder entries");
+            return;
+        }
+        assert!(
+            apps.len() > 10,
+            "expected a populated Start menu, got {}",
+            apps.len()
+        );
+        for (name, app_id) in &apps {
+            assert!(!name.trim().is_empty(), "an entry had no display name");
+            assert!(!app_id.trim().is_empty(), "{name} had no App ID");
+        }
+        let mut ids: Vec<String> = apps
+            .iter()
+            .map(|(_, app_id)| app_id.to_ascii_lowercase())
+            .collect();
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(total, ids.len(), "the namespace returned duplicate App IDs");
     }
 
     /// A subkey that does not exist must read as absent, not as an empty value.

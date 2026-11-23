@@ -185,9 +185,18 @@ pub(crate) fn run_windows_runtime(
     std::thread::Builder::new()
         .name("nex-startup-update-check".into())
         .spawn(move || {
-            let (available, latest) = crate::updater::check_update_available(
-                crate::updater::UpdateChannel::Stable
-            ).unwrap_or((false, None));
+            // A failed check is not "up to date". Say so in the log rather
+            // than letting a broken updater look like a current one.
+            let (available, latest) = match crate::updater::check_update_available(
+                crate::updater::UpdateChannel::Stable,
+            ) {
+                crate::updater::UpdateCheck::Available { version } => (true, Some(version)),
+                crate::updater::UpdateCheck::UpToDate { latest } => (false, Some(latest)),
+                crate::updater::UpdateCheck::Failed { reason } => {
+                    crate::runtime::log_warn(&format!("[nex] update check failed: {reason}"));
+                    (false, None)
+                }
+            };
             let _ = event_tx_for_update.send(OverlayEvent::UpdateAvailable { available, latest });
         })
         .ok();

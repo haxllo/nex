@@ -5,6 +5,29 @@ const INSTALLED_UPDATER_RELATIVE_PATH: &str = "scripts/update-nex.ps1";
 const INSTALLED_UPDATER_FALLBACK_NAME: &str = "update-nex.ps1";
 const DEV_UPDATER_RELATIVE_PATH: &str = "scripts/windows/update-nex.ps1";
 const MAX_ANCESTOR_SCAN_DEPTH: usize = 10;
+const RELEASES_API: &str = "https://api.github.com/repos/haxllo/nex/releases?per_page=40";
+const RELEASES_USER_AGENT: &str = "Nex-Updater";
+
+/// What an update check can answer.
+///
+/// A failed check is its own answer. The previous shape returned
+/// `(false, None)` for "up to date", for "no update script", and for "GitHub
+/// was unreachable" alike, so a permanently broken updater looked exactly like
+/// a current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCheck {
+    UpToDate { latest: String },
+    Available { version: String },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ReleaseTag {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    prerelease: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateChannel {
@@ -131,37 +154,141 @@ pub fn summarize_update_output(output: &std::process::Output) -> String {
 
 /// Check if an update is available by running the updater in capture mode
 /// and parsing the output. Returns (available, detected version).
-pub fn check_update_available(channel: UpdateChannel) -> Result<(bool, Option<String>), UpdateLaunchError> {
-    let script_path = resolve_updater_script()?;
-    let output = run_updater_script_check_only(script_path.as_path(), channel)?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines().rev() {
-        if let Some((_, json)) = line.split_once("NEX_UPDATE_RESULT:") {
-            let json = json.trim();
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
-                let status = value
-                    .get("status")
-                    .and_then(|field| field.as_str())
-                    .unwrap_or("");
-                if status == "version-skew" {
-                    let message = value
-                        .get("message")
-                        .and_then(|field| field.as_str())
-                        .unwrap_or("running copy differs from installed copy");
-                    crate::runtime::log_warn(&format!(
-                        "[nex] update check aborted: {message}"
-                    ));
-                }
-                let version = value
-                    .get("version")
-                    .and_then(|field| field.as_str())
-                    .map(str::to_string);
-                return Ok((status == "update-available", version));
-            }
+/// Ask GitHub whether a newer release exists, in process.
+///
+/// This used to start PowerShell and scrape `NEX_UPDATE_RESULT:` out of the
+/// update script: 1.8 s of interpreter start for one HTTPS GET, and every
+/// failure mode (no script, no interpreter, no network, unparseable output)
+/// arrived as "up to date". Selecting a release is pure and tested; only the
+/// fetch can fail, and now it says so.
+pub fn check_update_available(channel: UpdateChannel) -> UpdateCheck {
+    let releases = match fetch_releases() {
+        Ok(releases) => releases,
+        Err(reason) => return UpdateCheck::Failed { reason },
+    };
+    select_release(&releases, channel, running_version())
+}
+
+fn running_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn fetch_releases() -> Result<Vec<ReleaseTag>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(8))
+        .build();
+    let response = match agent
+        .get(RELEASES_API)
+        .set("User-Agent", RELEASES_USER_AGENT)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(format!("GitHub returned HTTP {code} for the release list"));
+        }
+        Err(ureq::Error::Transport(error)) => {
+            return Err(format!("could not reach GitHub: {error}"));
+        }
+    };
+    response
+        .into_json::<Vec<ReleaseTag>>()
+        .map_err(|error| format!("the release list was not readable: {error}"))
+}
+
+/// The selection rules, ported from `scripts/windows/update-nex.ps1` so the
+/// in-process check cannot disagree with the updater that applies the update.
+fn select_release(releases: &[ReleaseTag], channel: UpdateChannel, running: &str) -> UpdateCheck {
+    let wants_beta = channel == UpdateChannel::Beta;
+    let newest = releases
+        .iter()
+        .filter(|release| is_beta_release(release) == wants_beta)
+        .filter(|release| !normalize_version(&release.tag_name).is_empty())
+        .max_by(|left, right| {
+            compare_versions(
+                &normalize_version(&left.tag_name),
+                &normalize_version(&right.tag_name),
+            )
+        });
+
+    let Some(newest) = newest else {
+        let channel_name = if wants_beta { "beta" } else { "stable" };
+        return UpdateCheck::Failed {
+            reason: format!("no {channel_name} release found"),
+        };
+    };
+
+    let latest = normalize_version(&newest.tag_name);
+    if compare_versions(running, &latest) >= std::cmp::Ordering::Equal {
+        return UpdateCheck::UpToDate { latest };
+    }
+    UpdateCheck::Available { version: latest }
+}
+
+/// A release is beta when GitHub flags it as a prerelease, or its tag says so.
+fn is_beta_release(release: &ReleaseTag) -> bool {
+    if release.prerelease {
+        return true;
+    }
+    let tag = release.tag_name.as_str();
+    match tag.find("-beta") {
+        Some(index) => {
+            let rest = &tag[index + "-beta".len()..];
+            rest.is_empty() || rest.starts_with('.') || rest.starts_with('-')
+        }
+        None => false,
+    }
+}
+
+/// Strip a leading `v`, and give a two-part version the patch it omits.
+fn normalize_version(tag_or_version: &str) -> String {
+    let trimmed = tag_or_version.trim();
+    let without_prefix = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let (core, suffix) = match without_prefix.find(['-', '+']) {
+        Some(index) => (&without_prefix[..index], &without_prefix[index..]),
+        None => (without_prefix, ""),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() == 2 && parts.iter().all(|part| is_numeric(part)) {
+        return format!("{core}.0{suffix}");
+    }
+    without_prefix.to_string()
+}
+
+fn is_numeric(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// Numeric comparison of the version core, ignoring any `-`/`+` suffix, with
+/// missing components treated as zero — the same rule the script's
+/// `Compare-Versions` applies.
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    fn core(value: &str) -> Vec<u64> {
+        let trimmed = value.trim();
+        let without_prefix = trimmed.strip_prefix('v').unwrap_or(trimmed);
+        let head = match without_prefix.find(['-', '+']) {
+            Some(index) => &without_prefix[..index],
+            None => without_prefix,
+        };
+        head.split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+
+    let left = core(left);
+    let right = core(right);
+    for index in 0..left.len().max(right.len()) {
+        let l = left.get(index).copied().unwrap_or(0);
+        let r = right.get(index).copied().unwrap_or(0);
+        match l.cmp(&r) {
+            Ordering::Equal => continue,
+            other => return other,
         }
     }
-    // If we can't parse the result, assume no update is available
-    Ok((false, None))
+    Ordering::Equal
 }
 
 fn resolve_updater_script() -> Result<PathBuf, UpdateLaunchError> {
@@ -309,22 +436,6 @@ fn run_updater_script(
     })
 }
 
-#[cfg(target_os = "windows")]
-fn run_updater_script_check_only(
-    script_path: &Path,
-    channel: UpdateChannel,
-) -> Result<std::process::Output, UpdateLaunchError> {
-    let mut command = build_updater_command(script_path, channel);
-    command.arg("-CheckOnly");
-    command.arg("-RunningVersion").arg(env!("CARGO_PKG_VERSION"));
-    command.output().map_err(|error| {
-        UpdateLaunchError::LaunchFailed(format!(
-            "failed to check for updates with '{}': {error}",
-            script_path.display()
-        ))
-    })
-}
-
 #[cfg(not(target_os = "windows"))]
 fn launch_updater_script(
     _script_path: &Path,
@@ -335,14 +446,6 @@ fn launch_updater_script(
 
 #[cfg(not(target_os = "windows"))]
 fn run_updater_script(
-    _script_path: &Path,
-    _channel: UpdateChannel,
-) -> Result<std::process::Output, UpdateLaunchError> {
-    Err(UpdateLaunchError::UnsupportedPlatform)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_updater_script_check_only(
     _script_path: &Path,
     _channel: UpdateChannel,
 ) -> Result<std::process::Output, UpdateLaunchError> {
@@ -385,8 +488,144 @@ fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::{
-        updater_script_candidates, DEV_UPDATER_RELATIVE_PATH, INSTALLED_UPDATER_RELATIVE_PATH,
+        compare_versions, normalize_version, select_release, updater_script_candidates,
+        ReleaseTag, UpdateChannel, UpdateCheck, DEV_UPDATER_RELATIVE_PATH,
+        INSTALLED_UPDATER_RELATIVE_PATH,
     };
+
+    fn release(tag: &str, prerelease: bool) -> ReleaseTag {
+        ReleaseTag {
+            tag_name: tag.to_string(),
+            prerelease,
+        }
+    }
+
+    #[test]
+    fn versions_normalize_like_the_update_script() {
+        assert_eq!(normalize_version("v3.3.0"), "3.3.0");
+        assert_eq!(normalize_version("3.3"), "3.3.0");
+        assert_eq!(normalize_version("3.3.0-beta.1"), "3.3.0-beta.1");
+        assert_eq!(normalize_version("  v3.10.2  "), "3.10.2");
+        assert_eq!(normalize_version(""), "");
+    }
+
+    #[test]
+    fn versions_compare_numerically_not_lexically() {
+        assert_eq!(compare_versions("3.10.0", "3.9.0"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_versions("3.3", "3.3.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("v3.3.0", "3.3.1"), std::cmp::Ordering::Less);
+        // A pre-release suffix never outranks its own release.
+        assert_eq!(
+            compare_versions("3.4.0-beta.2", "3.4.0"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn the_newest_stable_release_wins_and_betas_are_skipped() {
+        let releases = vec![
+            release("v3.3.0", false),
+            release("v3.10.0", false),
+            release("v3.11.0-beta.1", true),
+            release("v9.9.9", false),
+        ];
+        // v9.9.9 sorts highest, so it is the one that must not be a beta.
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::Available {
+                version: "9.9.9".into()
+            }
+        );
+
+        let stable_only = vec![release("v3.3.0", false), release("v3.10.0", false)];
+        assert_eq!(
+            select_release(&stable_only, UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::Available {
+                version: "3.10.0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_beta_channel_only_offers_betas() {
+        let releases = vec![
+            release("v3.3.0", false),
+            release("v3.11.0-beta.1", true),
+            release("v3.10.0-beta", true),
+        ];
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Beta, "3.3.0"),
+            UpdateCheck::Available {
+                version: "3.11.0-beta.1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_beta_tag_is_recognized_without_the_prerelease_flag() {
+        let releases = vec![release("v3.12.0-beta.2", false)];
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::Failed {
+                reason: "no stable release found".into()
+            }
+        );
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Beta, "3.3.0"),
+            UpdateCheck::Available {
+                version: "3.12.0-beta.2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn running_the_newest_release_is_up_to_date_not_a_failed_check() {
+        let releases = vec![release("v3.3.0", false)];
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::UpToDate {
+                latest: "3.3.0".into()
+            }
+        );
+        // A running build ahead of the published release is current too.
+        assert_eq!(
+            select_release(&releases, UpdateChannel::Stable, "3.4.0"),
+            UpdateCheck::UpToDate {
+                latest: "3.3.0".into()
+            }
+        );
+    }
+
+    // Measurement probe, not a gate: hits the network on purpose.
+    #[test]
+    #[ignore = "hits the GitHub release API"]
+    fn what_the_live_check_answers_and_costs() {
+        let started = std::time::Instant::now();
+        let stable = super::check_update_available(UpdateChannel::Stable);
+        let stable_ms = started.elapsed().as_millis();
+        let started = std::time::Instant::now();
+        let beta = super::check_update_available(UpdateChannel::Beta);
+        let beta_ms = started.elapsed().as_millis();
+        println!("LIVE stable: {stable:?} in {stable_ms} ms");
+        println!("LIVE beta:   {beta:?} in {beta_ms} ms");
+    }
+
+    #[test]
+    fn an_unreadable_release_list_is_a_failed_check_not_up_to_date() {
+        // The defect this replaces: an empty or unparseable answer used to be
+        // indistinguishable from "you are current".
+        assert_eq!(
+            select_release(&[], UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::Failed {
+                reason: "no stable release found".into()
+            }
+        );
+        let untagged = vec![release("", false)];
+        assert!(matches!(
+            select_release(&untagged, UpdateChannel::Stable, "3.3.0"),
+            UpdateCheck::Failed { .. }
+        ));
+    }
 
     #[test]
     fn updater_candidates_prefer_installed_layout_before_repo_fallback() {

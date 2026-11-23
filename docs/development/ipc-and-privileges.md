@@ -22,8 +22,15 @@ The scope is the session id plus a hash of the user's SID, and the pipe's DACL i
 generated from that SID. Two consequences follow, and both are the point of the
 design:
 
-- An unrelated process running as the same user is still refused by the DACL, and
-  a process running as another user cannot open the pipe at all.
+- The boundary is **the user and the session, not the process**. Another user cannot
+  open the pipe at all, and a second session gets its own link instead of reaching
+  this one. A process running as the *same* user in the same session is still
+  allowed, and that is deliberate: a named pipe cannot tell two processes of one
+  user apart, and pretending otherwise in this document would be the kind of claim
+  that reads as security while holding none. What the pipe removes is the
+  *machine-wide, unauthenticated* reach of the old fixed port, which any account on
+  the box could call, and the cross-session fall-through where one session's UI
+  read another session's index.
 - Two sessions are two separate links. The earlier transport used a fixed loopback
   port, which is per machine while the runtime singleton is per session, so a
   second session's indexer could not bind and its UI silently read the first

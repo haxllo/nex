@@ -1938,74 +1938,198 @@ fn discover_start_menu_root(
 
 #[cfg(target_os = "windows")]
 fn discover_registered_app_paths() -> Result<Vec<SearchItem>, ProviderError> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY};
 
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let script = r#"
-$ErrorActionPreference = 'SilentlyContinue'
-$roots = @(
-  'HKCU:SoftwareMicrosoftWindowsCurrentVersionApp Paths',
-  'HKLM:SoftwareMicrosoftWindowsCurrentVersionApp Paths',
-  'HKLM:SoftwareWOW6432NodeMicrosoftWindowsCurrentVersionApp Paths'
-)
-foreach ($root in $roots) {
-  Get-ChildItem -LiteralPath $root | ForEach-Object {
-    $target = [string]$_.GetValue('')
-    if (-not [string]::IsNullOrWhiteSpace($target)) {
-      "{0}{1}{2}{1}{3}" -f $root, [char]9, $_.PSChildName, $target.Trim()
-    }
-  }
-}
-"#;
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|error| ProviderError::new(format!("App Paths query failed: {error}")))?;
-
-    if !output.status.success() {
-        return Err(ProviderError::new("App Paths query failed"));
-    }
+    /// `(label, hive, subkey)`.
+    ///
+    /// The 32-bit view is opened through its explicit `WOW6432Node` path rather
+    /// than with `KEY_WOW64_32KEY`, so all three roots go through one code path
+    /// and only the path differs.
+    const ROOTS: [(&str, HKEY, &str); 3] = [
+        (
+            "hkcu",
+            HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+        ),
+        (
+            "hklm",
+            HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+        ),
+        (
+            "hklm32",
+            HKEY_LOCAL_MACHINE,
+            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths",
+        ),
+    ];
 
     let mut items = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line.splitn(3, '\t');
-        let (Some(root), Some(name), Some(command)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let Some(path) = registered_command_target(command) else {
-            continue;
-        };
-        if !Path::new(&path).is_file() {
-            continue;
+    for (label, hive, subkey) in ROOTS {
+        for (name, command) in enumerate_app_path_key(hive, subkey) {
+            let Some(path) = registered_command_target(&command) else {
+                continue;
+            };
+            if !Path::new(&path).is_file() {
+                continue;
+            }
+            let trimmed = name.trim();
+            let title = trimmed.strip_suffix(".exe").unwrap_or(trimmed).trim();
+            if title.is_empty() {
+                continue;
+            }
+            let id = format!("app-registry:{label}:{}", normalize_id_path(trimmed));
+            items.push(SearchItem::new(&id, "app", title, &path));
         }
-
-        let title = name
-            .trim()
-            .strip_suffix(".exe")
-            .unwrap_or(name.trim())
-            .trim();
-        if title.is_empty() {
-            continue;
-        }
-        let id = format!(
-            "app-registry:{}:{}",
-            root.to_ascii_lowercase(),
-            normalize_id_path(name)
-        );
-        items.push(SearchItem::new(&id, "app", title, &path));
     }
     Ok(items)
+}
+
+/// Every `App Paths` entry under one key, as `(subkey name, default command)`.
+///
+/// This was three cold PowerShell starts, and the script that did the work had
+/// lost its backslashes (`HKCU:SoftwareMicrosoftWindowsCurrentVersionApp
+/// Paths`), so `Get-ChildItem` resolved nothing under
+/// `$ErrorActionPreference = 'SilentlyContinue'` and the provider indexed **no
+/// registry apps at all**. Reading the keys directly is both the correct
+/// enumeration and a removed interpreter start.
+#[cfg(target_os = "windows")]
+fn enumerate_app_path_key(hive: windows_sys::Win32::System::Registry::HKEY, subkey: &str) -> Vec<(String, String)> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY, KEY_READ,
+    };
+
+    let mut entries = Vec::new();
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `subkey` is NUL terminated through `to_wide` and `key` is a valid
+    // out pointer for the call.
+    let opened = unsafe { RegOpenKeyExW(hive, to_wide(subkey).as_ptr(), 0, KEY_READ, &mut key) };
+    if opened != 0 {
+        // A machine without the 32-bit view, or without this key at all, simply
+        // has nothing to report.
+        return entries;
+    }
+
+    let mut index = 0u32;
+    loop {
+        let mut name = vec![0u16; 512];
+        let mut name_len = name.len() as u32;
+        // SAFETY: the name buffer is writable for `name_len` code units, and
+        // every optional out pointer is null.
+        let status = unsafe {
+            RegEnumKeyExW(
+                key,
+                index,
+                name.as_mut_ptr(),
+                &mut name_len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            // ERROR_NO_MORE_ITEMS ends the enumeration; any other failure ends
+            // it too, with whatever was read so far.
+            break;
+        }
+        index += 1;
+        let name = String::from_utf16_lossy(&name[..name_len as usize]);
+        if let Some(command) = app_path_default_command(key, &name) {
+            entries.push((name, command));
+        }
+    }
+
+    // SAFETY: `key` was opened above and is not used afterwards.
+    unsafe { RegCloseKey(key) };
+    entries
+}
+
+/// The default value of one `App Paths` subkey, with environment strings
+/// expanded so `%ProgramFiles%` style registrations resolve to a real path.
+#[cfg(target_os = "windows")]
+fn app_path_default_command(parent: windows_sys::Win32::System::Registry::HKEY, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_EXPAND_SZ, REG_SZ,
+    };
+
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `name` is NUL terminated through `to_wide`.
+    if unsafe { RegOpenKeyExW(parent, to_wide(name).as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+        return None;
+    }
+
+    let empty = to_wide("");
+    let mut kind = 0u32;
+    let mut size = 0u32;
+    // SAFETY: a null data pointer with a zero size is the documented size query.
+    let sized = unsafe {
+        RegQueryValueExW(
+            key,
+            empty.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+
+    let mut command = None;
+    if sized == 0 && size >= 2 && (kind == REG_SZ || kind == REG_EXPAND_SZ) {
+        let mut buffer = vec![0u8; size as usize];
+        // SAFETY: `buffer` is writable for `size` bytes, the length the API
+        // itself reported.
+        let read = unsafe {
+            RegQueryValueExW(
+                key,
+                empty.as_ptr(),
+                std::ptr::null_mut(),
+                &mut kind,
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        if read == 0 {
+            let units: Vec<u16> = buffer
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            let text = String::from_utf16_lossy(&units);
+            let text = text.trim_end_matches('\0').trim();
+            if !text.is_empty() {
+                command = Some(if kind == REG_EXPAND_SZ {
+                    expand_environment(text)
+                } else {
+                    text.to_string()
+                });
+            }
+        }
+    }
+
+    // SAFETY: `key` was opened above and is not used afterwards.
+    unsafe { RegCloseKey(key) };
+    command
+}
+
+/// Expand `%VAR%` references, falling back to the input when the call fails.
+#[cfg(target_os = "windows")]
+fn expand_environment(value: &str) -> String {
+    use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+    let source = to_wide(value);
+    // SAFETY: a null destination with a zero length is the documented size
+    // query.
+    let needed = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return value.to_string();
+    }
+    let mut buffer = vec![0u16; needed as usize];
+    // SAFETY: `buffer` is writable for `needed` code units.
+    let written = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), buffer.as_mut_ptr(), needed) };
+    if written == 0 || written as usize > buffer.len() {
+        return value.to_string();
+    }
+    let text = String::from_utf16_lossy(&buffer[..written as usize]);
+    text.trim_end_matches('\0').to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -2801,6 +2925,73 @@ fn is_excluded_windows_kits_shortcut_reference(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `App Paths` provider used to run a PowerShell script whose registry
+    /// paths had lost their backslashes, so every `Get-ChildItem` resolved
+    /// nothing under `$ErrorActionPreference = 'SilentlyContinue'` and the
+    /// provider silently indexed no registry apps at all. Reading the keys
+    /// directly is the fix; this pins the enumeration itself.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn app_paths_are_read_from_the_registry_and_look_like_commands() {
+        use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+        let entries = enumerate_app_path_key(
+            HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Windows\CurrentVersion\App Paths",
+        );
+        if entries.is_empty() {
+            // A minimal image can carry no registrations; the point of the test
+            // is that when they exist they are read, not that they must exist.
+            eprintln!("skipping: this machine registers no App Paths entries under HKLM");
+            return;
+        }
+        for (name, command) in entries {
+            assert!(!name.trim().is_empty(), "an App Paths subkey had no name");
+            assert!(
+                !command.trim().is_empty(),
+                "{name} produced an empty command"
+            );
+            assert!(
+                !command.contains('\0'),
+                "{name} kept its NUL terminator: {command:?}"
+            );
+        }
+    }
+
+    /// A subkey that does not exist must read as absent, not as an empty value.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_missing_app_paths_key_reports_nothing() {
+        use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+        assert!(enumerate_app_path_key(
+            HKEY_LOCAL_MACHINE,
+            r"Software\Nex\There Is No Such Key",
+        )
+        .is_empty());
+        assert!(app_path_default_command(
+            HKEY_LOCAL_MACHINE,
+            r"Software\Nex\There Is No Such Key",
+        )
+        .is_none());
+    }
+
+    /// Registry commands are quoted or bare with arguments; both must resolve to
+    /// the executable the registry names.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn app_paths_commands_resolve_to_their_executable() {
+        assert_eq!(
+            registered_command_target(r#""C:\Program Files\App\app.exe" --flag"#),
+            Some(r"C:\Program Files\App\app.exe".to_string())
+        );
+        assert_eq!(
+            registered_command_target(r"C:\Windows\notepad.exe %1"),
+            Some(r"C:\Windows\notepad.exe".to_string())
+        );
+        assert_eq!(registered_command_target("   "), None);
+    }
 
     #[test]
     fn missing_position_forces_one_full_pass_then_skips() {

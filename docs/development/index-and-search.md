@@ -33,6 +33,16 @@ Applications come from the Start Menu for the current user and for all users, th
 Desktop, registered program records, the Windows Settings pages, and the Control
 Panel applets. Files and folders come from `discovery_roots`.
 
+`App Paths` registrations are enumerated straight from the registry (`HKCU`,
+`HKLM` and the `WOW6432Node` view) and a registration whose executable is not on
+disk is dropped. Start Menu app identities (`Get-StartApps`) and Appx packages
+(`Get-AppxPackage`) still come from PowerShell starts; those two are the
+remaining cost of an app pass.
+
+An application pass is skipped while its stamp is younger than the reconcile
+interval, so a change here does not show up until the stamp is cleared or the
+interval elapses.
+
 Built-in exclusions always apply to files and folders, never to applications:
 `Windows`, `Program Files`, `AppData`, `node_modules`, `.git`, `__pycache__`, and
 a short list of shell junctions. `discovery_exclude_roots` adds to them.

@@ -12,7 +12,15 @@ use std::time::{Duration, Instant};
 use nex_core::core_service::{CoreService, IndexRefreshReport};
 use nex_core::ipc::{self, INDEXER_ENDPOINT, PROTOCOL_VERSION};
 
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
+/// How long a delta pass waits before re-checking the filesystem.
+///
+/// Watchers are the fast path and they recover their own gaps (journal
+/// overflow, a root that appeared after startup, a restarted watcher all force a
+/// resync), so this is a safety net for a case none of them sees. Five minutes
+/// bounds the silent-staleness window at half what ten did, and a delta pass is
+/// cheap enough that the extra runs do not register: an idle cycle measures a
+/// few hundred milliseconds.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 fn main() {

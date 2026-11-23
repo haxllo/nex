@@ -46,6 +46,20 @@ An application pass is skipped while its stamp is younger than the reconcile
 interval, so a change here does not show up until the stamp is cleared or the
 interval elapses.
 
+### Watchers and the reconcile window
+
+Each root has its own directory watcher and consumer. A watcher that cannot open
+its root — an unmounted drive, a network path that comes up later, a directory
+replaced underneath it — is not treated as a dead root: the watcher thread stays
+alive, retries with backoff, and asks for a full resync the moment the root
+appears. A change-journal overflow, an exhausted 64 KiB completion buffer, and a
+watcher restart after a failure all ask for the same resync, because events were
+missed in each case.
+
+The 300 s reconcile pass is a safety net behind those signals rather than the
+primary one: it exists for a change none of them reports, at the cost of a
+delta pass that measures in the hundreds of milliseconds.
+
 Built-in exclusions always apply to files and folders, never to applications:
 `Windows`, `Program Files`, `AppData`, `node_modules`, `.git`, `__pycache__`, and
 a short list of shell junctions. `discovery_exclude_roots` adds to them.

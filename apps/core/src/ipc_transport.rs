@@ -135,6 +135,16 @@ mod imp {
     /// Chunk size for pipe transfers, and the buffer size for each direction.
     const CHUNK_BYTES: usize = 64 * 1024;
 
+    /// How many connections can be in flight at once, and therefore how many
+    /// pipe instances exist.
+    ///
+    /// Only one caller exists in practice (the UI), but a long-poll `sync`
+    /// parks for up to 30 seconds, so a single instance would make a keystroke
+    /// arriving in that window read as an unreachable indexer. Four leaves room
+    /// for a parked `sync`, a keystroke seed, a teardown `shutdown` and a
+    /// background snapshot at the same time.
+    const WORKERS: usize = 4;
+
     /// Applies only to clients that call `WaitNamedPipe` without their own
     /// timeout; this transport always passes one.
     const PIPE_DEFAULT_TIMEOUT_MS: u32 = 0;
@@ -300,9 +310,16 @@ mod imp {
         /// stated intent.
         guard: HANDLE,
         /// Created in `bind`, not in `serve`: a listener that reports success
-        /// must already be connectable. Callers treat a successful bind as
-        /// "ready", and a gap between the two reads as an unreachable indexer.
-        first: Option<HANDLE>,
+        /// must already be connectable, because callers treat a successful bind
+        /// as "ready" and a gap between the two reads as a dead indexer.
+        ///
+        /// A fixed set, one per worker, each reused for every connection it
+        /// serves. That is the shape of this whole transport: a worker owns one
+        /// instance for its lifetime and loops over connections. Creating an
+        /// instance per connection instead left a thread parked in
+        /// `ConnectNamedPipe` for every connection ever accepted, which grows at
+        /// scheduler speed and starves the rest of the process.
+        instances: Vec<HANDLE>,
     }
 
     // SAFETY: every handle in this struct is owned exclusively by it — created
@@ -314,15 +331,16 @@ mod imp {
     impl Drop for Listener {
         fn drop(&mut self) {
             // SAFETY: every handle here is owned by this struct and dropped
-            // once; `first` is `None` after `serve` takes it.
+            // once. `instances` is empty after `serve` takes it, and a listener
+            // that served is never dropped because `serve` parks.
             unsafe {
                 CloseHandle(self.guard);
                 if !self.descriptor.is_null() {
                     LocalFree(self.descriptor);
                 }
-                if let Some(first) = self.first {
-                    DisconnectNamedPipe(first);
-                    CloseHandle(first);
+                for instance in &self.instances {
+                    DisconnectNamedPipe(*instance);
+                    CloseHandle(*instance);
                 }
             }
         }
@@ -359,33 +377,34 @@ mod imp {
             let attributes_ptr = attributes
                 .as_ref()
                 .map_or(ptr::null(), |attributes| attributes as *const _);
-            let Some(first) = create_instance(&name, attributes_ptr) else {
-                // SAFETY: `guard` and `descriptor` are owned here and unused.
-                unsafe {
-                    CloseHandle(guard);
-                    if !descriptor.is_null() {
-                        LocalFree(descriptor);
+            let mut instances = Vec::with_capacity(WORKERS);
+            for _ in 0..WORKERS {
+                match create_instance(&name, attributes_ptr) {
+                    Some(instance) => instances.push(instance),
+                    None => {
+                        // SAFETY: every handle in this branch is owned here and
+                        // not used afterwards.
+                        unsafe {
+                            for instance in &instances {
+                                CloseHandle(*instance);
+                            }
+                            CloseHandle(guard);
+                            if !descriptor.is_null() {
+                                LocalFree(descriptor);
+                            }
+                        }
+                        return None;
                     }
                 }
-                return None;
-            };
+            }
 
             Some(Self {
                 name,
                 attributes,
                 descriptor,
                 guard,
-                first: Some(first),
+                instances,
             })
-        }
-
-        fn create_instance(&self) -> Option<HANDLE> {
-            create_instance(
-                &self.name,
-                self.attributes
-                    .as_ref()
-                    .map_or(ptr::null(), |attributes| attributes as *const _),
-            )
         }
 
         pub(super) fn serve<F>(mut self, handler: F)
@@ -393,34 +412,27 @@ mod imp {
             F: Fn(&str) -> String + Send + Sync + 'static,
         {
             let handler = Arc::new(handler);
-            let mut next = self.first.take();
-            loop {
-                let Some(handle) = next else {
-                    // Transient exhaustion: wait rather than stop serving, or a
-                    // single failed instance would end the link for good.
-                    std::thread::sleep(Duration::from_millis(20));
-                    next = self.create_instance();
-                    continue;
-                };
-                // Create the following instance *before* serving this one. A
-                // parked long-poll `sync` holds its instance for up to 30
-                // seconds, and without this a keystroke arriving meanwhile would
-                // find no free instance and read as an unreachable indexer.
-                let upcoming = self.create_instance();
+            let instances = std::mem::take(&mut self.instances);
+            for instance in instances {
                 let handler = Arc::clone(&handler);
-                let raw = handle as usize;
+                let raw = instance as usize;
                 let spawned = std::thread::Builder::new()
                     .name("nex-indexer-conn".into())
-                    .spawn(move || serve_one(raw as HANDLE, handler));
+                    .spawn(move || serve_worker(raw as HANDLE, handler));
                 if spawned.is_err() {
                     // SAFETY: the thread never ran, so this call still owns the
                     // instance.
                     unsafe {
-                        DisconnectNamedPipe(handle);
-                        CloseHandle(handle);
+                        DisconnectNamedPipe(instance);
+                        CloseHandle(instance);
                     }
                 }
-                next = upcoming;
+            }
+            // The ownership mutex, the security descriptor and the instance
+            // names must outlive the workers. Serving is a process-lifetime
+            // job with nothing to return to, so park rather than drop them.
+            loop {
+                std::thread::park();
             }
         }
     }
@@ -443,28 +455,38 @@ mod imp {
         unsafe { FlushFileBuffers(handle) };
     }
 
-    fn serve_one<F>(handle: HANDLE, handler: Arc<F>)
+    /// Serve connections forever on one pipe instance.
+    ///
+    /// One instance per worker, reused: `ConnectNamedPipe` waits for a client,
+    /// the request is answered, `DisconnectNamedPipe` resets the instance for
+    /// the next one. The only exit is the process ending, which is what the
+    /// UI's teardown does.
+    fn serve_worker<F>(handle: HANDLE, handler: Arc<F>)
     where
         F: Fn(&str) -> String,
     {
-        // SAFETY: `handle` is an unconnected pipe instance owned by this call.
-        let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
-        // ERROR_PIPE_CONNECTED means a client arrived between create and
-        // connect, which is a success, not a failure.
-        let ready = connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-        if ready {
+        loop {
+            // SAFETY: `handle` is an unconnected pipe instance owned by this
+            // worker.
+            let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
+            // ERROR_PIPE_CONNECTED means a client arrived between create and
+            // connect, which is a success rather than a failure.
+            let ready =
+                connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+            if !ready {
+                return;
+            }
             if let Ok(request) = read_frame_blocking(handle) {
                 let response = handler(&request);
-                if write_all_blocking(handle, response.as_bytes()).is_ok() {
-                    let _ = write_all_blocking(handle, b"\n");
+                if write_all_blocking(handle, response.as_bytes()).is_ok()
+                    && write_all_blocking(handle, b"\n").is_ok()
+                {
                     flush_before_disconnect(handle);
                 }
             }
-        }
-        // SAFETY: tearing down a handle this call owns.
-        unsafe {
-            DisconnectNamedPipe(handle);
-            CloseHandle(handle);
+            // SAFETY: `handle` is still owned by this worker, and is reset
+            // rather than closed so the next connection reuses it.
+            unsafe { DisconnectNamedPipe(handle) };
         }
     }
 
@@ -896,6 +918,41 @@ mod tests {
         let reply = call(&endpoint, "ping", Duration::from_secs(5)).expect("reply");
         assert_eq!(reply, "echo:ping");
         drop(started);
+    }
+
+    /// Serving with no client must cost nothing.
+    ///
+    /// The first version created a pipe instance *and* a thread parked in
+    /// `ConnectNamedPipe` on every loop iteration, so an idle listener grew the
+    /// handle table at scheduler speed until the process starved — the whole
+    /// test suite stopped making progress while every individual test passed in
+    /// its own process. A bounded pool fixes it; this measures the bound.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn serving_without_clients_does_not_grow_the_handle_table() {
+        fn handle_count() -> u32 {
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcess, GetProcessHandleCount,
+            };
+            let mut count = 0u32;
+            // SAFETY: the pseudo-handle is always valid and `count` is writable.
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+            count
+        }
+
+        let endpoint = format!("nex-test-idle-{}", std::process::id());
+        let listener = bind(&endpoint).expect("bind");
+        let before = handle_count();
+        let serving = std::thread::spawn(move || listener.serve(|request| request.to_string()));
+        std::thread::sleep(Duration::from_millis(400));
+        let after = handle_count();
+        // The pool is small; a leak of one handle per iteration would be in the
+        // thousands by now. The margin covers other tests running in parallel.
+        assert!(
+            after <= before + 64,
+            "idle listener grew the handle table from {before} to {after}"
+        );
+        drop(serving);
     }
 
     /// Only one process may own an endpoint at a time, and the loser must find

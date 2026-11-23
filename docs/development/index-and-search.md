@@ -35,9 +35,12 @@ Panel applets. Files and folders come from `discovery_roots`.
 
 `App Paths` registrations are enumerated straight from the registry (`HKCU`,
 `HKLM` and the `WOW6432Node` view) and a registration whose executable is not on
-disk is dropped. Start Menu app identities (`Get-StartApps`) and Appx packages
-(`Get-AppxPackage`) still come from PowerShell starts; those two are the
-remaining cost of an app pass.
+disk is dropped. Start-menu app identities come from the shell's `AppsFolder`
+namespace, enumerated as shell items: the App ID is the item's
+`SIGDN_PARENTRELATIVEPARSING` name and the title is its `SIGDN_NORMALDISPLAY`
+name, which is the same list `Get-StartApps` reports. No part of an app pass
+starts PowerShell; `Get-StartApps` remains only as a fallback for the case where
+the namespace enumerates nothing, and is expected never to run.
 
 An application pass is skipped while its stamp is younger than the reconcile
 interval, so a change here does not show up until the stamp is cleared or the

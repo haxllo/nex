@@ -16,7 +16,6 @@ pub mod config;
 pub mod config_watch;
 #[cfg(target_os = "windows")]
 pub(crate) mod console_signal;
-pub mod contract;
 pub mod control_panel;
 pub mod core_service;
 pub mod discovery;
@@ -68,7 +67,6 @@ pub mod settings_catalog;
 pub(crate) mod settings_snapshot;
 pub mod startup;
 pub(crate) mod tantivy_search;
-pub mod transport;
 pub mod uninstall_registry;
 pub mod updater;
 pub mod whats_new;

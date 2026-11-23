@@ -2,7 +2,6 @@ use rusqlite::Connection;
 
 use crate::action_executor::{launch_path, LaunchError};
 use crate::config::{validate, Config, SearchMode};
-use crate::contract::{CoreRequest, CoreResponse, LaunchResponse, SearchResponse};
 use crate::discovery::{
     DiscoveryProvider, FileSystemDiscoveryProvider, ProviderError, StartMenuAppDiscoveryProvider,
 };
@@ -2089,35 +2088,6 @@ impl CoreService {
         slot.take()
     }
 
-    pub fn handle_command(&self, request: CoreRequest) -> Result<CoreResponse, ServiceError> {
-        match request {
-            CoreRequest::Search(search) => {
-                let results = self.search(&search.query, search.limit.unwrap_or(0))?;
-                Ok(CoreResponse::Search(SearchResponse {
-                    results: results.into_iter().map(Into::into).collect(),
-                }))
-            }
-            CoreRequest::Launch(launch) => {
-                if let Some(id) = launch.id.as_deref() {
-                    if !id.trim().is_empty() {
-                        self.launch(LaunchTarget::Id(id))?;
-                        return Ok(CoreResponse::Launch(LaunchResponse { launched: true }));
-                    }
-                }
-
-                if let Some(path) = launch.path.as_deref() {
-                    if !path.trim().is_empty() {
-                        self.launch(LaunchTarget::Path(path))?;
-                        return Ok(CoreResponse::Launch(LaunchResponse { launched: true }));
-                    }
-                }
-
-                Err(ServiceError::InvalidRequest(
-                    "launch requires non-empty id or path".into(),
-                ))
-            }
-        }
-    }
 }
 
 fn open_tantivy_index(

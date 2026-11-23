@@ -847,12 +847,16 @@ pub(crate) fn command_update_plan() -> Result<(), RuntimeError> {
 /// script stays the default until the engine has proven itself on a real
 /// install. Both paths print a one-line result so a terminal run is readable
 /// without opening the log.
-pub(crate) fn command_update() -> Result<(), RuntimeError> {
+pub(crate) fn command_update(force: bool) -> Result<(), RuntimeError> {
     let channel = crate::updater::UpdateChannel::Stable;
     match crate::updater::UpdateEngine::from_environment() {
         crate::updater::UpdateEngine::Native => {
             println!("[nex] update via native engine");
-            match crate::updater_apply::run_update(channel, false) {
+            let options = crate::updater_apply::UpdateOptions {
+                keep_backup: false,
+                force,
+            };
+            match crate::updater_apply::run_update(channel, options) {
                 Ok(crate::updater_apply::UpdateOutcome::Updated {
                     version,
                     install_root,

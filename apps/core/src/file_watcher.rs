@@ -123,9 +123,27 @@ impl DirectoryWatcher {
             return Err(WatcherError::NoRoots);
         }
 
-        let (mut handles, directory) = unsafe { create_watcher_handles(&config.root)? };
-        handles.overlapped.hEvent = handles.event;
-        let _ = directory;
+        // A root that cannot be opened right now - an unmounted drive, a network
+        // path that comes up later, a directory replaced under us - must not cost
+        // the session its watcher. `run_watch_loop` retries with backoff and asks
+        // for a resync the moment the root appears, so the loop is spawned either
+        // way. Without this, a failed start left that root with no watcher at all
+        // for the rest of the session, and the ten-minute reconcile was the only
+        // thing that would ever notice a change there.
+        let initial = match unsafe { create_watcher_handles(&config.root) } {
+            Ok((mut handles, directory)) => {
+                handles.overlapped.hEvent = handles.event;
+                let _ = directory;
+                Some(handles)
+            }
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "[nex-dir-watcher] root=\"{}\" is not watchable yet ({error}); retrying in the background",
+                    config.root.display()
+                ));
+                None
+            }
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -133,14 +151,7 @@ impl DirectoryWatcher {
 
         let thread = std::thread::Builder::new()
             .name("nex-dir-watcher".to_string())
-            .spawn(move || {
-                run_watch_loop(
-                    config,
-                    handles,
-                    thread_stop,
-                    tx,
-                )
-            })
+            .spawn(move || run_watch_loop(config, initial, thread_stop, tx))
             .map_err(|e| WatcherError::ThreadSpawnFailed(e.to_string()))?;
 
         let watcher = Self {
@@ -240,7 +251,7 @@ enum SessionEnd {
 
 fn run_watch_loop(
     config: WatcherConfig,
-    initial: WatcherHandles,
+    initial: Option<WatcherHandles>,
     stop: Arc<AtomicBool>,
     tx: Sender<Vec<WatcherEvent>>,
 ) {
@@ -250,7 +261,7 @@ fn run_watch_loop(
         first_event: None,
     };
     // Boxed so the buffer address stays stable while an I/O is pending.
-    let mut handles: Option<Box<WatcherHandles>> = Some(Box::new(initial));
+    let mut handles: Option<Box<WatcherHandles>> = initial.map(Box::new);
     let mut backoff = RESTART_BACKOFF_MIN;
 
     while !stop.load(Ordering::SeqCst) {
@@ -263,8 +274,8 @@ fn run_watch_loop(
                 match unsafe { create_watcher_handles(&config.root) } {
                     Ok((mut h, _)) => {
                         h.overlapped.hEvent = h.event;
-                        crate::logging::warn(&format!(
-                            "[nex-dir-watcher] reopened watcher for {}; requesting resync",
+                        crate::logging::info(&format!(
+                            "[nex-dir-watcher] watcher for {} is live; requesting resync",
                             config.root.display()
                         ));
                         // Events were missed while the watcher was down.
@@ -629,6 +640,75 @@ fn log_watcher_error(op: &str, detail: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A root that does not exist must not stop the watcher from being created:
+    /// the session keeps a watcher that retries, instead of falling back to the
+    /// ten-minute reconcile for that root.
+    #[test]
+    fn start_on_an_unavailable_root_keeps_a_watcher() {
+        let root = std::env::temp_dir().join(format!(
+            "nex-watcher-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let config = WatcherConfig::new(root.clone(), Vec::new());
+        let (mut watcher, _rx) =
+            DirectoryWatcher::start(config).expect("a missing root must not fail the start");
+
+        // Give the loop a chance to attempt (and fail) one open, then stop.
+        std::thread::sleep(Duration::from_millis(150));
+        watcher.stop();
+        assert!(!root.exists(), "the test must not have created the root");
+    }
+
+    /// When the root appears afterwards, the retry loop picks it up and asks for
+    /// a resync so the events missed while it was gone are recovered.
+    #[test]
+    fn a_root_that_appears_later_gets_a_watcher_and_a_resync() {
+        let root = std::env::temp_dir().join(format!(
+            "nex-watcher-late-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let config = WatcherConfig::new(root.clone(), Vec::new());
+        let (mut watcher, rx) = DirectoryWatcher::start(config).expect("start");
+        std::fs::create_dir_all(&root).expect("create the root after the watcher started");
+
+        let mut saw_resync = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(batch) => {
+                    if batch
+                        .iter()
+                        .any(|event| event.kind == WatcherEventKind::OverflowResync)
+                    {
+                        saw_resync = true;
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        watcher.stop();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            saw_resync,
+            "a watcher that recovers a missing root must request a resync"
+        );
+    }
 
     #[test]
     fn watcher_event_kind_maps_actions() {

@@ -116,6 +116,13 @@ pub(crate) fn command_status_json() -> Result<(), RuntimeError> {
             "other_runtime_pids": state.other_runtime_pids,
             "diagnostics": diagnostics,
             "query_latency": report.map(query_profile_report_json),
+            // Which path each keystroke took, from both ends. The UI half counts
+            // the fallbacks it chose; the indexer half counts how often a seed
+            // exceeded the 500 ms typing budget.
+            "search_seed": serde_json::json!({
+                "ui": crate::runtime_search_session::search_seed_path_report(),
+                "indexer": crate::ipc::indexer_seed_stats(crate::ipc::INDEXER_ENDPOINT),
+            }),
         });
         let encoded = serde_json::to_string_pretty(&payload)
             .map_err(|error| RuntimeError::Args(format!("status-json encode error: {error}")))?;

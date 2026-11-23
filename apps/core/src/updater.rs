@@ -24,9 +24,19 @@ pub enum UpdateCheck {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct ReleaseTag {
     #[serde(default)]
-    tag_name: String,
+    pub(crate) tag_name: String,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    pub(crate) assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct ReleaseAsset {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) browser_download_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +85,37 @@ impl Display for UpdateLaunchError {
 }
 
 impl std::error::Error for UpdateLaunchError {}
+
+/// Which apply path an update uses.
+///
+/// `Script` stays the default while the native engine is unproven on a real
+/// install: it is the only path that has ever recovered a half-moved install,
+/// and losing that to save a child process would be a bad trade. `Native` is
+/// opt-in per run, so one machine can try it without changing what every user
+/// gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateEngine {
+    Script,
+    Native,
+}
+
+impl UpdateEngine {
+    /// `NEX_UPDATE_ENGINE=native` selects the native engine; anything else
+    /// (including unset) keeps the script.
+    pub fn from_environment() -> Self {
+        match std::env::var("NEX_UPDATE_ENGINE") {
+            Ok(value) if value.trim().eq_ignore_ascii_case("native") => Self::Native,
+            _ => Self::Script,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Native => "native",
+        }
+    }
+}
 
 pub fn launch_updater(channel: UpdateChannel) -> Result<PathBuf, UpdateLaunchError> {
     let script_path = resolve_updater_script()?;
@@ -256,20 +297,12 @@ pub(crate) fn select_release(
     channel: UpdateChannel,
     running: &str,
 ) -> UpdateCheck {
-    let wants_beta = channel == UpdateChannel::Beta;
-    let newest = releases
-        .iter()
-        .filter(|release| is_beta_release(release) == wants_beta)
-        .filter(|release| !normalize_version(&release.tag_name).is_empty())
-        .max_by(|left, right| {
-            compare_versions(
-                &normalize_version(&left.tag_name),
-                &normalize_version(&right.tag_name),
-            )
-        });
-
-    let Some(newest) = newest else {
-        let channel_name = if wants_beta { "beta" } else { "stable" };
+    let Some(newest) = newest_release(releases, channel) else {
+        let channel_name = if channel == UpdateChannel::Beta {
+            "beta"
+        } else {
+            "stable"
+        };
         return UpdateCheck::Failed {
             reason: format!("no {channel_name} release found"),
         };
@@ -280,6 +313,25 @@ pub(crate) fn select_release(
         return UpdateCheck::UpToDate { latest };
     }
     UpdateCheck::Available { version: latest }
+}
+
+/// The newest release on a channel: the one place that rule lives, shared by
+/// the update check and the engine that installs.
+pub(crate) fn newest_release(
+    releases: &[ReleaseTag],
+    channel: UpdateChannel,
+) -> Option<&ReleaseTag> {
+    let wants_beta = channel == UpdateChannel::Beta;
+    releases
+        .iter()
+        .filter(|release| is_beta_release(release) == wants_beta)
+        .filter(|release| !normalize_version(&release.tag_name).is_empty())
+        .max_by(|left, right| {
+            compare_versions(
+                &normalize_version(&left.tag_name),
+                &normalize_version(&right.tag_name),
+            )
+        })
 }
 
 /// A release is beta when GitHub flags it as a prerelease, or its tag says so.
@@ -319,7 +371,7 @@ fn is_numeric(value: &str) -> bool {
 /// Numeric comparison of the version core, ignoring any `-`/`+` suffix, with
 /// missing components treated as zero — the same rule the script's
 /// `Compare-Versions` applies.
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
     fn core(value: &str) -> Vec<u64> {
@@ -544,16 +596,33 @@ fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_versions, normalize_version, select_release, updater_script_candidates,
-        ReleaseTag, UpdateChannel, UpdateCheck, DEV_UPDATER_RELATIVE_PATH,
-        INSTALLED_UPDATER_RELATIVE_PATH,
+        compare_versions, newest_release, normalize_version, select_release,
+        updater_script_candidates, ReleaseAsset, ReleaseTag, UpdateChannel, UpdateCheck,
+        DEV_UPDATER_RELATIVE_PATH, INSTALLED_UPDATER_RELATIVE_PATH,
     };
 
     fn release(tag: &str, prerelease: bool) -> ReleaseTag {
         ReleaseTag {
             tag_name: tag.to_string(),
             prerelease,
+            assets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_newest_release_keeps_its_assets_for_the_engine() {
+        // The check only needs a version, but the engine needs the URLs, so the
+        // same selection has to carry them through.
+        let mut with_assets = release("v3.4.0", false);
+        with_assets.assets = vec![ReleaseAsset {
+            name: "nex-3.4.0-windows-x64-setup.exe".into(),
+            browser_download_url: "https://example.invalid/setup.exe".into(),
+        }];
+        let releases = vec![release("v3.3.0", false), with_assets];
+        let newest = newest_release(&releases, UpdateChannel::Stable).expect("a stable release");
+        assert_eq!(newest.tag_name, "v3.4.0");
+        assert_eq!(newest.assets.len(), 1);
+        assert_eq!(newest.assets[0].name, "nex-3.4.0-windows-x64-setup.exe");
     }
 
     #[test]

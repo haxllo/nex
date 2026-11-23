@@ -3,6 +3,7 @@ use crate::model::SearchItem;
 use crate::search::{search_with_filter, SearchFilter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,6 +13,40 @@ const MAX_CLIPBOARD_ENTRIES: usize = 500;
 const DPAPI_MAGIC: &[u8; 8] = b"NXCLPDPA";
 
 static CLIPBOARD_CACHE: Mutex<Option<(PathBuf, Vec<ClipboardEntry>)>> = Mutex::new(None);
+
+/// The clipboard sequence number this process has already looked at.
+///
+/// Windows bumps `GetClipboardSequenceNumber` on every clipboard change, so an
+/// unchanged clipboard needs no history load at all. The panel re-checks the
+/// clipboard every time it opens, which made that load the common case; 0 means
+/// "unknown" and always looks again.
+static LAST_CAPTURED_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+/// Whether a clipboard with this sequence number holds anything new.
+///
+/// Kept separate from the capture itself so the decision can be tested without
+/// touching the system clipboard.
+fn clipboard_is_new(sequence: u32) -> bool {
+    sequence == 0 || sequence != LAST_CAPTURED_SEQUENCE.load(Ordering::Relaxed)
+}
+
+fn mark_clipboard_seen(sequence: u32) {
+    if sequence != 0 {
+        LAST_CAPTURED_SEQUENCE.store(sequence, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system_clipboard_sequence() -> u32 {
+    use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    // SAFETY: takes no arguments and writes nothing; 0 means "not available".
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_clipboard_sequence() -> u32 {
+    0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ClipboardContentType {
@@ -47,8 +82,81 @@ pub struct ClipboardEntry {
     pub image_hash: Option<u64>,
 }
 
+/// One entry as it is written to disk.
+///
+/// The in-memory entry carries a rendered thumbnail; the file must not. A 30 KiB
+/// PNG became a JSON array of 30,720 integers, which made a full 500-entry
+/// history a 23 MiB blob to decrypt and re-encrypt on every capture. Image bytes
+/// live in the image cache as files and are read back when the grid is built.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredEntry {
+    id: String,
+    text: String,
+    captured_epoch_secs: i64,
+    #[serde(default)]
+    content_type: ClipboardContentType,
+    #[serde(default)]
+    image_width: Option<u32>,
+    #[serde(default)]
+    image_height: Option<u32>,
+    #[serde(default)]
+    image_hash: Option<u64>,
+    /// Legacy full-resolution bytes. Read so an old file still opens, never
+    /// written again: the capture path has put these on disk for a while.
+    #[serde(default, skip_serializing)]
+    image_data: Option<Vec<u8>>,
+    /// Legacy inline thumbnail bytes, written by versions before images moved to
+    /// the cache. Read, migrated to a file on load, and never written again.
+    #[serde(default, skip_serializing)]
+    thumbnail_data: Option<Vec<u8>>,
+}
+
+impl StoredEntry {
+    fn from_entry(entry: &ClipboardEntry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            text: entry.text.clone(),
+            captured_epoch_secs: entry.captured_epoch_secs,
+            content_type: entry.content_type.clone(),
+            image_width: entry.image_width,
+            image_height: entry.image_height,
+            image_hash: entry.image_hash,
+            image_data: None,
+            thumbnail_data: None,
+        }
+    }
+
+    fn into_entry(self, cfg: &Config) -> ClipboardEntry {
+        // An old history file still carries thumbnails inline. Write them out
+        // once so the grid keeps working and the next save drops the bytes.
+        if let (Some(hash), Some(bytes)) = (self.image_hash, self.thumbnail_data.as_ref()) {
+            if read_thumbnail_from_disk(cfg, hash).is_none() {
+                write_thumbnail_to_disk(cfg, hash, bytes);
+            }
+        }
+        ClipboardEntry {
+            id: self.id,
+            text: self.text,
+            captured_epoch_secs: self.captured_epoch_secs,
+            content_type: self.content_type,
+            image_data: self.image_data,
+            thumbnail_data: self.thumbnail_data,
+            image_width: self.image_width,
+            image_height: self.image_height,
+            image_hash: self.image_hash,
+        }
+    }
+}
+
 pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
     if !cfg.clipboard_enabled {
+        return Ok(false);
+    }
+
+    // Checked before loading anything: the panel calls this every time it
+    // opens, and the usual answer is "same clipboard as last time".
+    let sequence = system_clipboard_sequence();
+    if !clipboard_is_new(sequence) {
         return Ok(false);
     }
 
@@ -65,6 +173,7 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
         }));
         match img_result {
             Ok(Ok(Some((thumbnail_png, hash)))) => {
+                mark_clipboard_seen(sequence);
                 // Dedup: skip if same image as previous entry
                 if entries.first().is_some_and(|e| {
                     e.content_type == ClipboardContentType::Image
@@ -72,6 +181,9 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
                 }) {
                     return Ok(false);
                 }
+                // The thumbnail is a rendered tile, not history data: it lives
+                // beside the full-res file so the history blob stays text.
+                write_thumbnail_to_disk(cfg, hash, &thumbnail_png);
                 entries.insert(
                     0,
                     ClipboardEntry {
@@ -80,7 +192,7 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
                         captured_epoch_secs: now,
                         content_type: ClipboardContentType::Image,
                         image_data: None, // full-res lives on disk
-                        thumbnail_data: Some(thumbnail_png),
+                        thumbnail_data: None, // rendered on demand, see attach_thumbnails
                         image_width: None,
                         image_height: None,
                         image_hash: Some(hash),
@@ -97,6 +209,7 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
             }
             Ok(Ok(None)) => {
                 // No image on clipboard — fall through to text
+                mark_clipboard_seen(sequence);
             }
             Ok(Err(error)) => {
                 crate::runtime::log_warn(&format!(
@@ -113,8 +226,12 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
 
     // Fall back to text capture
     let Some(raw) = read_system_clipboard_text()? else {
+        mark_clipboard_seen(sequence);
         return Ok(false);
     };
+    // Read, not captured: an empty, filtered or repeated string still means
+    // this clipboard has been looked at and need not be looked at again.
+    mark_clipboard_seen(sequence);
     let text = normalize_clipboard_text(&raw);
     if text.is_empty() {
         return Ok(false);
@@ -148,7 +265,8 @@ pub fn maybe_capture_latest(cfg: &Config) -> Result<bool, String> {
 }
 
 /// Load all clipboard entries (for bento history view). Returns entries
-/// ordered newest-first, with expired entries pruned.
+/// ordered newest-first, with expired entries pruned, and image thumbnails
+/// read back from disk so the grid can render them.
 pub fn load_all_entries(cfg: &Config) -> Vec<ClipboardEntry> {
     if !cfg.clipboard_enabled {
         return Vec::new();
@@ -160,7 +278,23 @@ pub fn load_all_entries(cfg: &Config) -> Vec<ClipboardEntry> {
     if entries.len() != before_len {
         let _ = save_entries(cfg, &entries);
     }
+    attach_thumbnails(cfg, &mut entries);
     entries
+}
+
+/// Read each image entry's thumbnail back from the image cache.
+///
+/// Only the history view needs the bytes, so this runs there rather than on the
+/// capture path, where the thumbnail would be dead weight in every clone.
+fn attach_thumbnails(cfg: &Config, entries: &mut [ClipboardEntry]) {
+    for entry in entries.iter_mut() {
+        if entry.content_type != ClipboardContentType::Image || entry.thumbnail_data.is_some() {
+            continue;
+        }
+        if let Some(hash) = entry.image_hash {
+            entry.thumbnail_data = read_thumbnail_from_disk(cfg, hash);
+        }
+    }
 }
 
 /// Copy a clipboard entry back to the system clipboard by ID.
@@ -275,7 +409,11 @@ fn load_entries_from_disk(cfg: &Config) -> Vec<ClipboardEntry> {
             std::str::from_utf8(&raw).ok().map(|s| s.as_bytes().to_vec())
         })
         .unwrap_or(raw);
-    serde_json::from_slice::<Vec<ClipboardEntry>>(&decrypted).unwrap_or_default()
+    let stored: Vec<StoredEntry> = serde_json::from_slice(&decrypted).unwrap_or_default();
+    stored
+        .into_iter()
+        .map(|entry| entry.into_entry(cfg))
+        .collect()
 }
 
 fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> {
@@ -284,7 +422,10 @@ fn save_entries(cfg: &Config, entries: &[ClipboardEntry]) -> Result<(), String> 
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create clipboard history dir: {e}"))?;
     }
-    let encoded = serde_json::to_string(entries)
+    // Written through the stored shape: image bytes are files, so encoding
+    // never has to turn a thumbnail into a JSON array of 30,000 integers.
+    let stored: Vec<StoredEntry> = entries.iter().map(StoredEntry::from_entry).collect();
+    let encoded = serde_json::to_string(&stored)
         .map_err(|e| format!("failed to encode clipboard history: {e}"))?;
     let blob = dpapi_encrypt(encoded.as_bytes());
     let temp = path.with_extension("json.tmp");
@@ -642,6 +783,28 @@ fn image_cache_dir(cfg: &Config) -> PathBuf {
 /// Full-res file path for a given xxh3 hash.
 fn fullres_path(cfg: &Config, hash: u64) -> PathBuf {
     image_cache_dir(cfg).join(format!("full_{hash:016x}.png"))
+}
+
+/// Thumbnail file path for a given xxh3 hash.
+fn thumbnail_path(cfg: &Config, hash: u64) -> PathBuf {
+    image_cache_dir(cfg).join(format!("thumb_{hash:016x}.png"))
+}
+
+fn write_thumbnail_to_disk(cfg: &Config, hash: u64, png: &[u8]) {
+    let path = thumbnail_path(cfg, hash);
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    // Best effort: a missing thumbnail costs a blank tile, never an entry.
+    if let Err(error) = std::fs::write(&path, png) {
+        crate::runtime::log_warn(&format!("[nex] clipboard thumbnail write failed: {error}"));
+    }
+}
+
+fn read_thumbnail_from_disk(cfg: &Config, hash: u64) -> Option<Vec<u8>> {
+    std::fs::read(thumbnail_path(cfg, hash)).ok()
 }
 
 /// Encode RGBA pixels as PNG using the `png` crate.
@@ -1002,9 +1165,13 @@ fn prune_image_cache(cfg: &Config, keep_hashes: &[u64]) {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        // Extract hash from filename to check if it should be kept
+        // Extract hash from filename to check if it should be kept. Both tiers
+        // are keyed by the same hash, so the same rule covers thumbnails.
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if let Some(hex) = stem.strip_prefix("full_") {
+        let keyed = stem
+            .strip_prefix("full_")
+            .or_else(|| stem.strip_prefix("thumb_"));
+        if let Some(hex) = keyed {
             if let Ok(h) = u64::from_str_radix(hex, 16) {
                 if keep_hashes.contains(&h) {
                     entries.push((path, meta.len(), meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
@@ -1116,8 +1283,220 @@ fn write_fullres_to_clipboard(cfg: &Config, hash: u64) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod measurement {
+    //! Temporary probe: what a full history actually costs to rewrite.
+
+    use super::*;
+
+    fn probe_config(dir: &std::path::Path) -> Config {
+        let mut cfg = Config::default();
+        cfg.config_path = dir.join("config.toml");
+        cfg.clipboard_retention_minutes = 60 * 24 * 365;
+        cfg
+    }
+
+    fn entry(index: usize, text_len: usize, thumb_len: Option<usize>) -> ClipboardEntry {
+        ClipboardEntry {
+            id: format!("clip-{index}"),
+            text: "x".repeat(text_len),
+            captured_epoch_secs: now_epoch_secs() - index as i64,
+            content_type: if thumb_len.is_some() {
+                ClipboardContentType::Image
+            } else {
+                ClipboardContentType::Text
+            },
+            image_data: None,
+            thumbnail_data: thumb_len.map(|len| vec![0xABu8; len]),
+            image_width: thumb_len.map(|_| 512),
+            image_height: thumb_len.map(|_| 320),
+            image_hash: thumb_len.map(|_| index as u64),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn what_a_full_history_costs_to_rewrite() {
+        let dir = std::env::temp_dir().join(format!("nex-clip-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cfg = probe_config(&dir);
+
+        // The cap is 500 entries; a busy clipboard is mostly text with a
+        // substantial minority of screenshots. 30 KiB is a compressed 512 px
+        // thumbnail of a photo-ish screen, which is the realistic per-entry size.
+        let mut entries: Vec<ClipboardEntry> = (0..300).map(|i| entry(i, 200, None)).collect();
+        entries.extend((300..500).map(|i| entry(i, 0, Some(30 * 1024))));
+
+        // A capture writes the thumbnail beside the full-res image first.
+        let started = std::time::Instant::now();
+        for entry in &entries {
+            if let (Some(hash), Some(bytes)) = (entry.image_hash, entry.thumbnail_data.as_ref()) {
+                write_thumbnail_to_disk(&cfg, hash, bytes);
+            }
+        }
+        let thumb_write_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        let started = std::time::Instant::now();
+        save_entries(&cfg, &entries).expect("save");
+        let save_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let file_bytes = std::fs::metadata(history_path(&cfg)).expect("metadata").len();
+
+        let started = std::time::Instant::now();
+        let loaded = load_entries_from_disk(&cfg);
+        let load_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(loaded.len(), 500);
+
+        // A cache hit is what every overlay show pays before it can decide
+        // whether anything changed.
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = load_entries(&cfg);
+        }
+        let hit_ms = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
+
+        // Opening the history view reads the thumbnails back.
+        let started = std::time::Instant::now();
+        let mut view = load_all_entries(&cfg);
+        let view_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let rendered = view
+            .iter()
+            .filter(|entry| entry.thumbnail_data.is_some())
+            .count();
+        view.clear();
+
+        eprintln!(
+            "PROBE entries=500 text=300 images=200 thumb_kib=30 file_kib={:.0} save_ms={:.1} load_ms={:.1} cache_hit_ms={:.2} thumb_write_ms={:.1} view_ms={:.1} thumbnails={rendered}",
+            file_bytes as f64 / 1024.0,
+            save_ms,
+            load_ms,
+            hit_ms,
+            thumb_write_ms,
+            view_ms
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{is_sensitive_content, preview_text};
+    use super::*;
+
+    fn test_config(dir: &std::path::Path) -> Config {
+        let mut cfg = Config::default();
+        cfg.config_path = dir.join("config.toml");
+        cfg
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nex-clip-{label}-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn image_entry(hash: u64, thumbnail: Option<Vec<u8>>) -> ClipboardEntry {
+        ClipboardEntry {
+            id: format!("clip-{hash}"),
+            text: String::new(),
+            captured_epoch_secs: now_epoch_secs(),
+            content_type: ClipboardContentType::Image,
+            image_data: None,
+            thumbnail_data: thumbnail,
+            image_width: Some(512),
+            image_height: Some(320),
+            image_hash: Some(hash),
+        }
+    }
+
+    /// The whole point of the stored shape: a thumbnail is a file, not an array
+    /// of integers inside the encrypted blob.
+    #[test]
+    fn the_history_file_holds_no_image_bytes() {
+        let dir = temp_dir("blob");
+        let cfg = test_config(&dir);
+        let thumbnail = vec![0x7Fu8; 30 * 1024];
+        let entries = vec![
+            image_entry(1, Some(thumbnail.clone())),
+            image_entry(2, Some(thumbnail)),
+        ];
+
+        save_entries(&cfg, &entries).expect("save");
+
+        let raw = std::fs::read(history_path(&cfg)).expect("read");
+        let decrypted = dpapi_try_decrypt(&raw).expect("decrypt");
+        let json = String::from_utf8(decrypted).expect("utf8");
+        assert!(
+            !json.contains("thumbnail_data"),
+            "the blob must not carry rendered bytes"
+        );
+        assert!(
+            json.len() < 4096,
+            "two image entries should be a few hundred bytes, got {}",
+            json.len()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stored_thumbnail_is_read_back_for_the_history_view() {
+        let dir = temp_dir("view");
+        let cfg = test_config(&dir);
+        let thumbnail = vec![0x11u8; 4096];
+        write_thumbnail_to_disk(&cfg, 42, &thumbnail);
+        save_entries(&cfg, &[image_entry(42, None)]).expect("save");
+
+        // Capture does not keep the bytes, so loading alone has none.
+        let plain = load_entries(&cfg);
+        assert!(plain[0].thumbnail_data.is_none());
+
+        let view = load_all_entries(&cfg);
+        assert_eq!(view[0].thumbnail_data.as_deref(), Some(&thumbnail[..]));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An older history file carries the bytes inline. Those still render, and
+    /// the first read writes them where the new shape expects them.
+    #[test]
+    fn an_inline_thumbnail_from_an_old_file_is_moved_to_the_cache() {
+        let dir = temp_dir("legacy");
+        let cfg = test_config(&dir);
+        let thumbnail = vec![0x22u8; 2048];
+        let legacy = serde_json::json!([{
+            "id": "clip-legacy",
+            "text": "",
+            "captured_epoch_secs": now_epoch_secs(),
+            "content_type": "Image",
+            "image_hash": 9u64,
+            "thumbnail_data": thumbnail,
+        }]);
+        std::fs::write(history_path(&cfg), legacy.to_string()).expect("write legacy");
+
+        let view = load_all_entries(&cfg);
+        assert_eq!(view[0].thumbnail_data.as_deref(), Some(&thumbnail[..]));
+        assert!(
+            thumbnail_path(&cfg, 9).exists(),
+            "the inline thumbnail should be migrated to a file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The panel calls this on every open. Only a clipboard that actually
+    /// changed may cost a history load.
+    #[test]
+    fn the_clipboard_sequence_decides_whether_anything_changed() {
+        mark_clipboard_seen(7);
+        assert!(!clipboard_is_new(7), "the same clipboard needs no work");
+        assert!(clipboard_is_new(8), "a new clipboard does");
+        assert!(
+            clipboard_is_new(0),
+            "an unavailable sequence number must never stick"
+        );
+    }
 
     #[test]
     fn sensitive_filter_detects_keywords() {

@@ -69,6 +69,15 @@ mismatch forces a full read.
 This is what makes search fast during indexing: typing never waits on a pipe or on
 a write lock. The tradeoff is that a result can be a moment out of date.
 
+Clipboard history is the UI's own store as well, and it is deliberately small.
+`clipboard-history.json` holds text and metadata only, encrypted with DPAPI: one
+JSON array that is rewritten on each capture. Images live in `image_cache` as
+`full_<hash>.png` and `thumb_<hash>.png`, never inside that array, because a
+thumbnail written as a JSON array of integers inflated a full history to 23 MiB
+and cost hundreds of milliseconds to re-encrypt per copy. Capture is also skipped
+entirely when the Windows clipboard sequence number has not changed, since the
+panel re-checks the clipboard every time it opens.
+
 ## The show path
 
 A single hotkey press travels through several stages, and each one exists because

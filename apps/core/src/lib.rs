@@ -69,6 +69,8 @@ pub mod startup;
 pub(crate) mod tantivy_search;
 pub mod uninstall_registry;
 pub mod update_install;
+pub mod updater_apply;
+pub mod updater_engine;
 mod win_version_resource;
 pub mod updater;
 pub mod whats_new;

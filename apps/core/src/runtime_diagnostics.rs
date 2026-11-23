@@ -841,6 +841,49 @@ pub(crate) fn command_update_plan() -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// `--update`: apply an update through the selected engine.
+///
+/// `NEX_UPDATE_ENGINE=native` opts a single run into the native engine; the
+/// script stays the default until the engine has proven itself on a real
+/// install. Both paths print a one-line result so a terminal run is readable
+/// without opening the log.
+pub(crate) fn command_update() -> Result<(), RuntimeError> {
+    let channel = crate::updater::UpdateChannel::Stable;
+    match crate::updater::UpdateEngine::from_environment() {
+        crate::updater::UpdateEngine::Native => {
+            println!("[nex] update via native engine");
+            match crate::updater_apply::run_update(channel, false) {
+                Ok(crate::updater_apply::UpdateOutcome::Updated {
+                    version,
+                    install_root,
+                    backup,
+                }) => {
+                    println!("[nex] updated to {version} at {}", install_root.display());
+                    if let Some(backup) = backup {
+                        println!("[nex] previous version kept at {}", backup.display());
+                    }
+                    Ok(())
+                }
+                Ok(crate::updater_apply::UpdateOutcome::AlreadyCurrent { version }) => {
+                    println!("[nex] already up to date ({version})");
+                    Ok(())
+                }
+                Err(error) => {
+                    println!("[nex] update failed: {error}");
+                    Err(RuntimeError::Args(format!("update failed: {error}")))
+                }
+            }
+        }
+        crate::updater::UpdateEngine::Script => {
+            println!("[nex] update via updater script");
+            let script = crate::updater::launch_updater(channel)
+                .map_err(|error| RuntimeError::Args(error.to_string()))?;
+            println!("[nex] started {}", script.display());
+            Ok(())
+        }
+    }
+}
+
 pub(crate) fn command_probe_index() -> Result<(), RuntimeError> {
     use crate::tantivy_search::TantivyIndex;
     use std::path::Path;

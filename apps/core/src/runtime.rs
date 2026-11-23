@@ -18,8 +18,8 @@ pub(crate) use crate::runtime_diagnostics::{
     build_status_diagnostics_json, parse_status_diagnostics_snapshot, summarize_query_profiles,
 };
 pub(crate) use crate::runtime_diagnostics::{
-    command_diagnostics_bundle, command_probe_index, command_status_json, command_update_plan,
-    env_var_with_legacy,
+    command_diagnostics_bundle, command_probe_index, command_status_json, command_update,
+    command_update_plan, env_var_with_legacy,
     load_query_profile_status_report, load_status_diagnostics_snapshot,
 };
 #[cfg(test)]
@@ -127,6 +127,7 @@ pub enum RuntimeCommand {
     DiagnosticsBundle,
     ProbeIndex,
     UpdatePlan,
+    Update,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--diagnostics-bundle" => options.command = RuntimeCommand::DiagnosticsBundle,
             "--probe-index" => options.command = RuntimeCommand::ProbeIndex,
             "--update-plan" => options.command = RuntimeCommand::UpdatePlan,
+            "--update" => options.command = RuntimeCommand::Update,
             "--help" | "-h" => {
                 return Err(
                     "usage: nex [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle|--probe-index]".to_string(),
@@ -223,6 +225,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         RuntimeCommand::DiagnosticsBundle => return command_diagnostics_bundle(),
         RuntimeCommand::ProbeIndex => return command_probe_index(),
         RuntimeCommand::UpdatePlan => return command_update_plan(),
+        RuntimeCommand::Update => return command_update(),
         RuntimeCommand::Run => {}
     }
 

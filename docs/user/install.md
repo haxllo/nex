@@ -69,6 +69,7 @@ The command line is not needed for daily use. Every flag belongs to
 | `NexUIProcess.exe --set-launch-at-startup=false` | Same, disabling it. |
 | `NexUIProcess.exe --diagnostics-bundle` | Write a diagnostics folder to `%APPDATA%\Nex\support` for a bug report. |
 | `NexUIProcess.exe --probe-index` | Report what the index currently holds. |
+| `NexUIProcess.exe --update-plan` | Show which installation an update would modify, whether it needs elevation, and what it would install. Downloads nothing. |
 
 Running `NexUIProcess.exe` with no arguments when an instance is already running
 does not start a second copy. The existing instance is brought forward.

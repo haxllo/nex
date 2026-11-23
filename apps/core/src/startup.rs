@@ -222,14 +222,30 @@ pub fn set_enabled(enabled: bool, executable_path: &Path) -> Result<(), StartupE
 /// HKLM). `None` when no registered install exists (portable/dev runs).
 #[cfg(target_os = "windows")]
 pub fn registered_install_location() -> Option<std::path::PathBuf> {
+    let (hkcu, hklm) = registered_install_locations();
+    hkcu.or(hklm)
+}
+
+/// Both registrations, kept apart.
+///
+/// The updater needs the distinction the merged getter throws away: an HKLM
+/// entry that is not under Program Files is the stale hybrid an older updater
+/// bug left behind, and it must not make the update machine-wide. Reading them
+/// together also halves the registry work.
+#[cfg(target_os = "windows")]
+pub fn registered_install_locations() -> (
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+) {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
     };
 
     let subkey = to_wide(UNINSTALL_SUBKEY);
     let value_name = to_wide("InstallLocation");
-    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+    let mut found: (Option<std::path::PathBuf>, Option<std::path::PathBuf>) = (None, None);
+    for (index, hive) in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE].into_iter().enumerate() {
         let mut buffer = [0u16; 1024];
         let mut buffer_size = (buffer.len() * 2) as u32;
         let mut value_type = 0u32;
@@ -251,10 +267,14 @@ pub fn registered_install_location() -> Option<std::path::PathBuf> {
         let location = String::from_utf16_lossy(&buffer[..char_count]);
         let trimmed = location.trim();
         if !trimmed.is_empty() {
-            return Some(std::path::PathBuf::from(trimmed));
+            if index == 0 {
+                found.0 = Some(std::path::PathBuf::from(trimmed));
+            } else {
+                found.1 = Some(std::path::PathBuf::from(trimmed));
+            }
         }
     }
-    None
+    found
 }
 
 /// Warn loudly when this process runs from outside the registered install

@@ -2126,7 +2126,7 @@ pub(crate) fn run(host: Host) -> Result<(), String> {
                                         let proxy = proxy_for_ipc.clone();
                                         std::thread::spawn(move || {
                                             let json = match crate::ipc::ipc_call(
-                                                crate::ipc::INDEXER_ADDR,
+                                                crate::ipc::INDEXER_ENDPOINT,
                                                 &crate::ipc::IpcRequest::new(
                                                     "status",
                                                     serde_json::Value::Null,

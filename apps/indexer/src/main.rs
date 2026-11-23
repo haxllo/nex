@@ -1,15 +1,16 @@
 //! `NexIndexerProcess`: owns discovery, file watchers, SQLite, and Tantivy.
 //!
 //! `NexUIProcess` spawns this process and mirrors its item snapshots over the
-//! local IPC socket. Keeping every index write here removes cross-process
-//! Tantivy races and keeps heavy indexing off the UI thread.
+//! local IPC link (a named pipe scoped to this user and session). Keeping every
+//! index write here removes cross-process Tantivy races and keeps heavy
+//! indexing off the UI thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use nex_core::core_service::{CoreService, IndexRefreshReport};
-use nex_core::ipc::{self, INDEXER_ADDR, PROTOCOL_VERSION};
+use nex_core::ipc::{self, INDEXER_ENDPOINT, PROTOCOL_VERSION};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(600);
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -24,7 +25,12 @@ fn main() {
     };
     let parent_pid: Option<u32> = flag_value("--parent-pid").and_then(|value| value.parse().ok());
     let config_path = flag_value("--config").map(std::path::PathBuf::from);
-    let addr = flag_value("--addr").unwrap_or_else(|| INDEXER_ADDR.to_string());
+    // `--endpoint` names the link. `--addr` is still accepted because it was
+    // the flag before the transport moved off a socket, and an existing harness
+    // or script passing it should not start failing silently.
+    let endpoint = flag_value("--endpoint")
+        .or_else(|| flag_value("--addr"))
+        .unwrap_or_else(|| INDEXER_ENDPOINT.to_string());
 
     #[cfg(windows)]
     attach_parent_console_if_present();
@@ -54,9 +60,9 @@ fn main() {
     // responsive.
 
     // Bind first: a second instance must not run a duplicate discovery pass.
-    let Some(listener) = ipc::bind_indexer_listener(&addr) else {
+    let Some(listener) = ipc::bind_indexer_listener(&endpoint) else {
         if stdio_enabled {
-            println!("[nex-indexer] another indexer already owns {addr}; exiting");
+            println!("[nex-indexer] another indexer already owns {endpoint}; exiting");
         }
         return;
     };
@@ -91,7 +97,7 @@ fn main() {
         let indexing = Arc::clone(&indexing);
         std::thread::spawn(move || {
             nex_core::logging::info(&format!(
-                "[nex-indexer] protocol_version={PROTOCOL_VERSION} serving {addr}"
+                "[nex-indexer] protocol_version={PROTOCOL_VERSION} serving {endpoint}"
             ));
             ipc::serve_indexer(listener, service, indexing);
         });

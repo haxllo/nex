@@ -139,7 +139,7 @@ pub(crate) fn search_overlay_results_with_session(
         )
     } else {
         let remote = if service.is_ui_client() {
-            crate::ipc::search_seed(crate::ipc::INDEXER_ADDR, text_query, indexed_seed_limit)
+            crate::ipc::search_seed(crate::ipc::INDEXER_ENDPOINT, text_query, indexed_seed_limit)
         } else {
             Err("not a UI client".to_string())
         };

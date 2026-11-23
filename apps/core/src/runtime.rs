@@ -237,7 +237,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         unsafe {
             std::env::set_var("NEX_UI_PROCESS", "1");
         }
-        if !crate::ipc::request_indexer_start(crate::ipc::INDEXER_ADDR) {
+        if !crate::ipc::request_indexer_start(crate::ipc::INDEXER_ENDPOINT) {
             log_warn("[nex] NexIndexerProcess start request failed; searching the last known snapshot");
         }
     }

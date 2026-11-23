@@ -1,12 +1,17 @@
 //! Local IPC between `NexUIProcess` (search/UI) and `NexIndexerProcess`
 //! (discovery, SQLite, Tantivy).
 //!
-//! Transport is a JSON-line protocol over a loopback TCP socket. The UI only
-//! ever transports an item snapshot; it never reads the Tantivy index and never
-//! runs discovery, so the two processes cannot race on index files.
+//! The UI only ever transports an item snapshot; it never reads the Tantivy
+//! index and never runs discovery, so the two processes cannot race on index
+//! files.
+//!
+//! This module owns the *protocol* — versions, methods, parameters, the
+//! snapshot/delta shapes. The transport that carries those lines is
+//! [`crate::ipc_transport`], which on Windows is a named pipe scoped to the
+//! user and session. It used to be an unauthenticated loopback socket on a
+//! fixed port, which let any process on the machine read the index and control
+//! the indexer (CIQ-242).
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -16,10 +21,15 @@ use serde_json::{json, Value};
 
 use crate::config::SearchMode;
 use crate::core_service::CoreService;
+use crate::ipc_transport::Listener;
 use crate::model::SearchItem;
 
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const INDEXER_ADDR: &str = "127.0.0.1:45821";
+
+/// Logical name of the indexer link. The transport turns this into a concrete
+/// endpoint scoped to the current user and session, so two sessions never
+/// contend for one channel.
+pub const INDEXER_ENDPOINT: &str = "nex-indexer";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequest {
@@ -131,54 +141,39 @@ pub fn items_from_values(values: &[Value]) -> Vec<SearchItem> {
 
 /// Bind the indexer listener. Binding before the first rebuild means a second
 /// instance exits without running a duplicate (expensive) discovery pass.
-pub fn bind_indexer_listener(addr: &str) -> Option<TcpListener> {
-    match TcpListener::bind(addr) {
-        Ok(listener) => Some(listener),
-        Err(error) => {
-            crate::logging::info(&format!("[nex-ipc] bind failed on {addr}: {error}"));
-            None
-        }
+pub fn bind_indexer_listener(endpoint: &str) -> Option<Listener> {
+    let listener = crate::ipc_transport::bind(endpoint);
+    if listener.is_none() {
+        crate::logging::info(&format!(
+            "[nex-ipc] {endpoint} is already owned for this user and session"
+        ));
     }
+    listener
 }
 
 /// Serve requests until the process exits.
 pub fn serve_indexer(
-    listener: TcpListener,
+    listener: Listener,
     service: Arc<RwLock<CoreService>>,
     indexing: Arc<AtomicBool>,
 ) {
-    crate::logging::info(&format!("[nex-ipc] listening on {INDEXER_ADDR}"));
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let service = Arc::clone(&service);
-                let indexing = Arc::clone(&indexing);
-                std::thread::spawn(move || handle_connection(stream, service, indexing));
-            }
-            Err(error) => crate::logging::warn(&format!("[nex-ipc] accept failed: {error}")),
-        }
-    }
+    crate::logging::info(&format!("[nex-ipc] listening on {INDEXER_ENDPOINT}"));
+    listener.serve(move |line| handle_request_line(line, &service, &indexing));
 }
 
-fn handle_connection(
-    mut stream: TcpStream,
-    service: Arc<RwLock<CoreService>>,
-    indexing: Arc<AtomicBool>,
-) {
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(clone) => clone,
-        Err(_) => return,
-    });
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
+/// Answer one request line with one response line.
+///
+/// A malformed request is answered rather than dropped: the caller is waiting
+/// on a reply, and a silently closed link reads as an unreachable indexer.
+fn handle_request_line(
+    line: &str,
+    service: &Arc<RwLock<CoreService>>,
+    indexing: &AtomicBool,
+) -> String {
     let request: IpcRequest = match serde_json::from_str(line.trim()) {
         Ok(request) => request,
         Err(error) => {
-            let response = IpcResponse::error(format!("bad request: {error}"));
-            let _ = write_response(&mut stream, &response);
-            return;
+            return encode_response(&IpcResponse::error(format!("bad request: {error}")))
         }
     };
 
@@ -188,9 +183,18 @@ fn handle_connection(
             request.version
         ))
     } else {
-        dispatch(&request, &service, &indexing)
+        dispatch(&request, service, indexing)
     };
-    let _ = write_response(&mut stream, &response);
+    encode_response(&response)
+}
+
+fn encode_response(response: &IpcResponse) -> String {
+    // A response that cannot be encoded is still better than a dead link: the
+    // caller gets an error it can act on.
+    serde_json::to_string(response).unwrap_or_else(|error| {
+        serde_json::json!({ "version": PROTOCOL_VERSION, "ok": false, "error": error.to_string() })
+            .to_string()
+    })
 }
 
 fn dispatch(
@@ -547,31 +551,17 @@ fn sync_long_poll(
     }
 }
 
-fn write_response(stream: &mut TcpStream, response: &IpcResponse) -> std::io::Result<()> {
-    let encoded = serde_json::to_string(response).unwrap_or_default();
-    writeln!(stream, "{encoded}")?;
-    stream.flush()
-}
-
-pub fn ipc_call(addr: &str, request: &IpcRequest) -> Result<IpcResponse, String> {
-    ipc_call_with_timeout(addr, request, Duration::from_secs(60))
+pub fn ipc_call(endpoint: &str, request: &IpcRequest) -> Result<IpcResponse, String> {
+    ipc_call_with_timeout(endpoint, request, Duration::from_secs(60))
 }
 
 pub fn ipc_call_with_timeout(
-    addr: &str,
+    endpoint: &str,
     request: &IpcRequest,
     read_timeout: Duration,
 ) -> Result<IpcResponse, String> {
-    let mut stream = TcpStream::connect(addr).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
     let encoded = serde_json::to_string(request).map_err(|e| e.to_string())?;
-    writeln!(stream, "{encoded}").map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(|e| e.to_string())?;
+    let line = crate::ipc_transport::call(endpoint, &encoded, read_timeout)?;
     serde_json::from_str(line.trim()).map_err(|e| e.to_string())
 }
 
@@ -635,9 +625,9 @@ fn lower_current_thread_priority() {
 #[cfg(not(target_os = "windows"))]
 fn lower_current_thread_priority() {}
 
-pub fn warm_index(addr: &str) {
+pub fn warm_index(endpoint: &str) {
     let _ = ipc_call_with_timeout(
-        addr,
+        endpoint,
         &IpcRequest::new("warm_index", Value::Null),
         LIVE_PROBE_TIMEOUT,
     );
@@ -648,10 +638,10 @@ pub fn warm_index(addr: &str) {
 /// Called from teardown paths and from a poll loop, so it must not carry the
 /// default 60-second budget: a single unresponsive indexer would stall the
 /// caller far past the point where the answer stops mattering.
-pub fn indexer_is_alive(addr: &str) -> bool {
+pub fn indexer_is_alive(endpoint: &str) -> bool {
     matches!(
         ipc_call_with_timeout(
-            addr,
+            endpoint,
             &IpcRequest::new("ping", Value::Null),
             LIVE_PROBE_TIMEOUT,
         ),
@@ -678,9 +668,9 @@ pub const SHUTDOWN_INDEXER_TIMEOUT: Duration = Duration::from_millis(500);
 /// fallback used to ask `indexer_is_alive`, which goes through `ipc_call` and
 /// its 60-second budget, so a silent indexer still froze the quit for a
 /// minute — the short timeout was spent and then the long one began.
-pub fn shutdown_indexer(addr: &str) -> bool {
+pub fn shutdown_indexer(endpoint: &str) -> bool {
     match ipc_call_with_timeout(
-        addr,
+        endpoint,
         &IpcRequest::new("shutdown", Value::Null),
         SHUTDOWN_INDEXER_TIMEOUT,
     ) {
@@ -703,7 +693,7 @@ pub fn send_indexer_command(method: &'static str, params: Value) {
     let _ = std::thread::Builder::new()
         .name("nex-indexer-cmd".into())
         .spawn(move || {
-            let _ = ipc_call(INDEXER_ADDR, &IpcRequest::new(method, params));
+            let _ = ipc_call(INDEXER_ENDPOINT, &IpcRequest::new(method, params));
         });
 }
 
@@ -718,9 +708,9 @@ pub fn indexer_exe_path() -> Option<std::path::PathBuf> {
 ///
 /// This only requests process creation; it deliberately does not wait for the
 /// IPC listener. The UI calls it during startup so its hotkey and overlay can
-/// become ready while the indexer opens its store and binds the socket.
-pub fn request_indexer_start(addr: &str) -> bool {
-    if indexer_is_alive(addr) {
+/// become ready while the indexer opens its store and binds the link.
+pub fn request_indexer_start(endpoint: &str) -> bool {
+    if indexer_is_alive(endpoint) {
         return true;
     }
     static LAST_SPAWN: Mutex<Option<Instant>> = Mutex::new(None);
@@ -754,11 +744,11 @@ pub fn request_indexer_start(addr: &str) -> bool {
 
 /// Start the indexer when needed, then wait briefly for its listener. This is
 /// for background recovery paths where waiting cannot delay the UI startup.
-pub fn ensure_indexer_running(addr: &str) -> bool {
-    if indexer_is_alive(addr) {
+pub fn ensure_indexer_running(endpoint: &str) -> bool {
+    if indexer_is_alive(endpoint) {
         return true;
     }
-    if !request_indexer_start(addr) {
+    if !request_indexer_start(endpoint) {
         return false;
     }
 
@@ -766,7 +756,7 @@ pub fn ensure_indexer_running(addr: &str) -> bool {
     // background snapshot recovery from falling back to a cold local cache.
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(100));
-        if indexer_is_alive(addr) {
+        if indexer_is_alive(endpoint) {
             return true;
         }
     }
@@ -818,33 +808,33 @@ mod tests {
     }
 
     /// An indexer that never answers must not turn a quit into an error. The
-    /// port is bound and left silent, which is exactly the busy-indexer case.
+    /// endpoint is bound and left silent, which is exactly the busy-indexer
+    /// case.
     #[test]
     fn shutdown_of_a_silent_indexer_returns_within_the_budget() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr").to_string();
-        // Accept and *hold* the connection open without replying, which is the
-        // case that actually waits: a dropped stream returns at once and would
-        // let this test pass against a 60 s timeout.
-        let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let hold_for_server = hold.clone();
+        let endpoint = format!("nex-test-silent-{}", std::process::id());
+        let listener = crate::ipc_transport::bind(&endpoint).expect("bind test endpoint");
+        // Accept and *hold* the request without replying, which is the case
+        // that actually waits: a closed link returns at once and would let
+        // this test pass against a minute-long timeout.
         std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                while hold_for_server.load(std::sync::atomic::Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                drop(stream);
-            }
+            listener.serve(|_request| {
+                std::thread::sleep(Duration::from_secs(3));
+                String::new()
+            });
         });
         let started = std::time::Instant::now();
-        let result = shutdown_indexer(&addr);
+        let result = shutdown_indexer(&endpoint);
         let elapsed = started.elapsed();
-        hold.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = result;
         // The wait must be the budget, not a scheduler accident: the old 60 s
-        // call would sit here for a minute.
+        // call would sit here for a minute. The tolerance is a few tens of
+        // milliseconds because the budget starts inside the call, after this
+        // measurement and after the link is opened, so a fast transport returns
+        // marginally under it (measured 498.4 ms of 500 ms on CI). A call that
+        // returned early would be orders of magnitude away, not 1.6 ms.
         assert!(
-            elapsed >= SHUTDOWN_INDEXER_TIMEOUT,
+            elapsed >= SHUTDOWN_INDEXER_TIMEOUT - Duration::from_millis(50),
             "expected to wait out the budget, returned in {elapsed:?}"
         );
         assert!(

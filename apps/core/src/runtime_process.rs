@@ -145,7 +145,7 @@ pub(crate) fn stop_runtime_instance(
     if !state.has_overlay_window && state.other_runtime_pids.is_empty() {
         // No UI left, but a stray indexer may still hold the index files
         // open (e.g. quit raced the orphan watchdog). Stop it directly.
-        if indexer_process_running() && crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+        if indexer_process_running() && crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ENDPOINT) {
             return Ok(stop_indexer_process());
         }
         return Ok(StopRuntimeOutcome::AlreadyStopped);
@@ -204,13 +204,13 @@ fn stop_indexer_process() -> StopRuntimeOutcome {
         }
         std::thread::sleep(std::time::Duration::from_millis(60));
     }
-    if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+    if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ENDPOINT) {
         return StopRuntimeOutcome::AlreadyStopped;
     }
-    if crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ADDR) {
+    if crate::ipc::shutdown_indexer(crate::ipc::INDEXER_ENDPOINT) {
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(3) {
-            if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+            if !crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ENDPOINT) {
                 return StopRuntimeOutcome::Graceful;
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -224,7 +224,7 @@ fn stop_indexer_process() -> StopRuntimeOutcome {
         ))
         .status();
     std::thread::sleep(std::time::Duration::from_millis(250));
-    if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ADDR) {
+    if crate::ipc::indexer_is_alive(crate::ipc::INDEXER_ENDPOINT) {
         StopRuntimeOutcome::Failed
     } else {
         StopRuntimeOutcome::Forced

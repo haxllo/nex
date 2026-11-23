@@ -29,6 +29,7 @@ pub mod hotkey_runtime;
 pub mod index_store;
 pub mod indexing_progress;
 pub mod ipc;
+pub(crate) mod ipc_transport;
 pub mod logging;
 #[cfg(target_os = "windows")]
 pub(crate) mod media;

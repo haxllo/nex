@@ -1,7 +1,5 @@
-use nex_core::contract::{CoreRequest, SearchRequest};
 use nex_core::core_service::CoreService;
 use nex_core::hotkey_runtime::{default_hotkey_registrar, HotkeyRegistration};
-use nex_core::transport::TransportResponse;
 
 fn seed_service() -> CoreService {
     let config = nex_core::config::Config::default();
@@ -34,21 +32,16 @@ fn non_windows_fallback_smoke_still_roundtrips() {
         .expect("non-windows registrar should unregister noop entries");
 
     let service = seed_service();
-    let request = CoreRequest::Search(SearchRequest {
-        query: "code".into(),
-        limit: Some(5),
-    });
-    let response = nex_core::transport::handle_request(&service, request);
-
-    match response {
-        TransportResponse::Ok { response: _ } => {}
-        other => panic!("unexpected transport response: {other:?}"),
-    }
+    let results = service.search("code", 5).expect("search should answer");
+    assert!(
+        !results.is_empty(),
+        "the seeded item should be found through the live search path"
+    );
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn windows_runtime_smoke_registers_hotkey_and_transport_roundtrip() {
+fn windows_runtime_smoke_registers_hotkey_and_searches() {
     if std::env::var("NEX_WINDOWS_RUNTIME_SMOKE").as_deref() != Ok("1") {
         eprintln!("skipping windows runtime smoke (set NEX_WINDOWS_RUNTIME_SMOKE=1 to enable)");
         return;
@@ -79,18 +72,9 @@ fn windows_runtime_smoke_registers_hotkey_and_transport_roundtrip() {
         .expect("unregister should succeed after registration");
 
     let service = seed_service();
-    let payload = serde_json::to_string(&CoreRequest::Search(SearchRequest {
-        query: "code".into(),
-        limit: Some(5),
-    }))
-    .expect("request should serialize");
-
-    let response = nex_core::transport::handle_json(&service, &payload);
-    let parsed: TransportResponse =
-        serde_json::from_str(&response).expect("response should deserialize");
-
-    match parsed {
-        TransportResponse::Ok { response: _ } => {}
-        other => panic!("expected ok transport response, got {other:?}"),
-    }
+    let results = service.search("code", 5).expect("search should answer");
+    assert!(
+        !results.is_empty(),
+        "the seeded item should be found through the live search path"
+    );
 }

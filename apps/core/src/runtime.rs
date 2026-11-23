@@ -134,6 +134,8 @@ pub enum RuntimeCommand {
 pub struct RuntimeOptions {
     pub command: RuntimeCommand,
     pub background: bool,
+    /// `--update --force`: reinstall even when nothing newer is published.
+    pub force: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -141,6 +143,7 @@ impl Default for RuntimeOptions {
         Self {
             command: RuntimeCommand::Run,
             background: true,
+            force: false,
         }
     }
 }
@@ -175,6 +178,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<RuntimeOptions, String> {
             "--probe-index" => options.command = RuntimeCommand::ProbeIndex,
             "--update-plan" => options.command = RuntimeCommand::UpdatePlan,
             "--update" => options.command = RuntimeCommand::Update,
+            "--force" => options.force = true,
             "--help" | "-h" => {
                 return Err(
                     "usage: nex [--background|--foreground] [--status|--status-json|--quit|--restart|--ensure-config|--sync-startup|--set-launch-at-startup=true|false|--diagnostics-bundle|--probe-index]".to_string(),
@@ -225,7 +229,7 @@ pub fn run_with_options(options: RuntimeOptions) -> Result<(), RuntimeError> {
         RuntimeCommand::DiagnosticsBundle => return command_diagnostics_bundle(),
         RuntimeCommand::ProbeIndex => return command_probe_index(),
         RuntimeCommand::UpdatePlan => return command_update_plan(),
-        RuntimeCommand::Update => return command_update(),
+        RuntimeCommand::Update => return command_update(options.force),
         RuntimeCommand::Run => {}
     }
 
@@ -960,8 +964,22 @@ mod tests {
             RuntimeOptions {
                 command: RuntimeCommand::Run,
                 background: true,
+                force: false,
             }
         );
+    }
+
+    #[test]
+    fn force_only_sets_the_flag_and_nothing_else() {
+        let args = vec!["--update".to_string(), "--force".to_string()];
+        let options = parse_cli_args(&args).expect("update --force should parse");
+        assert!(matches!(options.command, RuntimeCommand::Update));
+        assert!(options.force);
+
+        // Absent the flag, an update must not reinstall over a current build.
+        let args = vec!["--update".to_string()];
+        let options = parse_cli_args(&args).expect("update should parse");
+        assert!(!options.force);
     }
 
     #[test]

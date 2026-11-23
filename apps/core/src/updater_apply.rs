@@ -50,10 +50,24 @@ const RUNTIME_IMAGES: [&str; 5] = [
 ///
 /// `keep_backup` leaves the previous install on disk after a successful update
 /// so a bad build can be put back by hand.
+/// How one update run should behave.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UpdateOptions {
+    /// Keep the previous install on disk after a successful update.
+    pub keep_backup: bool,
+    /// Install even when the installed version is already current.
+    ///
+    /// This exists so the engine can be exercised deliberately on a machine
+    /// that has nothing newer to install: a forced run reinstalls the build that
+    /// is already there, which is the safest way to test the destructive path,
+    /// because the version that comes back is known-good.
+    pub force: bool,
+}
+
 #[cfg(target_os = "windows")]
 pub fn run_update(
     channel: crate::updater::UpdateChannel,
-    keep_backup: bool,
+    options: UpdateOptions,
 ) -> Result<UpdateOutcome, UpdateError> {
     let facts = crate::update_install::collect_install_facts();
     let target = crate::update_install::resolve_install_target(&facts);
@@ -96,11 +110,18 @@ pub fn run_update(
                 ),
             ));
         }
-        if crate::updater::compare_versions(&installed, &release.version)
-            >= std::cmp::Ordering::Equal
+        if !options.force
+            && crate::updater::compare_versions(&installed, &release.version)
+                >= std::cmp::Ordering::Equal
         {
             log.step(&format!("already up to date (installed {installed})"));
             return Ok(UpdateOutcome::AlreadyCurrent { version: installed });
+        }
+        if options.force {
+            log.step(&format!(
+                "forced: reinstalling {} over installed {installed}",
+                release.version
+            ));
         }
     }
     log.step(&format!(
@@ -199,7 +220,7 @@ pub fn run_update(
 
     match result {
         Ok(()) => {
-            if backed_up && !keep_backup {
+            if backed_up && !options.keep_backup {
                 if let Err(error) = remove_tree(&backup_dir) {
                     log.step(&format!(
                         "warning: could not remove backup '{}': {error}",
@@ -238,7 +259,7 @@ pub fn run_update(
 #[cfg(not(target_os = "windows"))]
 pub fn run_update(
     _channel: crate::updater::UpdateChannel,
-    _keep_backup: bool,
+    _options: UpdateOptions,
 ) -> Result<UpdateOutcome, UpdateError> {
     Err(UpdateError::new(
         Stage::Check,
@@ -571,13 +592,25 @@ fn stop_runtime(installed_exe: &Path) -> Result<(), String> {
         let _ = run_helper(installed_exe, "--quit", STOP_TIMEOUT);
     }
 
-    for image in RUNTIME_IMAGES {
-        let _ = run_captured("taskkill", &["/IM", image, "/F"]);
+    // Killed by PID, never by image name, and never this process.
+    //
+    // The engine runs *inside* `NexUIProcess.exe`, so `taskkill /IM
+    // NexUIProcess.exe /F` would kill the updater itself — mid-update, with the
+    // install tree already moved and nobody left to roll it back. The script
+    // was never exposed to this because it was a separate `powershell.exe`; a
+    // native engine that self-updates has to skip its own PID explicitly.
+    let own_pid = std::process::id();
+    for (pid, _name) in others_alive(&running_runtime_processes(), own_pid) {
+        let pid = pid.to_string();
+        let _ = run_captured("taskkill", &["/PID", &pid, "/F"]);
     }
 
     let deadline = Instant::now() + STOP_TIMEOUT;
     loop {
-        let alive = running_runtime_images();
+        let alive: Vec<String> = others_alive(&running_runtime_processes(), own_pid)
+            .into_iter()
+            .map(|(pid, name)| format!("{name} [{pid}]"))
+            .collect();
         if alive.is_empty() {
             return Ok(());
         }
@@ -615,12 +648,27 @@ fn run_captured(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Which of the Nex images are running right now.
+/// The Nex processes still running that are *not* this one.
+///
+/// Split out because it is the difference between a working self-update and a
+/// dead app: the engine runs inside `NexUIProcess.exe`, so counting itself as
+/// something to stop would either kill the updater after the install tree had
+/// already moved, or make the wait loop time out on a process that is not
+/// going away.
+fn others_alive(processes: &[(u32, String)], own_pid: u32) -> Vec<(u32, String)> {
+    processes
+        .iter()
+        .filter(|(pid, _)| *pid != own_pid)
+        .cloned()
+        .collect()
+}
+
+/// Which of the Nex images are running right now, with their process ids.
 #[cfg(target_os = "windows")]
-fn running_runtime_images() -> Vec<String> {
-    running_images()
+fn running_runtime_processes() -> Vec<(u32, String)> {
+    running_processes()
         .into_iter()
-        .filter(|name| {
+        .filter(|(_, name)| {
             RUNTIME_IMAGES
                 .iter()
                 .any(|image| image.eq_ignore_ascii_case(name))
@@ -629,7 +677,7 @@ fn running_runtime_images() -> Vec<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn running_images() -> Vec<String> {
+fn running_processes() -> Vec<(u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -656,7 +704,7 @@ fn running_images() -> Vec<String> {
                     .take_while(|unit| *unit != 0)
                     .collect::<Vec<u16>>(),
             );
-            found.push(name);
+            found.push((entry.th32ProcessID, name));
             ok = Process32NextW(snapshot, &mut entry) != 0;
         }
         CloseHandle(snapshot);
@@ -910,7 +958,37 @@ fn quote_argument(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::quote_argument;
+    use super::{others_alive, quote_argument, UpdateOptions};
+
+    #[test]
+    fn stopping_never_counts_the_updater_itself() {
+        // A self-update runs inside NexUIProcess.exe. Its own pid must not be
+        // in the stop set, or the run kills itself after the install tree has
+        // already moved.
+        let processes = vec![
+            (100u32, "NexUIProcess.exe".to_string()),
+            (200u32, "NexIndexerProcess.exe".to_string()),
+            (300u32, "NexUIProcess.exe".to_string()),
+        ];
+        assert_eq!(
+            others_alive(&processes, 300),
+            vec![
+                (100u32, "NexUIProcess.exe".to_string()),
+                (200u32, "NexIndexerProcess.exe".to_string()),
+            ]
+        );
+        // With only itself running there is nothing to stop, so the wait loop
+        // returns immediately instead of timing out.
+        assert!(others_alive(&[(300u32, "NexUIProcess.exe".to_string())], 300).is_empty());
+    }
+
+    #[test]
+    fn force_is_off_unless_asked_for() {
+        // A forced run reinstalls the published version over itself, so it must
+        // never be the default for a path that forgets to say otherwise.
+        assert!(!UpdateOptions::default().force);
+        assert!(!UpdateOptions::default().keep_backup);
+    }
 
     #[test]
     fn arguments_are_quoted_like_the_windows_runtime_expects() {

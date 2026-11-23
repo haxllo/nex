@@ -117,15 +117,39 @@ impl Indexer {
         ipc::ipc_call(&self.endpoint, &IpcRequest::new(method, params)).expect("ipc call")
     }
 
+    /// Poll the published item set the way the UI does: `sync` at an unknown
+    /// generation answers with the whole hot set, and a later poll may answer
+    /// with a delta instead.
     fn await_item(&self, needle: &str, timeout: Duration) -> Vec<nex_core::model::SearchItem> {
         let deadline = Instant::now() + timeout;
+        let mut known: Vec<nex_core::model::SearchItem> = Vec::new();
         while Instant::now() < deadline {
-            let response = self.call("snapshot", Value::Null);
+            let response = self.call(
+                "sync",
+                serde_json::json!({ "generation": 0, "instance": 0, "wait_ms": 0 }),
+            );
             if response.ok {
-                if let Some(items) = response.result.as_ref().and_then(|r| r.get("items")) {
-                    let items = items_from_values(items.as_array().expect("items array"));
-                    if items.iter().any(|item| item.path.ends_with(needle)) {
-                        return items;
+                if let Some(result) = response.result.as_ref() {
+                    if let Some(items) = result.get("items").and_then(Value::as_array) {
+                        known = items_from_values(items);
+                    }
+                    if let Some(upserts) = result
+                        .get("delta")
+                        .and_then(|delta| delta.get("upserts"))
+                        .and_then(Value::as_array)
+                    {
+                        for item in items_from_values(upserts) {
+                            if let Some(existing) =
+                                known.iter_mut().find(|existing| existing.id == item.id)
+                            {
+                                *existing = item;
+                            } else {
+                                known.push(item);
+                            }
+                        }
+                    }
+                    if known.iter().any(|item| item.path.ends_with(needle)) {
+                        return known;
                     }
                 }
             }
@@ -143,13 +167,13 @@ impl Drop for Indexer {
 }
 
 #[test]
-fn indexer_publishes_searchable_snapshot_and_recovers_after_crash() {
+fn indexer_publishes_searchable_items_and_recovers_after_crash() {
     if !enabled() {
         eprintln!("skipping: set NEX_RUN_PROCESS_ISOLATION_TEST=1 to run");
         return;
     }
 
-    let root = temp_root("snapshot");
+    let root = temp_root("published-set");
     std::fs::write(root.join("files").join("message.txt"), "hello").expect("seed file");
     let config_path = write_config(&root);
     let endpoint = unique_endpoint("isolate");
@@ -160,7 +184,7 @@ fn indexer_publishes_searchable_snapshot_and_recovers_after_crash() {
     let items = indexer.await_item("message.txt", Duration::from_secs(120));
     assert!(
         items.iter().any(|item| item.path.ends_with("message.txt")),
-        "indexed file missing from snapshot"
+        "indexed file missing from the published set"
     );
 
     // Search over IPC returns the same file. Tantivy syncs after the

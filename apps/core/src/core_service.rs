@@ -989,15 +989,6 @@ impl CoreService {
         Ok(index_store::list_hot_items(&*self.db(), UI_CACHE_MAX_ITEMS)?)
     }
 
-    /// Full store contents. Served from the cache when it holds every row;
-    /// bounded (hot) caches read SQLite directly.
-    pub fn all_items_snapshot(&self) -> Result<Vec<SearchItem>, ServiceError> {
-        if self.cache_complete.load(Ordering::SeqCst) {
-            return Ok(self.cached_items_snapshot());
-        }
-        Ok(index_store::list_items(&*self.db())?)
-    }
-
     /// Replace the searchable item set from the indexer. The UI keeps a
     /// smaller subset; the rest is found by the indexer's search or SQLite.
     pub fn apply_external_snapshot(&self, items: Vec<SearchItem>) -> usize {

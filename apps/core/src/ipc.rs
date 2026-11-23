@@ -224,17 +224,6 @@ fn dispatch(
                 "search_seed": seed_stats_json(),
             }))
         }
-        "snapshot" => {
-            let service = service.read().unwrap_or_else(|e| e.into_inner());
-            let items = match service.all_items_snapshot() {
-                Ok(items) => items,
-                Err(error) => return IpcResponse::error(format!("snapshot failed: {error}")),
-            };
-            IpcResponse::ok(json!({
-                "generation": service.search_generation(),
-                "items": items_to_values(&items),
-            }))
-        }
         // One round trip for the UI's poll: reports whether anything changed
         // and ships the item set only when it did. Mirrors the old
         // status+snapshot pair so the caller does not open two connections.

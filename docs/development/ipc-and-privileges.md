@@ -48,7 +48,6 @@ is rejected rather than guessed at.
 | `ping` | Liveness and version |
 | `shutdown` | Stop the indexer, used by a graceful quit |
 | `status` | Index health, including the `search_seed` counters |
-| `snapshot` | The published item snapshot with its generation |
 | `sync` | Incremental changes since a generation |
 | `search` | A query against the index |
 | `search_seed` | Candidate ids for a query, used by the UI's own ranking |
@@ -57,6 +56,14 @@ is rejected rather than guessed at.
 | `record_launch`, `record_selection` | Usage counters written by the UI |
 | `delete_item` | Remove one item from the index |
 | `warm_index` | Ask the indexer to warm its caches |
+
+The item set crosses this boundary in exactly one shape: the `sync` response,
+either a snapshot of the hot set or a delta against a generation. The hot set is
+bounded at 10,000 items, which measured 4.1 MB and 167 ms against a 347,369-item
+index. A full-store dump was removed rather than optimised: 136 MB of JSON and
+4.7 s per call, with no caller outside a test. Icons are not part of either
+payload — the UI decodes them per visible row from its own cache (median 1.2 KiB
+per icon), so a row's picture costs nothing until it is on screen.
 
 `status` also carries `search_seed` (`requests`, `answered`, `empty`, `failed`,
 `over_budget`, `avg_ms`, `max_ms`, `budget_ms`), so a keystroke served by the UI's
